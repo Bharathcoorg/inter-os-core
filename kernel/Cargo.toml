@@ -20,6 +20,35 @@ path = "src/main.rs"
 test = false
 doctest = false
 
+[features]
+default = []
+# WHY this feature exists and why it is OFF by default: the COM1 console is an
+# unauthenticated control plane -- `service_serial_commands` dispatches every
+# complete UART line with no CapHandle and no caller identity. A handful of
+# verbs mutate authentication / lock / kill-switch state (FINGERPRINT_INJECT,
+# KILLSWITCH_TOGGLE), inject synthetic battery telemetry (BATTERY_SET), or read
+# and write arbitrary guest paths (READ_FILE, WRITE_FILE). The same channel also
+# carries device-wide trust and fault mutations: RAPP_TRUST mints a publisher
+# trust root (so an attacker's signed .rapp is accepted), TLS_TRUST_BEGIN /
+# CHUNK / COMMIT / REVOKE and the single-line TLS_TRUST install or withdraw TLS
+# trust anchors (so an attacker can MITM every TLS connection), PANIC_POLICY SET
+# changes the panic response, and TRIGGER_KERNEL_PANIC forces a kernel panic
+# (remote DoS). Shipping those in a production image lets anyone with the serial
+# socket unlock the owner account, cut the radios, read /user/.accounts, trust
+# their own CA / publisher, or crash the device. They are therefore compiled OUT
+# of every default build and exist only when a developer explicitly opts in with
+# `--features debug-control-plane` (or `INTEROS_DEBUG_CONTROL_PLANE=1` via
+# tools/interos.py). There is deliberately no runtime switch: with the feature
+# off the verb handlers are not in the binary at all, so no console line can
+# re-enable them. Input injection (INPUT_TOUCH/INPUT_KEY/...), diagnostics
+# (DIAG_STATE/PROC_LIST/SET_MODE/...), the read-only trust/policy observers
+# (TLS_TRUST_LIST, PANIC_POLICY GET) and the path-confined Studio filesystem
+# channel (STUDIO_FS_*) stay available in production. SENSOR_INJECT also stays
+# (Device Studio orientation testing needs it) but labels its reply synthetic;
+# sys_sensor_read independently reports NOT_IMPLEMENTED because no physical IMU
+# is present, so injected values never reach an app as a measurement.
+debug-control-plane = []
+
 [dependencies]
 bootloader_api = "0.11.17"
 x86_64 = "0.15.5"

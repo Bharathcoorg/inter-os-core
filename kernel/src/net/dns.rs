@@ -278,9 +278,26 @@ impl DnsCacheEntry { pub const fn empty() -> Self { Self { name:[0;DNS_MAX_NAME]
 pub struct DnsQueryState { pub id:u16, pub name:[u8;DNS_MAX_NAME], pub name_len:usize, pub retries:u8, pub deadline:u64, pub valid:bool }
 impl DnsQueryState { pub const fn empty()->Self { Self{id:0,name:[0;DNS_MAX_NAME],name_len:0,retries:0,deadline:0,valid:false} } }
 
-pub struct DnsResolver { next_id:u16, queries:[DnsQueryState;DNS_MAX_INFLIGHT], cache:[DnsCacheEntry;DNS_MAX_CACHE] }
+/// The wrap-safe scan that keeps a new transaction id off every active query.
+///
+/// WHY it is separate from `begin`: the scan is the part that has to behave at
+/// the `u16::MAX` boundary, and a random draw lands there too rarely for a case
+/// to reach it by chance. Taking the start as an argument lets the boundary be
+/// driven directly while `begin` still walks this exact code.
+fn free_query_id(queries: &[DnsQueryState; DNS_MAX_INFLIGHT], start: u16) -> Option<u16> {
+    let mut id = start.max(1);
+    for _ in 0..u16::MAX {
+        if !queries.iter().any(|q| q.valid && q.id == id) {
+            return Some(id);
+        }
+        id = id.wrapping_add(1).max(1);
+    }
+    None
+}
+
+pub struct DnsResolver { queries:[DnsQueryState;DNS_MAX_INFLIGHT], cache:[DnsCacheEntry;DNS_MAX_CACHE] }
 impl DnsResolver {
-    pub const fn new()->Self { Self{next_id:1,queries:[DnsQueryState::empty();DNS_MAX_INFLIGHT],cache:[DnsCacheEntry::empty();DNS_MAX_CACHE]} }
+    pub const fn new()->Self { Self{queries:[DnsQueryState::empty();DNS_MAX_INFLIGHT],cache:[DnsCacheEntry::empty();DNS_MAX_CACHE]} }
     pub fn cached(&self, name: &[u8], now: u64) -> Option<Ipv4Address> {
         self.cache.iter().find(|e| {
             e.valid
@@ -289,21 +306,30 @@ impl DnsResolver {
                 && e.name[..e.name_len].eq_ignore_ascii_case(name)
         }).map(|e| e.addr)
     }
+
+    /// Is a query outstanding right now?
+    ///
+    /// WHY the socket layer asks (M5): the resolver's own source ports are a
+    /// system resource, and a bind inside that range is only legitimate while a
+    /// resolution is actually in flight.
+    pub fn has_inflight(&self) -> bool { self.queries.iter().any(|q| q.valid) }
+
     pub fn begin(&mut self,name:&[u8],now:u64)->Result<u16,&'static str>{
         if name.is_empty()||name.len()>DNS_MAX_NAME{return Err("invalid DNS name")}
         if self.cached(name,now).is_some(){return Err("DNS cache hit")}
-        let tick_salt = ((now as u16) ^ 0xA5C3).wrapping_mul(31);
-        let mut id = (self.next_id.wrapping_add(tick_salt)).max(1);
-        let mut free_id = None;
-        for _ in 0..u16::MAX {
-            if !self.queries.iter().any(|q| q.valid && q.id == id) {
-                free_id = Some(id);
-                break;
-            }
-            id = id.wrapping_add(1).max(1);
-        }
-        let id = free_id.ok_or("DNS query id space exhausted")?;
-        self.next_id = id.wrapping_add(1).max(1);
+        // WHY the id is drawn from the kernel TRNG (M1): it used to be
+        // `next_id + ((now as u16) ^ 0xA5C3) * 31`, and `now` is the public tick
+        // counter, so an off-path attacker who could see when a query started
+        // could compute its transaction id and poison the answer for the very
+        // name being asked -- bailiwick checking does not help, because the
+        // forged record is for the queried name. The draw is 16 bits of a
+        // hardware-seeded word (`net::net_entropy_u64`); the sequential cursor is
+        // gone, not merely salted.
+        //
+        // WHY a refusal rather than a fallback: without entropy the id would be
+        // predictable again, so the query does not start.
+        let draw = crate::net::net_entropy_u64().map_err(|_| "DNS entropy unavailable")? as u16;
+        let id = free_query_id(&self.queries, draw).ok_or("DNS query id space exhausted")?;
 
         let q=self.queries.iter_mut().find(|q|!q.valid).ok_or("DNS query table full")?;
         q.id=id;q.name[..name.len()].copy_from_slice(name);q.name_len=name.len();q.retries=0;q.deadline=now.saturating_add(DNS_RETRY_TICKS);q.valid=true;Ok(id)
@@ -387,14 +413,94 @@ mod lifecycle_tests {
         assert_ne!(replacement, 0);
     }
 
+    /// M1: the sequential cursor is gone, so the wrap boundary is driven through
+    /// the same scan `begin` walks. The invariant the name states -- a new id
+    /// never reuses an active one, including across the `u16::MAX` wrap -- is
+    /// unchanged and still has to hold.
     #[test]
     fn query_ids_skip_active_ids_after_wrap() {
         let mut r = DnsResolver::new();
-        r.next_id = u16::MAX;
         let first = r.begin(b"one.example", 0).unwrap();
         let second = r.begin(b"two.example", 0).unwrap();
         assert_ne!(first, second);
         assert_ne!(second, 0);
+
+        let mut queries = [DnsQueryState::empty(); DNS_MAX_INFLIGHT];
+        queries[0].id = u16::MAX;
+        queries[0].valid = true;
+        assert_eq!(free_query_id(&queries, u16::MAX), Some(1), "the scan must wrap past u16::MAX to 1, never to 0");
+        queries[1].id = 1;
+        queries[1].valid = true;
+        assert_eq!(free_query_id(&queries, u16::MAX), Some(2));
+        assert_eq!(free_query_id(&queries, 0), Some(2), "id 0 is not a transaction id");
+    }
+
+    /// M1: two resolvers fed the identical tick sequence must not agree on the
+    /// transaction id. The old derivation was `next_id + ((now as u16) ^ 0xA5C3)
+    /// * 31` from the same starting cursor, so it produced the same stream every
+    /// time -- which is what let an off-path attacker poison the queried name.
+    #[test]
+    fn query_ids_are_not_a_function_of_the_tick_counter() {
+        let mut a = DnsResolver::new();
+        let mut b = DnsResolver::new();
+        for tick in 0..8u64 {
+            let ia = a.begin(b"same.example", tick).unwrap();
+            let ib = b.begin(b"same.example", tick).unwrap();
+            assert_ne!(ia, ib, "two resolvers at tick {tick} derived the same id, so the id is still computable from observable traffic");
+            assert!(a.abort(ia));
+            assert!(b.abort(ib));
+        }
+
+        // At one fixed tick the old code walked an arithmetic progression. A
+        // hardware draw does not, and the progression is what an observer could
+        // extend to the next query.
+        let mut r = DnsResolver::new();
+        let mut ids = [0u16; 12];
+        for slot in ids.iter_mut() {
+            let id = r.begin(b"fixed.example", 4242).unwrap();
+            *slot = id;
+            assert!(r.abort(id));
+        }
+        let progression = ids.windows(2).all(|w| w[1] == w[0].wrapping_add(1).max(1));
+        assert!(!progression, "ids at a fixed tick are still consecutive: {ids:?}");
+    }
+
+    /// M1: no entropy, no query. This drives the production refusal branch --
+    /// `net_entropy_u64` declines a contended TRNG rather than waiting -- and
+    /// checks the refused query left no inflight state behind.
+    #[test]
+    fn begin_refuses_to_start_a_query_without_entropy() {
+        let mut r = DnsResolver::new();
+        let _held = crate::crypto::TRNG.lock();
+        assert_eq!(r.begin(b"blocked.example", 0), Err("DNS entropy unavailable"));
+        assert!(!r.has_inflight(), "a refused query must not occupy an inflight slot");
+    }
+
+    /// Positive control for M1: a normal resolution still completes end to end
+    /// through the randomized id -- query built, answer accepted from the pinned
+    /// resolver address, result cached.
+    #[test]
+    fn a_randomized_query_id_still_resolves_normally() {
+        let mut r = DnsResolver::new();
+        let id = r.begin(b"ok.example", 0).unwrap();
+        assert!(r.has_inflight());
+        let mut query = [0u8; 300];
+        let n = r.build_query(id, &mut query).unwrap();
+        assert_eq!(u16::from_be_bytes([query[0], query[1]]), id, "the wire id must be the one the resolver holds");
+        assert!(n > DNS_HEADER_LEN);
+
+        let mut answer = alloc::vec![
+            (id >> 8) as u8, (id & 0xFF) as u8, 0x81, 0x80,
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ];
+        answer.extend_from_slice(b"\x02ok\x07example\x00\x00\x01\x00\x01");
+        answer.extend_from_slice(&[0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04, 93, 184, 216, 34]);
+        assert_eq!(
+            r.accept_response_from(&answer, DNS_SERVER, 53, 10).unwrap(),
+            Ipv4Address([93, 184, 216, 34])
+        );
+        assert_eq!(r.cached(b"ok.example", 20), Some(Ipv4Address([93, 184, 216, 34])));
+        assert!(!r.has_inflight());
     }
 
     #[test]

@@ -64,13 +64,24 @@ def _user_address_space_defects(user: str, services: str, inference: str = None)
     else:
         defects.append("missing load_user_elf_into_page_table body")
 
-    # 6. Body-scoped process instantiation budget refusal
+    # 6. Process instantiation budget refusal, following the single spawn funnel.
+    #
+    # WHY the funnel and not the wrapper's own body: every spawner now delegates
+    # to `spawn_user_process_inner`, which is where the budget is compared against
+    # the page table's actually-mapped bytes. Pinning only the wrapper body would
+    # keep passing while the refusal was deleted from the code every caller reaches.
     spawn_sig = "pub fn spawn_user_process_with_limits("
-    if spawn_sig in user:
+    funnel_sig = "fn spawn_user_process_inner("
+    if spawn_sig in user and funnel_sig in user:
         start_spawn = user.index(spawn_sig)
         end_spawn = user.index("\n}\n", start_spawn)
         spawn_body = user[start_spawn:end_spawn]
-        if 'return Err("userspace address-space budget exceeded");' not in spawn_body:
+        start_funnel = user.index(funnel_sig)
+        end_funnel = user.index("\n}\n", start_funnel)
+        funnel_body = user[start_funnel:end_funnel]
+        if "spawn_user_process_inner(" not in spawn_body:
+            defects.append("spawn_user_process_with_limits does not delegate to the spawn funnel")
+        if 'return Err("userspace address-space budget exceeded");' not in funnel_body:
             defects.append("spawn_user_process_with_limits missing live return Err('userspace address-space budget exceeded')")
     else:
         defects.append("missing spawn_user_process_with_limits body")
@@ -706,6 +717,90 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("no digitizer is attached", main)
         self.assertIn("no secure element is bound", main)
 
+    def test_x86_integrity_claims_match_what_is_actually_attested(self):
+        # WHY this exists: /system/etc/policy.json is a real file in the guest
+        # VFS that any authorized app can read, and it used to declare
+        # "integrity_protection": "dm-verity Merkle Tree" while the boot report
+        # said verified boot was NOT IMPLEMENTED. Only a Merkle block-verify
+        # primitive exists, self-tested on a synthetic block; no partition is
+        # walked and no root digest is provisioned. A policy file that claims
+        # an unimplemented protection is fabricated telemetry, not documentation.
+        main = self.read("kernel/src/main.rs")
+        self.assertIn("Verified boot: NOT IMPLEMENTED", main)
+        self.assertIn("no fixed Merkle root is provisioned", main)
+        # The self-test must stay labelled synthetic, or a reader takes a
+        # primitive check for a partition attestation.
+        self.assertIn("SYNTHETIC block", main)
+        self.assertIn("synthetic_block", main)
+
+        vfs = self.read("kernel/src/fs/vfs.rs")
+        start = vfs.find("let policy_content = br#\"{")
+        self.assertNotEqual(start, -1, "the seeded policy.json must still exist")
+        policy = vfs[start:vfs.find("}\"#;", start)]
+        self.assertIn('"integrity_protection"', policy)
+        self.assertIn("NOT IMPLEMENTED", policy)
+        self.assertNotIn("dm-verity Merkle Tree", policy)
+
+        # An unreferenced static artifact is still a claim a reader can find.
+        info = self.read("emulator/data/vfs/sys/kernel_info.txt")
+        self.assertNotIn("dm-verity Merkle Tree: VERIFIED", info)
+        self.assertIn("NOT IMPLEMENTED", info)
+
+    def test_futex_wait_reads_the_user_word_only_under_a_pin(self):
+        # WHY: sys_futex_wait reads the caller's word twice -- once to compare,
+        # and once inside add_waiter_recheck after the waiter is published, to
+        # close the lost-wakeup window. Both reads used to be raw
+        # `read_volatile` after the page-table pin had been released. A sibling
+        # `mem_unmap` racing either read faults in ring 0, which the fault
+        # handler classifies as FatalKernelFault and halts the whole device:
+        # one process could kill the OS by unmapping memory another waits on.
+        # The race itself cannot be exercised in a host unit test, so this pins
+        # the property that makes it unreachable.
+        syscall = self.read("kernel/src/syscall/mod.rs")
+        start = syscall.find("pub fn sys_futex_wait(")
+        self.assertNotEqual(start, -1, "sys_futex_wait must exist")
+        body = syscall[start:syscall.find("\n}\n", start)]
+        self.assertNotIn("read_volatile(uaddr", body)
+        self.assertNotIn("validate_user_range", body)
+        self.assertEqual(
+            body.count("read_user_value::<u32>(uaddr)"), 2,
+            "both the compare read and the published-waiter re-read must go "
+            "through the pinned helper",
+        )
+        # The re-read must stay inside the manager lock, or the lost-wakeup
+        # window H7 closed reopens.
+        recheck = body[body.find("add_waiter_recheck("):]
+        self.assertIn("read_user_value::<u32>(uaddr)", recheck)
+
+    def test_lost_input_is_reported_on_the_pass_that_notices_it(self):
+        # WHY: PENDING_SCANCODE_OVERRUN and DEFERRED_INPUT_OVERRUN were both
+        # written and read nowhere outside their own modules' tests, so a lost
+        # keypress or a dropped tap was silent in production. A counter nobody
+        # reads is not a report. The reporter itself is covered by host unit
+        # tests that drive the real producers; the kernel-loop call site is
+        # guest-only, so a host test compiles it out and cannot pin it. This does.
+        interrupts = self.read("kernel/src/interrupts.rs")
+        start = interrupts.find("pub fn report_input_loss()")
+        self.assertNotEqual(start, -1, "the input-loss reporter must exist")
+        reporter = interrupts[start:interrupts.find("\n}\n", start)]
+        self.assertIn("PENDING_SCANCODE_OVERRUN.swap(0", reporter)
+        self.assertIn("DEFERRED_INPUT_OVERRUN.swap(0", reporter)
+        self.assertIn("scancode byte(s) lost", reporter)
+        self.assertIn("deferred input event(s) lost", reporter)
+
+        loop_start = interrupts.find("pub fn service_deferred_diagnostics() {")
+        self.assertNotEqual(loop_start, -1)
+        loop_body = interrupts[loop_start:interrupts.find("\n}\n", loop_start)]
+        call = loop_body.find("report_input_loss()")
+        self.assertNotEqual(call, -1, "the kernel loop must report lost input")
+        bail = loop_body.find("PROCESS_TABLE_SAMPLE_TICKS")
+        self.assertNotEqual(bail, -1)
+        self.assertLess(
+            call, bail,
+            "the report must run before the sample-interval early return, or a "
+            "lost keypress waits for the next one-second boundary to be stated",
+        )
+
     def test_x86_page_fault_report_path_is_allocation_free_and_bounded(self):
         interrupts = self.read("kernel/src/interrupts.rs")
         handler = interrupts[interrupts.index('extern "x86-interrupt" fn page_fault_handler'):interrupts.index('extern "x86-interrupt" fn general_protection_fault_handler')]
@@ -727,8 +822,22 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertNotIn("serial_println!", handler)
         self.assertNotIn("panic!(", handler)
         self.assertNotIn("{:#?}", handler)
-        self.assertIn("crate::task::terminate_current()", handler)
+        self.assertIn("recover_and_terminate_current()", handler)
         self.assertIn("halt_after_fault_report_failure()", handler)
+        # Termination moved into a helper that first releases what the dying
+        # context abandoned -- a raised preempt gate, a still-held mutex, a
+        # pinned page table -- because `terminate_current` switches away
+        # permanently and no guard on that stack ever runs its Drop. Follow the
+        # call chain: the guarantee pinned here is that a user fault STILL
+        # terminates its task, and now also that it cannot strand a lock.
+        recover = interrupts[
+            interrupts.index("fn recover_and_terminate_current()"):
+            interrupts.index('extern "x86-interrupt" fn page_fault_handler')
+        ]
+        self.assertIn("crate::task::terminate_current()", recover)
+        self.assertIn("recover_abandoned_user_access()", recover)
+        self.assertIn("crate::sync::abandon_current_context()", recover)
+        self.assertIn("halt_after_fault_report_failure()", recover)
 
         # The bounds live in the shared reporting helpers every fatal handler
         # calls, so they are asserted at module scope rather than inside a single

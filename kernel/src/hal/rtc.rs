@@ -179,6 +179,40 @@ pub const fn bcd_to_binary(bcd: u8) -> u8 {
     (bcd & 0x0F) + ((bcd >> 4) * 10)
 }
 
+/// Decodes the raw CMOS hour register for both data modes (BCD / binary) and
+/// both hour formats (12 / 24), as selected by Status Register B.
+///
+/// WHY the 12-hour mapping is not `(hour + 12) % 24`: in MC146818 12-hour mode
+/// bit 7 (0x80) is the PM flag and the low bits carry the hour 1..12. Hour 12
+/// with PM clear is midnight (0) and hour 12 with PM set is noon (12); a
+/// blanket `+12 mod 24` on the PM flag inverts both, reporting noon as
+/// midnight and midnight as noon to every app and to TLS certificate
+/// validity windows judged against this clock.
+fn decode_hour_register(hour_reg: u8, status_b: u8) -> u8 {
+    // Bit 2 of Status Register B: registers are binary (1) or BCD (0). The PM
+    // flag survives the BCD decode so the 12-hour branch below can read it.
+    let hour = if (status_b & 0x04) != 0 {
+        hour_reg
+    } else {
+        ((hour_reg & 0x0F) + (((hour_reg & 0x70) >> 4) * 10)) | (hour_reg & 0x80)
+    };
+
+    // Bit 1 of Status Register B set: the register already holds 24-hour time.
+    if (status_b & 0x02) != 0 {
+        return hour;
+    }
+
+    let pm = (hour & 0x80) != 0;
+    let h12 = hour & 0x7F;
+    if h12 == 12 {
+        if pm { 12 } else { 0 }
+    } else if pm {
+        h12 + 12
+    } else {
+        h12
+    }
+}
+
 /// Reads a CMOS register byte, setting Bit 7 (0x80) on Address Port 0x70 to suppress NMI.
 unsafe fn read_cmos_register(reg: u8) -> u8 {
     let mut addr_port = Port::<u8>::new(CMOS_ADDRESS_PORT);
@@ -232,7 +266,7 @@ impl RtcManager {
 
         let mut sec = unsafe { read_cmos_register(RTC_REG_SECONDS) };
         let mut min = unsafe { read_cmos_register(RTC_REG_MINUTES) };
-        let mut hour = unsafe { read_cmos_register(RTC_REG_HOURS) };
+        let hour_reg = unsafe { read_cmos_register(RTC_REG_HOURS) };
         let mut day = unsafe { read_cmos_register(RTC_REG_DAY_OF_MONTH) };
         let mut month = unsafe { read_cmos_register(RTC_REG_MONTH) };
         let mut year_reg = unsafe { read_cmos_register(RTC_REG_YEAR) };
@@ -245,17 +279,14 @@ impl RtcManager {
         if !is_binary {
             sec = bcd_to_binary(sec);
             min = bcd_to_binary(min);
-            hour = ((hour & 0x0F) + (((hour & 0x70) >> 4) * 10)) | (hour & 0x80);
             day = bcd_to_binary(day);
             month = bcd_to_binary(month);
             year_reg = bcd_to_binary(year_reg);
         }
 
-        // Convert 12-hour format to 24-hour format if Status B bit 1 is clear
-        let is_24hr = (status_b & 0x02) != 0;
-        if !is_24hr && (hour & 0x80) != 0 {
-            hour = ((hour & 0x7F) + 12) % 24;
-        }
+        // The hour register is decoded separately: its bit 7 is the PM flag in
+        // 12-hour mode, so it must not go through the plain BCD path above.
+        let hour = decode_hour_register(hour_reg, status_b);
 
         // Calculate full 4-digit Gregorian year
         let full_year = if century_reg > 0 && century_reg < 100 {
@@ -356,4 +387,91 @@ pub fn init() {
         str_view,
         current_dt.unix_epoch_secs
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Encodes a 24-hour value into the raw hour register for 12-hour mode:
+    /// low bits carry 1..12, bit 7 is the PM flag.
+    fn hour_reg_12h(hour24: u8, binary: bool) -> u8 {
+        let h12 = if hour24 % 12 == 0 { 12 } else { hour24 % 12 };
+        let pm = if hour24 >= 12 { 0x80 } else { 0x00 };
+        let encoded = if binary { h12 } else { (h12 / 10) << 4 | (h12 % 10) };
+        encoded | pm
+    }
+
+    // Status B: bit 1 = 24-hour mode, bit 2 = binary data mode.
+    const STATUS_B_12H_BCD: u8 = 0x00;
+    const STATUS_B_12H_BINARY: u8 = 0x04;
+    const STATUS_B_24H_BCD: u8 = 0x02;
+    const STATUS_B_24H_BINARY: u8 = 0x06;
+
+    #[test]
+    fn rtc_12h_bcd_all_24_hours_decode_exactly() {
+        for hour24 in 0u8..24 {
+            let reg = hour_reg_12h(hour24, false);
+            assert_eq!(
+                decode_hour_register(reg, STATUS_B_12H_BCD),
+                hour24,
+                "BCD 12-hour register {:#04x} must decode to hour {}",
+                reg,
+                hour24
+            );
+        }
+    }
+
+    #[test]
+    fn rtc_12h_binary_all_24_hours_decode_exactly() {
+        for hour24 in 0u8..24 {
+            let reg = hour_reg_12h(hour24, true);
+            assert_eq!(
+                decode_hour_register(reg, STATUS_B_12H_BINARY),
+                hour24,
+                "binary 12-hour register {:#04x} must decode to hour {}",
+                reg,
+                hour24
+            );
+        }
+    }
+
+    #[test]
+    fn rtc_12h_midnight_is_not_noon() {
+        // Regression: 12 AM (hour 12, PM clear) used to pass through untouched
+        // and was reported as 12 (noon).
+        assert_eq!(decode_hour_register(0x12, STATUS_B_12H_BCD), 0);
+        assert_eq!(decode_hour_register(12, STATUS_B_12H_BINARY), 0);
+    }
+
+    #[test]
+    fn rtc_12h_noon_is_not_midnight() {
+        // Regression: 12 PM (hour 12, PM set) used to compute (12+12)%24 = 0
+        // and was reported as midnight.
+        assert_eq!(decode_hour_register(0x92, STATUS_B_12H_BCD), 12);
+        assert_eq!(decode_hour_register(12 | 0x80, STATUS_B_12H_BINARY), 12);
+    }
+
+    #[test]
+    fn rtc_24h_mode_registers_pass_through_unchanged() {
+        for hour in 0u8..24 {
+            let bcd = (hour / 10) << 4 | (hour % 10);
+            assert_eq!(decode_hour_register(bcd, STATUS_B_24H_BCD), hour);
+            assert_eq!(decode_hour_register(hour, STATUS_B_24H_BINARY), hour);
+        }
+    }
+
+    #[test]
+    fn rtc_decoded_hour_feeds_the_same_epoch_math() {
+        // The wall clock every app and TLS validity check sees is the epoch
+        // built from the decoded hour: noon and midnight must differ by 12h.
+        let mut noon = DateTime { year: 2026, month: 9, day: 19, hour: 0, minute: 0, second: 0, unix_epoch_secs: 0 };
+        noon.hour = decode_hour_register(0x92, STATUS_B_12H_BCD);
+        let mut midnight = noon;
+        midnight.hour = decode_hour_register(0x12, STATUS_B_12H_BCD);
+        let noon_epoch = calculate_unix_epoch(&noon);
+        let midnight_epoch = calculate_unix_epoch(&midnight);
+        assert_eq!(noon_epoch - midnight_epoch, 12 * 3600);
+        assert_eq!(midnight_epoch, 1789776000);
+    }
 }

@@ -420,6 +420,39 @@ def _build_x86_kernel_and_image():
     ]
     if kernel_profile == "release":
         cargo_build.append("--release")
+    # WHY this is an explicit, loud opt-in: the COM1 console is an unauthenticated
+    # control plane. The `debug-control-plane` cargo feature compiles IN verbs that
+    # unlock the owner account without consulting a biometric matcher
+    # (FINGERPRINT_INJECT), fabricate battery telemetry (BATTERY_SET), cut the radios
+    # (KILLSWITCH_TOGGLE), read/write arbitrary guest paths (READ_FILE/WRITE_FILE),
+    # mint a RAPP publisher trust root (RAPP_TRUST), install/revoke TLS trust anchors
+    # (TLS_TRUST_BEGIN/CHUNK/COMMIT/REVOKE and the single-line TLS_TRUST), change the
+    # panic policy (PANIC_POLICY SET) and force a kernel panic (TRIGGER_KERNEL_PANIC).
+    # They are OFF by default and must never reach a production or `build demo` image
+    # by accident. Only a developer who sets INTEROS_DEBUG_CONTROL_PLANE=1 gets them,
+    # and the build announces it loudly. There is no runtime switch: with the feature
+    # off those handlers are not in the binary at all, so no serial line can re-enable
+    # them. Input injection, diagnostics, the read-only TLS_TRUST_LIST / PANIC_POLICY
+    # GET observers and the path-confined STUDIO_FS channel are unaffected and stay
+    # available in every build.
+    debug_control_plane = os.environ.get("INTEROS_DEBUG_CONTROL_PLANE", "").strip().lower()
+    if debug_control_plane in ("1", "true", "yes", "on"):
+        cargo_build += ["--features", "debug-control-plane"]
+        log_warn("=" * 72)
+        log_warn("DEBUG CONTROL PLANE ENABLED (INTEROS_DEBUG_CONTROL_PLANE=1).")
+        log_warn("This kernel build COMPILES IN unauthenticated serial verbs that")
+        log_warn("unlock the owner account, inject synthetic battery telemetry,")
+        log_warn("toggle the hardware kill-switches, read/write arbitrary guest")
+        log_warn("paths, mint RAPP publisher trust roots, install/revoke TLS trust")
+        log_warn("anchors, change the panic policy and force a kernel panic")
+        log_warn("(FINGERPRINT_INJECT, BATTERY_SET, KILLSWITCH_TOGGLE, READ_FILE,")
+        log_warn("WRITE_FILE, RAPP_TRUST, TLS_TRUST*, PANIC_POLICY SET,")
+        log_warn("TRIGGER_KERNEL_PANIC). DEVELOPMENT ONLY -- never ship or demo")
+        log_warn("this image.")
+        log_warn("=" * 72)
+    else:
+        log("Kernel debug control plane: DISABLED (production default; set "
+            "INTEROS_DEBUG_CONTROL_PLANE=1 to opt in for development only).")
     target_base = Path(os.environ["CARGO_TARGET_DIR"]) if "CARGO_TARGET_DIR" in os.environ else (WORKSPACE_ROOT / "kernel" / "target")
     canonical_kernel = target_base / "x86_64-unknown-none" / kernel_profile / "kernel"
     if canonical_kernel.exists():
@@ -1762,6 +1795,15 @@ def _provision_guest_trust(data, publisher, port):
     trust the publisher of it -- the same decision the `trust` command
     records on its own.
 
+    WHY this can fail on a production image: the guest installs the root over
+    the COM1 `RAPP_TRUST` verb, which is compiled OUT of production builds
+    behind the `debug-control-plane` cargo feature (the console carries no
+    CapHandle, so an attacker could otherwise mint their own publisher root).
+    Provisioning is a once-only act on a build made with
+    INTEROS_DEBUG_CONTROL_PLANE=1; the root is journalled and restored at boot
+    by REVOCATION_REGISTRY.seed, so a production image keeps the roots it was
+    provisioned with but cannot add new ones from the console.
+
     Returns (ok, detail) so a caller can report what the guest said.
     """
     if len(data) < 0xB0 or data[:4] != b"RAPP":
@@ -1801,7 +1843,14 @@ def cmd_install(args):
     trust_ok, trust_detail = _provision_guest_trust(data, publisher, port)
     if not trust_ok:
         log_error(f"The guest does not trust this publisher yet: {trust_detail}")
-        log_error(f"Provision it with 'interos.py trust {filename}' and install again.")
+        log_error("Provisioning installs a publisher trust root over the COM1 RAPP_TRUST")
+        log_error("verb, which is compiled OUT of production images (debug-control-plane")
+        log_error("OFF). On a production guest 'interos.py trust' cannot mint a new root")
+        log_error("either. Build the provisioning image with INTEROS_DEBUG_CONTROL_PLANE=1,")
+        log_error(f"run 'interos.py trust {filename}' once, then install. The root is")
+        log_error("journalled to persistent storage and restored at boot by")
+        log_error("REVOCATION_REGISTRY.seed where the journal is bound; a production image")
+        log_error("keeps the roots it was provisioned with but cannot add new ones.")
         return 1
     log(f"Publisher '{publisher}' trusted in the guest trust store: {trust_detail}")
     log(f"Uploading verified package '{filename}' to InterOS Studio (port {port})...")
@@ -1839,6 +1888,11 @@ def cmd_trust(args):
         log_success(f"Publisher trust root provisioned in QEMU guest: {detail}")
         return 0
     log_error(f"Guest trust provisioning failed: {detail}")
+    log_error("RAPP_TRUST is compiled OUT of production images (debug-control-plane OFF).")
+    log_error("To provision a new publisher root, build the image with")
+    log_error("INTEROS_DEBUG_CONTROL_PLANE=1 and run this command once; the root is")
+    log_error("journalled to persistent storage and restored at boot by")
+    log_error("REVOCATION_REGISTRY.seed where the storage journal is bound.")
     return 1
 
 

@@ -815,15 +815,47 @@ impl CapabilityTable {
     /// WHY this exists alongside `has_capability`: a caller whose lease
     /// budget is exhausted and a caller that never held the capability are
     /// different situations, and the platform reports them differently. The
-    /// first has used its authority; the second never had it.
+    /// first has used its authority; the second never had it. `vfs` turns that
+    /// difference into `InvalidSlot` versus `TypeMismatch`, so the quota is
+    /// deliberately *not* consulted here.
+    ///
+    /// WHY revocation and lease validity ARE consulted: "held" must mean held
+    /// now. A slot whose identity was published into the kernel-wide revocation
+    /// set is not authority, wherever the copy lives -- `revoke_by_id` clears
+    /// this table's slots and bumps their generation, but a copy installed in
+    /// another task's table keeps its old identity and is caught only by the
+    /// global check. The same applies to a lease that was revoked, expired, or
+    /// minted for a different grantee: the slot still describes a token, and
+    /// the token no longer authorises anything. Answering "yes" from the slot
+    /// alone made this the one inspection in the table that a revocation could
+    /// not reach, and the IPC service gate authorised sends from it.
     pub fn holds_capability_type(
         &self,
         expected_type: CapabilityType,
         required_rights: Rights,
     ) -> bool {
+        let now = crate::interrupts::get_system_ticks();
         self.slots.iter().any(|slot| {
             slot.cap.as_ref().is_some_and(|cap| {
-                cap.cap_type == expected_type && cap.rights.contains(required_rights)
+                if cap.cap_type != expected_type || !cap.rights.contains(required_rights) {
+                    return false;
+                }
+                if revocation::is_revoked(cap.id) {
+                    return false;
+                }
+                if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+                    let lease_id = cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF;
+                    // Unrevoked and unexpired, but quota-blind: see above.
+                    if !delegation::is_lease_unrevoked_and_unexpired(
+                        lease_id,
+                        self.owner_task,
+                        now,
+                        required_rights,
+                    ) {
+                        return false;
+                    }
+                }
+                true
             })
         })
     }

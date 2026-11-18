@@ -321,6 +321,16 @@ pub enum SyscallNumber {
     FsReadAt = 164,
     /// Queries active and pending consent requests from the Permission Manager.
     ConsentQuery = 165,
+    /// Verifies that the SENDER of an IPC message genuinely holds the capability
+    /// a tool request claims, resolved by generation-counted handle in the
+    /// sender's own capability table.
+    ///
+    /// WHY 166: it is the next free number above the whole declared table, so no
+    /// existing ABI number moves. WHY it is a kernel call and not an app-side
+    /// test: `cap_handle != 0` is a claim any integer satisfies, and only the
+    /// kernel can read the sender's table. The receiver supplies the `sender`
+    /// TaskId the router stamped on the message, which userspace cannot forge.
+    AppMcpAuthorize = 166,
 }
 
 /// System call result status codes.
@@ -758,6 +768,29 @@ fn require_own_or_delegated_user(user_id: u32) -> Result<(), SyscallResult> {
     require_user_control_object(user_id)
 }
 
+/// Whether the account `uid` is locked, as the KERNEL knows it.
+///
+/// WHY the caller's flag is not consulted: `NotificationQuery` used to take
+/// `is_locked` in a2 and redact Secret/Private records only when the caller said
+/// the device was locked. The shipped launcher passes the real state, so the
+/// attacker is a sideloaded app that simply passes `false` and reads every
+/// private body on a locked device. Whether the screen is locked is a fact about
+/// the device, not an argument an application may choose.
+///
+/// WHY anything other than `Unlocked` redacts: `Locked`, `Lockout` and
+/// `Uninitialized` are all states in which the person has not authenticated, and
+/// a profile the user manager does not know is not evidence of an unlocked
+/// device either. This is the same rule the launcher applies
+/// (`state != Unlocked`, and `true` when the state cannot be read), so the
+/// kernel's answer and the shell's answer cannot disagree.
+fn account_is_locked(uid: u32) -> bool {
+    let mgr = crate::user::USER_MANAGER.lock();
+    !matches!(
+        mgr.get_lock_state(crate::user::UserId(uid)),
+        Ok(crate::user::UserLockState::Unlocked)
+    )
+}
+
 /// Returns true when the caller's process name matches the package identity it
 /// is claiming to act as.
 ///
@@ -784,6 +817,40 @@ fn require_package_or_delegated(pkg: &str) -> Result<(), SyscallResult> {
     require_system_control_object(NOTIFICATION_CONTROL_OBJECT)
 }
 
+/// Well-known Ring-3 service aliases. A caller names the service, not the task
+/// id the supervisor happened to allocate for it; the alias is resolved to the
+/// registered task before anything is authorised or delivered.
+const SERVICE_ALIAS_BASE: u64 = 0xFFFF_0000;
+const SERVICE_ALIAS_LAST: u64 = 0xFFFF_000F;
+const INFERENCE_SERVICE_ALIAS: u64 = 0xFFFF_000C;
+const SEARCH_SERVICE_ALIAS: u64 = 0xFFFF_000D;
+
+/// The task a service is actually running as, or `None` while it is only
+/// declared.
+///
+/// WHY `TaskId(0)` is filtered: a declared-but-not-started record carries
+/// `TaskId(0)`, the primordial kernel thread. Treating that as the service's
+/// identity would make PID 0 answer to the inference/search name, so a service
+/// capability would authorise a send into the kernel supervisor's mailbox.
+fn registered_service_task(sid: crate::services::ServiceId) -> Option<TaskId> {
+    crate::services::task_id(sid).filter(|task| task.0 != 0)
+}
+
+/// Resolves a well-known service alias to the task the supervisor registered
+/// for it, leaving every other destination untouched.
+fn resolve_ipc_destination(dest: TaskId) -> TaskId {
+    if dest.0 >= SERVICE_ALIAS_BASE && dest.0 <= SERVICE_ALIAS_LAST {
+        let service_id = (dest.0 & 0xF) as u8;
+        if let Some(sid) = crate::services::ServiceId::from_u8(service_id) {
+            // An unstarted service keeps its alias, which no mailbox owns: the
+            // send fails honestly with TargetNotFound instead of being routed
+            // to whatever task id the empty record happened to hold.
+            return registered_service_task(sid).unwrap_or(dest);
+        }
+    }
+    dest
+}
+
 /// Sends an IPC message to a destination task.
 pub fn sys_ipc_send(
     cap_slot: usize,
@@ -791,6 +858,13 @@ pub fn sys_ipc_send(
     msg_type: u32,
     data: &[u8],
 ) -> SyscallResult {
+    // WHY the destination is resolved before it is authorised: every check
+    // below must name the task the message will actually be delivered to. An
+    // alias authorised as an alias and delivered as a task id is two different
+    // peers, and the object scope of an `IpcSend` grant would be compared
+    // against the wrong one.
+    let target_dest = resolve_ipc_destination(dest);
+
     let (sender_id, is_valid) = {
         let sched = SCHEDULER.lock();
         let current = match sched.current_task() {
@@ -798,11 +872,16 @@ pub fn sys_ipc_send(
             None => return SyscallResult::PermissionDenied,
         };
 
-        let is_inference = dest.0 == 0xFFFF_000C
-            || crate::services::task_id(crate::services::ServiceId::Inference) == Some(dest)
-            || msg_type == 0x454D_4244 || msg_type == 0x4747_5546 || msg_type == 0x4745_4E52 || msg_type == 0x4745_4E45 || msg_type == 0x5352_4348;
-        let is_search = dest.0 == 0xFFFF_000D
-            || crate::services::task_id(crate::services::ServiceId::Search) == Some(dest);
+        // WHY service identity comes from the destination and never from
+        // `msg_type`: a3 is caller-controlled. Keying `is_inference` on the
+        // message kind let an InferenceService holder set a3 to `EMBD`/`GGUF`/
+        // `GENR`/`GENE`/`SRCH` and name ANY TaskId, because the service
+        // disjuncts below never consulted the destination. The kind of a
+        // message is not authority over the task that receives it.
+        let is_inference = dest.0 == INFERENCE_SERVICE_ALIAS
+            || registered_service_task(crate::services::ServiceId::Inference) == Some(target_dest);
+        let is_search = dest.0 == SEARCH_SERVICE_ALIAS
+            || registered_service_task(crate::services::ServiceId::Search) == Some(target_dest);
 
         // Zero ambient authority: Access to inference requires explicit InferenceService capability
         if is_inference && !current.cap_table.holds_capability_type(CapabilityType::InferenceService, Rights::READ)
@@ -816,10 +895,15 @@ pub fn sys_ipc_send(
             return SyscallResult::PermissionDenied;
         }
 
-        let valid = current.cap_table.verify_object(cap_slot, CapabilityType::IpcSend, Rights::WRITE, dest.0).is_ok()
-            || current.cap_table.find_capability_for_object(CapabilityType::IpcSend, Rights::WRITE, dest.0).is_some()
-            || (is_inference && current.cap_table.holds_capability_type(CapabilityType::InferenceService, Rights::INVOKE | Rights::READ))
-            || (is_search && current.cap_table.holds_capability_type(CapabilityType::SearchService, Rights::INVOKE | Rights::READ));
+        // WHY the service disjuncts authorise rather than merely inspect: a send
+        // is a privileged operation, so a delegated service lease must spend one
+        // invocation here exactly as the two object-scoped disjuncts do.
+        // `holds_capability_type` is quota-blind by design (it tells `vfs`
+        // "spent" from "never held") and must not decide an actual send.
+        let valid = current.cap_table.verify_object(cap_slot, CapabilityType::IpcSend, Rights::WRITE, target_dest.0).is_ok()
+            || current.cap_table.find_capability_for_object(CapabilityType::IpcSend, Rights::WRITE, target_dest.0).is_some()
+            || (is_inference && current.cap_table.authorize_capability(CapabilityType::InferenceService, Rights::INVOKE | Rights::READ))
+            || (is_search && current.cap_table.authorize_capability(CapabilityType::SearchService, Rights::INVOKE | Rights::READ));
         (current.id, valid)
     };
 
@@ -830,17 +914,6 @@ pub fn sys_ipc_send(
     if crate::task::process::consume_background_ipc(sender_id).is_err() {
         return SyscallResult::NotReady;
     }
-
-    let target_dest = if dest.0 >= 0xFFFF_0000 && dest.0 <= 0xFFFF_000F {
-        let service_id = (dest.0 & 0xF) as u8;
-        if let Some(sid) = crate::services::ServiceId::from_u8(service_id) {
-            crate::services::task_id(sid).unwrap_or(dest)
-        } else {
-            dest
-        }
-    } else {
-        dest
-    };
 
     let mut router = IPC_ROUTER.lock();
     match router.send_direct(sender_id, target_dest, msg_type, data) {
@@ -1544,6 +1617,19 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                     }
                     n as i64
                 }
+                Err(e) => e as i64,
+            }
+        }
+        166 => {
+            // AppMcpAuthorize: a1 = sender_task_id, a2 = cap_handle,
+            // a3 = cap_type_raw, a4 = required_rights, a5 = object_id.
+            //
+            // Answers 0 when the SENDER genuinely holds the claimed capability,
+            // PermissionDenied when it does not, InvalidArguments when the type
+            // tag cannot be parsed. No buffer crosses the boundary, so there is
+            // nothing to copy and nothing to validate a pointer for.
+            match sys_appmcp_authorize(a1, a2, a3, a4, a5) {
+                Ok(()) => SyscallResult::Success as i64,
                 Err(e) => e as i64,
             }
         }
@@ -3461,12 +3547,18 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         },
         112 => {
-            // NotificationQuery: a1 = user_id, a2 = is_locked, a3 = out_buf_ptr, a4 = out_buf_cap
+            // NotificationQuery: a1 = user_id, a2 = IGNORED (legacy is_locked),
+            // a3 = out_buf_ptr, a4 = out_buf_cap.
             // Scoped to the caller's own account (or a delegated grant for that account).
             let target_uid = a1 as u32;
             if let Err(e) = require_own_or_delegated_user(target_uid) { return e as i64; }
+            // The lock state is read from the user manager, not from a2: an
+            // application must not be able to declare the device unlocked.
+            // Read before the notification store is taken so the two locks are
+            // never held at once.
+            let is_locked = account_is_locked(target_uid);
             let nm = crate::notification::NOTIFICATION_MANAGER.lock();
-            let active = nm.query_active(target_uid, a2 != 0);
+            let active = nm.query_active(target_uid, is_locked);
             if a3 == 0 || a4 == 0 {
                 return active.len() as i64;
             }
@@ -3512,28 +3604,22 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 Some(p) => p,
                 None => return SyscallResult::InvalidArguments as i64,
             };
-            let mut pm = crate::capability::permission::PERMISSION_MANAGER.lock();
-            if pm.revoke_permission(task_id, perm) {
-                let mut sched = SCHEDULER.lock();
-                if task_id != TaskId(0) {
-                    if let Some(task) = sched.get_task_mut(task_id) {
-                        // WHY the shared helper instead of re-deriving the identity here:
-                        // a second hand-written copy of the id expression is exactly how
-                        // revocation ends up targeting a capability that was never minted,
-                        // while reporting success.
-                        task.cap_table.revoke_by_id(perm.capability_id(task_id));
-                    }
-                } else {
-                    let task_ids: alloc::vec::Vec<TaskId> = sched.tasks_iter().map(|t| t.id).collect();
-                    for tid in task_ids {
-                        if let Some(task) = sched.get_task_mut(tid) {
-                            task.cap_table.revoke_by_id(perm.capability_id(tid));
-                        }
-                    }
-                }
-                SyscallResult::Success as i64
-            } else {
-                SyscallResult::TargetNotFound as i64
+            // WHY the whole boundary is one call made while this arm owns no lock:
+            // the record half and the live-capability half used to be split across
+            // a PERMISSION_MANAGER guard held over a blocking SCHEDULER acquire,
+            // which is the reverse of the order `sys_cap_request_consent` and the
+            // force-stop reclaim path already use. The live scan also used to be a
+            // bounded try-spin that could expire and leave a manifest SystemControl
+            // grant authorizing while this arm still returned Success.
+            match crate::capability::permission::revoke_permission_live(task_id, perm) {
+                crate::capability::permission::RevocationOutcome::Revoked => SyscallResult::Success as i64,
+                crate::capability::permission::RevocationOutcome::NotFound => SyscallResult::TargetNotFound as i64,
+                // WHY not Success and not TargetNotFound: the scan did not finish,
+                // so the authority is not proven withdrawn. Reporting either of
+                // those would tell userspace the revoke completed when it may not
+                // have. OutOfMemory is the honest cause -- the only way this arm
+                // is reached is a failed allocation inside the live-table scan.
+                crate::capability::permission::RevocationOutcome::Incomplete => SyscallResult::OutOfMemory as i64,
             }
         },
         114 => {
@@ -4459,6 +4545,12 @@ fn register_spawned_task_ipc(tid: TaskId, parent_id: TaskId) -> Result<(), Sysca
 
     // IPC registration is part of the launch transaction. A task that cannot
     // obtain an inbound endpoint must never remain runnable without one.
+    //
+    // FORCED zombify is deliberate here, not a missed cooperative kill: the
+    // victim has never been dispatched (this runs inside the spawn path, before
+    // the new task's first instruction), so it has no kernel frames to unwind
+    // and no boundary it could ever reach. The launch transaction has to fail
+    // synchronously and completely.
     let cleanup = {
         let mut sched = SCHEDULER.lock();
         let terminated = sched.terminate_task(tid, -24).is_ok();
@@ -4478,6 +4570,87 @@ fn register_spawned_task_ipc(tid: TaskId, parent_id: TaskId) -> Result<(), Sysca
     Err(SyscallResult::NotReady)
 }
 
+/// How long a production stop waits for the victim to consume its cooperative
+/// termination request before the forced zombify commits.
+///
+/// WHY a window at all: `pending_kill` is consumed by the victim itself, at its
+/// own syscall-return gate or the RPL=3 timer-return gate. Neither runs until
+/// the victim is dispatched, so a kill that requests cooperation and then
+/// zombifies in the same breath never gives the victim the chance to unwind its
+/// kernel frames in Ring 0 -- which is the whole point of the control.
+const COOPERATIVE_STOP_GRACE_TICKS: u64 = 2;
+
+/// Backstop on the grace window for a context whose tick counter does not move.
+///
+/// WHY it differs by build: the host `--lib` binary has no timer interrupt, so
+/// `get_system_ticks()` never advances and the tick deadline alone would spin
+/// forever. The guest's deadline is the real bound; this cap only keeps a
+/// stuck-counter context from hanging a force-stop.
+#[cfg(not(test))]
+const COOPERATIVE_STOP_GRACE_SPINS: usize = 1_000_000;
+#[cfg(test)]
+const COOPERATIVE_STOP_GRACE_SPINS: usize = 256;
+
+/// Marks a child for cooperative termination on behalf of its parent.
+///
+/// Returns whether a request was actually placed, i.e. whether the victim is
+/// live and owned by `parent` and therefore has a boundary to reach.
+///
+/// WHY ownership is checked here and not left to `terminate_child`: this runs
+/// BEFORE the forced fallback, so without the same parent test a caller could
+/// set `pending_kill` on a task it does not own and have that task terminate
+/// itself at its next syscall return -- a kill primitive with no authority
+/// check, which is worse than the forced path it was meant to precede.
+fn request_cooperative_stop(
+    sched: &mut crate::task::scheduler::Scheduler,
+    parent: TaskId,
+    child_id: TaskId,
+    exit_code: i32,
+) -> bool {
+    if child_id == TaskId(0) || child_id == parent {
+        return false;
+    }
+    let Some(child) = sched.get_task(child_id) else { return false };
+    if child.parent_id != parent {
+        return false;
+    }
+    if matches!(child.state, crate::task::TaskState::Zombie | crate::task::TaskState::Terminated) {
+        return false;
+    }
+    // `request_kill` also moves a Blocked/WaitPid victim to Ready, which is what
+    // lets a task parked in `event_poll` or `futex_wait` reach its boundary at
+    // all instead of waiting out the grace window and being forced.
+    sched.request_kill(child_id, exit_code).is_ok()
+}
+
+/// Waits, holding no kernel lock, for the victim to reach a terminal state on
+/// its own. The preemptive timer dispatches the victim during this window; the
+/// victim's own gate then terminates it and the scheduler returns here.
+fn await_cooperative_stop(child_id: TaskId) {
+    let deadline = crate::interrupts::get_system_ticks()
+        .saturating_add(COOPERATIVE_STOP_GRACE_TICKS);
+    for _ in 0..COOPERATIVE_STOP_GRACE_SPINS {
+        let terminal = {
+            let sched = SCHEDULER.lock();
+            match sched.get_task(child_id) {
+                Some(task) => matches!(
+                    task.state,
+                    crate::task::TaskState::Zombie | crate::task::TaskState::Terminated
+                ),
+                // Already reaped: nothing left to wait for.
+                None => true,
+            }
+        };
+        if terminal {
+            return;
+        }
+        if crate::interrupts::get_system_ticks() >= deadline {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
 pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
     if require_app_launcher_or_service_manager().is_err() {
         return SyscallResult::PermissionDenied;
@@ -4490,6 +4663,19 @@ pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
         .lock()
         .get_task(child_id)
         .map(|task| task.name);
+
+    // Cooperative phase: this is the production setter of `pending_kill`. The
+    // victim consumes it at its own safe boundary; the forced zombify below
+    // remains the fallback for a victim that cannot reach one (a Ring-0 worker
+    // that never returns to userspace, or one that outlives the grace window).
+    let requested = {
+        let mut sched = SCHEDULER.lock();
+        request_cooperative_stop(&mut sched, parent, child_id, -9)
+    };
+    if requested {
+        await_cooperative_stop(child_id);
+    }
+
     let terminated = {
         let mut sched = SCHEDULER.lock();
         sched.terminate_child(parent, child_id, -9)
@@ -4534,6 +4720,15 @@ pub fn sys_app_restart(app_id: &str) -> Result<TaskId, SyscallResult> {
         sched.find_child_by_name(parent, app_id)
     };
     if let Some(child) = child {
+        // Same cooperative-then-forced sequence as `sys_app_stop`: a restart is
+        // a stop followed by a launch, and the victim must get its boundary.
+        let requested = {
+            let mut sched = SCHEDULER.lock();
+            request_cooperative_stop(&mut sched, parent, child, -9)
+        };
+        if requested {
+            await_cooperative_stop(child);
+        }
         {
             let mut sched = SCHEDULER.lock();
             sched.terminate_child(parent, child, -9).map_err(|_| SyscallResult::NotReady)?;
@@ -4887,6 +5082,18 @@ pub fn sys_surface_create(cap_slot: usize, width: u32, height: u32, z_order: u32
         // destroys its surfaces, and holding both here would invert the order the
         // exit path takes. The retirement's exit code is the reserved sentinel, not
         // the generic -1, so the process record can tell the device needed memory.
+        //
+        // FORCED zombify is retained here rather than the cooperative request
+        // `sys_app_stop` uses, for three reasons that are specific to retirement:
+        // (1) the bytes are needed by the caller's `create_surface` in this same
+        // syscall, so there is no window in which the retirement may be deferred;
+        // (2) the victim is chosen from every app in sight, not from the caller's
+        // children, so the parent-ownership rule that makes a cooperative request
+        // safe does not hold -- marking an unrelated task for death would be an
+        // unowned kill primitive; (3) `destroy_surfaces_owned_by` runs immediately
+        // after, so a victim that were still unwinding would race its own surfaces
+        // being freed under it. The victim's own exit gate still runs when it is
+        // next dispatched, and `revoke_all` has already made its capabilities dead.
         if let Err(why) = SCHEDULER.lock().terminate_task(TaskId(victim), crate::drivers::display_kms::DrmKmsController::EXIT_CODE_MEMORY_RETIRE) {
             crate::serial_println!("[LIFECYCLE] task {} could not be retired: {}", victim, why);
         }
@@ -5966,6 +6173,11 @@ pub static GLOBAL_PHYSICS_SCROLLER: spin::Mutex<crate::gui::InertialScroller> =
     spin::Mutex::new(crate::gui::InertialScroller::new(720, 2000));
 
 /// Derives an attenuated capability token into a target task's capability table.
+///
+/// Delegation into another task is an act of authority OVER that task: the
+/// caller must be the target itself, must have spawned it (`parent_id`), or must
+/// hold `SystemControl|INVOKE` bound to `SERVICE_MANAGER_OBJECT` -- the same
+/// ownership rule `terminate_child` and the service supervisor already use.
 pub fn sys_cap_delegate(
     cap_slot: usize,
     target_task: TaskId,
@@ -5976,6 +6188,30 @@ pub fn sys_cap_delegate(
     let mut sched = SCHEDULER.lock();
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let current_ticks = crate::interrupts::get_system_ticks();
+
+    // WHY the target is authorised before anything is derived: `target_task` is
+    // a caller-supplied register. Attenuation only bounds what the derived token
+    // may do; it says nothing about whose table it may be installed into. Without
+    // this gate any task holding one GRANT-able capability could write a lease
+    // into every other task on the device, including PID 1 and the kernel.
+    if target_task != current_id {
+        let target = sched.get_task(target_task).ok_or(SyscallResult::TargetNotFound)?;
+        // A dead task's authority was revoked on exit. Installing a fresh lease
+        // into its table would hand live authority to a task that no longer runs.
+        if matches!(target.state, crate::task::TaskState::Zombie | crate::task::TaskState::Terminated) {
+            return Err(SyscallResult::TargetNotFound);
+        }
+        if target.parent_id != current_id {
+            let current = sched.get_task(current_id).ok_or(SyscallResult::TargetNotFound)?;
+            if !current.cap_table.authorize_object(
+                CapabilityType::SystemControl,
+                Rights::INVOKE,
+                SERVICE_MANAGER_OBJECT,
+            ) {
+                return Err(SyscallResult::PermissionDenied);
+            }
+        }
+    }
 
     let lease = {
         let task = sched.get_task(current_id).ok_or(SyscallResult::TargetNotFound)?;
@@ -6003,6 +6239,92 @@ pub fn sys_cap_delegate(
         return Err(SyscallResult::InvalidArguments);
     }
     Ok(slot)
+}
+
+/// Kernel verification primitive for an AppMcp tool request (syscall 166).
+///
+/// WHY this exists: the receiving applications gated a tool request on
+/// `req.cap_handle != 0` and then executed it with their OWN capabilities. Any
+/// non-zero integer passed that test, so it proved nothing about the requester
+/// and the receiver's authority became ambient. The one trustworthy fact a
+/// receiver holds is the `sender` TaskId the kernel stamped on the IPC message
+/// (`sys_ipc_recv` reads it from the router, never from the payload). This call
+/// turns that fact into a real question about the SENDER's table.
+///
+/// WHY the handle is resolved in the sender's table and by generation: a
+/// `CapHandle` is a slot position plus that slot's generation in ONE table.
+/// Resolving it in the caller's table would answer a question about the wrong
+/// task, and resolving it by slot index alone would accept a handle minted
+/// before the slot was revoked and reused.
+///
+/// Every refusal is `PermissionDenied` except an unparseable capability type,
+/// which is `InvalidArguments`: a malformed claim is a bad argument, a claim
+/// that does not hold is a denied one. Missing state fails closed.
+pub fn sys_appmcp_authorize(
+    sender_task_id: u64,
+    cap_handle: u64,
+    cap_type_raw: u64,
+    required_rights: u64,
+    object_id: u64,
+) -> Result<(), SyscallResult> {
+    // Zero is the absence of a handle, not a handle. Refused before any lookup
+    // so a caller cannot reach slot 0 generation 0 by passing nothing.
+    if cap_handle == 0 {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    let expected_type =
+        CapabilityType::from_raw(cap_type_raw).ok_or(SyscallResult::InvalidArguments)?;
+    let required = Rights(required_rights as u32);
+
+    let sched = SCHEDULER.lock();
+    // A verification request must come from a task that exists: there is no
+    // anonymous kernel context in which this question may be asked.
+    if sched.current_task_id().is_none() {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    let sender = sched
+        .get_task(TaskId(sender_task_id))
+        .ok_or(SyscallResult::PermissionDenied)?;
+    // A terminated sender holds no authority. Its table was revoked on exit and
+    // its identity must not authorise a request that arrives afterwards.
+    if matches!(sender.state, crate::task::TaskState::Zombie | crate::task::TaskState::Terminated) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+
+    // Generation-counted lookup: rejects a forged slot, a stale generation and
+    // a globally revoked identity, and refuses a handle that names an empty slot.
+    let cap = sender
+        .cap_table
+        .get_by_handle(CapHandle(cap_handle))
+        .map_err(|_| SyscallResult::PermissionDenied)?;
+
+    if cap.cap_type != expected_type {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    if !cap.rights.contains(required) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    // Object scoping follows `has_capability_object`: 0 is the unscoped grant,
+    // any other value must name exactly the object being acted upon.
+    if cap.object_id != 0 && cap.object_id != object_id {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    // A delegated token is a budget. The lease must exist, be unrevoked and
+    // unexpired, carry the rights, and have been minted for THIS sender -- the
+    // table we are reading is its table, so a lease granted to another task is
+    // not authority here even if the token was copied into it.
+    if cap.id.0 & 0x8000_0000_0000_0000 != 0 {
+        let lease_id = cap.id.0 & 0x7FFF_FFFF_FFFF_FFFF;
+        if !crate::capability::delegation::is_lease_valid(
+            lease_id,
+            Some(sender.id),
+            crate::interrupts::get_system_ticks(),
+            required,
+        ) {
+            return Err(SyscallResult::PermissionDenied);
+        }
+    }
+    Ok(())
 }
 
 /// Advances or interacts with the Gravity Glass fluid inertial physics scroller.
@@ -6316,7 +6638,14 @@ pub fn sys_consent_query(filter_task_id: u64, out_buf: &mut [u8]) -> Result<usiz
             return Err(SyscallResult::PermissionDenied);
         }
     }
-    let pm = crate::capability::permission::PERMISSION_MANAGER.lock();
+    // WHY the privilege decision is made before the record lock is taken:
+    // `require_system_control` acquires SCHEDULER, and every other path that
+    // reads consent records holds SCHEDULER across its PERMISSION_MANAGER
+    // acquire (`sys_cap_request_consent`, the force-stop reclaim, and
+    // `permission::revoke_permission_live`). Holding PERMISSION_MANAGER here
+    // while waiting for SCHEDULER is the reverse order and closes an ABBA cycle
+    // with them. The decision depends only on the caller's task record, so
+    // computing it first changes no answer.
     let filter = if filter_task_id == 0 {
         if require_system_control().is_ok() {
             None
@@ -6326,6 +6655,7 @@ pub fn sys_consent_query(filter_task_id: u64, out_buf: &mut [u8]) -> Result<usiz
     } else {
         Some(crate::task::TaskId(filter_task_id))
     };
+    let pm = crate::capability::permission::PERMISSION_MANAGER.lock();
     let written = pm.format_records(filter, out_buf);
     Ok(written)
 }
@@ -6905,18 +7235,18 @@ pub fn sys_futex_wait(uaddr: u64, expected_val: u32, timeout_ns: u64) -> Result<
         return Err(SyscallResult::InvalidArguments);
     }
 
-    let (current_id, pt_arc) = {
+    let current_id = {
         let sched = SCHEDULER.lock();
-        let current_task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-        (current_task.id, current_task.page_table.clone().ok_or(SyscallResult::PermissionDenied)?)
+        sched.current_task().ok_or(SyscallResult::PermissionDenied)?.id
     };
 
-    {
-        let pt = pt_arc.lock();
-        pt.validate_user_range(uaddr, 4, false).map_err(|_| SyscallResult::InvalidArguments)?;
-    }
-
-    let val = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+    // WHY pinned rather than validate-then-read: this word is read again after
+    // the waiter is published. An unpinned read of a range a sibling
+    // `mem_unmap` has just removed faults in ring 0, which the fault handler
+    // classifies as a kernel fault and halts the whole device -- letting one
+    // process kill the OS by unmapping memory another process is waiting on.
+    let val = crate::syscall::user_ptr::read_user_value::<u32>(uaddr)
+        .map_err(|_| SyscallResult::InvalidArguments)?;
     if val != expected_val {
         return Err(SyscallResult::NotReady); // EAGAIN
     }
@@ -6935,7 +7265,36 @@ pub fn sys_futex_wait(uaddr: u64, expected_val: u32, timeout_ns: u64) -> Result<
             crate::task::process::process_for_task(current_id).unwrap_or(crate::task::process::ProcessId(0))
         })
     };
-    crate::task::futex::FUTEX_MANAGER.lock().add_waiter(current_id, pid, uaddr, deadline_ticks);
+    // WHY the word is re-read here and not only above: the compare at the top of
+    // this function happens before the waiter is published, so a waker that stores
+    // and wakes in that window finds no waiter and the wake is lost -- this task
+    // then blocks on a condition that is already false. `add_waiter_recheck`
+    // publishes and re-reads under the same manager lock, and rolls the waiter
+    // back if the value moved.
+    let outcome = crate::task::futex::FUTEX_MANAGER.lock().add_waiter_recheck(
+        current_id,
+        pid,
+        uaddr,
+        deadline_ticks,
+        expected_val,
+        // A failed re-read means the word is no longer readable, so the wait
+        // must be refused. Any value differing from `expected_val` makes
+        // `add_waiter_recheck` roll the waiter back and report ValueChanged;
+        // this is a refusal sentinel, not a value read from the caller.
+        || crate::syscall::user_ptr::read_user_value::<u32>(uaddr)
+            .unwrap_or_else(|_| expected_val.wrapping_add(1)),
+    );
+    match outcome {
+        crate::task::futex::FutexWaitOutcome::ValueChanged => {
+            return Err(SyscallResult::NotReady);
+        }
+        crate::task::futex::FutexWaitOutcome::AlreadyWoken => {
+            // The waiter stays published so removing it reports a wake, not a timeout.
+            crate::task::futex::FUTEX_MANAGER.lock().remove_waiter(current_id);
+            return Ok(0);
+        }
+        crate::task::futex::FutexWaitOutcome::Enqueued => {}
+    }
 
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut sched = SCHEDULER.lock();
@@ -9148,6 +9507,472 @@ fn browser_clock_monotonic_increments() {
             assert!(curr.cap_table.find_slot(CapabilityType::FrameBufferDirect, Rights::WRITE).is_none());
             assert!(curr.cap_table.find_slot(CapabilityType::SerialOutput, Rights::WRITE).is_some());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Syscall 113 (PermissionRevoke) driven through `sys_dispatch`, so these
+    // cases exercise the production boundary rather than a helper nothing calls.
+    // -----------------------------------------------------------------------
+
+    /// Restores the current task's diagnostic name after a case borrows a
+    /// privileged identity.
+    ///
+    /// WHY a guard: `is_privileged_system_identity` reads the task name, so a case
+    /// that renames the current task and then unwinds would leave every later case
+    /// running as a system publisher. `try_lock` in `Drop` for the same reason
+    /// `OwnedLeader` uses it: the panicking frame may still hold the scheduler.
+    struct CurrentTaskNameGuard {
+        saved: Option<&'static str>,
+    }
+
+    impl CurrentTaskNameGuard {
+        fn rename(name: &'static str) -> Self {
+            let mut sched = SCHEDULER.lock();
+            let task = sched.current_task_mut().expect("a current task to rename");
+            let saved = task.name;
+            task.name = name;
+            Self { saved: Some(saved) }
+        }
+    }
+
+    impl Drop for CurrentTaskNameGuard {
+        fn drop(&mut self) {
+            if let Some(name) = self.saved.take() {
+                if let Some(mut sched) = SCHEDULER.try_lock() {
+                    if let Some(task) = sched.current_task_mut() {
+                        task.name = name;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Entry point for the syscall-113 cases' spawned tasks. Never dispatched: the
+    /// host suite has no context switch, and the cases only inspect the tables.
+    extern "C" fn a504_revoke_dummy_entry() -> ! {
+        loop { core::hint::spin_loop(); }
+    }
+
+    /// Spawns a target task that is guaranteed not to be the scheduler's current
+    /// task, and returns it with the process-record guards for both pushes.
+    ///
+    /// WHY two pushes: `spawn` appends and never moves `current_idx`, so a single
+    /// push lands ON `current_idx` whenever the task list was empty or the current
+    /// task was last -- which is what the rest of the suite leaves behind. A second
+    /// push sits at an index `current_idx` cannot name, so "this is a cross-task
+    /// case" becomes a property of the setup instead of a race with whatever ran
+    /// before. The first push is a spacer with an empty table.
+    fn spawn_cross_task_target(
+        name: &'static str,
+        caps: crate::capability::CapabilityTable,
+    ) -> (
+        TaskId,
+        crate::task::process::OwnedLeader,
+        crate::task::process::OwnedLeader,
+    ) {
+        let (spacer, target) = {
+            let mut sched = SCHEDULER.lock();
+            let spacer = sched.spawn(
+                "a504.cross.spacer",
+                a504_revoke_dummy_entry,
+                crate::capability::CapabilityTable::new_for_task(TaskId(0), 1),
+                6,
+            );
+            let target = sched.spawn(name, a504_revoke_dummy_entry, caps, 6);
+            (spacer, target)
+        };
+        assert_ne!(spacer, TaskId(0), "spacer spawn must register");
+        assert_ne!(target, TaskId(0), "target spawn must register");
+        assert_ne!(spacer, target);
+        let spacer_leader = crate::task::process::OwnedLeader::adopted(spacer);
+        let target_leader = crate::task::process::OwnedLeader::adopted(target);
+        (target, spacer_leader, target_leader)
+    }
+
+    /// A manifest `SystemControl` camera grant in the shape RAPP v2 id 22 produces,
+    /// re-keyed into the per-launch instance id space exactly as the spawn funnel
+    /// does, plus the generation-counted handle the application would hold.
+    fn manifest_camera_table(
+        owner: TaskId,
+    ) -> (crate::capability::CapabilityTable, crate::capability::CapHandle) {
+        let mut caps = crate::capability::CapabilityTable::new_for_task(owner, 4);
+        let handle = caps.insert_handle(crate::capability::Capability {
+            id: crate::capability::CapabilityId(0x5000_0002),
+            cap_type: CapabilityType::SystemControl,
+            rights: Rights::INVOKE,
+            object_id: crate::services::SERVICE_CAMERA_CONTROL_OBJECT,
+        }).expect("insert manifest camera grant");
+        assert_eq!(caps.rekey_all(), 1, "the spawn funnel re-keys every manifest handle");
+        (caps, handle)
+    }
+
+    /// A5-04 through the real syscall: a task whose only camera authority is a
+    /// re-keyed manifest `SystemControl` grant must lose it, and the syscall must
+    /// report Success only because the grant is genuinely gone.
+    #[test]
+    fn syscall_113_revokes_a_manifest_system_control_grant() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (caps, handle) = manifest_camera_table(TaskId(0));
+        let _guard = TestTaskCapGuard::new_with_caps(caps);
+        let tid = SCHEDULER.lock().current_task_id().expect("current task");
+        let consent_id = crate::capability::permission::SensitivePermission::CameraCapture
+            .capability_id(tid);
+
+        {
+            let sched = SCHEDULER.lock();
+            let task = sched.get_task(tid).expect("task");
+            let live = task.cap_table.raw_slot(handle.slot()).expect("manifest slot");
+            assert_ne!(live.id, consent_id, "the live manifest id is not the bit-62 consent id");
+            assert!(task.cap_table.verify_handle(handle, CapabilityType::SystemControl, Rights::INVOKE).is_ok());
+            assert!(task.cap_table.authorize_object(
+                CapabilityType::SystemControl, Rights::INVOKE,
+                crate::services::SERVICE_CAMERA_CONTROL_OBJECT,
+            ));
+        }
+
+        assert_eq!(
+            sys_dispatch(113, tid.0, 4, 0, 0, 0),
+            SyscallResult::Success as i64,
+            "self-revocation of camera must succeed"
+        );
+
+        let sched = SCHEDULER.lock();
+        let task = sched.get_task(tid).expect("task");
+        assert!(
+            task.cap_table.raw_slot(handle.slot()).is_none(),
+            "the manifest slot must be cleared, not merely published against"
+        );
+        assert!(
+            task.cap_table.verify_handle(handle, CapabilityType::SystemControl, Rights::INVOKE).is_err(),
+            "the application's own handle must no longer verify after the revoke"
+        );
+        assert!(
+            !task.cap_table.authorize_object(
+                CapabilityType::SystemControl, Rights::INVOKE,
+                crate::services::SERVICE_CAMERA_CONTROL_OBJECT,
+            ),
+            "the manifest SystemControl grant must not survive syscall 113"
+        );
+    }
+
+    /// Positive control: the consent-minted shape is still revoked by syscall 113.
+    #[test]
+    fn syscall_113_revokes_the_consent_minted_shape() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TestTaskCapGuard::new_with_caps(
+            crate::capability::CapabilityTable::new_for_task(TaskId(0), 4),
+        );
+        let tid = SCHEDULER.lock().current_task_id().expect("current task");
+        let perm = crate::capability::permission::SensitivePermission::Microphone;
+        let consent = perm.to_capability(tid);
+        let consent_id = consent.id;
+        let handle = {
+            let mut sched = SCHEDULER.lock();
+            let task = sched.get_task_mut(tid).expect("task");
+            task.cap_table.insert_handle(consent).expect("insert consent cap")
+        };
+
+        {
+            let sched = SCHEDULER.lock();
+            let task = sched.get_task(tid).expect("task");
+            assert!(task.cap_table.verify_handle(handle, CapabilityType::HardwarePortIo, Rights::READ).is_ok());
+        }
+
+        assert_eq!(sys_dispatch(113, tid.0, perm as u64, 0, 0, 0), SyscallResult::Success as i64);
+
+        let sched = SCHEDULER.lock();
+        let task = sched.get_task(tid).expect("task");
+        assert!(task.cap_table.raw_slot(handle.slot()).is_none(), "the consent slot must be cleared");
+        assert!(task.cap_table.verify_handle(handle, CapabilityType::HardwarePortIo, Rights::READ).is_err());
+        assert!(crate::capability::revocation::is_revoked(consent_id));
+    }
+
+    /// A task that never held the resource must not be told the revoke succeeded,
+    /// and an unknown permission id must still be rejected before any state moves.
+    ///
+    /// WHY the absent-resource half targets a spawned task rather than the caller:
+    /// `TaskId(0)` means "every task", and the primordial current task is id 0, so
+    /// a self-targeted absent-resource case would depend on what unrelated tasks
+    /// happen to be alive. A named target makes the single-task branch the one
+    /// under test.
+    #[test]
+    fn syscall_113_absent_resource_and_bad_permission_are_not_success() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut target_caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 4);
+        target_caps.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(0x5000_0009),
+            cap_type: CapabilityType::SerialOutput,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).expect("insert unrelated cap");
+        target_caps.rekey_all();
+        let (target, _spacer_leader, _leader) =
+            spawn_cross_task_target("a504.absent.target", target_caps);
+
+        let mut caller_caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 4);
+        caller_caps.insert_handle(crate::capability::Capability {
+            id: crate::capability::CapabilityId(0x5000_000C),
+            cap_type: CapabilityType::SystemControl,
+            rights: Rights::INVOKE,
+            object_id: GLOBAL_SYSTEM_CONTROL_OBJECT,
+        }).expect("insert global system control");
+        let _guard = TestTaskCapGuard::new_with_caps(caller_caps);
+        let _name = CurrentTaskNameGuard::rename("org.interos.a504.admin");
+        let caller = SCHEDULER.lock().current_task_id().expect("current task");
+        assert_ne!(caller, target);
+        assert!(require_system_control().is_ok());
+
+        assert_eq!(
+            sys_dispatch(113, target.0, 4, 0, 0, 0),
+            SyscallResult::TargetNotFound as i64,
+            "a task without the camera resource must not be reported as revoked"
+        );
+        {
+            let sched = SCHEDULER.lock();
+            let task = sched.get_task(target).expect("target");
+            assert!(
+                task.cap_table.find_slot(CapabilityType::SerialOutput, Rights::WRITE).is_some(),
+                "an unrelated capability must be untouched"
+            );
+        }
+
+        // Self-targeted so authorization passes and the argument check is reached.
+        assert_eq!(
+            sys_dispatch(113, caller.0, 999, 0, 0, 0),
+            SyscallResult::InvalidArguments as i64,
+        );
+    }
+
+    /// Authorization is unchanged: revoking another task's permission needs
+    /// device-wide system control, and a denied call must not touch the target.
+    #[test]
+    fn syscall_113_cross_task_revoke_is_denied_without_system_control() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (target_caps, handle) = manifest_camera_table(TaskId(0));
+        let (target, _spacer_leader, _leader) =
+            spawn_cross_task_target("a504.cross.target", target_caps);
+
+        // The caller holds no SystemControl at all, so the identity half of the
+        // gate cannot matter: the capability half must refuse.
+        let mut caller_caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 4);
+        caller_caps.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(0x5000_000A),
+            cap_type: CapabilityType::SerialOutput,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).expect("insert caller cap");
+        let _guard = TestTaskCapGuard::new_with_caps(caller_caps);
+        let caller = SCHEDULER.lock().current_task_id().expect("current task");
+        assert_ne!(caller, target, "the case must be a cross-task revoke");
+
+        assert_eq!(
+            sys_dispatch(113, target.0, 4, 0, 0, 0),
+            SyscallResult::PermissionDenied as i64,
+            "a non-privileged cross-task revoke must be refused"
+        );
+        let sched = SCHEDULER.lock();
+        let task = sched.get_task(target).expect("target");
+        assert!(
+            task.cap_table.verify_handle(handle, CapabilityType::SystemControl, Rights::INVOKE).is_ok(),
+            "a denied revoke must leave the target's authority intact"
+        );
+    }
+
+    /// `TaskId(0)` through the real syscall: a privileged caller revokes the
+    /// resource from every live task, in both grant shapes.
+    #[test]
+    fn syscall_113_all_tasks_reaches_every_live_table() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (target_caps, target_handle) = manifest_camera_table(TaskId(0));
+        let (target, _spacer_leader, _leader) =
+            spawn_cross_task_target("a504.all.target", target_caps);
+
+        // The caller is a system publisher holding the global administration
+        // object, plus a consent-minted camera grant of its own.
+        let mut caller_caps = crate::capability::CapabilityTable::new_for_task(TaskId(0), 4);
+        caller_caps.insert_handle(crate::capability::Capability {
+            id: crate::capability::CapabilityId(0x5000_000B),
+            cap_type: CapabilityType::SystemControl,
+            rights: Rights::INVOKE,
+            object_id: GLOBAL_SYSTEM_CONTROL_OBJECT,
+        }).expect("insert global system control");
+        let caller_consent = crate::capability::permission::SensitivePermission::CameraCapture
+            .to_capability(TaskId(0));
+        let caller_handle = caller_caps.insert_handle(caller_consent).expect("insert caller consent cap");
+        let _guard = TestTaskCapGuard::new_with_caps(caller_caps);
+        let _name = CurrentTaskNameGuard::rename("org.interos.a504.admin");
+        let caller = SCHEDULER.lock().current_task_id().expect("current task");
+        assert!(require_system_control().is_ok(), "the case must hold device-wide system control");
+
+        assert_eq!(sys_dispatch(113, 0, 4, 0, 0, 0), SyscallResult::Success as i64);
+
+        let sched = SCHEDULER.lock();
+        let victim = sched.get_task(target).expect("target");
+        assert!(
+            victim.cap_table.raw_slot(target_handle.slot()).is_none(),
+            "the all-tasks revoke must clear another task's manifest grant"
+        );
+        assert!(!victim.cap_table.authorize_object(
+            CapabilityType::SystemControl, Rights::INVOKE,
+            crate::services::SERVICE_CAMERA_CONTROL_OBJECT,
+        ));
+        let admin = sched.get_task(caller).expect("caller");
+        assert!(
+            admin.cap_table.raw_slot(caller_handle.slot()).is_none(),
+            "the all-tasks revoke must clear the caller's own consent grant too"
+        );
+        assert!(
+            admin.cap_table.authorize_object(
+                CapabilityType::SystemControl, Rights::INVOKE, GLOBAL_SYSTEM_CONTROL_OBJECT,
+            ),
+            "an unrelated administration grant must survive a camera revoke"
+        );
+    }
+
+    /// The fail-open is gone at the syscall boundary: with SCHEDULER held by
+    /// another context, syscall 113 waits and then completes the live scan. The
+    /// old shape spun `try_lock` 10_000 times inside the permission manager,
+    /// expired in microseconds, left the manifest grant authorizing, and still
+    /// returned Success.
+    #[test]
+    fn syscall_113_waits_for_a_busy_scheduler_instead_of_reporting_a_skip() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (caps, handle) = manifest_camera_table(TaskId(0));
+        let _guard = TestTaskCapGuard::new_with_caps(caps);
+        let tid = SCHEDULER.lock().current_task_id().expect("current task");
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let guard = SCHEDULER.lock();
+            held_tx.send(()).expect("signal held");
+            release_rx.recv().expect("release signal");
+            drop(guard);
+        });
+        held_rx.recv().expect("holder must own SCHEDULER");
+
+        let worker = std::thread::spawn(move || sys_dispatch(113, tid.0, 4, 0, 0, 0));
+        // Far longer than the old bounded try-spin could ever survive. The release
+        // is time-based, not worker-based, so a neighbour holding another lock
+        // cannot turn this into a deadlock.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(
+            !worker.is_finished(),
+            "syscall 113 must still be waiting for SCHEDULER; finishing here means it skipped the live scan"
+        );
+        release_tx.send(()).expect("release holder");
+        let ret = worker.join().expect("syscall worker");
+        holder.join().expect("holder thread");
+
+        assert_eq!(ret, SyscallResult::Success as i64);
+        let sched = SCHEDULER.lock();
+        let task = sched.get_task(tid).expect("task");
+        assert!(
+            task.cap_table.raw_slot(handle.slot()).is_none(),
+            "Success is only honest if the manifest slot was actually cleared"
+        );
+        assert!(task.cap_table.verify_handle(handle, CapabilityType::SystemControl, Rights::INVOKE).is_err());
+        assert!(!task.cap_table.authorize_object(
+            CapabilityType::SystemControl, Rights::INVOKE,
+            crate::services::SERVICE_CAMERA_CONTROL_OBJECT,
+        ));
+    }
+
+    /// Consent query (syscall 165) answers the same after the privilege decision
+    /// moved ahead of the record lock.
+    ///
+    /// WHY this case exists: `require_system_control` takes SCHEDULER, so making
+    /// that decision while PERMISSION_MANAGER was held was the reverse of the
+    /// order every other consent path uses. Moving it must not change who may see
+    /// whose records, so both filter branches and both privilege states are
+    /// driven through the production function the syscall arm calls.
+    #[test]
+    fn consent_query_privilege_filter_survives_the_lock_order_change() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let other = TaskId(0x5A04);
+        let other_name = "a504.query.other";
+        {
+            let mut pm = crate::capability::permission::PERMISSION_MANAGER.lock();
+            let (req_id, decision) = pm.request_consent(
+                other,
+                None,
+                other_name,
+                crate::capability::permission::SensitivePermission::CameraCapture,
+                false,
+                0,
+            );
+            assert_eq!(
+                decision,
+                crate::capability::ConsentDecision::Pending,
+                "the case needs a listed record belonging to another task"
+            );
+            // WHY resolved rather than left pending: the record stays listed, but
+            // this case must not leave an active prompt behind for the next one.
+            pm.resolve_consent(req_id, crate::capability::ConsentDecision::Denied);
+        }
+        let mut plain = crate::capability::CapabilityTable::new_for_task(TaskId(0), 4);
+        plain.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(0x5000_000D),
+            cap_type: CapabilityType::SerialOutput,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).expect("insert caller cap");
+        let mut guard = TestTaskCapGuard::new_with_caps(plain);
+        // WHY the caller is read only after the guard exists: `new_with_caps`
+        // falls back to `sched.init` when the global scheduler has no current
+        // task, so it is what establishes one. Reading `current_task_id` first
+        // made this case depend on ambient state another test could leave unset.
+        let caller = SCHEDULER.lock().current_task_id().expect("current task");
+        assert_ne!(caller, other);
+        let _plain_name = CurrentTaskNameGuard::rename("a504.query.plain");
+        assert!(require_system_control().is_err(), "the caller must hold no system control");
+
+        // Large enough that the record this case just appended is not truncated
+        // away by records earlier cases left in the global manager.
+        let mut buf = [0u8; 262144];
+        let n = sys_consent_query(0, &mut buf)
+            .expect("an unprivileged filter=0 query is allowed, scoped to the caller");
+        let text = core::str::from_utf8(&buf[..n]).expect("records are ascii");
+        assert!(
+            !text.contains(other_name),
+            "an unprivileged filter=0 query must not see another task's records"
+        );
+        for line in text.lines() {
+            assert_eq!(
+                line.split('|').nth(1).expect("a task id field").parse::<u64>().expect("a numeric task id"),
+                caller.0,
+                "every record an unprivileged filter=0 query returns must belong to the caller"
+            );
+        }
+        assert_eq!(
+            sys_consent_query(other.0, &mut buf),
+            Err(SyscallResult::PermissionDenied),
+            "a cross-task query still needs system control"
+        );
+
+        let mut admin = crate::capability::CapabilityTable::new_for_task(TaskId(0), 4);
+        admin.insert_handle(crate::capability::Capability {
+            id: crate::capability::CapabilityId(0x5000_000E),
+            cap_type: CapabilityType::SystemControl,
+            rights: Rights::INVOKE,
+            object_id: GLOBAL_SYSTEM_CONTROL_OBJECT,
+        }).expect("insert global system control");
+        guard.set_caps(admin);
+        let _admin_name = CurrentTaskNameGuard::rename("org.interos.a504.admin");
+        assert!(require_system_control().is_ok(), "the privileged half must hold system control");
+
+        let n = sys_consent_query(0, &mut buf).expect("a privileged filter=0 query");
+        let text = core::str::from_utf8(&buf[..n]).expect("records are ascii");
+        assert!(
+            text.contains(other_name),
+            "a privileged filter=0 query must see every task's records"
+        );
+        let n = sys_consent_query(other.0, &mut buf).expect("a privileged cross-task query");
+        let text = core::str::from_utf8(&buf[..n]).expect("records are ascii");
+        assert!(
+            text.contains(other_name),
+            "a privileged cross-task query must see the target's records"
+        );
     }
 }
 #[test]

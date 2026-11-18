@@ -8,7 +8,7 @@
 
 #[cfg(not(target_os = "windows"))]
 use conquer_once::spin::Lazy;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 #[cfg(not(target_os = "windows"))]
 use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
 use pic8259::ChainedPics;
@@ -265,6 +265,16 @@ pub const FAULT_HANDLER_STACK_LABEL: &[u8] = b"KSP=";
 pub const USER_PAGE_FAULT_BANNER: &[u8] = b"\r\n[USER PAGE FAULT]\r\n";
 /// Banner header emitted before a supervisor page fault report.
 pub const KERNEL_PAGE_FAULT_BANNER: &[u8] = b"\r\n[KERNEL PAGE FAULT]\r\n";
+/// Banner header emitted before a supervisor page fault that was caused by a
+/// validated user-buffer access rather than by a kernel bug.
+///
+/// WHY this is a third banner and not one of the two above: the fault is taken
+/// in ring 0 on the task's kernel stack, so it is neither a `[USER PAGE FAULT]`
+/// (the CPU did not report a privilege change) nor a `[KERNEL PAGE FAULT]` (the
+/// kernel's own memory is not what failed). Reporting it as either one sent past
+/// investigations to the wrong place. The address belongs to a user task and
+/// the answer is to terminate that task, so the report says so.
+pub const USER_BUFFER_PAGE_FAULT_BANNER: &[u8] = b"\r\n[USER BUFFER PAGE FAULT]\r\n";
 /// Banner header emitted before a ring-3 general protection fault report.
 pub const USER_GPF_BANNER: &[u8] = b"\r\n[USER GENERAL PROTECTION FAULT]\r\n";
 /// Banner header emitted before a supervisor general protection fault report.
@@ -659,6 +669,71 @@ fn halt_after_fault_report_failure() -> ! {
     }
 }
 
+/// How a page fault must be answered.
+///
+/// The three cases are genuinely different and conflating any two of them is a
+/// defect. A ring-3 fault is the user task's own memory failing. A ring-0 fault
+/// *inside a validated user-buffer access* is also the user task's memory
+/// failing -- the copy runs in ring 0 on the task's kernel stack, so the CPU
+/// reports neither `USER_MODE` nor a ring-3 code segment, and the old handler
+/// read that as a kernel bug and halted the device. Every other ring-0 fault is
+/// a kernel bug and stays fatal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultDisposition {
+    /// Terminate the faulting ring-3 task.
+    TerminateUserTask,
+    /// Terminate the task whose user buffer the kernel was copying.
+    TerminateUserBufferTask,
+    /// Halt the device: the kernel faulted on its own memory.
+    FatalKernelFault,
+}
+
+/// Classifies a page fault from the privilege the CPU reported and the address
+/// it faulted on.
+///
+/// Kept as a pure function so the decision the handler makes is testable on the
+/// host, where the handler itself cannot run.
+pub fn classify_page_fault(is_user: bool, accessed_address: u64) -> FaultDisposition {
+    if is_user {
+        return FaultDisposition::TerminateUserTask;
+    }
+    if crate::syscall::user_ptr::fault_is_user_buffer_access(accessed_address) {
+        return FaultDisposition::TerminateUserBufferTask;
+    }
+    FaultDisposition::FatalKernelFault
+}
+
+/// Releases everything the dying context abandoned, then terminates it.
+///
+/// WHY recovery happens here and not inside `terminate_current`: that function
+/// switches away permanently, so no guard on this stack ever runs its `Drop`.
+/// A fault taken inside a `sync::Mutex` region would otherwise leave the global
+/// preemption counter raised for the rest of the device's life -- the timer
+/// refusing to preempt, `yield_now` refusing to switch -- and leave the mutex
+/// itself held, so every later locker spins forever with interrupts enabled.
+/// A fault taken inside a user-buffer copy would leave the page table pinned,
+/// which `prepare_terminate` then locks to unmap the departing thread's stack.
+///
+/// This is the last point where the dying context's stack is intact and the
+/// scheduler has not been asked to lock anything, so it is the only correct
+/// place for it. The two recovery calls below are lock-free and safe from a
+/// fault handler. `terminate_current` is NOT: it drains deferred cleanup and
+/// takes blocking subsystem locks. That is safe only because both callers
+/// guarantee the dying context holds no kernel lock -- a fault on a user
+/// buffer, or the tick gate, which fires only on a Ring-3 frame.
+#[cfg(not(target_os = "windows"))]
+fn recover_and_terminate_current() -> ! {
+    crate::syscall::user_ptr::recover_abandoned_user_access();
+    crate::sync::abandon_current_context();
+    crate::task::terminate_current();
+
+    // A task terminator is not expected to return. If it ever does, never fall
+    // through into the kernel-fault path: that would report a user fault as a
+    // kernel fault and lose the distinction this handler exists to preserve.
+    #[allow(unreachable_code)]
+    halt_after_fault_report_failure()
+}
+
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
@@ -689,41 +764,44 @@ extern "x86-interrupt" fn page_fault_handler(
     let is_user = error_code.contains(PageFaultErrorCode::USER_MODE)
         || stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
 
-    if is_user {
-        if !fault_report_bytes(USER_PAGE_FAULT_BANNER)
-            || !fault_report_line(b"CR2=", accessed_address)
-            || !fault_report_line(b"RIP=", instruction_pointer)
-            || !fault_report_stack_pointer(frame_stack_pointer)
-            || !fault_report_line(b"ERR=", error_flags)
-            || !fault_report_bytes(FAULT_TASK_TERMINATED_LINE)
-        {
-            halt_after_fault_report_failure();
-        }
+    // Decide once, from state captured above, what this fault means. Doing it
+    // here rather than branching on `is_user` twice keeps the report and the
+    // action from disagreeing about which of the three cases this is.
+    let disposition = classify_page_fault(is_user, accessed_address);
+    let banner = match disposition {
+        FaultDisposition::TerminateUserTask => USER_PAGE_FAULT_BANNER,
+        FaultDisposition::TerminateUserBufferTask => USER_BUFFER_PAGE_FAULT_BANNER,
+        FaultDisposition::FatalKernelFault => KERNEL_PAGE_FAULT_BANNER,
+    };
+    let trailer = match disposition {
+        FaultDisposition::FatalKernelFault => FAULT_HALT_LINE,
+        _ => FAULT_TASK_TERMINATED_LINE,
+    };
 
-        // Preserve the existing security boundary: a ring-3 page fault
-        // terminates the faulting user task rather than panicking the kernel.
-        crate::task::terminate_current();
-
-        // A task terminator is not expected to return. If it ever does, never
-        // fall through into the kernel-fault path: that would report a user
-        // fault as a kernel fault and lose the distinction this handler exists
-        // to preserve.
-        #[allow(unreachable_code)]
-        halt_after_fault_report_failure();
-    }
-
-    if !fault_report_bytes(KERNEL_PAGE_FAULT_BANNER)
+    if !fault_report_bytes(banner)
         || !fault_report_line(b"CR2=", accessed_address)
         || !fault_report_line(b"RIP=", instruction_pointer)
         || !fault_report_stack_pointer(frame_stack_pointer)
         || !fault_report_line(b"ERR=", error_flags)
-        || !fault_report_bytes(FAULT_HALT_LINE)
+        || !fault_report_bytes(trailer)
     {
         halt_after_fault_report_failure();
     }
 
-    // Kernel faults must remain fatal. Do not recurse through panic formatting.
-    halt_after_fault_report_failure()
+    match disposition {
+        // Preserve the existing security boundary: a fault in user memory
+        // terminates the offending task rather than panicking the kernel. The
+        // ring-0 user-buffer case is the same boundary reached from the other
+        // side -- the kernel was copying on the task's behalf, so the task owns
+        // the failure and the device keeps running.
+        FaultDisposition::TerminateUserTask | FaultDisposition::TerminateUserBufferTask => {
+            recover_and_terminate_current()
+        }
+        // A genuinely unexpected kernel fault stays fatal. Do not recurse
+        // through panic formatting, and do not turn it into a silent task kill:
+        // halting is the only honest answer when the kernel's own memory failed.
+        FaultDisposition::FatalKernelFault => halt_after_fault_report_failure(),
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -749,12 +827,16 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         {
             halt_after_fault_report_failure();
         }
-        crate::task::terminate_current();
-
-        #[allow(unreachable_code)]
-        halt_after_fault_report_failure();
+        // Same recovery as the page-fault path: this task may be dying inside a
+        // critical section, and `terminate_current` never unwinds it.
+        recover_and_terminate_current()
     }
 
+    // A kernel #GP stays fatal, and deliberately so: unlike a page fault, a
+    // validated user-buffer copy cannot produce one. `validate_user_buffer`
+    // rejects every non-canonical address before the copy starts, so a #GP on
+    // that path means the kernel itself did something illegal. Reporting it as
+    // a user-buffer fault would kill an innocent task and hide a kernel bug.
     if !fault_report_bytes(KERNEL_GPF_BANNER)
         || !fault_report_line(b"RIP=", rip)
         || !fault_report_stack_pointer(frame_stack_pointer)
@@ -772,6 +854,14 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // WHY this handler takes no `InterruptGuard`: it is the one IRQ that can
+    // context-switch (`task::on_timer_tick` -> `switch_context`). The guard's
+    // depth is per-CPU state, so a handler that switches away would leave the
+    // *next* task believing it runs in interrupt context, and every keypress it
+    // makes would be deferred forever. The tick reaches no input dispatch --
+    // `poll_serial_rx` only accumulates bytes and `event::on_timer_tick` only
+    // arms deadlines -- so it has nothing to defer and nothing to mark.
+    //
     // WHY the clock is read here and not simply incremented: one delivery can
     // stand for many milliseconds of real time, and the whole OS measures
     // timeouts in these ticks. See the clock source at the top of this file.
@@ -809,7 +899,11 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
     if _stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3
         && crate::task::scheduler::is_current_pending_kill()
     {
-        crate::task::terminate_current();
+        // The task is being killed from the tick, which is a permanent switch
+        // away: nothing on its stack unwinds. Recover first, exactly as the
+        // fault handlers do, or a kill requested while the task held a lock
+        // leaves the preemption gate raised and that mutex held forever.
+        recover_and_terminate_current();
     }
 }
 
@@ -892,6 +986,21 @@ pub fn process_table_dump_now() -> Option<usize> {
 /// trigger moved from "two seconds passed" to "the task table changed".
 #[cfg(not(target_os = "windows"))]
 pub fn service_deferred_diagnostics() {
+    // WHY this runs first, ahead of every early return below: the keyboard IRQ
+    // no longer dispatches, it queues. This is the kernel loop's once-per-pass
+    // task-context drain, and the sample interval and the scheduler `try_lock`
+    // that follow are both allowed to bail out. If the drain sat behind either
+    // of them, a keypress would wait for the next one-second boundary -- or for
+    // a tick where the scheduler happened to be free -- instead of being
+    // delivered on this pass. Input is not diagnostics; it only shares the
+    // loop's convenient task-context slot.
+    crate::drivers::input::drain_deferred_input();
+    replay_pending_scancodes();
+    // Ahead of the sample-interval return below for the same reason as the
+    // drains: a lost keypress is reported on the pass that notices it, not on
+    // the next one-second boundary.
+    report_input_loss();
+
     if TICK_HEARTBEAT_DUE.swap(false, Ordering::Relaxed) {
         crate::serial_println!(
             "[KERNEL TICK HEARTBEAT] System uptime: {} ticks",
@@ -913,24 +1022,219 @@ pub fn service_deferred_diagnostics() {
 #[cfg(target_os = "windows")]
 pub fn service_deferred_diagnostics() {}
 
+// ---------------------------------------------------------------------------
+// Deferred PS/2 scancodes
+// ---------------------------------------------------------------------------
+//
+// WHY the keyboard handler no longer takes a blocking lock: `KEYBOARD` is a
+// plain `spin::Mutex`, and a handler that spins on it with IF clear deadlocks
+// the single CPU the moment the interrupt lands inside the lock's own critical
+// section -- no other core exists to release it. Today the only other locker is
+// boot-time `init_idt`, which runs before `interrupts::enable()`, so the
+// contention is unreachable rather than merely unlikely. That is an invariant
+// nobody is enforcing, and the next person to add a keyboard ioctl would break
+// it silently. The handler now tries for a bounded number of spins and, if it
+// cannot get in, hands the raw byte to this ring.
+//
+// WHY a lock-free ring and not another mutex: the producer is the IRQ and the
+// consumer is the kernel loop, so a mutex between them is the same deadlock
+// wearing a different name. This is the pattern `drivers::ps2_mouse` already
+// uses for IRQ12 -- one producer, one consumer, atomics only.
+//
+// WHY the byte is queued rather than dropped: a scancode stream is a state
+// machine. Losing a break code leaves a modifier stuck down, and losing a make
+// code loses the keypress outright. Neither is an acceptable answer to "the
+// decoder was busy for a microsecond".
+
+/// Raw scancodes waiting for the decoder, in arrival order.
+///
+/// 64 bytes is roughly a second of fast typing. The kernel loop drains on every
+/// pass, so reaching the end of this ring means the loop itself has been blocked
+/// for that long -- which is a fault worth counting, not worth hiding.
+pub const PENDING_SCANCODE_CAPACITY: usize = 64;
+
+/// Scancodes decoded per drain, so one pass of the loop cannot be monopolised.
+const PENDING_SCANCODE_BATCH: usize = 16;
+
+/// Bounded spins before the handler gives up on the decoder and queues instead.
+const KEYBOARD_TRY_LOCK_SPINS: usize = 64;
+
+static PENDING_SCANCODES: [AtomicU8; PENDING_SCANCODE_CAPACITY] =
+    [const { AtomicU8::new(0) }; PENDING_SCANCODE_CAPACITY];
+/// Producer index. Only the keyboard IRQ advances it, and IRQs do not nest.
+static PENDING_SCANCODE_HEAD: AtomicUsize = AtomicUsize::new(0);
+/// Consumer index. Only the task-context drain advances it.
+static PENDING_SCANCODE_TAIL: AtomicUsize = AtomicUsize::new(0);
+
+/// Bytes the ring could not hold. Non-zero means input was lost, and says so.
+pub static PENDING_SCANCODE_OVERRUN: AtomicU64 = AtomicU64::new(0);
+
+/// Number of scancodes waiting to be decoded.
+pub fn pending_scancode_count() -> usize {
+    PENDING_SCANCODE_HEAD
+        .load(Ordering::Acquire)
+        .wrapping_sub(PENDING_SCANCODE_TAIL.load(Ordering::Acquire))
+}
+
+/// Queues one raw scancode for the task-context decoder.
+///
+/// Returns `false` only when the ring is full, in which case the byte is
+/// counted in [`PENDING_SCANCODE_OVERRUN`] rather than vanishing silently.
+pub fn queue_pending_scancode(scancode: u8) -> bool {
+    let head = PENDING_SCANCODE_HEAD.load(Ordering::Relaxed);
+    let tail = PENDING_SCANCODE_TAIL.load(Ordering::Acquire);
+    if head.wrapping_sub(tail) >= PENDING_SCANCODE_CAPACITY {
+        PENDING_SCANCODE_OVERRUN.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    PENDING_SCANCODES[head % PENDING_SCANCODE_CAPACITY].store(scancode, Ordering::Relaxed);
+    PENDING_SCANCODE_HEAD.store(head.wrapping_add(1), Ordering::Release);
+    true
+}
+
+/// Takes the oldest queued scancode, or `None` when the ring is empty.
+fn pop_pending_scancode() -> Option<u8> {
+    let tail = PENDING_SCANCODE_TAIL.load(Ordering::Relaxed);
+    if tail == PENDING_SCANCODE_HEAD.load(Ordering::Acquire) {
+        return None;
+    }
+    let scancode = PENDING_SCANCODES[tail % PENDING_SCANCODE_CAPACITY].load(Ordering::Relaxed);
+    PENDING_SCANCODE_TAIL.store(tail.wrapping_add(1), Ordering::Release);
+    Some(scancode)
+}
+
+/// Consumes and reports input the platform lost, so a keypress that never
+/// arrived is stated on the console instead of vanishing.
+///
+/// Returns the counts it consumed: (scancode bytes, deferred events). Both
+/// counters are swapped to zero, so one loss episode is reported once rather
+/// than on every pass of the kernel loop.
+///
+/// WHY this is not `cfg`-gated like its caller: the ring, the deferred queue and
+/// both counters are shared with the host tests, so the produce-then-report path
+/// is exercisable there even though the guest-only drain is not.
+pub fn report_input_loss() -> (u64, u64) {
+    let scancodes = PENDING_SCANCODE_OVERRUN.swap(0, Ordering::Relaxed);
+    let events = crate::drivers::input::DEFERRED_INPUT_OVERRUN.swap(0, Ordering::Relaxed);
+    if scancodes > 0 {
+        crate::serial_println!(
+            "[INPUT] {} scancode byte(s) lost: the {}-slot pending ring was full.",
+            scancodes,
+            PENDING_SCANCODE_CAPACITY
+        );
+    }
+    if events > 0 {
+        crate::serial_println!(
+            "[INPUT] {} deferred input event(s) lost: the {}-slot queue was full or its lock was contended.",
+            events,
+            crate::drivers::input::DEFERRED_INPUT_CAPACITY
+        );
+    }
+    (scancodes, events)
+}
+
+/// Feeds one byte to the decoder and returns the character it produced.
+///
+/// Shared by the IRQ fast path and the task-context replay so a queued byte and
+/// an immediately decoded byte go through exactly the same state machine.
+#[cfg(not(target_os = "windows"))]
+fn decode_scancode(
+    keyboard: &mut Keyboard<layouts::Us104Key, ScancodeSet1>,
+    scancode: u8,
+) -> Option<char> {
+    let key_event = keyboard.add_byte(scancode).ok()??;
+    match keyboard.process_keyevent(key_event)? {
+        DecodedKey::Unicode(character) => Some(character),
+        DecodedKey::RawKey(key) => {
+            serial_println!("[KEY: {:?}]", key);
+            None
+        }
+    }
+}
+
+/// Decodes queued scancodes in task context and dispatches what they produced.
+///
+/// Returns how many characters were dispatched.
+///
+/// WHY the decoder lock is held across the whole batch but the dispatch is not:
+/// holding it keeps the IRQ's `try_lock` failing, so a byte arriving mid-replay
+/// is queued behind the ones being drained instead of overtaking them. Keeping
+/// the dispatch outside means the compositor and scheduler locks are never
+/// taken underneath the keyboard lock, so no new lock order is introduced.
+#[cfg(not(target_os = "windows"))]
+pub fn replay_pending_scancodes() -> usize {
+    if pending_scancode_count() == 0 {
+        return 0;
+    }
+    let mut decoded: [Option<char>; PENDING_SCANCODE_BATCH] = [None; PENDING_SCANCODE_BATCH];
+    let mut count = 0;
+    {
+        let mut guard = KEYBOARD.lock();
+        let keyboard = match guard.as_mut() {
+            Some(keyboard) => keyboard,
+            None => return 0,
+        };
+        while count < PENDING_SCANCODE_BATCH {
+            let scancode = match pop_pending_scancode() {
+                Some(scancode) => scancode,
+                None => break,
+            };
+            if let Some(character) = decode_scancode(keyboard, scancode) {
+                decoded[count] = Some(character);
+                count += 1;
+            }
+        }
+    }
+    for character in decoded[..count].iter().flatten() {
+        crate::serial_print!("{}", character);
+        crate::input::post_char_event(*character);
+    }
+    count
+}
+
+#[cfg(target_os = "windows")]
+pub fn replay_pending_scancodes() -> usize {
+    0
+}
+
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // Marks this context as interrupt context for everything it reaches, so
+    // `drivers::input::dispatch_to_focused_window` defers instead of trying to
+    // take the compositor lock here. Scoped to the handler: the depth is back
+    // to zero before the interrupted task resumes.
+    let _irq = crate::sync::InterruptGuard::enter();
+
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
 
-    if let Some(ref mut keyboard) = *KEYBOARD.lock() {
-        if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-            if let Some(key) = keyboard.process_keyevent(key_event) {
-                match key {
-                    DecodedKey::Unicode(character) => {
-                        crate::serial_print!("{}", character);
-                        crate::input::post_char_event(character);
-                    }
-                    DecodedKey::RawKey(key) => {
-                        serial_println!("[KEY: {:?}]", key);
-                    }
+    // Once anything is queued, every later byte queues too, even if the decoder
+    // looks free: decoding this one inline would deliver it ahead of the bytes
+    // still waiting, and a break code arriving before its make code is a stuck
+    // key. The drain empties the ring under the decoder lock, so this test and
+    // the `try_lock` below cannot both succeed out of order.
+    let mut guard = None;
+    if pending_scancode_count() == 0 {
+        for _ in 0..KEYBOARD_TRY_LOCK_SPINS {
+            if let Some(locked) = KEYBOARD.try_lock() {
+                guard = Some(locked);
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    match guard {
+        Some(mut locked) => {
+            if let Some(ref mut keyboard) = *locked {
+                if let Some(character) = decode_scancode(keyboard, scancode) {
+                    crate::serial_print!("{}", character);
+                    crate::input::post_char_event(character);
                 }
             }
+        }
+        None => {
+            queue_pending_scancode(scancode);
         }
     }
 
@@ -942,6 +1246,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq4_com1_handler(_stack_frame: InterruptStackFrame) {
+    let _irq = crate::sync::InterruptGuard::enter();
     crate::serial::poll_serial_rx();
     unsafe {
         PICS.lock().notify_end_of_interrupt(36);
@@ -950,6 +1255,7 @@ extern "x86-interrupt" fn irq4_com1_handler(_stack_frame: InterruptStackFrame) {
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq12_touch_digitizer_handler(_stack_frame: InterruptStackFrame) {
+    let _irq = crate::sync::InterruptGuard::enter();
     crate::drivers::ps2_mouse::handle_irq_byte();
     unsafe {
         PICS.lock().notify_end_of_interrupt(44);
@@ -1236,6 +1542,7 @@ mod fault_banner_tests {
         ("DOUBLE_FAULT_BANNER", DOUBLE_FAULT_BANNER),
         ("USER_PAGE_FAULT_BANNER", USER_PAGE_FAULT_BANNER),
         ("KERNEL_PAGE_FAULT_BANNER", KERNEL_PAGE_FAULT_BANNER),
+        ("USER_BUFFER_PAGE_FAULT_BANNER", USER_BUFFER_PAGE_FAULT_BANNER),
         ("USER_GPF_BANNER", USER_GPF_BANNER),
         ("KERNEL_GPF_BANNER", KERNEL_GPF_BANNER),
         ("FAULT_HALT_LINE", FAULT_HALT_LINE),
@@ -1343,6 +1650,11 @@ mod fault_banner_tests {
             ("user gpf", USER_GPF_BANNER, FAULT_TASK_TERMINATED_LINE),
             ("kernel gpf", KERNEL_GPF_BANNER, FAULT_HALT_LINE),
             ("user page fault", USER_PAGE_FAULT_BANNER, FAULT_TASK_TERMINATED_LINE),
+            (
+                "user buffer page fault",
+                USER_BUFFER_PAGE_FAULT_BANNER,
+                FAULT_TASK_TERMINATED_LINE,
+            ),
         ] {
             let report = compose_report(banner, b"RIP=", 0x0000_0001_0001_4440, trailer);
             assert_eq!(
@@ -1488,6 +1800,495 @@ mod fault_banner_tests {
             "a same-privilege report must not claim a frame RSP: {report:?}"
         );
         assert!(!report.contains(&b'\\'));
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Fault disposition tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fault_disposition_tests {
+    use super::*;
+    use crate::syscall::user_ptr;
+
+    /// The attribution window is global, so these tests serialise against each
+    /// other. Cargo runs test threads concurrently by default.
+    static CLASSIFY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A plausible user buffer: page aligned, inside the validated user range.
+    const BUFFER: u64 = 0x0000_0000_2000_0000;
+    const BUFFER_LEN: usize = 0x1000;
+    /// A kernel address no user buffer can ever contain.
+    const KERNEL_ADDRESS: u64 = 0xffff_8000_0000_0000;
+
+    fn with_window<R>(body: impl FnOnce() -> R) -> R {
+        let _serialized = CLASSIFY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        user_ptr::test_open_access_window(BUFFER, BUFFER_LEN);
+        let outcome = body();
+        user_ptr::test_close_access_window();
+        outcome
+    }
+
+    fn without_window<R>(body: impl FnOnce() -> R) -> R {
+        let _serialized = CLASSIFY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        user_ptr::test_close_access_window();
+        body()
+    }
+
+    #[test]
+    fn a_ring3_fault_terminates_the_task_whatever_address_it_names() {
+        without_window(|| {
+            assert_eq!(
+                classify_page_fault(true, BUFFER),
+                FaultDisposition::TerminateUserTask
+            );
+            assert_eq!(
+                classify_page_fault(true, KERNEL_ADDRESS),
+                FaultDisposition::TerminateUserTask
+            );
+            assert_eq!(
+                classify_page_fault(true, 0),
+                FaultDisposition::TerminateUserTask
+            );
+        });
+    }
+
+    /// The regression this whole change exists for: before it, every ring-0
+    /// page fault halted the device, including one taken while copying a user
+    /// buffer whose frame had just been unmapped.
+    #[test]
+    fn a_supervisor_fault_inside_the_buffer_being_copied_terminates_the_task() {
+        with_window(|| {
+            assert_eq!(
+                classify_page_fault(false, BUFFER),
+                FaultDisposition::TerminateUserBufferTask
+            );
+            assert_eq!(
+                classify_page_fault(false, BUFFER + BUFFER_LEN as u64 - 1),
+                FaultDisposition::TerminateUserBufferTask
+            );
+        });
+    }
+
+    /// The window must not become a blanket excuse for kernel faults.
+    #[test]
+    fn a_supervisor_fault_outside_the_buffer_being_copied_stays_fatal() {
+        with_window(|| {
+            assert_eq!(
+                classify_page_fault(false, BUFFER - 1),
+                FaultDisposition::FatalKernelFault
+            );
+            // The end is exclusive: the byte after the buffer is not the buffer.
+            assert_eq!(
+                classify_page_fault(false, BUFFER + BUFFER_LEN as u64),
+                FaultDisposition::FatalKernelFault
+            );
+            assert_eq!(
+                classify_page_fault(false, KERNEL_ADDRESS),
+                FaultDisposition::FatalKernelFault
+            );
+            assert_eq!(
+                classify_page_fault(false, 0),
+                FaultDisposition::FatalKernelFault
+            );
+        });
+    }
+
+    #[test]
+    fn a_supervisor_fault_with_no_copy_in_flight_stays_fatal() {
+        without_window(|| {
+            assert_eq!(
+                classify_page_fault(false, BUFFER),
+                FaultDisposition::FatalKernelFault
+            );
+            assert_eq!(
+                classify_page_fault(false, KERNEL_ADDRESS),
+                FaultDisposition::FatalKernelFault
+            );
+        });
+    }
+
+    #[test]
+    fn closing_the_window_restores_the_fatal_answer() {
+        let _serialized = CLASSIFY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        user_ptr::test_open_access_window(BUFFER, BUFFER_LEN);
+        assert_eq!(
+            classify_page_fault(false, BUFFER),
+            FaultDisposition::TerminateUserBufferTask
+        );
+        user_ptr::test_close_access_window();
+        assert_eq!(
+            classify_page_fault(false, BUFFER),
+            FaultDisposition::FatalKernelFault
+        );
+    }
+
+    /// A ring-3 fault is the task's own code failing, so it keeps its own banner
+    /// even when a copy happens to be in flight -- the two must not be merged.
+    #[test]
+    fn ring3_keeps_its_own_disposition_while_a_window_is_open() {
+        with_window(|| {
+            assert_eq!(
+                classify_page_fault(true, BUFFER),
+                FaultDisposition::TerminateUserTask
+            );
+        });
+    }
+
+    #[test]
+    fn the_three_dispositions_report_three_distinct_banners() {
+        assert_ne!(USER_PAGE_FAULT_BANNER, KERNEL_PAGE_FAULT_BANNER);
+        assert_ne!(USER_BUFFER_PAGE_FAULT_BANNER, KERNEL_PAGE_FAULT_BANNER);
+        assert_ne!(USER_BUFFER_PAGE_FAULT_BANNER, USER_PAGE_FAULT_BANNER);
+        assert_eq!(
+            USER_BUFFER_PAGE_FAULT_BANNER,
+            b"\r\n[USER BUFFER PAGE FAULT]\r\n"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Deferred scancode ring tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+pub(crate) mod pending_scancode_tests {
+    use super::*;
+
+    /// Serializes every test that touches either input-loss counter.
+    ///
+    /// `report_input_loss` consumes both in one call, so a test driving the
+    /// deferred queue would otherwise zero the scancode count another test is
+    /// still asserting on. Shared with `drivers::input`'s tests for that reason.
+    pub(crate) static RING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn empty_ring() {
+        PENDING_SCANCODE_HEAD.store(0, Ordering::Relaxed);
+        PENDING_SCANCODE_TAIL.store(0, Ordering::Relaxed);
+        PENDING_SCANCODE_OVERRUN.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn the_ring_returns_scancodes_in_arrival_order() {
+        let _serialized = RING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        empty_ring();
+
+        // A make code, its break code, and a second make: the order matters,
+        // because a break delivered before its make leaves a key stuck down.
+        for scancode in [0x1e_u8, 0x9e, 0x30] {
+            assert!(queue_pending_scancode(scancode));
+        }
+        assert_eq!(pending_scancode_count(), 3);
+        assert_eq!(pop_pending_scancode(), Some(0x1e));
+        assert_eq!(pop_pending_scancode(), Some(0x9e));
+        assert_eq!(pop_pending_scancode(), Some(0x30));
+        assert_eq!(pop_pending_scancode(), None);
+        assert_eq!(pending_scancode_count(), 0);
+        assert_eq!(PENDING_SCANCODE_OVERRUN.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn an_empty_ring_pops_nothing() {
+        let _serialized = RING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        empty_ring();
+        assert_eq!(pending_scancode_count(), 0);
+        assert_eq!(pop_pending_scancode(), None);
+    }
+
+    #[test]
+    fn the_ring_wraps_without_losing_or_reordering_bytes() {
+        let _serialized = RING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        empty_ring();
+
+        // Three times around the ring, one byte in flight at a time, so the
+        // indices pass the capacity boundary and keep going.
+        for round in 0..(PENDING_SCANCODE_CAPACITY * 3) {
+            let scancode = (round % 251) as u8;
+            assert!(queue_pending_scancode(scancode));
+            assert_eq!(pending_scancode_count(), 1);
+            assert_eq!(pop_pending_scancode(), Some(scancode));
+        }
+        assert_eq!(pending_scancode_count(), 0);
+        assert_eq!(PENDING_SCANCODE_OVERRUN.load(Ordering::Relaxed), 0);
+    }
+
+    /// Overflow must be counted, never silent: a lost scancode is a stuck
+    /// modifier or a dropped keypress, and the counter is what makes it visible.
+    #[test]
+    fn a_full_ring_counts_the_byte_it_could_not_hold() {
+        let _serialized = RING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        empty_ring();
+
+        for index in 0..PENDING_SCANCODE_CAPACITY {
+            assert!(queue_pending_scancode(index as u8));
+        }
+        assert_eq!(pending_scancode_count(), PENDING_SCANCODE_CAPACITY);
+        assert!(!queue_pending_scancode(0xff));
+        assert_eq!(PENDING_SCANCODE_OVERRUN.load(Ordering::Relaxed), 1);
+        assert_eq!(pending_scancode_count(), PENDING_SCANCODE_CAPACITY);
+
+        // The bytes that did fit are still intact and still in order.
+        for index in 0..PENDING_SCANCODE_CAPACITY {
+            assert_eq!(pop_pending_scancode(), Some(index as u8));
+        }
+        assert_eq!(pop_pending_scancode(), None);
+    }
+
+    /// WHY this exists: the counter above was written and never read, so a lost
+    /// keypress was silent in production. A counter is not a report. This drives
+    /// the real producer past capacity and then the real reporter, and asserts
+    /// the console said so -- once, not on every pass of the kernel loop.
+    #[test]
+    fn a_lost_scancode_reaches_the_console_exactly_once() {
+        let _serialized = RING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        empty_ring();
+        crate::drivers::input::DEFERRED_INPUT_OVERRUN.store(0, Ordering::Relaxed);
+
+        for index in 0..PENDING_SCANCODE_CAPACITY {
+            assert!(queue_pending_scancode(index as u8));
+        }
+        assert!(!queue_pending_scancode(0xff));
+        assert!(!queue_pending_scancode(0xfe));
+
+        crate::serial::capture_clear();
+        assert_eq!(report_input_loss(), (2, 0));
+        let lines = crate::serial::capture_lines();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("[INPUT] 2 scancode byte(s) lost")),
+            "the lost bytes were counted but never reported: {:?}",
+            lines
+        );
+        assert_eq!(PENDING_SCANCODE_OVERRUN.load(Ordering::Relaxed), 0);
+
+        crate::serial::capture_clear();
+        assert_eq!(report_input_loss(), (0, 0));
+        assert!(
+            !crate::serial::capture_lines()
+                .iter()
+                .any(|l| l.contains("scancode byte(s) lost")),
+            "a consumed loss was reported a second time"
+        );
+        empty_ring();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Interrupt-path structure tests
+// -----------------------------------------------------------------------------
+//
+// WHY source scans and not behavioural tests: the handlers themselves are
+// `extern "x86-interrupt"` and cannot run on the host, and the deadlock they
+// guard against needs a real interrupt landing inside a real critical section.
+// A host test can prove the ring and the classifier are right; only a scan can
+// prove the handler still calls them instead of taking a blocking lock. These
+// assertions are the loud guard against that regression, not a claim that the
+// race was reproduced.
+
+#[cfg(test)]
+mod irq_path_structure_tests {
+    fn production_source() -> &'static str {
+        let source = include_str!("interrupts.rs");
+        source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(head, _tail)| head)
+    }
+
+    fn fn_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let needle = alloc::format!("fn {name}(");
+        let start = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("no fn {name} in the scanned source"));
+        let open = source[start..].find('{').map(|i| start + i).expect("fn body");
+        let mut depth = 0usize;
+        for (offset, byte) in source[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open + 1..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces in fn {name}");
+    }
+
+    /// Strips line comments so a comment *about* a lock is not read as a call.
+    fn without_comments(body: &str) -> alloc::string::String {
+        body.lines()
+            .map(|line| match line.find("//") {
+                Some(index) => &line[..index],
+                None => line,
+            })
+            .collect::<alloc::vec::Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every permanent switch away from a dying context must recover first.
+    ///
+    /// `terminate_current` never unwinds, so a bare call from a fault or from
+    /// the tick's kill gate leaks the preemption gate and every mutex the task
+    /// held. There must be no bare call left in this file.
+    #[test]
+    fn no_handler_terminates_a_task_without_recovering_its_locks_first() {
+        let production = production_source();
+        // The helper is the one place allowed to call the terminator: it is the
+        // recovery. Everything outside it must go through the helper.
+        let helper = fn_body(production, "recover_and_terminate_current");
+        let start = helper.as_ptr() as usize - production.as_ptr() as usize;
+        let outside = alloc::format!(
+            "{}{}",
+            &production[..start],
+            &production[start + helper.len()..]
+        );
+        let outside = without_comments(&outside);
+        assert!(
+            !outside.contains("crate::task::terminate_current()"),
+            "interrupts.rs calls terminate_current outside the recovery helper. Route it \
+             through recover_and_terminate_current so the dying context's page-table pin, \
+             mutexes and preemption depth are released before the switch."
+        );
+        assert!(
+            outside.contains("recover_and_terminate_current()"),
+            "the recovery helper is no longer called by any handler"
+        );
+    }
+
+    /// Recovery order is load-bearing: the pin must go before the scheduler is
+    /// asked to lock the same address space in `prepare_terminate`.
+    #[test]
+    fn recovery_releases_the_pin_and_the_locks_before_it_switches_away() {
+        let body = without_comments(fn_body(production_source(), "recover_and_terminate_current"));
+        let pin = body
+            .find("recover_abandoned_user_access()")
+            .expect("recovery must release the user-buffer page-table pin");
+        let locks = body
+            .find("abandon_current_context()")
+            .expect("recovery must release abandoned mutexes and the preemption gate");
+        let switch = body
+            .find("terminate_current()")
+            .expect("recovery must terminate the task");
+        assert!(pin < locks, "the pin must be released before the lock list");
+        assert!(locks < switch, "locks must be released before switching away");
+    }
+
+    #[test]
+    fn the_keyboard_handler_never_blocking_locks_the_decoder() {
+        let body = without_comments(fn_body(production_source(), "keyboard_interrupt_handler"));
+        // `PICS.lock()` is the one blocking acquisition left, and it is provably
+        // uncontended: the only other locker is boot-time `initialize`, which
+        // runs before `interrupts::enable()`, and every handler that takes it
+        // runs with IF clear through an interrupt gate, so they cannot nest.
+        // No interrupted task can ever hold it.
+        let body = body.replace("PICS.lock()", "PICS_END_OF_INTERRUPT");
+        assert!(
+            !body.contains(".lock()"),
+            "the keyboard IRQ takes a blocking lock. On this single-CPU kernel the \
+             interrupted context may already hold it and the handler spins with IF \
+             clear forever.\n{body}"
+        );
+        assert!(
+            body.contains("KEYBOARD.try_lock()"),
+            "the keyboard IRQ must try the decoder for a bounded number of spins"
+        );
+        assert!(
+            body.contains("queue_pending_scancode(scancode)"),
+            "a scancode the handler could not decode must be queued, not dropped"
+        );
+        assert!(
+            body.contains("InterruptGuard::enter()"),
+            "the keyboard IRQ must mark interrupt context so input dispatch defers"
+        );
+    }
+
+    /// The tick is the one IRQ that context-switches, so a per-CPU interrupt
+    /// depth taken here would leak into the next task and defer its input
+    /// forever. It reaches no dispatch, so it must not mark itself.
+    #[test]
+    fn the_switching_timer_handler_does_not_mark_interrupt_context() {
+        let body = without_comments(fn_body(production_source(), "timer_interrupt_handler"));
+        assert!(
+            !body.contains("InterruptGuard::enter()"),
+            "the timer handler switches context; an interrupt depth taken here would \
+             still be raised when the next task runs.\n{body}"
+        );
+        assert!(
+            body.contains("recover_and_terminate_current()"),
+            "the tick's pending-kill gate must recover before it switches away"
+        );
+    }
+
+    #[test]
+    fn the_other_input_reaching_irq_handlers_mark_interrupt_context() {
+        let source = production_source();
+        for name in ["irq4_com1_handler", "irq12_touch_digitizer_handler"] {
+            let body = without_comments(fn_body(source, name));
+            assert!(
+                body.contains("InterruptGuard::enter()"),
+                "fn {name} must mark interrupt context for anything it reaches"
+            );
+        }
+    }
+
+    /// Input is not diagnostics. The drain must sit ahead of the sample-interval
+    /// early return and ahead of the scheduler `try_lock`, both of which are
+    /// allowed to bail out and would otherwise delay a keypress by a second.
+    #[test]
+    fn the_kernel_loop_drains_input_before_anything_that_can_bail_out() {
+        let body = without_comments(fn_body(production_source(), "service_deferred_diagnostics"));
+        let drain = body
+            .find("drain_deferred_input()")
+            .expect("the kernel loop must drain deferred input");
+        let replay = body
+            .find("replay_pending_scancodes()")
+            .expect("the kernel loop must replay deferred scancodes");
+        let bail = body.find("return").expect("the sample interval early return");
+        let try_lock = body.find("try_lock").expect("the scheduler try_lock");
+        assert!(drain < bail, "input must drain before the sample-interval return");
+        assert!(drain < try_lock, "input must drain before the scheduler try_lock");
+        assert!(replay < bail, "scancodes must replay before the sample-interval return");
+    }
+
+    /// The replay holds the decoder lock across the batch so a byte arriving
+    /// mid-drain queues behind it instead of overtaking it, and dispatches
+    /// outside the lock so no new lock order is introduced.
+    #[test]
+    fn the_scancode_replay_decodes_under_the_lock_and_dispatches_outside_it() {
+        let body = without_comments(fn_body(production_source(), "replay_pending_scancodes"));
+        let lock = body.find("KEYBOARD.lock()").expect("the replay takes the decoder");
+        let dispatch = body
+            .find("post_char_event")
+            .expect("the replay dispatches what it decoded");
+        assert!(
+            lock < dispatch,
+            "decoding must happen inside the decoder lock and dispatch after it"
+        );
+        let release = body.find("for character in").expect("the dispatch loop");
+        assert!(
+            body[..release].contains("pop_pending_scancode()"),
+            "the batch must be popped while the decoder lock is held"
+        );
     }
 }
 

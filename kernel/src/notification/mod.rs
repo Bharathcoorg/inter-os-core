@@ -255,7 +255,15 @@ impl NotificationManager {
         Ok(())
     }
 
-    /// Cancels all notifications for a package.
+    /// Cancels all notifications a package owns for one account.
+    ///
+    /// WHY `user_id` must be the established owner and never a default: records
+    /// are filed per account, so a caller that guesses the uid destroys a
+    /// different account's notifications -- the task-exit path once guessed 0
+    /// when the owner could not be resolved. A caller that cannot establish the
+    /// owner must cancel nothing and surface the failure instead; see
+    /// `task::scheduler::reclaim_task`, which carries the uid captured at
+    /// termination for exactly this reason.
     pub fn cancel_all_for_package(&mut self, package_id: &str, user_id: u32) {
         self.records
             .retain(|r| !(r.package_id == package_id && r.user_id == user_id));
@@ -464,5 +472,135 @@ mod tests {
         nm.cancel_all_for_package_all_users("interos.vault");
         assert_eq!(nm.records.len(), 1, "an uninstalled package still holds records");
         assert_eq!(nm.records[0].package_id, "interos.notes");
+    }
+
+    /// Posts one record of each lock-screen visibility class for `uid`.
+    fn post_visibility_classes(nm: &mut NotificationManager, uid: u32) {
+        for (pkg, visibility) in [
+            ("interos.public", LockscreenVisibility::Public),
+            ("interos.private", LockscreenVisibility::Private),
+            ("interos.secret", LockscreenVisibility::Secret),
+        ] {
+            nm.post(
+                pkg,
+                uid,
+                "system",
+                "title",
+                "sensitive body",
+                NotificationPriority::Default,
+                visibility,
+                1,
+                1,
+            )
+            .expect("post accepted");
+        }
+    }
+
+    /// Redaction is a function of the lock state passed in, and of nothing else.
+    ///
+    /// WHY this is pinned here as well as at the syscall: the store is the only
+    /// place that decides what a locked reader may see, and the syscall now
+    /// supplies the kernel's own lock state instead of the caller's flag. Both
+    /// halves have to hold: the store must redact when told the device is
+    /// locked, and it must not leak a Secret record or a Private body.
+    #[test]
+    fn locked_queries_redact_private_and_hide_secret() {
+        let mut nm = NotificationManager::new();
+        nm.seed_standard_channels();
+        post_visibility_classes(&mut nm, 1000);
+
+        let locked = nm.query_active(1000, true);
+        assert_eq!(locked.len(), 2, "a Secret record must not reach a locked reader");
+        assert!(locked.iter().all(|r| r.visibility != LockscreenVisibility::Secret));
+        let private = locked
+            .iter()
+            .find(|r| r.visibility == LockscreenVisibility::Private)
+            .expect("a Private record is shown with its body redacted");
+        assert_eq!(private.body, "[Private Content]");
+        assert_ne!(private.body, "sensitive body");
+        let public = locked
+            .iter()
+            .find(|r| r.visibility == LockscreenVisibility::Public)
+            .expect("a Public record is shown in full");
+        assert_eq!(public.body, "sensitive body");
+
+        let unlocked = nm.query_active(1000, false);
+        assert_eq!(unlocked.len(), 3);
+        assert!(unlocked.iter().any(|r| r.visibility == LockscreenVisibility::Secret));
+        assert!(unlocked.iter().all(|r| r.body == "sensitive body"));
+    }
+
+    /// Locking again after an unlocked read must redact again.
+    ///
+    /// WHY: the unlocked answer is a full clone of the record. If a query ever
+    /// cached or returned that clone on a later locked read, the private body
+    /// would survive the transition -- stale state exposing private content is
+    /// the same leak as never redacting at all.
+    #[test]
+    fn lock_unlock_lock_transitions_never_reuse_an_unlocked_answer() {
+        let mut nm = NotificationManager::new();
+        nm.seed_standard_channels();
+        post_visibility_classes(&mut nm, 1000);
+
+        for _ in 0..3 {
+            assert_eq!(nm.query_active(1000, false).len(), 3);
+            let locked = nm.query_active(1000, true);
+            assert_eq!(locked.len(), 2);
+            assert!(locked.iter().all(|r| r.body != "sensitive body"
+                || r.visibility == LockscreenVisibility::Public));
+        }
+        // The store itself was never mutated by a read: the original bodies are
+        // still there for the next unlocked query, and only there.
+        assert_eq!(nm.records.len(), 3);
+        assert!(nm.records.iter().all(|r| r.body == "sensitive body"));
+    }
+
+    /// One account's lock state says nothing about another account's records.
+    #[test]
+    fn a_query_never_returns_another_accounts_records() {
+        let mut nm = NotificationManager::new();
+        nm.seed_standard_channels();
+        post_visibility_classes(&mut nm, 1000);
+        post_visibility_classes(&mut nm, 1001);
+
+        assert!(nm.query_active(1000, false).iter().all(|r| r.user_id == 1000));
+        assert!(nm.query_active(1001, true).iter().all(|r| r.user_id == 1001));
+        assert!(nm.query_active(4242, false).is_empty());
+        assert!(nm.query_active(4242, true).is_empty());
+    }
+
+    /// Cancelling a package for one account must leave every other account's
+    /// records for the same package untouched.
+    ///
+    /// WHY this is pinned: the task-exit reclaim once passed uid 0 whenever the
+    /// real owner could not be resolved, which cancelled user 0's shade for the
+    /// package instead of the dead task's own. The store is where that guess
+    /// lands, so the scoping has to hold here, not only at the caller.
+    #[test]
+    fn cancelling_a_package_for_one_account_leaves_the_others_intact() {
+        let mut nm = NotificationManager::new();
+        nm.seed_standard_channels();
+        for uid in [0u32, 1000] {
+            nm.post(
+                "interos.messages",
+                uid,
+                "system",
+                "title",
+                "body",
+                NotificationPriority::Default,
+                LockscreenVisibility::Public,
+                1,
+                1,
+            )
+            .expect("post accepted");
+        }
+        assert_eq!(nm.records.len(), 2);
+
+        nm.cancel_all_for_package("interos.messages", 1000);
+
+        assert_eq!(nm.records.len(), 1, "a cancellation reached beyond its account");
+        assert_eq!(nm.records[0].user_id, 0, "user 0's record was destroyed by another account's cancellation");
+        assert_eq!(nm.get_badge_count("interos.messages", 0), 1);
+        assert_eq!(nm.get_badge_count("interos.messages", 1000), 0);
     }
 }

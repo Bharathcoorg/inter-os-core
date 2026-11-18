@@ -7,6 +7,10 @@ InterOS Core — x86_64 QEMU Boot & Contract Verification
 Verifies that the x86_64 microkernel and userspace stack boots in QEMU,
 reaches every mandatory boot invariant, spawns PID 1, initializes the
 compositor/launcher, and produces an authentic framebuffer screendump.
+
+Before any QEMU interaction the gate refuses a boot image older than its
+build inputs (stale evidence, exit 1) and reports a missing QEMU executable
+as BLOCKED (exit 2). A missing prerequisite is never a passing boot.
 """
 
 import os
@@ -17,8 +21,6 @@ import subprocess
 import re
 import collections
 import shutil
-
-from test_interactive_lifecycle import find_qemu, SerialReader, send_monitor_cmd, qemu_x86_audio_args
 
 # The canonical portrait scanout the KMS declares (kernel/src/drivers/display_kms.rs).
 # A screendump that is not this geometry did not come from this display path.
@@ -178,7 +180,80 @@ def kill_proc_on_port(p):
 
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Build inputs whose edits must reach the boot image before it is booted: the
+# kernel and boot packager sources plus the Ring-3 images' sources, and the
+# packaged kernel ELF mirrors the image is built from. kernel/build.rs rebuilds
+# the kernel whenever an embedded Ring-3 image changes, so the ELF mtime covers
+# the embedded images transitively.
+BOOT_INPUT_TREES = ("kernel", "boot", "userspace", "apps")
+BOOT_INPUT_SUFFIXES = (".rs", ".toml", ".lock")
+
+
+def kernel_image_staleness(kernel_img, root):
+    """Returns (newer_inputs, checked_count) for the boot image, newest first.
+
+    WHY this exists: the gate used to boot whatever target/inter-os-bios.img
+    held, even an image packaged before the current source was written, and
+    report that boot as verification of the current tree. An image older than
+    its newest build input is stale evidence; main() refuses it instead of
+    passing on it. checked_count is 0 when no build input could be stat'd at
+    all, and main() fails closed on that rather than reading it as fresh.
+    """
+    image_mtime = os.path.getmtime(kernel_img)
+    candidates = []
+    for tree in BOOT_INPUT_TREES:
+        for dirpath, dirnames, filenames in os.walk(os.path.join(root, tree)):
+            dirnames[:] = [d for d in dirnames if d != "target"]
+            for filename in filenames:
+                if filename.endswith(BOOT_INPUT_SUFFIXES):
+                    candidates.append(os.path.join(dirpath, filename))
+    for profile in ("debug", "release"):
+        candidates.append(os.path.join(root, "target", "x86_64-unknown-none", profile, "kernel"))
+    newer = []
+    checked = 0
+    for path in candidates:
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        checked += 1
+        if mtime > image_mtime:
+            newer.append((mtime, path))
+    newer.sort(reverse=True)
+    return newer, checked
+
+
 def main():
+    kernel_img = os.path.abspath(os.environ.get("INTEROS_KERNEL_IMAGE", os.path.join("target", "inter-os-bios.img")))
+    ppm_path = os.path.abspath(os.environ.get("INTEROS_PPM_PATH", os.path.join("target", "mobile_screen2.ppm")))
+    log_path = os.path.abspath(os.environ.get("INTEROS_BOOT_LOG", os.path.join("target", "x86_boot.log")))
+
+    if not os.path.exists(kernel_img):
+        print(f"[FAIL] Bootable image missing: {kernel_img}")
+        sys.exit(1)
+
+    stale_inputs, checked = kernel_image_staleness(kernel_img, WORKSPACE_ROOT)
+    if checked == 0:
+        print(f"[FAIL] Boot image freshness could not be established: no build inputs "
+              f"found under {WORKSPACE_ROOT}. Refusing to boot an unverifiable image.")
+        sys.exit(1)
+    if stale_inputs:
+        newest_mtime, newest_path = stale_inputs[0]
+        print(f"[FAIL] Stale boot image: {kernel_img}")
+        print(f"       The image (mtime {time.ctime(os.path.getmtime(kernel_img))}) predates "
+              f"{len(stale_inputs)} of its {checked} build inputs; newest: {newest_path} "
+              f"(mtime {time.ctime(newest_mtime)}).")
+        print("       Booting it would verify a previous build, not the current source.")
+        print("       Rebuild the image (python tools/interos.py build demo) and re-run this gate.")
+        sys.exit(1)
+    print(f"[OK] Boot image freshness: none of {checked} build inputs is newer than the image.")
+
+    # WHY the QEMU helpers are imported here and not at module top: importing
+    # test_interactive_lifecycle imports emulator.server, which starts Device
+    # Studio's VNC scanout worker at import time. A gate that is about to refuse
+    # a stale image or report QEMU unavailable must not start Studio side effects.
+    from test_interactive_lifecycle import find_qemu, SerialReader, send_monitor_cmd, qemu_x86_audio_args
+
     qemu_bin = "qemu-system-x86_64.exe" if sys.platform == "win32" else "qemu-system-x86_64"
     qemu_exe = find_qemu(qemu_bin)
     if not os.path.exists(qemu_exe) and not shutil.which(qemu_exe):
@@ -187,14 +262,11 @@ def main():
             if cand:
                 qemu_exe = cand
                 break
-
-    kernel_img = os.path.abspath(os.environ.get("INTEROS_KERNEL_IMAGE", os.path.join("target", "inter-os-bios.img")))
-    ppm_path = os.path.abspath(os.environ.get("INTEROS_PPM_PATH", os.path.join("target", "mobile_screen2.ppm")))
-    log_path = os.path.abspath(os.environ.get("INTEROS_BOOT_LOG", os.path.join("target", "x86_boot.log")))
-
-    if not os.path.exists(kernel_img):
-        print(f"[FAIL] Bootable image missing: {kernel_img}")
-        sys.exit(1)
+    if not os.path.exists(qemu_exe) and not shutil.which(qemu_exe):
+        print(f"[BLOCKED] QEMU executable unavailable: {qemu_bin} was not found on PATH, "
+              "under QEMU_PATH, or in the standard install locations. Boot verification "
+              "cannot run on this host; a missing prerequisite is not a passing boot.")
+        sys.exit(2)
 
     for p in [ppm_path, log_path]:
         if os.path.exists(p):

@@ -122,6 +122,22 @@ def main():
     boot_img = ROOT / "target" / "inter-os-bios.img"
     assert boot_img.exists(), f"Boot image missing: {boot_img}"
 
+    # Preflight opt-in detection. This suite drives PANIC_POLICY SET and
+    # TRIGGER_KERNEL_PANIC, which are compiled OUT of production images behind the
+    # `debug-control-plane` cargo feature (the COM1 console is unauthenticated, so a
+    # production image must not let a serial line change the panic response or force
+    # a panic). The packaged BIOS image embeds the kernel's read-only strings, so a
+    # byte scan tells us whether this image was built with the feature ON. Against a
+    # production image the suite would fail confusingly (SET refused, no panic
+    # banner), so skip loudly and name the opt-in instead of launching QEMU.
+    if b"TRIGGER_KERNEL_PANIC" not in boot_img.read_bytes():
+        print("  [LOUD SKIP] Production image (debug-control-plane OFF): the")
+        print("              TRIGGER_KERNEL_PANIC / PANIC_POLICY SET verbs are compiled")
+        print("              out, so watchdog recovery cannot be exercised. Rebuild with")
+        print("              INTEROS_DEBUG_CONTROL_PLANE=1 (python tools/interos.py build")
+        print("              demo) and re-run. This is a SKIP, not a pass.")
+        return
+
     port = 5560
     kill_proc_on_port(port)
     time.sleep(0.5)

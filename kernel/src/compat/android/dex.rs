@@ -25,6 +25,16 @@ pub fn is_valid_dex_magic(magic: &[u8; 8]) -> bool {
 pub const DEX_HEADER_SIZE: usize = 0x70; // 112 bytes
 pub const ENDIAN_CONSTANT: u32 = 0x12345678;
 
+/// Minimum bytes one `encoded_method` occupies: three uleb128 values
+/// (method_idx_diff, access_flags, code_off), each at least one byte.
+pub const MIN_ENCODED_METHOD_BYTES: usize = 3;
+/// Ceiling on cumulative `String` bytes owned by one parsed DEX, as a
+/// multiple of the actual input length. WHY a factor and not 1x: legitimate
+/// method/type tables clone shared pool strings, so honest files clone a
+/// small multiple of their size; the factor caps the quadratic sharing
+/// amplification while still accepting real DEX layouts.
+pub const MAX_STRING_BYTES_FACTOR: usize = 32;
+
 // Dalvik Opcodes
 pub const OP_NOP: u8 = 0x00;
 pub const OP_MOVE: u8 = 0x01;
@@ -152,6 +162,12 @@ pub enum DexError {
     ExcessiveRegisters,
     ExcessiveArrayAllocation,
     UnexpectedEof,
+    /// Total DexMethod records exceeded `raw.len() / MIN_ENCODED_METHOD_BYTES`.
+    TooManyMethodRecords,
+    /// Cumulative String bytes exceeded `raw.len() * MAX_STRING_BYTES_FACTOR`.
+    StringBudgetExceeded,
+    /// The verified-instruction counter would overflow u32.
+    InstructionCountOverflow,
 }
 
 /// Parsed method descriptor from DEX string pool and method ID tables.
@@ -208,6 +224,15 @@ impl<'a> DexPackage<'a> {
             return Err(DexError::ChecksumMismatch);
         }
 
+        // WHY budgets are formulas over raw.len(): every record and every
+        // cloned String must be paid for out of bytes the input actually
+        // carries, so shared-offset amplification cannot exceed a constant
+        // factor of the input instead of growing quadratically.
+        let max_method_records = raw.len() / MIN_ENCODED_METHOD_BYTES;
+        let mut string_budget = raw.len()
+            .checked_mul(MAX_STRING_BYTES_FACTOR)
+            .ok_or(DexError::StringBudgetExceeded)?;
+
         // 1. Parse String Pool
         let string_ids_size = u32::from_le(header.string_ids_size) as usize;
         let string_ids_off = u32::from_le(header.string_ids_off) as usize;
@@ -234,6 +259,7 @@ impl<'a> DexPackage<'a> {
                 cur += 1;
             }
             let s = core::str::from_utf8(&raw[str_start..cur]).unwrap_or("<invalid utf8>");
+            charge_string_bytes(&mut string_budget, s.len())?;
             strings.push(String::from(s));
         }
 
@@ -255,6 +281,7 @@ impl<'a> DexPackage<'a> {
             if descriptor_idx >= strings.len() {
                 return Err(DexError::TypeIndexOutOfBounds);
             }
+            charge_string_bytes(&mut string_budget, strings[descriptor_idx].len())?;
             types.push(strings[descriptor_idx].clone());
         }
 
@@ -280,6 +307,7 @@ impl<'a> DexPackage<'a> {
             let method_name = if name_idx < strings.len() { strings[name_idx].clone() } else { String::from("<unknown>") };
             let proto_str = if proto_idx < strings.len() { strings[proto_idx].clone() } else { String::from("V") };
 
+            charge_string_bytes(&mut string_budget, class_name.len() + method_name.len() + proto_str.len())?;
             method_entries.push((class_name, method_name, proto_str));
         }
 
@@ -291,6 +319,11 @@ impl<'a> DexPackage<'a> {
             return Err(DexError::UnexpectedEof);
         }
         let mut methods = Vec::new();
+        // WHY dedup: N class_defs pointing at one shared class_data blob used
+        // to decode that blob N times, multiplying records by N. A well-formed
+        // DEX gives every class its own class_data_item, so a repeated offset
+        // is decoded once and later sharers contribute no additional records.
+        let mut seen_class_data: Vec<usize> = Vec::new();
 
         for i in 0..class_defs_size {
             let offset_pos = class_defs_off + i * 32;
@@ -301,6 +334,10 @@ impl<'a> DexPackage<'a> {
             if class_data_off == 0 || class_data_off >= raw.len() {
                 continue;
             }
+            if seen_class_data.contains(&class_data_off) {
+                continue;
+            }
+            seen_class_data.push(class_data_off);
 
             let mut cur = class_data_off;
             let static_fields_size = read_uleb128(raw, &mut cur)?;
@@ -319,12 +356,12 @@ impl<'a> DexPackage<'a> {
             }
 
             // Direct methods
-            let mut last_method_idx = 0;
+            let mut last_method_idx: u32 = 0;
             for _ in 0..direct_methods_size {
                 let diff = read_uleb128(raw, &mut cur)?;
                 let _access_flags = read_uleb128(raw, &mut cur)?;
                 let code_off = read_uleb128(raw, &mut cur)? as usize;
-                last_method_idx += diff;
+                last_method_idx = last_method_idx.checked_add(diff).ok_or(DexError::MethodIndexOutOfBounds)?;
 
                 let (c_name, m_name, p_name) = if (last_method_idx as usize) < method_entries.len() {
                     method_entries[last_method_idx as usize].clone()
@@ -344,6 +381,10 @@ impl<'a> DexPackage<'a> {
                     insns_count = u32::from_le_bytes(raw[code_off + 12..code_off + 16].try_into().unwrap()) as usize;
                 }
 
+                if methods.len() >= max_method_records {
+                    return Err(DexError::TooManyMethodRecords);
+                }
+                charge_string_bytes(&mut string_budget, c_name.len() + m_name.len() + p_name.len())?;
                 methods.push(DexMethod {
                     method_index: last_method_idx as usize,
                     class_name: c_name,
@@ -359,12 +400,12 @@ impl<'a> DexPackage<'a> {
             }
 
             // Virtual methods
-            let mut last_vmethod_idx = 0;
+            let mut last_vmethod_idx: u32 = 0;
             for _ in 0..virtual_methods_size {
                 let diff = read_uleb128(raw, &mut cur)?;
                 let _access_flags = read_uleb128(raw, &mut cur)?;
                 let code_off = read_uleb128(raw, &mut cur)? as usize;
-                last_vmethod_idx += diff;
+                last_vmethod_idx = last_vmethod_idx.checked_add(diff).ok_or(DexError::MethodIndexOutOfBounds)?;
 
                 let (c_name, m_name, p_name) = if (last_vmethod_idx as usize) < method_entries.len() {
                     method_entries[last_vmethod_idx as usize].clone()
@@ -384,6 +425,10 @@ impl<'a> DexPackage<'a> {
                     insns_count = u32::from_le_bytes(raw[code_off + 12..code_off + 16].try_into().unwrap()) as usize;
                 }
 
+                if methods.len() >= max_method_records {
+                    return Err(DexError::TooManyMethodRecords);
+                }
+                charge_string_bytes(&mut string_budget, c_name.len() + m_name.len() + p_name.len())?;
                 methods.push(DexMethod {
                     method_index: last_vmethod_idx as usize,
                     class_name: c_name,
@@ -481,7 +526,7 @@ impl<'a> DexPackage<'a> {
             }
         }
 
-        let mut verified_instructions = 0;
+        let mut verified_instructions: u32 = 0;
 
         // 3. Audit methods, registers, CFG branches, and instructions
         for m in &self.methods {
@@ -499,13 +544,14 @@ impl<'a> DexPackage<'a> {
             }
 
             if m.code_offset > 0 && m.code_offset + 16 <= self.raw.len() {
-                let insns_len = m.instruction_count * 2;
+                let insns_len = m.instruction_count.checked_mul(2).ok_or(DexError::UnexpectedEof)?;
                 let insns_start = m.code_offset + 16;
-                if insns_start + insns_len > self.raw.len() {
+                let insns_end = insns_start.checked_add(insns_len).ok_or(DexError::UnexpectedEof)?;
+                if insns_end > self.raw.len() {
                     return Err(DexError::UnexpectedEof);
                 }
 
-                let insns = &self.raw[insns_start..insns_start + insns_len];
+                let insns = &self.raw[insns_start..insns_end];
                 let mut pc = 0;
 
                 while pc < insns.len() {
@@ -566,11 +612,21 @@ impl<'a> DexPackage<'a> {
                 }
             }
 
-            verified_instructions += m.instruction_count as u32;
+            let count = u32::try_from(m.instruction_count).map_err(|_| DexError::InstructionCountOverflow)?;
+            verified_instructions = verified_instructions
+                .checked_add(count)
+                .ok_or(DexError::InstructionCountOverflow)?;
         }
 
         Ok(verified_instructions)
     }
+}
+
+/// Charges cloned String bytes against the parse budget; refuses by number
+/// when the cumulative total would exceed `raw.len() * MAX_STRING_BYTES_FACTOR`.
+fn charge_string_bytes(budget: &mut usize, bytes: usize) -> Result<(), DexError> {
+    *budget = budget.checked_sub(bytes).ok_or(DexError::StringBudgetExceeded)?;
+    Ok(())
 }
 
 /// Reads an unsigned LEB128 integer from slice at `*offset`.
@@ -815,6 +871,194 @@ mod tests {
 
         let pkg = DexPackage::parse(&raw).expect("parse DEX 038");
         assert_eq!(pkg.get_string_slice(2).unwrap(), "Lorg/interos/ModernActivity;");
+    }
+
+    // ------------------------------------------------------------------
+    // Adversarial parser-bounds tests (H17): call the real production
+    // DexPackage::parse / audit_bytecode paths.
+    // ------------------------------------------------------------------
+
+    fn push_uleb(out: &mut Vec<u8>, mut value: u32) {
+        loop {
+            let byte = (value & 0x7F) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    /// Builds a DEX where `class_defs` class_def entries all point at ONE
+    /// shared class_data blob declaring `methods_per_class` direct methods
+    /// (each encoded_method is exactly 3 bytes: diff, flags, code_off=0).
+    fn build_shared_class_dex(class_defs: usize, methods_per_class: usize, method_diff: u32) -> Vec<u8> {
+        let class_defs_off = DEX_HEADER_SIZE;
+        let blob_off = class_defs_off + class_defs * 32;
+        let mut dex = alloc::vec![0u8; blob_off];
+        dex.push(0); // static_fields_size
+        dex.push(0); // instance_fields_size
+        push_uleb(&mut dex, methods_per_class as u32);
+        dex.push(0); // virtual_methods_size
+        for _ in 0..methods_per_class {
+            push_uleb(&mut dex, method_diff);
+            dex.push(1); // access_flags
+            dex.push(0); // code_off = 0
+        }
+        let file_size = dex.len();
+        for i in 0..class_defs {
+            let p = class_defs_off + i * 32;
+            dex[p + 24..p + 28].copy_from_slice(&(blob_off as u32).to_le_bytes());
+        }
+        let hdr = DexHeader {
+            magic: *DEX_MAGIC,
+            checksum: 0,
+            signature: [0u8; 20],
+            file_size: (file_size as u32).to_le(),
+            header_size: (DEX_HEADER_SIZE as u32).to_le(),
+            endian_tag: ENDIAN_CONSTANT.to_le(),
+            link_size: 0,
+            link_off: 0,
+            map_off: 0,
+            string_ids_size: 0,
+            string_ids_off: 0,
+            type_ids_size: 0,
+            type_ids_off: 0,
+            proto_ids_size: 0,
+            proto_ids_off: 0,
+            field_ids_size: 0,
+            field_ids_off: 0,
+            method_ids_size: 0,
+            method_ids_off: 0,
+            class_defs_size: (class_defs as u32).to_le(),
+            class_defs_off: (class_defs_off as u32).to_le(),
+            data_size: ((file_size - blob_off) as u32).to_le(),
+            data_off: (blob_off as u32).to_le(),
+        };
+        let hdr_bytes = unsafe {
+            core::slice::from_raw_parts(&hdr as *const DexHeader as *const u8, DEX_HEADER_SIZE)
+        };
+        dex[..DEX_HEADER_SIZE].copy_from_slice(hdr_bytes);
+        let checksum = compute_adler32(&dex[12..]);
+        dex[8..12].copy_from_slice(&checksum.to_le_bytes());
+        dex
+    }
+
+    #[test]
+    fn dex_bounds_shared_class_data_amplification_is_bounded() {
+        let raw = build_shared_class_dex(1024, 1024, 1);
+        let pkg = DexPackage::parse(&raw).expect("shared-blob DEX must parse under dedup");
+        let record_bytes = pkg.methods.len() * core::mem::size_of::<DexMethod>();
+        let string_bytes: usize = pkg.methods.iter()
+            .map(|m| m.class_name.len() + m.method_name.len() + m.proto_shorty.len())
+            .sum();
+        let naive_records = 1024usize * 1024;
+        std::println!(
+            "[DEX-BOUNDS] input_bytes={} naive_records={} actual_records={} record_bytes={} string_bytes={} heap_amplification_before={:.1}x after={:.1}x",
+            raw.len(), naive_records, pkg.methods.len(), record_bytes, string_bytes,
+            (naive_records * (core::mem::size_of::<DexMethod>() + 14)) as f64 / raw.len() as f64,
+            (record_bytes + string_bytes) as f64 / raw.len() as f64,
+        );
+        let max_records = raw.len() / MIN_ENCODED_METHOD_BYTES;
+        assert!(pkg.methods.len() <= max_records,
+            "records {} exceeded input-derived cap {}", pkg.methods.len(), max_records);
+        assert_eq!(pkg.methods.len(), 1024, "the shared blob must be decoded exactly once");
+        assert!(pkg.audit_bytecode().is_ok());
+    }
+
+    #[test]
+    fn dex_bounds_string_clone_budget_refuses_by_number() {
+        // One 1000-byte pool string referenced by 1000 type_ids: honest input
+        // is ~5 KiB but naive cloning would allocate ~1 MB of Strings. The
+        // cumulative budget raw.len() * MAX_STRING_BYTES_FACTOR must refuse.
+        let string_ids_off = DEX_HEADER_SIZE;
+        let type_ids_off = string_ids_off + 4;
+        let type_count = 1000usize;
+        let str_data_off = type_ids_off + type_count * 4;
+        let mut dex = alloc::vec![0u8; str_data_off];
+        push_uleb(&mut dex, 1000);
+        dex.extend_from_slice(&alloc::vec![b'A'; 1000]);
+        dex.push(0);
+        let file_size = dex.len();
+        dex[string_ids_off..string_ids_off + 4].copy_from_slice(&(str_data_off as u32).to_le_bytes());
+        for i in 0..type_count {
+            let p = type_ids_off + i * 4;
+            dex[p..p + 4].copy_from_slice(&0u32.to_le_bytes());
+        }
+        let hdr = DexHeader {
+            magic: *DEX_MAGIC,
+            checksum: 0,
+            signature: [0u8; 20],
+            file_size: (file_size as u32).to_le(),
+            header_size: (DEX_HEADER_SIZE as u32).to_le(),
+            endian_tag: ENDIAN_CONSTANT.to_le(),
+            link_size: 0,
+            link_off: 0,
+            map_off: 0,
+            string_ids_size: 1u32.to_le(),
+            string_ids_off: (string_ids_off as u32).to_le(),
+            type_ids_size: (type_count as u32).to_le(),
+            type_ids_off: (type_ids_off as u32).to_le(),
+            proto_ids_size: 0,
+            proto_ids_off: 0,
+            field_ids_size: 0,
+            field_ids_off: 0,
+            method_ids_size: 0,
+            method_ids_off: 0,
+            class_defs_size: 0,
+            class_defs_off: 0,
+            data_size: ((file_size - str_data_off) as u32).to_le(),
+            data_off: (str_data_off as u32).to_le(),
+        };
+        let hdr_bytes = unsafe {
+            core::slice::from_raw_parts(&hdr as *const DexHeader as *const u8, DEX_HEADER_SIZE)
+        };
+        dex[..DEX_HEADER_SIZE].copy_from_slice(hdr_bytes);
+        let checksum = compute_adler32(&dex[12..]);
+        dex[8..12].copy_from_slice(&checksum.to_le_bytes());
+
+        assert!(1000 * 1000 > dex.len() * MAX_STRING_BYTES_FACTOR);
+        let err = DexPackage::parse(&dex).err().unwrap();
+        assert_eq!(err, DexError::StringBudgetExceeded);
+    }
+
+    #[test]
+    fn dex_bounds_method_index_diff_overflow_refused() {
+        let raw = build_shared_class_dex(1, 2, u32::MAX);
+        let err = DexPackage::parse(&raw).err().unwrap();
+        assert_eq!(err, DexError::MethodIndexOutOfBounds);
+    }
+
+    #[test]
+    fn dex_bounds_instruction_counter_overflow_checked() {
+        // audit_bytecode is the production counter path. code_offset = 0
+        // skips the instruction scan, so two u32::MAX counts reach the
+        // accumulator directly; a wrapping add would report success.
+        let raw = create_test_dex("Lorg/interos/Counter;", "m", "counter");
+        let base = DexPackage::parse(&raw).expect("fixture DEX must parse");
+        let mut forged = DexPackage {
+            raw: base.raw,
+            header: base.header,
+            strings: Vec::new(),
+            types: Vec::new(),
+            methods: Vec::new(),
+        };
+        for _ in 0..2 {
+            forged.methods.push(DexMethod {
+                method_index: 0,
+                class_name: String::from("Lorg/interos/Counter;"),
+                method_name: String::from("m"),
+                proto_shorty: String::from("V"),
+                is_direct: true,
+                registers_size: 0,
+                ins_size: 0,
+                outs_size: 0,
+                instruction_count: u32::MAX as usize,
+                code_offset: 0,
+            });
+        }
+        assert_eq!(forged.audit_bytecode(), Err(DexError::InstructionCountOverflow));
     }
 }
 

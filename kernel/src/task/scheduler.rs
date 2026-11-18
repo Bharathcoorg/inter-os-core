@@ -10,6 +10,7 @@
 //! guaranteeing zero lock contention or deadlocks across tasks.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::sync::Mutex;
 
 use super::{switch_context, TaskContext, TaskControlBlock, TaskId, TaskState};
@@ -52,13 +53,64 @@ pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 struct DeferredCleanup {
     id: TaskId,
     name: &'static str,
+    /// The owner uid established at termination, while the process record was
+    /// still live. `None` means no identity could be established; reclaim must
+    /// not guess one. See the notification tail of `reclaim_task`.
+    user_id: Option<u32>,
 }
 
-/// Bound on terminations awaiting reclaim. The kernel main loop drains the
-/// queue on every pass, so it only has to cover exits inside a single pass.
-const DEFERRED_CLEANUP_SLOTS: usize = 64;
-static DEFERRED_CLEANUP: Mutex<[Option<DeferredCleanup>; DEFERRED_CLEANUP_SLOTS]> =
-    Mutex::new([None; DEFERRED_CLEANUP_SLOTS]);
+/// Terminations awaiting reclaim.
+///
+/// WHY a growable queue and not a fixed array: the old 64-slot array dropped
+/// entries on overflow with only a serial warning, so a terminated task's
+/// delegated authority, IPC endpoints and consent records survived it --
+/// fail-open under load, and 64 exits inside one main-loop pass is reachable.
+/// Overflow is now impossible by construction: every task-creation path
+/// reserves capacity for its exit before publishing the task
+/// (`reserve_cleanup_slot`), each TaskId is queued at most once (dedup below,
+/// and a Zombie is never scheduled or terminated again), and draining only
+/// removes entries while capacity is never shrunk. The invariant is
+/// `capacity >= len + CLEANUP_RESERVATIONS`, so the push at termination never
+/// allocates and can never be refused.
+static DEFERRED_CLEANUP: Mutex<Vec<DeferredCleanup>> = Mutex::new(Vec::new());
+
+/// Outstanding reclaim reservations: one per created task that has not yet
+/// queued its exit. Every mutation of this counter happens under the
+/// `DEFERRED_CLEANUP` lock, alongside the length it is paired with.
+///
+/// WHY a counter and not just `try_reserve(1)` per spawn: `try_reserve`
+/// reserves relative to the CURRENT length, so reservations made while the
+/// queue is empty would all be satisfied by the same single slot of headroom
+/// and the second push would reallocate. Reserving for `reservations + 1`
+/// keeps the invariant above true across any interleaving of spawns, exits
+/// and drains.
+static CLEANUP_RESERVATIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Reserves capacity for one future reclaim entry, before the task exists.
+///
+/// WHY creation fails closed when this fails: a task whose exit could not be
+/// queued would keep live delegated authority after termination. Refusing to
+/// create it is the only outcome that leaks nothing; the reservation itself is
+/// fallible (`try_reserve`), so an exhausted heap refuses the spawn instead of
+/// panicking or halting inside the exit path later.
+fn reserve_cleanup_slot() -> bool {
+    let mut pending = DEFERRED_CLEANUP.lock();
+    let needed = CLEANUP_RESERVATIONS.load(Ordering::Relaxed).saturating_add(1);
+    if pending.try_reserve(needed).is_err() {
+        return false;
+    }
+    CLEANUP_RESERVATIONS.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Returns a reservation a failed creation never used. Without this a refused
+/// spawn would only over-reserve capacity, never under-reserve; releasing
+/// keeps the bound tight.
+fn release_cleanup_slot() {
+    let _ = CLEANUP_RESERVATIONS.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_sub(1))
+    });
+}
 
 /// Queues cross-subsystem reclaim for a task that has left the run queue.
 ///
@@ -70,18 +122,24 @@ static DEFERRED_CLEANUP: Mutex<[Option<DeferredCleanup>; DEFERRED_CLEANUP_SLOTS]
 /// the parallel task holding VFS never runs again and both spin forever. The
 /// task is only marked here; `run_deferred_cleanup` performs the reclaim in a
 /// context that owns no scheduler lock.
-pub fn defer_cleanup(id: TaskId, name: &'static str) {
+///
+/// `user_id` is captured by the caller at termination, never re-derived at
+/// reclaim time: by then the process record may already be released.
+pub fn defer_cleanup(id: TaskId, name: &'static str, user_id: Option<u32>) {
     let mut pending = DEFERRED_CLEANUP.lock();
-    if pending.iter().any(|slot| matches!(slot, Some(entry) if entry.id == id)) {
+    if pending.iter().any(|entry| entry.id == id) {
         return;
     }
-    match pending.iter_mut().find(|slot| slot.is_none()) {
-        Some(slot) => *slot = Some(DeferredCleanup { id, name }),
-        None => crate::serial_println!(
-            "[LIFECYCLE] deferred cleanup queue full; task {} resources not reclaimed",
-            id.0
-        ),
-    }
+    // Capacity for this entry was reserved when the task was created, so this
+    // push cannot allocate and cannot be refused. The assert pins that
+    // invariant in test builds; if it were ever broken, the push would go
+    // through the kernel allocator whose OOM policy halts loudly (lib.rs) --
+    // never a silent drop of a reclaim.
+    debug_assert!(pending.len() < pending.capacity());
+    let _ = CLEANUP_RESERVATIONS.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_sub(1))
+    });
+    pending.push(DeferredCleanup { id, name, user_id });
 }
 
 /// Reclaims resources of tasks that terminated since the last pass.
@@ -91,13 +149,7 @@ pub fn defer_cleanup(id: TaskId, name: &'static str) {
 /// nothing the scheduler needs and the timer can preempt it.
 pub fn run_deferred_cleanup() {
     loop {
-        let entry = {
-            let mut pending = DEFERRED_CLEANUP.lock();
-            match pending.iter_mut().find(|slot| slot.is_some()) {
-                Some(slot) => slot.take(),
-                None => return,
-            }
-        };
+        let entry = DEFERRED_CLEANUP.lock().pop();
         let Some(entry) = entry else { return; };
         reclaim_task(entry);
     }
@@ -125,10 +177,16 @@ fn reclaim_task(entry: DeferredCleanup) {
         if crate::task::process::live_threads_for_process(pid) <= 1 {
             let orphaned = crate::task::futex::FUTEX_MANAGER.lock().cleanup_process(pid);
             if !orphaned.is_empty() {
-                if let Some(mut sched) = SCHEDULER.try_lock() {
-                    for tid in orphaned {
-                        sched.unblock_task(tid);
-                    }
+                // WHY a blocking lock here and a `try_lock` on the tick path:
+                // `cleanup_process` has already REMOVED these waiters, so a
+                // dropped unblock list cannot be retried by a later tick -- the
+                // tasks would stay Blocked with nothing left to wake them. This
+                // function runs in task context owning no scheduler lock (see
+                // `run_deferred_cleanup`), and already takes `SCHEDULER.lock()`
+                // below for the shell lookup, so waiting here is safe.
+                let mut sched = SCHEDULER.lock();
+                for tid in orphaned {
+                    sched.unblock_task(tid);
                 }
             }
         }
@@ -160,10 +218,31 @@ fn reclaim_task(entry: DeferredCleanup) {
         }
     }
 
-    let user_id = crate::task::process::user_for_task(entry.id).unwrap_or(0);
-    crate::notification::NOTIFICATION_MANAGER
-        .lock()
-        .cancel_all_for_package(entry.name, user_id);
+    // WHY the uid is carried in the entry and never re-derived here: reclaim
+    // runs after the process record may already have been released -- the
+    // `process_for_task` lookup above returns None on that normal path -- so
+    // `user_for_task` here would answer None for a task whose owner was known
+    // at exit. The old `unwrap_or(0)` turned that into cancelling user 0's
+    // notifications for the package: a different account's data destroyed
+    // because the owner could not be resolved. `None` means no identity could
+    // be established at termination; such a task could never have posted its
+    // own notifications (syscall NotificationPost requires `caller_user_id`,
+    // the same accessor, and refuses None), so nothing of its own is left
+    // behind, and the failure is surfaced rather than guessed at. Neither
+    // uid 0 nor `cancel_all_for_package_all_users` is a safe default: both
+    // destroy records belonging to other accounts.
+    match entry.user_id {
+        Some(user_id) => {
+            crate::notification::NOTIFICATION_MANAGER
+                .lock()
+                .cancel_all_for_package(entry.name, user_id);
+        }
+        None => crate::serial_println!(
+            "[LIFECYCLE] task {} ({}) exited without an establishable user identity; its package notifications were not cancelled",
+            entry.id.0,
+            entry.name
+        ),
+    }
 }
 
 /// The multitasking scheduler managing all active OS threads and processes.
@@ -258,6 +337,13 @@ impl Scheduler {
         if self.initialized {
             return;
         }
+        // Even the primordial task must have a reclaim slot reserved before it
+        // exists. A failed reservation leaves the scheduler uninitialized, so
+        // nothing is scheduled -- fail closed rather than run a task whose
+        // exit could not be queued.
+        if !reserve_cleanup_slot() {
+            return;
+        }
         let main_task = TaskControlBlock::from_current("kernel_main", main_cap_table);
         let stack_top = main_task.kernel_stack_top();
         self.tasks.push(main_task);
@@ -290,6 +376,11 @@ impl Scheduler {
         priority: u8,
         parent_id: TaskId,
     ) -> TaskId {
+        // Reserve the exit's reclaim slot before the task exists; see
+        // `reserve_cleanup_slot`. A refused spawn creates no reclaim debt.
+        if !reserve_cleanup_slot() {
+            return TaskId(0);
+        }
         let mut tcb = TaskControlBlock::new(name, entry_point, cap_table, priority);
         tcb.parent_id = parent_id;
         let id = tcb.id;
@@ -303,6 +394,7 @@ impl Scheduler {
         if !ipc_registered {
             self.tasks.pop();
             crate::task::process::try_reap(id).ok();
+            release_cleanup_slot();
             return TaskId(0);
         }
         id
@@ -310,6 +402,11 @@ impl Scheduler {
 
     /// Spawns an existing TaskControlBlock (e.g. userspace process with isolated page table).
     pub fn spawn_task(&mut self, mut tcb: TaskControlBlock) -> TaskId {
+        // Reserve the exit's reclaim slot before the task exists; see
+        // `reserve_cleanup_slot`.
+        if !reserve_cleanup_slot() {
+            return TaskId(0);
+        }
         let id = tcb.id;
         tcb.cap_table.set_owner_task(id);
         if id == TaskId(0) {
@@ -331,6 +428,7 @@ impl Scheduler {
         if !ipc_registered {
             self.tasks.pop();
             crate::task::process::try_reap(id).ok();
+            release_cleanup_slot();
             return TaskId(0);
         }
         id
@@ -347,6 +445,11 @@ impl Scheduler {
         mut cap_table: CapabilityTable,
         priority: u8,
     ) -> Result<TaskId, &'static str> {
+        // Every user thread terminates through `defer_cleanup` too, so it
+        // needs its own reserved reclaim slot before it exists.
+        if !reserve_cleanup_slot() {
+            return Err("cleanup capacity unavailable");
+        }
         crate::task::process::reserve_thread(process_id)?;
         let shared_space = match self.tasks.iter()
             .find(|t| t.process_id == Some(process_id))
@@ -354,6 +457,7 @@ impl Scheduler {
             Some(space) => space,
             None => {
                 crate::task::process::cancel_thread_reservation(process_id);
+                release_cleanup_slot();
                 return Err("process has no userspace address space");
             }
         };
@@ -369,6 +473,7 @@ impl Scheduler {
         } else {
             if let Err(e) = crate::task::process::reserve_address_space(process_id, crate::task::user::USER_STACK_SIZE) {
                 crate::task::process::cancel_thread_reservation(process_id);
+                release_cleanup_slot();
                 return Err(e);
             }
             let mut pt = shared_space.lock();
@@ -378,6 +483,7 @@ impl Scheduler {
                 Err(e) => {
                     crate::task::process::cancel_thread_reservation(process_id);
                     crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
+                    release_cleanup_slot();
                     return Err(e);
                 }
             }
@@ -403,6 +509,7 @@ impl Scheduler {
                 Ok(())
             };
             crate::task::process::cancel_thread_reservation(process_id);
+            release_cleanup_slot();
             if rollback.is_err() {
                 return Err("thread stack rollback failed");
             }
@@ -420,6 +527,7 @@ impl Scheduler {
                 crate::task::process::release_address_space(process_id, crate::task::user::USER_STACK_SIZE);
             }
             crate::task::process::try_reap(id).ok();
+            release_cleanup_slot();
             return Err("IPC endpoint quota exceeded");
         }
         Ok(id)
@@ -591,6 +699,29 @@ impl Scheduler {
         }
     }
 
+    /// Removes a TCB a test case spawned, returning the scheduler it inherited.
+    ///
+    /// WHY the production reaper cannot do this: `reap_terminated` deliberately
+    /// skips the current task, and a case that spawns into an empty scheduler
+    /// leaves its own task AT `current_idx` -- so the TCB survives every reap.
+    /// The next case then inherits an application task as "current", its
+    /// capability checks resolve against that identity instead of its own, and
+    /// it passes or fails depending on suite order.
+    #[cfg(test)]
+    pub(crate) fn drop_test_task(&mut self, task: TaskId) -> bool {
+        let Some(i) = self.tasks.iter().position(|t| t.id == task) else {
+            return false;
+        };
+        self.tasks.remove(i);
+        if i < self.current_idx {
+            self.current_idx -= 1;
+        }
+        if self.current_idx >= self.tasks.len() {
+            self.current_idx = self.tasks.len().saturating_sub(1);
+        }
+        true
+    }
+
     /// Reclaims orphaned zombies whose parent is TaskId(0) and are not the current task.
     ///
     /// When a parent process terminates before its children, live children are reparented
@@ -755,7 +886,21 @@ impl Scheduler {
         if task_id != TaskId(0) {
             crate::task::process::mark_zombie(task_id, self.tasks[current_idx].exit_code);
         }
-        defer_cleanup(task_id, self.tasks[current_idx].name);
+        // WHY the uid is captured here and not at reclaim: the process record
+        // is still live at termination, and reclaim may run after it has been
+        // released. SCHEDULER -> PROCESS_TABLE is the order this path already
+        // uses (`mark_zombie` just above and `release_address_space` earlier
+        // take PROCESS_TABLE under SCHEDULER); no path holds a process table
+        // across a blocking SCHEDULER lock -- process.rs drops its table
+        // guards before touching the scheduler or uses try_lock -- so the
+        // capture introduces no new lock-order edge. `user_for_task` reads
+        // THREAD_TABLE with a bounded fail-safe try_lock spin, and a None
+        // answer is carried as None, never defaulted.
+        defer_cleanup(
+            task_id,
+            self.tasks[current_idx].name,
+            crate::task::process::user_for_task(task_id),
+        );
 
         // Audit capability telemetry before table revocation
         let total_cap_invocations: u64 = (0..self.tasks[current_idx].cap_table.capacity())
@@ -832,21 +977,33 @@ impl Scheduler {
             if suspended > 0 {
                 crate::serial_println!("[LIFECYCLE] Suspended {} background application(s) after budget exhaustion.", suspended);
             }
-            if let Some(current) = self.tasks.get(self.current_idx) {
-                let blocked = current.process_id
-                    .and_then(crate::task::process::record_for_process)
-                    .map(|r| r.state == crate::task::process::ProcessState::Suspended)
-                    .unwrap_or(false);
-                if blocked {
-                    let current_id = current.id;
-                    if let Some(task) = self.tasks.iter_mut().find(|t| t.id == current_id) {
-                        task.state = TaskState::Blocked;
-                    }
-                }
-            }
+            self.park_current_if_budget_suspended();
             self.prepare_switch()
         } else {
             (None, None)
+        }
+    }
+
+    /// Parks the current task when the background budget suspended its process.
+    ///
+    /// WHY a pending kill is exempt: `request_kill` unblocks a parked task so it
+    /// can run to the cooperative exit gate at syscall return. Re-parking it here
+    /// because its process is still Suspended would strand it in front of that
+    /// gate -- the kill would never complete, and the task's capabilities, IPC
+    /// endpoints and mappings would never be reclaimed. Termination outranks the
+    /// budget: the task is leaving anyway.
+    fn park_current_if_budget_suspended(&mut self) {
+        let Some(current) = self.tasks.get(self.current_idx) else { return };
+        let suspended = current.process_id
+            .and_then(crate::task::process::record_for_process)
+            .map(|r| r.state == crate::task::process::ProcessState::Suspended)
+            .unwrap_or(false);
+        if !suspended || current.pending_kill {
+            return;
+        }
+        let current_id = current.id;
+        if let Some(task) = self.tasks.iter_mut().find(|t| t.id == current_id) {
+            task.state = TaskState::Blocked;
         }
     }
 
@@ -881,7 +1038,9 @@ impl Scheduler {
         task.exit_code = exit_code;
         task.state = TaskState::Zombie;
         crate::task::process::mark_zombie(id, exit_code);
-        defer_cleanup(id, task_name);
+        // Capture the owner while the process record is live; see the same
+        // capture in `prepare_terminate` for the lock-order argument.
+        defer_cleanup(id, task_name, crate::task::process::user_for_task(id));
 
         // Reparent live children to primordial init so a dead parent cannot leave
         // an unreapable child/zombie subtree behind.
@@ -1058,14 +1217,9 @@ pub fn yield_now() -> bool {
 pub fn on_timer_tick(elapsed_ms: u64) {
     let ticks = crate::interrupts::get_system_ticks();
     if let Some(mut fm) = crate::task::futex::FUTEX_MANAGER.try_lock() {
-        let timed_out = fm.check_timeouts(ticks);
-        if !timed_out.is_empty() {
-            if let Some(mut sched) = SCHEDULER.try_lock() {
-                for tid in timed_out {
-                    sched.unblock_task(tid);
-                }
-            }
-        }
+        let expired = fm.take_timeouts(ticks);
+        let mut sched_guard = SCHEDULER.try_lock();
+        dispatch_futex_timeouts(&mut fm, expired, sched_guard.as_deref_mut());
     }
 
     let (prev, next) = {
@@ -1079,6 +1233,50 @@ pub fn on_timer_tick(elapsed_ms: u64) {
     if let (Some(prev_ptr), Some(next_ptr)) = (prev, next) {
         unsafe {
             switch_context(prev_ptr, next_ptr);
+        }
+    }
+}
+
+/// Delivers expired futex waiters to the scheduler, or hands their deadlines back.
+///
+/// WHY the restore rather than a dropped list: `take_timeouts` CONSUMES each
+/// deadline it reports. If the wake cannot be delivered, a consumed deadline means
+/// no later tick will ever report that waiter again, so it stays Blocked until an
+/// explicit wake or process exit even though its timeout expired. Restoring re-arms
+/// it for the next tick -- the same retry contract `event::on_timer_tick` keeps with
+/// `is_waiting`.
+///
+/// Two cases cannot be delivered:
+/// * the scheduler lock is held by the task this interrupt landed on (`sched` is
+///   `None`), so no task state can be touched at all;
+/// * the waiter is published but its task has not reached `block_task` yet. It is
+///   still Running/Ready, `unblock_task` would be a no-op, and consuming the
+///   deadline would strand it the moment it parks.
+///
+/// A task that is gone, Zombie or Terminated has nothing left to wake: its expiry
+/// is consumed so a stale entry cannot be reported on every tick.
+///
+/// `sched` is the guard the tick managed to take, if any. Both locks are only ever
+/// `try_lock`ed here: this runs in interrupt context.
+fn dispatch_futex_timeouts(
+    fm: &mut crate::task::futex::FutexManager,
+    expired: crate::task::futex::FutexTimeouts,
+    sched: Option<&mut Scheduler>,
+) {
+    if expired.is_empty() {
+        return;
+    }
+    let Some(sched) = sched else {
+        fm.restore_timeouts(&expired);
+        return;
+    };
+    for &(tid, deadline_ticks) in expired.as_slice() {
+        match sched.get_task(tid).map(|t| t.state) {
+            Some(TaskState::Blocked) => sched.unblock_task(tid),
+            Some(TaskState::Running) | Some(TaskState::Ready) => {
+                fm.restore_timeout(tid, deadline_ticks);
+            }
+            _ => {}
         }
     }
 }
@@ -1118,16 +1316,24 @@ pub fn terminate_current() -> ! {
 }
 
 /// Returns whether the current task has a pending kill request waiting to be processed.
-/// Retries with bounded backoff if contested, falling back to lock acquisition to guarantee
-/// that a pending termination is never missed at the user-kernel privilege boundary.
+///
+/// WHY this never falls back to a blocking lock: the timer handler calls it on the
+/// return-to-Ring3 path, and `SCHEDULER.lock()` in interrupt context spins forever
+/// whenever the interrupt landed inside a scheduler critical section of the task
+/// it interrupted -- one CPU, so no other core can release it. `crate::sync` states
+/// that rule for every lock the tick path takes.
+///
+/// A contended answer is `false`, which postpones the kill by at most one gate: the
+/// flag stays set, so the next syscall return or timer tick reads it again. The
+/// task is back in Ring 3 in the meantime, and every later syscall re-runs the gate.
 pub fn is_current_pending_kill() -> bool {
-    for _ in 0..16 {
+    for _ in 0..64 {
         if let Some(s) = SCHEDULER.try_lock() {
             return s.is_current_pending_kill();
         }
         core::hint::spin_loop();
     }
-    SCHEDULER.lock().is_current_pending_kill()
+    false
 }
 
 #[cfg(test)]
@@ -1755,6 +1961,697 @@ mod tests {
 
         // 3. Syscall exit gate evaluates is_current_pending_kill() without deadlocking
         // or holding the kernel test lock.
+    }
+
+    // ------------------------------------------------------------------
+    // Futex timeout delivery on the tick path (H8).
+    //
+    // `dispatch_futex_timeouts` is the whole of the tick's futex decision, and
+    // `None` is exactly what `SCHEDULER.try_lock()` yields when the interrupt
+    // landed on a task holding the scheduler. A local scheduler and manager keep
+    // the case deterministic: the global ones belong to whichever test runs next.
+    // ------------------------------------------------------------------
+
+    /// Spawns one task, parks it Blocked, and registers a futex waiter for it.
+    fn parked_futex_waiter(
+        sched: &mut Scheduler,
+        fm: &mut crate::task::futex::FutexManager,
+        name: &'static str,
+        deadline_ticks: u64,
+    ) -> (TaskId, crate::task::process::ProcessId, u64) {
+        let tid = sched.spawn(name, dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
+        assert_ne!(tid, TaskId(0));
+        let pid = sched.get_task(tid).unwrap().process_id.expect("spawn registered a process");
+        let uaddr = 0x9000_1000;
+        sched.block_task(tid);
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Blocked);
+        fm.add_waiter(tid, pid, uaddr, deadline_ticks);
+        (tid, pid, uaddr)
+    }
+
+    /// Releases the process, thread and IPC records a case registered globally.
+    ///
+    /// WHY the IPC reclaim is explicit: host cases never run `run_deferred_cleanup`,
+    /// so `terminate_task` only queues the reclaim. Without this the mailbox and
+    /// inbound endpoint `spawn` registered would outlive the case in the global
+    /// router, and the next case to enumerate endpoints would see a dead task's.
+    fn retire(sched: &mut Scheduler, tid: TaskId) {
+        let idx = sched.tasks.iter().position(|t| t.id == tid).unwrap();
+        if sched.current_idx == idx {
+            sched.current_idx = 0;
+        }
+        crate::ipc::cleanup_task(tid);
+        let _ = crate::task::process::wake(tid);
+        let _ = sched.terminate_task(tid, 0);
+        let _ = sched.reap_child(TaskId(0), tid);
+    }
+
+    #[test]
+    fn futex_timeout_unblocks_a_blocked_waiter() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        let mut fm = crate::task::futex::FutexManager::new();
+        let (tid, _pid, _uaddr) = parked_futex_waiter(&mut sched, &mut fm, "futex_timeout_ok", 100);
+
+        let expired = fm.take_timeouts(150);
+        assert_eq!(expired.as_slice(), &[(tid, 100)][..]);
+        dispatch_futex_timeouts(&mut fm, expired, Some(&mut sched));
+
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Ready);
+        fm.cleanup_task(tid);
+        retire(&mut sched, tid);
+    }
+
+    /// H8: a contended scheduler lock must not consume the timeout. The waiter
+    /// stays Blocked on that tick and still times out on a later one.
+    #[test]
+    fn contended_scheduler_lock_restores_the_deadline_for_a_later_tick() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        let mut fm = crate::task::futex::FutexManager::new();
+        let (tid, _pid, _uaddr) = parked_futex_waiter(&mut sched, &mut fm, "futex_timeout_contended", 100);
+
+        // Tick 1: the scheduler lock is held elsewhere, so the wake cannot land.
+        let first = fm.take_timeouts(150);
+        assert_eq!(first.len(), 1);
+        dispatch_futex_timeouts(&mut fm, first, None);
+        assert_eq!(
+            sched.get_task(tid).unwrap().state,
+            TaskState::Blocked,
+            "a contended tick must not claim it delivered the wake"
+        );
+
+        // Tick 2, still contended: the waiter must be reported AGAIN. With the
+        // deadline dropped this batch is empty and the waiter sleeps forever.
+        let second = fm.take_timeouts(151);
+        assert_eq!(
+            second.as_slice(),
+            &[(tid, 100)][..],
+            "the consumed deadline was dropped: no later tick can time this waiter out"
+        );
+        dispatch_futex_timeouts(&mut fm, second, None);
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Blocked);
+
+        // Tick 3: the lock is free and the timeout is finally delivered.
+        let third = fm.take_timeouts(152);
+        assert_eq!(third.len(), 1);
+        dispatch_futex_timeouts(&mut fm, third, Some(&mut sched));
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Ready);
+
+        fm.cleanup_task(tid);
+        retire(&mut sched, tid);
+    }
+
+    /// A waiter whose deadline has not passed is neither woken nor re-armed by a
+    /// contended tick.
+    #[test]
+    fn contended_tick_leaves_an_unexpired_waiter_alone() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        let mut fm = crate::task::futex::FutexManager::new();
+        let (tid, _pid, _uaddr) = parked_futex_waiter(&mut sched, &mut fm, "futex_not_expired", 500);
+
+        let expired = fm.take_timeouts(150);
+        assert!(expired.is_empty());
+        dispatch_futex_timeouts(&mut fm, expired, None);
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Blocked);
+
+        let later = fm.take_timeouts(500);
+        assert_eq!(later.as_slice(), &[(tid, 500)][..], "the original deadline must survive untouched");
+        fm.cleanup_task(tid);
+        retire(&mut sched, tid);
+    }
+
+    /// A waiter can be published before its task reaches `block_task` (the tick
+    /// preempted it in between). `unblock_task` is a no-op on a Running/Ready
+    /// task, so consuming the deadline there would strand it as soon as it parks.
+    #[test]
+    fn timeout_of_a_waiter_that_has_not_parked_yet_is_retried() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        let mut fm = crate::task::futex::FutexManager::new();
+        let tid = sched.spawn("futex_not_parked", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
+        let pid = sched.get_task(tid).unwrap().process_id.expect("process registered");
+        let uaddr = 0x9000_1000;
+        fm.add_waiter(tid, pid, uaddr, 100);
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Ready);
+
+        let expired = fm.take_timeouts(150);
+        assert_eq!(expired.len(), 1);
+        dispatch_futex_timeouts(&mut fm, expired, Some(&mut sched));
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Ready);
+
+        // The deadline must still be armed for the tick that lands after parking.
+        let again = fm.take_timeouts(151);
+        assert_eq!(
+            again.as_slice(),
+            &[(tid, 100)][..],
+            "the expiry was consumed while the task was still runnable"
+        );
+
+        sched.block_task(tid);
+        dispatch_futex_timeouts(&mut fm, again, Some(&mut sched));
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Ready, "the parked waiter must time out");
+
+        fm.cleanup_task(tid);
+        retire(&mut sched, tid);
+    }
+
+    /// An expired waiter whose task already died is consumed, not re-reported on
+    /// every tick, and the wake must not resurrect the zombie.
+    #[test]
+    fn expiry_of_a_dead_waiter_is_consumed_and_cannot_resurrect_it() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        let mut fm = crate::task::futex::FutexManager::new();
+        let (tid, _pid, _uaddr) = parked_futex_waiter(&mut sched, &mut fm, "futex_dead_waiter", 100);
+        sched.terminate_task(tid, 0).expect("terminate the parked waiter");
+
+        let expired = fm.take_timeouts(150);
+        assert_eq!(expired.len(), 1);
+        dispatch_futex_timeouts(&mut fm, expired, Some(&mut sched));
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Zombie);
+        assert!(
+            fm.take_timeouts(151).is_empty(),
+            "a stale expiry must not be re-reported on every tick"
+        );
+
+        fm.cleanup_task(tid);
+        retire(&mut sched, tid);
+    }
+
+    // ------------------------------------------------------------------
+    // Termination of a task parked in a futex wait.
+    // ------------------------------------------------------------------
+
+    /// A task blocked on an infinite futex wait must be terminable: the kill
+    /// unblocks it, its authority is revoked, its waiter is reclaimed, and a
+    /// repeated wake after exit cannot resurrect it.
+    #[test]
+    fn kill_of_a_blocked_futex_waiter_unblocks_terminates_and_reclaims() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        let mut fm = crate::task::futex::FutexManager::new();
+        let (tid, pid, uaddr) = parked_futex_waiter(&mut sched, &mut fm, "futex_kill_victim", 0);
+
+        // One live authority, so revocation on termination is observable.
+        sched.get_task_mut(tid).unwrap().cap_table.insert(crate::capability::Capability {
+            id: crate::capability::CapabilityId(0x00C0_FFEE_F00D),
+            cap_type: crate::capability::CapabilityType::StorageRawBlock,
+            rights: crate::capability::Rights::READ | crate::capability::Rights::INVOKE,
+            object_id: 0,
+        }).expect("insert capability");
+        assert_eq!(sched.get_task(tid).unwrap().cap_table.count(), 1);
+
+        // Cooperative kill of a Blocked waiter: it must become dispatchable.
+        sched.request_kill(tid, -9).expect("kill a blocked futex waiter");
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Ready);
+        assert!(sched.get_task(tid).unwrap().pending_kill);
+        assert_eq!(sched.get_task(tid).unwrap().exit_code, -9);
+
+        // The unwind inside sys_futex_wait: an infinite deadline never expired and
+        // no wake arrived, so the waiter reports a timeout, not a successful wake.
+        assert!(!fm.remove_waiter(tid));
+
+        // Syscall-return gate -> terminate: Zombie, authority gone, not schedulable.
+        sched.terminate_task(tid, -9).expect("terminate the killed waiter");
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Zombie);
+        assert_eq!(sched.get_task(tid).unwrap().cap_table.count(), 0, "termination must revoke all authority");
+        assert_eq!(sched.active_task_count(), 1, "a zombie must not stay schedulable");
+
+        // Deferred reclaim drops the wait state; a late wake finds nobody.
+        fm.cleanup_task(tid);
+        assert!(fm.wake(pid, uaddr, 10).is_empty(), "a wake after exit must not reach the dead task");
+        sched.unblock_task(tid);
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Zombie, "a late unblock must not resurrect a zombie");
+
+        // Repeated kill requests after termination stay idempotent no-ops: the
+        // state and the exit code the parent will reap are both untouched.
+        assert_eq!(sched.request_kill(tid, 1), Ok(()));
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Zombie);
+        assert_eq!(sched.get_task(tid).unwrap().exit_code, -9, "a late kill must not rewrite the recorded exit code");
+
+        assert_eq!(sched.reap_child(TaskId(0), tid).expect("reap the killed waiter"), -9);
+        assert!(sched.get_task(tid).is_none());
+        assert!(crate::task::process::process_for_task(tid).is_none());
+        crate::ipc::cleanup_task(tid);
+    }
+
+    /// A whole process exiting must not leave its parked waiters behind: the
+    /// purge reports them and unblocking is applied to every one of them.
+    #[test]
+    fn process_exit_purges_every_parked_waiter() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        let mut fm = crate::task::futex::FutexManager::new();
+        let (leader, pid, uaddr) = parked_futex_waiter(&mut sched, &mut fm, "futex_proc_leader", 0);
+        let sibling = sched.spawn("futex_proc_sibling", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 5);
+        sched.block_task(sibling);
+        fm.add_waiter(sibling, pid, uaddr, 0);
+
+        let orphaned = fm.cleanup_process(pid);
+        assert_eq!(orphaned.len(), 2);
+        for tid in orphaned {
+            sched.unblock_task(tid);
+        }
+        assert_eq!(sched.get_task(leader).unwrap().state, TaskState::Ready);
+        assert_eq!(sched.get_task(sibling).unwrap().state, TaskState::Ready);
+        assert!(fm.wake(pid, uaddr, 10).is_empty());
+
+        retire(&mut sched, leader);
+        retire(&mut sched, sibling);
+    }
+
+    /// A pending kill outranks the background budget: re-parking the task because
+    /// its process is Suspended would strand it in front of its exit gate.
+    #[test]
+    fn pending_kill_is_not_reparked_by_the_suspended_budget() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        let tid = sched.spawn("budget_kill_victim", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 16), 6);
+        let pid = sched.get_task(tid).unwrap().process_id.expect("process registered");
+
+        // The budget path only ever looks at the current task.
+        sched.current_idx = sched.tasks.iter().position(|t| t.id == tid).unwrap();
+        crate::task::process::suspend(tid, 0).expect("suspend the victim's process");
+        assert_eq!(
+            crate::task::process::record_for_process(pid).unwrap().state,
+            crate::task::process::ProcessState::Suspended
+        );
+
+        sched.get_task_mut(tid).unwrap().state = TaskState::Running;
+        sched.park_current_if_budget_suspended();
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Blocked, "a suspended process parks its current task");
+
+        sched.request_kill(tid, -9).expect("kill the parked task");
+        assert_eq!(sched.get_task(tid).unwrap().state, TaskState::Ready);
+
+        // Dispatched again, still inside the suspended process: it must be allowed
+        // to run to the syscall-return gate instead of being parked again.
+        sched.get_task_mut(tid).unwrap().state = TaskState::Running;
+        sched.park_current_if_budget_suspended();
+        assert_eq!(
+            sched.get_task(tid).unwrap().state,
+            TaskState::Running,
+            "a pending kill was re-parked by the budget and can never reach its exit gate"
+        );
+
+        retire(&mut sched, tid);
+    }
+
+    /// The defect this pins: `live_threads_for_process` returned 0 when it lost
+    /// the `THREAD_TABLE` race, and `reclaim_task` purges a whole process's futex
+    /// waiters on `count <= 1`. A fabricated 0 therefore destroyed the wait state
+    /// of siblings that were still running and woke them on a condition that had
+    /// not changed.
+    ///
+    /// WHAT THIS EXERCISES: the count the purge decision is actually made on,
+    /// with live siblings present, and the predicate itself.
+    ///
+    /// WHAT IT CANNOT EXERCISE: the contention window. The count is now read
+    /// under a blocking lock, so holding the table and calling it from this
+    /// thread would deadlock rather than reproduce the old race. The source pin
+    /// below is what forbids the fabricated fallback from returning.
+    #[test]
+    fn a_process_with_live_siblings_is_not_counted_as_exiting() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let pid = crate::task::ProcessId(0x5E17_0001);
+        let siblings = [TaskId(0x5E17_1001), TaskId(0x5E17_1002)];
+
+        let mut placed = 0usize;
+        {
+            let mut threads = crate::task::process::THREAD_TABLE.lock();
+            for slot in threads.iter_mut() {
+                if slot.is_none() && placed < siblings.len() {
+                    *slot = Some(crate::task::process::ThreadRecord {
+                        task: siblings[placed],
+                        process: pid,
+                    });
+                    placed += 1;
+                }
+            }
+        }
+        assert_eq!(placed, siblings.len(), "the thread table had no room for this case's siblings");
+
+        let live = crate::task::process::live_threads_for_process(pid);
+        assert_eq!(live, siblings.len(), "a live sibling must be counted, not skipped");
+        assert!(
+            live > 1,
+            "reclaim_task purges a process's futex waiters on count <= 1, so this \
+             count would destroy the wait state of siblings that are still running"
+        );
+
+        {
+            let mut threads = crate::task::process::THREAD_TABLE.lock();
+            for slot in threads.iter_mut() {
+                if slot.as_ref().is_some_and(|r| r.process == pid) {
+                    *slot = None;
+                }
+            }
+        }
+        assert_eq!(crate::task::process::live_threads_for_process(pid), 0);
+
+        let src = include_str!("process.rs");
+        let start = src.find("pub fn live_threads_for_process(")
+            .expect("live_threads_for_process must exist for the purge decision to be made");
+        let end = src[start..].find("\n}\n").expect("the function body must be closed") + start;
+        let body = &src[start..end];
+        assert!(
+            body.contains("THREAD_TABLE.lock()") && !body.contains("try_lock"),
+            "the thread count must be read under a blocking lock: a try_lock \
+             fallback returns a 0 that is indistinguishable from 'last thread left'"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Deferred reclaim: no terminated task may ever escape it.
+    //
+    // These cases drive the production path end to end: `terminate_task`
+    // queues through `defer_cleanup` exactly as the syscall exit gate does,
+    // and `run_deferred_cleanup` is the same drain the kernel main loop and
+    // `terminate_current` call. The observable is the kernel-wide delegation
+    // registry: only `capability::cleanup_task` inside `reclaim_task`
+    // revokes a departed grantee's leases and publishes the revocation, so
+    // a lease that stays live after the drain is a reclaim that never ran.
+    // ------------------------------------------------------------------
+
+    /// Registers one live delegated lease naming `grantee` as its holder.
+    fn live_lease_for(grantee: TaskId) -> u64 {
+        let parent = crate::capability::Capability {
+            id: crate::capability::CapabilityId(0x0DEF_ACE0_0000_0001),
+            cap_type: crate::capability::CapabilityType::SerialOutput,
+            rights: crate::capability::Rights::READ | crate::capability::Rights::GRANT,
+            object_id: 0x0DEF,
+        };
+        let lease_id = crate::capability::delegation::allocate_lease_id();
+        let lease = crate::capability::delegation::DelegatedLease::new(
+            lease_id,
+            &parent,
+            TaskId(0),
+            grantee,
+            crate::capability::Rights::READ,
+            8,
+            100_000,
+            crate::interrupts::get_system_ticks(),
+        )
+        .expect("lease construction");
+        assert!(
+            crate::capability::delegation::register_lease(lease),
+            "the delegation registry had no room for this case's lease"
+        );
+        lease_id
+    }
+
+    /// Whether this case's entries are still awaiting reclaim.
+    fn queued_ids(ids: &[TaskId]) -> usize {
+        DEFERRED_CLEANUP
+            .lock()
+            .iter()
+            .filter(|entry| ids.contains(&entry.id))
+            .count()
+    }
+
+    /// More terminations than the old fixed queue could hold must every one
+    /// reach reclaim.
+    ///
+    /// WHY this is the defect and not a leak: the old 64-slot array answered
+    /// overflow with a serial warning and dropped the entry, so the 65th and
+    /// later departed tasks kept live delegated leases in the kernel-wide
+    /// registry -- `has_permission` kept answering for a dead task. The drain
+    /// below is the production drain; the leases are the authority that must
+    /// not survive it.
+    #[test]
+    fn every_termination_past_the_old_queue_bound_is_reclaimed() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        // Drain anything an earlier case queued so this case observes only
+        // its own terminations.
+        run_deferred_cleanup();
+
+        // The old bound was 64; six more exits than it could hold.
+        const EXITS: usize = 70;
+        let mut victims: Vec<(TaskId, u64)> = Vec::new();
+        for _ in 0..EXITS {
+            let tid = sched.spawn(
+                "reclaim_overflow_probe",
+                dummy_test_entry,
+                CapabilityTable::new_for_task(TaskId::new(), 16),
+                5,
+            );
+            assert_ne!(tid, TaskId(0), "spawn refused under the process table budget");
+            let lease_id = live_lease_for(tid);
+            assert!(crate::capability::delegation::is_lease_active(
+                lease_id,
+                crate::interrupts::get_system_ticks()
+            ));
+            victims.push((tid, lease_id));
+        }
+        let ids: Vec<TaskId> = victims.iter().map(|&(tid, _)| tid).collect();
+
+        for &(tid, _) in &victims {
+            sched.terminate_task(tid, 0).expect("terminate the probe");
+        }
+        assert_eq!(
+            queued_ids(&ids),
+            EXITS,
+            "a termination was refused a reclaim slot: the queue dropped an exit"
+        );
+        // Termination alone revokes the task's own table, never the registry:
+        // every lease must still be live here, so the revocations asserted
+        // after the drain can only have come from `reclaim_task`.
+        for &(_, lease_id) in &victims {
+            assert!(
+                crate::capability::delegation::is_lease_active(
+                    lease_id,
+                    crate::interrupts::get_system_ticks()
+                ),
+                "a lease was revoked before reclaim ran; the observable is no longer isolated"
+            );
+        }
+
+        run_deferred_cleanup();
+
+        assert_eq!(queued_ids(&ids), 0, "the drain left entries behind");
+        for &(tid, lease_id) in &victims {
+            assert!(
+                crate::capability::capability_revoked(
+                    crate::capability::delegation::lease_capability_id(lease_id)
+                ),
+                "task {} kept live delegated authority after termination: its reclaim was dropped",
+                tid.0
+            );
+        }
+
+        // A second pass is a no-op: nothing is queued and nothing is reclaimed
+        // twice.
+        run_deferred_cleanup();
+        assert_eq!(queued_ids(&ids), 0);
+
+        reap_orphans_until_quiet(&mut sched);
+        crate::capability::delegation::prune(crate::interrupts::get_system_ticks());
+    }
+
+    /// A task is queued once even if termination is requested twice, and the
+    /// drain reclaims it exactly once.
+    #[test]
+    fn a_termination_is_queued_once_and_reclaimed_once() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        run_deferred_cleanup();
+
+        let tid = sched.spawn(
+            "reclaim_dedup_probe",
+            dummy_test_entry,
+            CapabilityTable::new_for_task(TaskId::new(), 16),
+            5,
+        );
+        assert_ne!(tid, TaskId(0));
+        let lease_id = live_lease_for(tid);
+        let ids = [tid];
+
+        sched.terminate_task(tid, 0).expect("terminate");
+        // A repeated termination is an idempotent no-op, and a repeated defer
+        // for the same id must not queue a second reclaim.
+        sched.terminate_task(tid, 0).expect("idempotent terminate");
+        defer_cleanup(tid, "reclaim_dedup_probe", None);
+        assert_eq!(queued_ids(&ids), 1, "one task queued more than one reclaim");
+
+        run_deferred_cleanup();
+        assert!(crate::capability::capability_revoked(
+            crate::capability::delegation::lease_capability_id(lease_id)
+        ));
+        assert_eq!(queued_ids(&ids), 0);
+        run_deferred_cleanup();
+        assert_eq!(queued_ids(&ids), 0, "a reclaimed task was queued again");
+
+        let _ = sched.reap_child(TaskId(0), tid);
+        crate::capability::delegation::prune(crate::interrupts::get_system_ticks());
+    }
+
+    /// Posts one notification into the global store under `package`/`uid`.
+    fn post_global_notification(package: &str, uid: u32) {
+        let mut nm = crate::notification::NOTIFICATION_MANAGER.lock();
+        nm.seed_standard_channels();
+        nm.post(
+            package,
+            uid,
+            "system",
+            "title",
+            "body",
+            crate::notification::NotificationPriority::Default,
+            crate::notification::LockscreenVisibility::Public,
+            1,
+            crate::interrupts::get_system_ticks(),
+        )
+        .expect("the global notification store refused this case's post");
+    }
+
+    /// Whether the global store holds a record for `package`/`uid`.
+    fn global_notification_present(package: &str, uid: u32) -> bool {
+        crate::notification::NOTIFICATION_MANAGER
+            .lock()
+            .query_active(uid, false)
+            .iter()
+            .any(|r| r.package_id == package)
+    }
+
+    /// Reclaim must cancel the dead task's OWN account's notifications and
+    /// never another account's, even when the process record is already gone
+    /// by the time the drain runs.
+    ///
+    /// WHY the record is released before the drain: that is the normal path,
+    /// not a contention edge -- `reap_child`/`reap_orphans` release the process
+    /// record while the deferred entry is still queued. The old code re-derived
+    /// the uid at reclaim time, got None, and `unwrap_or(0)` cancelled user 0's
+    /// notifications for the package: a different account's data destroyed,
+    /// while the dead task's own records survived.
+    #[test]
+    fn reclaim_cancels_the_captured_owner_and_never_user_zero() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        run_deferred_cleanup();
+
+        const PKG: &str = "org.interos.reclaimprobe";
+        const OTHER_PKG: &str = "org.interos.reclaimprobe.other";
+        const OWNER: u32 = 1000;
+        {
+            let mut nm = crate::notification::NOTIFICATION_MANAGER.lock();
+            nm.cancel_all_for_package_all_users(PKG);
+            nm.cancel_all_for_package_all_users(OTHER_PKG);
+        }
+        post_global_notification(PKG, 0);
+        post_global_notification(PKG, OWNER);
+        post_global_notification(OTHER_PKG, OWNER);
+
+        let tid = sched.spawn(
+            PKG,
+            dummy_test_entry,
+            CapabilityTable::new_for_task(TaskId::new(), 16),
+            5,
+        );
+        assert_ne!(tid, TaskId(0));
+        crate::task::process::bind_user_for_task(tid, OWNER).expect("bind the owner uid");
+        assert_eq!(crate::task::process::user_for_task(tid), Some(OWNER));
+
+        sched.terminate_task(tid, 0).expect("terminate");
+        assert_eq!(
+            DEFERRED_CLEANUP.lock().iter().find(|e| e.id == tid).map(|e| e.user_id),
+            Some(Some(OWNER)),
+            "the exit did not capture the owner uid while the process record was live"
+        );
+
+        // Release the process record BEFORE reclaim runs, exactly as a parent
+        // reap or the orphan reaper does. The owner is now unresolvable.
+        sched.reap_child(TaskId(0), tid).expect("reap the child");
+        assert!(
+            crate::task::process::user_for_task(tid).is_none(),
+            "the precondition is broken: the owner is still resolvable at reclaim time"
+        );
+
+        run_deferred_cleanup();
+
+        assert!(
+            global_notification_present(PKG, 0),
+            "user 0's notification for {} was destroyed by a reclaim that could not resolve the owner",
+            PKG
+        );
+        assert!(
+            !global_notification_present(PKG, OWNER),
+            "the dead task's own notification survived reclaim: the privacy leak the cancellation exists to prevent"
+        );
+        assert!(
+            global_notification_present(OTHER_PKG, OWNER),
+            "the cancellation reached beyond the dead task's package"
+        );
+
+        let mut nm = crate::notification::NOTIFICATION_MANAGER.lock();
+        nm.cancel_all_for_package_all_users(PKG);
+        nm.cancel_all_for_package_all_users(OTHER_PKG);
+    }
+
+    /// When no owner uid can be established at termination, reclaim cancels
+    /// nothing and surfaces the failure -- it must not guess uid 0 and must
+    /// not fall back to the all-users cancellation.
+    #[test]
+    fn reclaim_without_an_establishable_owner_cancels_nothing() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        run_deferred_cleanup();
+
+        const PKG: &str = "org.interos.reclaimunknown";
+        {
+            let mut nm = crate::notification::NOTIFICATION_MANAGER.lock();
+            nm.cancel_all_for_package_all_users(PKG);
+        }
+        post_global_notification(PKG, 0);
+        post_global_notification(PKG, 1000);
+
+        let tid = sched.spawn(
+            PKG,
+            dummy_test_entry,
+            CapabilityTable::new_for_task(TaskId::new(), 16),
+            5,
+        );
+        assert_ne!(tid, TaskId(0));
+        // Release the process record while the task is still registered: at
+        // termination no accessor can establish an owner for it.
+        crate::task::process::reap(tid).expect("release the process record");
+        assert!(crate::task::process::user_for_task(tid).is_none());
+
+        sched.terminate_task(tid, 0).expect("terminate");
+        assert_eq!(
+            DEFERRED_CLEANUP.lock().iter().find(|e| e.id == tid).map(|e| e.user_id),
+            Some(None),
+            "an unresolvable owner must be carried as None, never defaulted"
+        );
+
+        run_deferred_cleanup();
+
+        assert!(
+            global_notification_present(PKG, 0),
+            "the unknown-owner fallback destroyed user 0's notifications"
+        );
+        assert!(
+            global_notification_present(PKG, 1000),
+            "the unknown-owner fallback destroyed another account's notifications"
+        );
+
+        let mut nm = crate::notification::NOTIFICATION_MANAGER.lock();
+        nm.cancel_all_for_package_all_users(PKG);
+        drop(nm);
+        let _ = sched.reap_child(TaskId(0), tid);
     }
 }
 

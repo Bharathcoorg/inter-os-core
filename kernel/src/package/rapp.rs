@@ -100,13 +100,29 @@ fn fixed_utf8(data:&[u8])->Result<String,RappError>{
     core::str::from_utf8(&data[..end]).map(|s|s.to_string()).map_err(|_|RappError::InvalidPackageId)
 }
 
-pub(crate) fn signed_message(data:&[u8], payload_offset:usize, payload_len:usize)->Vec<u8>{
-    let mut msg=Vec::with_capacity(0xA4 + data.len().saturating_sub(payload_offset));
+/// Builds the canonical Ed25519 message with checked range arithmetic.
+/// WHY Result: `payload_offset`/`payload_len` reach this function from
+/// attacker-controlled header fields, and an unchecked `payload_offset +
+/// payload_len` used to panic the kernel on a malformed container.
+fn canonical_signed_message(data:&[u8], payload_offset:usize, payload_len:usize)->Result<Vec<u8>,RappError>{
+    let sig_end = RAPP_SIGNATURE_OFFSET + RAPP_SIGNATURE_SIZE;
+    let payload_end = payload_offset.checked_add(payload_len).ok_or(RappError::PayloadOverflow)?;
+    if data.len() < sig_end || payload_offset < sig_end || payload_end > data.len() {
+        return Err(RappError::PayloadOverflow);
+    }
+    let mut msg=Vec::with_capacity(payload_end);
     msg.extend_from_slice(&data[..RAPP_SIGNATURE_OFFSET]);
     msg.extend_from_slice(&[0u8;RAPP_SIGNATURE_SIZE]);
-    msg.extend_from_slice(&data[RAPP_SIGNATURE_OFFSET+RAPP_SIGNATURE_SIZE..payload_offset]);
-    msg.extend_from_slice(&data[payload_offset..payload_offset+payload_len]);
-    msg
+    msg.extend_from_slice(&data[sig_end..payload_offset]);
+    msg.extend_from_slice(&data[payload_offset..payload_end]);
+    Ok(msg)
+}
+
+/// Test/build-side wrapper over the checked canonical builder. Production
+/// verification goes through `canonical_signed_message` and propagates errors.
+pub(crate) fn signed_message(data:&[u8], payload_offset:usize, payload_len:usize)->Vec<u8>{
+    canonical_signed_message(data, payload_offset, payload_len)
+        .expect("signed_message requires an in-bounds canonical payload range")
 }
 
 /// Builds a genuinely signed RAPP for tests.
@@ -145,9 +161,16 @@ pub(crate) fn build_signed_test_package(
 }
 
 pub fn verify_rapp_signature(data:&[u8], publisher_key:&[u8;32], signature:&[u8;64], payload_offset:usize, payload_len:usize)->Result<(),RappError>{
+    // Re-validate the ranges here rather than trusting the caller: this is a
+    // public entry point and the offsets originate in attacker-controlled bytes.
+    let sig_end = RAPP_SIGNATURE_OFFSET + RAPP_SIGNATURE_SIZE;
+    let payload_end = payload_offset.checked_add(payload_len).ok_or(RappError::PayloadOverflow)?;
+    if data.len() < sig_end || payload_offset < sig_end || payload_end > data.len() {
+        return Err(RappError::PayloadOverflow);
+    }
     let key=VerifyingKey::from_bytes(publisher_key).map_err(|_|RappError::InvalidPublisherKey)?;
     let sig=Signature::from_bytes(signature);
-    let msg=signed_message(data,payload_offset,payload_len);
+    let msg=canonical_signed_message(data,payload_offset,payload_len)?;
     key.verify_strict(&msg,&sig).map_err(|_|RappError::SignatureInvalid)
 }
 
@@ -254,29 +277,17 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     };
     let caps_end=header_end.checked_add(cap_count.checked_mul(2).ok_or(RappError::PayloadOverflow)?).ok_or(RappError::PayloadOverflow)?;
     if data.len()<caps_end{return Err(RappError::BufferTooShort)}
-    let mut capabilities=Vec::with_capacity(cap_count);
-    for i in 0..cap_count{
-        let o=header_end+i*2;
-        let cap=u16::from_le_bytes([data[o],data[o+1]]);
-        if !(1..=30).contains(&cap) {
-            return Err(RappError::UnknownCapability);
-        }
-        capabilities.push(cap);
-    }
     let section_start=caps_end;
     let section_end=section_start.checked_add(section_len).ok_or(RappError::PayloadOverflow)?;
     if data.len()<section_end{return Err(RappError::PayloadOverflow)}
-    let (dependencies,intents)=match format_version {
-        RAPP_FORMAT_VERSION_V4 => parse_v4_section(&data[section_start..section_end])?,
-        RAPP_FORMAT_VERSION_V3 => (parse_dependency_table(&data[section_start..section_end])?, Vec::new()),
-        _ => {
-            if section_len!=0 { return Err(RappError::InvalidDependency); }
-            (Vec::new(), Vec::new())
-        }
-    };
     let payload_offset=section_end;
     let payload_end=payload_offset.checked_add(payload_len).ok_or(RappError::PayloadOverflow)?;
     if data.len()<payload_end || data.len()!=payload_end{return Err(RappError::PayloadOverflow)}
+    // WHY authentication runs before any attacker-controlled structure is
+    // parsed: the capability table and the v3/v4 dependency/intent tables are
+    // only meaningful once the container is authentic, and unauthenticated
+    // bytes must never drive structure parsing. The order of the auth steps
+    // themselves (digest, revocation, signature, trust) is unchanged.
     let computed=Sha256::digest(&data[payload_offset..payload_end]);
     if computed!=digest{return Err(RappError::DigestMismatch)}
     // WHY the registry lock is not held across the signature verification:
@@ -298,6 +309,23 @@ pub fn parse_rapp(data:&[u8])->Result<RappManifest,RappError>{
     if !REVOCATION_REGISTRY.lock().is_key_trusted(&publisher_key){
         return Err(RappError::PublisherUntrusted)
     }
+    let mut capabilities=Vec::with_capacity(cap_count);
+    for i in 0..cap_count{
+        let o=header_end+i*2;
+        let cap=u16::from_le_bytes([data[o],data[o+1]]);
+        if !(1..=30).contains(&cap) {
+            return Err(RappError::UnknownCapability);
+        }
+        capabilities.push(cap);
+    }
+    let (dependencies,intents)=match format_version {
+        RAPP_FORMAT_VERSION_V4 => parse_v4_section(&data[section_start..section_end])?,
+        RAPP_FORMAT_VERSION_V3 => (parse_dependency_table(&data[section_start..section_end])?, Vec::new()),
+        _ => {
+            if section_len!=0 { return Err(RappError::InvalidDependency); }
+            (Vec::new(), Vec::new())
+        }
+    };
     let mut policy=PackagePolicy::from_rapp_capabilities(&capabilities);
     policy.dependencies=dependencies.clone();
     if !policy.validate(){return Err(RappError::InvalidDependency)}
@@ -838,5 +866,90 @@ mod tests {
         assert_eq!(TrustState::from_u8(TrustState::Revoked.as_u8()), Some(TrustState::Revoked));
         assert_eq!(TrustState::from_u8(TrustState::Tampered.as_u8()), Some(TrustState::Tampered));
         assert_eq!(TrustState::from_u8(4), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Adversarial parser-bounds tests (M15): authenticate before parse.
+    // ------------------------------------------------------------------
+
+    fn signed_v4_with_dependency(seed: u8) -> (Vec<u8>, [u8; 32], usize) {
+        let signing_key = SigningKey::from_bytes(&[seed; 32]);
+        let pub_key = signing_key.verifying_key().to_bytes();
+        let payload = b"\x7fELF_BOUNDS_PAYLOAD";
+        let deps = [Dependency {
+            package_id: String::from("org.interos.dep"),
+            requirement: VersionRequirement::Exact(PackageVersion::new(1, 0, 0)),
+        }];
+        let mut pkg = build_rapp_v4(
+            "org.interos.bounds",
+            &pub_key,
+            (1, 0, 0),
+            RappArch::X86_64,
+            &[1],
+            &deps,
+            &[],
+            payload,
+            &[0u8; 64],
+        );
+        let section_len = u32::from_le_bytes([pkg[0xB4], pkg[0xB5], pkg[0xB6], pkg[0xB7]]) as usize;
+        let section_start = RAPP_V3_HEADER_SIZE + 2;
+        let payload_offset = section_start + section_len;
+        let msg = signed_message(&pkg, payload_offset, payload.len());
+        let sig = signing_key.sign(&msg);
+        pkg[RAPP_SIGNATURE_OFFSET..RAPP_SIGNATURE_OFFSET + RAPP_SIGNATURE_SIZE]
+            .copy_from_slice(&sig.to_bytes());
+        (pkg, pub_key, section_start)
+    }
+
+    #[test]
+    fn rapp_bounds_bad_signature_refused_before_section_parse() {
+        let (mut pkg, pub_key, section_start) = signed_v4_with_dependency(91);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "bounds_order_test").unwrap();
+        // Corrupt the dependency table's first id_len byte (would be
+        // InvalidDependency if structure were parsed before authentication)
+        // and the signature. Authentication must report the forged container.
+        pkg[section_start + 8 + 2] = 0;
+        pkg[RAPP_SIGNATURE_OFFSET] ^= 0x5A;
+        assert_eq!(parse_rapp(&pkg).unwrap_err(), RappError::SignatureInvalid);
+        assert_eq!(inspect_rapp_trust(&pkg), TrustState::Tampered);
+        REVOCATION_REGISTRY.lock().trusted_keys.remove(&pub_key);
+    }
+
+    #[test]
+    fn rapp_bounds_authentic_container_still_gets_structure_validated() {
+        let (mut pkg, pub_key, section_start) = signed_v4_with_dependency(92);
+        REVOCATION_REGISTRY.lock().grant_trust_root(pub_key, "bounds_struct_test").unwrap();
+        // Declare 33 dependencies (> RAPP_MAX_DEPENDENCIES) and re-sign so the
+        // container is authentic: the structure refusal must still happen,
+        // now after authentication rather than instead of it.
+        pkg[section_start + 8..section_start + 10].copy_from_slice(&33u16.to_le_bytes());
+        let signing_key = SigningKey::from_bytes(&[92; 32]);
+        let section_len = u32::from_le_bytes([pkg[0xB4], pkg[0xB5], pkg[0xB6], pkg[0xB7]]) as usize;
+        let payload_offset = section_start + section_len;
+        let payload_len = pkg.len() - payload_offset;
+        let msg = signed_message(&pkg, payload_offset, payload_len);
+        let sig = signing_key.sign(&msg);
+        pkg[RAPP_SIGNATURE_OFFSET..RAPP_SIGNATURE_OFFSET + RAPP_SIGNATURE_SIZE]
+            .copy_from_slice(&sig.to_bytes());
+        assert_eq!(parse_rapp(&pkg).unwrap_err(), RappError::TooManyDependencies);
+        REVOCATION_REGISTRY.lock().trusted_keys.remove(&pub_key);
+    }
+
+    #[test]
+    fn rapp_bounds_signature_range_overflow_refused_without_panic() {
+        let (pkg, pub_key, _) = signed_v4_with_dependency(93);
+        let sig = [0u8; 64];
+        assert_eq!(
+            verify_rapp_signature(&pkg, &pub_key, &sig, usize::MAX, 1),
+            Err(RappError::PayloadOverflow)
+        );
+        assert_eq!(
+            verify_rapp_signature(&pkg, &pub_key, &sig, 0, pkg.len()),
+            Err(RappError::PayloadOverflow)
+        );
+        assert_eq!(
+            verify_rapp_signature(&pkg, &pub_key, &sig, pkg.len(), 1),
+            Err(RappError::PayloadOverflow)
+        );
     }
 }

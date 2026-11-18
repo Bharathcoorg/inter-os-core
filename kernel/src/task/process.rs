@@ -69,6 +69,18 @@ pub struct ProcessRecord {
     pub address_space_bytes: u64,
     pub limits: ResourceLimits,
     pub user_id: u32,
+    /// Whether this process is an installed application subject to the per-app
+    /// VFS sandbox.
+    ///
+    /// WHY an explicit flag and not only the process name: the sandbox root is
+    /// derived from a reverse-DNS package name, but `parse_rapp` accepts any
+    /// non-empty package id, so a verified package can carry a name the dotted
+    /// heuristic does not recognise. Marking every installed package here lets
+    /// the filesystem fail closed for a sandbox subject whose root cannot be
+    /// established, instead of falling open to the whole VFS. Kernel tasks and
+    /// system services are never marked: they hold no package identity and are
+    /// deliberately exempt from the application sandbox.
+    pub is_application: bool,
     pub background_started_ticks: u64,
     pub background_cpu_ticks: u64,
     pub background_ipc: u16,
@@ -94,7 +106,7 @@ pub static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     if task == TaskId(0) { return None; }
     let id = ProcessId(NEXT_PROCESS_ID.fetch_add(1, Ordering::Relaxed));
-    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, network_socket_count: 0, ipc_endpoint_count: 0, address_space_bytes: 0, limits: ResourceLimits::default(), user_id: 0, background_started_ticks: 0, background_cpu_ticks: 0, background_ipc: 0, background_network_bytes: 0 };
+    let record = ProcessRecord { id, leader_task: task, parent_task, state: ProcessState::Running, exit_code: 0, thread_count: 1, open_file_count: 0, network_socket_count: 0, ipc_endpoint_count: 0, address_space_bytes: 0, limits: ResourceLimits::default(), user_id: 0, is_application: false, background_started_ticks: 0, background_cpu_ticks: 0, background_ipc: 0, background_network_bytes: 0 };
     let mut table = PROCESS_TABLE.lock();
     let Some(slot) = table.iter_mut().find(|slot| slot.is_none()) else { return None; };
     let mut threads = THREAD_TABLE.lock();
@@ -104,14 +116,24 @@ pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     Some(id)
 }
 
-pub fn process_for_task(task: TaskId) -> Option<ProcessId> {
+/// Looks up the process owning `task`, distinguishing "no such thread" from
+/// "the table could not be read".
+///
+/// `Ok(None)` is an answer: the table was read and nothing owns this task.
+/// `Err(())` is not an answer, and a caller that turns it into `Ok(None)` is
+/// deciding that an unreadable table means an unowned task.
+fn try_process_for_task(task: TaskId) -> Result<Option<ProcessId>, ()> {
     for _ in 0..10_000 {
         if let Some(threads) = THREAD_TABLE.try_lock() {
-            return threads.iter().flatten().find(|r| r.task == task).map(|r| r.process);
+            return Ok(threads.iter().flatten().find(|r| r.task == task).map(|r| r.process));
         }
         core::hint::spin_loop();
     }
-    None
+    Err(())
+}
+
+pub fn process_for_task(task: TaskId) -> Option<ProcessId> {
+    try_process_for_task(task).ok().flatten()
 }
 
 pub fn bind_user_for_task(task: TaskId, user_id: u32) -> Result<(), &'static str> {
@@ -127,6 +149,52 @@ pub fn user_for_task(task: TaskId) -> Option<u32> {
     PROCESS_TABLE.lock().iter().flatten().find(|r| r.id == process).map(|r| r.user_id).filter(|uid| *uid != 0)
 }
 
+/// Marks the process owning `task` as an installed application subject to the
+/// per-app VFS sandbox. Idempotent.
+///
+/// WHY this is separate from `bind_user_for_task`: the sandbox flag records that
+/// a task is an application even when its user identity cannot be bound, so the
+/// filesystem can refuse it (fail closed) rather than grant it the whole VFS.
+pub fn mark_application_for_task(task: TaskId) -> Result<(), &'static str> {
+    let process = process_for_task(task).ok_or("process not found")?;
+    let mut table = PROCESS_TABLE.lock();
+    let record = table.iter_mut().flatten().find(|r| r.id == process).ok_or("process not found")?;
+    record.is_application = true;
+    Ok(())
+}
+
+/// Whether the process owning `task` is marked as an installed application.
+///
+/// `Some(false)` is an answer: the tables were read and this task is a kernel
+/// task or system service, which carry no application mark. `None` means the
+/// answer could not be established -- a table stayed busy for the whole bounded
+/// spin, or a thread record names a process that is no longer in the table.
+///
+/// WHY the caller must not read `None` as `false`: the only production caller is
+/// the VFS sandbox boundary, where "not an application" means "exempt from the
+/// sandbox and entitled to the whole filesystem". Answering that from a failed
+/// `try_lock` hands an application ambient VFS authority for as long as the table
+/// is contended, which is the opposite of zero ambient authority. An unknown
+/// subject is sandboxed; see `Vfs::task_is_sandbox_subject`.
+///
+/// Uses `try_lock` with a bounded spin so it is safe to call from the filesystem
+/// enforcement path without risking a blocking lock under another subsystem's
+/// lock.
+pub fn task_is_application(task: TaskId) -> Option<bool> {
+    let process = match try_process_for_task(task) {
+        Ok(Some(process)) => process,
+        Ok(None) => return Some(false),
+        Err(()) => return None,
+    };
+    for _ in 0..10_000 {
+        if let Some(table) = PROCESS_TABLE.try_lock() {
+            return table.iter().flatten().find(|r| r.id == process).map(|r| r.is_application);
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
 pub fn record_for_process(process: ProcessId) -> Option<ProcessRecord> {
     for _ in 0..10_000 {
         if let Some(table) = PROCESS_TABLE.try_lock() {
@@ -138,14 +206,22 @@ pub fn record_for_process(process: ProcessId) -> Option<ProcessRecord> {
 }
 
 /// Returns the number of live threads currently bound to `process`.
+///
+/// WHY this waits instead of returning 0 on a busy table: the sole caller uses
+/// the answer to decide whether to purge a whole process's futex waiters, and a
+/// 0 produced by a failed `try_lock` is indistinguishable from "the last thread
+/// just left". That purged the wait state of siblings that were still running
+/// and woke them on a condition that had not changed.
+///
+/// CONTEXT: reached from `reclaim_task`, which the kernel loop and the syscall
+/// exit path call in task context, and also the tick's kill gate via
+/// `terminate_current`. Waiting is safe on all three because each guarantees
+/// the caller holds no kernel lock: the tick gate fires only on a Ring-3
+/// frame, and the guest is single-CPU behind an interrupt gate, so nothing
+/// else can hold THREAD_TABLE. A caller holding a kernel lock must not use this.
 pub fn live_threads_for_process(process: ProcessId) -> usize {
-    for _ in 0..10_000 {
-        if let Some(threads) = THREAD_TABLE.try_lock() {
-            return threads.iter().flatten().filter(|r| r.process == process).count();
-        }
-        core::hint::spin_loop();
-    }
-    0
+    let threads = THREAD_TABLE.lock();
+    threads.iter().flatten().filter(|r| r.process == process).count()
 }
 
 pub fn set_background(task: TaskId, now: u64) -> Result<(), &'static str> {
@@ -611,6 +687,18 @@ impl Drop for OwnedLeader {
         // a table happened to be busy, and `Drop` runs on the panic path too, so an
         // asserting case still cleans up after itself.
         let _ = reap(self.task);
+        // WHY the scheduler as well: `reap` frees the process and thread records
+        // but never the TCB, and `reap_terminated` skips the current task -- which
+        // is where a case's own spawn lands when it spawned into an empty
+        // scheduler. Without this the next case inherits that application task as
+        // "current" and is sandbox-denied on paths it is entitled to.
+        //
+        // WHY `try_lock`: this runs during unwind, and the panicking frame may
+        // still hold the scheduler guard. Blocking here would deadlock the whole
+        // test process instead of failing one case.
+        if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+            sched.drop_test_task(self.task);
+        }
     }
 }
 

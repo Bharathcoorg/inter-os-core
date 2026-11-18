@@ -640,6 +640,37 @@ pub fn spawn_user_process_with_limits(
     parent_id: TaskId,
     limits: crate::task::process::ResourceLimits,
 ) -> Result<TaskId, &'static str> {
+    // An installed application is sandboxed and must own a user identity. This
+    // covers every first-party built-in (matched by process name), every
+    // `org.interos.*` package, and any reverse-DNS package name a verified
+    // third-party `.rapp` carries -- not only the first-party subset. Kernel
+    // system services have non-dotted names and are deliberately not applications.
+    let application = crate::package::first_party_package_by_process_name(name).is_some()
+        || name.starts_with("org.interos.")
+        || is_package_like_name(name);
+    spawn_user_process_inner(name, elf_data, caps, priority, parent_id, limits, application)
+}
+
+/// Whether `name` is a reverse-DNS shaped package identifier that is safe to use
+/// as a single path component. Mirrors the filesystem's package-identity
+/// heuristic so the spawn boundary and the VFS agree on what an application is.
+fn is_package_like_name(name: &str) -> bool {
+    name.contains('.') && !name.contains('/') && !name.contains('\\') && !name.contains("..")
+}
+
+/// Single spawn funnel. `application` marks the process as a per-app VFS sandbox
+/// subject and binds the active user identity; verified packages pass `true`
+/// regardless of package-id shape so a forged or non-dotted id can never fall
+/// open to the whole filesystem.
+fn spawn_user_process_inner(
+    name: &'static str,
+    elf_data: &[u8],
+    caps: CapabilityTable,
+    priority: u8,
+    parent_id: TaskId,
+    limits: crate::task::process::ResourceLimits,
+    application: bool,
+) -> Result<TaskId, &'static str> {
     // WHY re-key here, at the single funnel every spawner passes through: app
     // capability tables are built from hardcoded constants (CapabilityId(2601),
     // CapabilityId(1701), ... -- 101 of them across 12 spawn functions), and
@@ -702,9 +733,11 @@ pub fn spawn_user_process_with_limits(
         return Err(error);
     }
 
-    let is_application = crate::package::first_party_package_by_process_name(name).is_some()
-        || name.starts_with("org.interos.");
-    if is_application {
+    if application {
+        // Mark the process as a sandbox subject before binding its identity, so
+        // a task whose user identity cannot be established is refused by the
+        // filesystem (fail closed) rather than granted the whole VFS.
+        let _ = crate::task::process::mark_application_for_task(spawned);
         let user_id = crate::user::USER_MANAGER.lock().active_user().0;
         if user_id == crate::user::UserId::SYSTEM.0
             || crate::task::process::bind_user_for_task(spawned, user_id).is_err()
@@ -730,6 +763,27 @@ pub(crate) fn capabilities_from_rapp(ids: &[u16], ipc_target: u64) -> Result<Cap
     capabilities_from_rapp_with_trust(ids, ipc_target, false)
 }
 
+/// Checked conversion of a manifest capability id that names a sensitive
+/// resource into the consent-space capability shape for that resource.
+///
+/// WHY the shape is read from `SensitivePermission` and not hand-copied: the
+/// grant boundary and the consent broker must name the exact same scoped
+/// resource, or a manifest could mint authority the consent system would never
+/// grant. Camera/microphone/location shapes do not depend on the task, so
+/// `TaskId(0)` is used only to read the shape; the identity is the manifest slot
+/// handle assigned by the caller (and re-keyed at spawn).
+fn sensitive_manifest_shape(id: u16) -> (CapabilityType, Rights, u64) {
+    use crate::capability::permission::SensitivePermission;
+    let permission = match id {
+        4 => SensitivePermission::CameraCapture,
+        7 => SensitivePermission::Microphone,
+        8 => SensitivePermission::Location,
+        _ => unreachable!("sensitive_manifest_shape is only called for ids 4/7/8"),
+    };
+    let shape = permission.to_capability(TaskId(0));
+    (shape.cap_type, shape.rights, shape.object_id)
+}
+
 pub(crate) fn capabilities_from_rapp_with_trust(
     ids: &[u16],
     ipc_target: u64,
@@ -744,11 +798,24 @@ pub(crate) fn capabilities_from_rapp_with_trust(
             1 => (CapabilityType::SerialOutput, Rights::WRITE, 0),
             2 => (CapabilityType::FrameBufferDirect, Rights::WRITE, 0),
             3 => (CapabilityType::TimerTickRead, Rights::READ, 0),
-            4 => (CapabilityType::HardwarePortIo, Rights::READ | Rights::WRITE, 0),
+            // RAPP v2 ids 4/7/8 are the camera/microphone/location declarations
+            // the SDKs emit. In the kernel raw type space those same numbers are
+            // unscoped HardwarePortIo, ProcessSpawn and ProcessKill, so mapping
+            // them straight through handed a manifest whole-bus port I/O and
+            // process spawn/kill authority. Convert them through the consent
+            // permission space instead: a manifest can only ever name the scoped
+            // consent shape for the resource -- never unscoped port I/O, never
+            // process spawn or kill. Without system platform trust they are
+            // refused outright: camera, microphone and location are consent gated
+            // at runtime, never granted ambiently from a manifest.
+            4 | 7 | 8 => {
+                if !is_system_authority {
+                    return Err("RAPP camera/microphone/location (4/7/8) are consent-gated; a manifest cannot grant them without system platform trust");
+                }
+                sensitive_manifest_shape(id)
+            }
             5 => (CapabilityType::IpcSend, Rights::WRITE, ipc_target),
             6 => (CapabilityType::IpcReceive, Rights::READ, ipc_target),
-            7 => (CapabilityType::ProcessSpawn, Rights::INVOKE, 0),
-            8 => (CapabilityType::ProcessKill, Rights::INVOKE, 0),
             9 => (CapabilityType::FileSystemRead, Rights::READ, 0),
             10 => (CapabilityType::FileSystemWrite, Rights::WRITE, 0),
             11 => (CapabilityType::StorageRawBlock, Rights::READ | Rights::WRITE, 0),
@@ -849,7 +916,18 @@ pub fn spawn_verified_rapp_process(
     let is_system = crate::package::REVOCATION_REGISTRY.lock().is_system_publisher(&manifest.publisher_key);
     let caps = capabilities_from_rapp_with_trust(&manifest.capabilities, parent_id.0, is_system)?;
     let process_name: &'static str = intern_package_name(&manifest.package_id);
-    spawn_user_process_with_parent(process_name, elf_payload, caps, 6, parent_id)
+    // Every installed package is an application: mark it as a VFS sandbox subject
+    // and bind the active user identity regardless of the package-id shape, so a
+    // third-party or forged id can never fall open to the whole filesystem.
+    spawn_user_process_inner(
+        process_name,
+        elf_payload,
+        caps,
+        6,
+        parent_id,
+        crate::task::process::ResourceLimits::default(),
+        true,
+    )
 }
 
 /// Spawns a first-party system service as an isolated Ring-3 process owned by PID1.
@@ -2475,6 +2553,57 @@ pub fn spawn_app_webview_demo(id_security: TaskId) -> TaskId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_sensitive_ids_never_grant_unscoped_port_io_or_process_control() {
+        use crate::capability::permission::SensitivePermission;
+
+        // C2: without system platform trust, camera/microphone/location manifest
+        // declarations are consent-gated and must be refused outright -- a
+        // manifest can never grant them ambiently.
+        for id in [4u16, 7, 8] {
+            assert!(
+                capabilities_from_rapp(&[id], 0x1234).is_err(),
+                "manifest id {id} must not be granted without system trust"
+            );
+        }
+
+        // With system platform trust they convert through the consent permission
+        // space: the scoped HardwarePortIo shape for the named resource, never
+        // the kernel raw type that shares the manifest number (4=HardwarePortIo
+        // object 0, 7=ProcessSpawn, 8=ProcessKill).
+        let table = capabilities_from_rapp_with_trust(&[4, 7, 8], 0x1234, true)
+            .expect("trusted manifest sensitive ids must convert");
+        for (slot, perm) in [
+            (0usize, SensitivePermission::CameraCapture),
+            (1usize, SensitivePermission::Microphone),
+            (2usize, SensitivePermission::Location),
+        ] {
+            let cap = table.raw_slot(slot).expect("manifest slot present");
+            let shape = perm.to_capability(TaskId(0));
+            assert_eq!(cap.cap_type, shape.cap_type, "slot {slot} cap type");
+            assert_eq!(cap.object_id, shape.object_id, "slot {slot} object");
+            assert_eq!(cap.cap_type, CapabilityType::HardwarePortIo);
+            assert_ne!(cap.object_id, 0, "sensitive grant must be scoped, not whole-bus");
+        }
+
+        // Sweep the whole manifest id space under trust: no slot may ever carry
+        // ProcessSpawn or ProcessKill, and any HardwarePortIo must be scoped to a
+        // non-zero object (never the unscoped whole-bus object 0). A camera
+        // request must therefore never yield whole-bus port I/O.
+        let all: alloc::vec::Vec<u16> = (1..=30).collect();
+        let full = capabilities_from_rapp_with_trust(&all, 0x1234, true)
+            .expect("full trusted manifest must convert");
+        for slot in 0..full.capacity() {
+            if let Some(cap) = full.raw_slot(slot) {
+                assert_ne!(cap.cap_type, CapabilityType::ProcessSpawn, "slot {slot}");
+                assert_ne!(cap.cap_type, CapabilityType::ProcessKill, "slot {slot}");
+                if cap.cap_type == CapabilityType::HardwarePortIo {
+                    assert_ne!(cap.object_id, 0, "port I/O at slot {slot} must be scoped");
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_user_address_space_limit_scales_with_detected_physical_ram() {

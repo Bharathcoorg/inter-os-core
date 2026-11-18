@@ -76,6 +76,34 @@ pub const MODEL_NAMESPACE: &str = "/data/models/";
 pub const DEFAULT_FILE_MODE: u16 = 0o644;
 pub const DEFAULT_DIR_MODE: u16 = 0o755;
 pub const ROOT_UID: u32 = 0;
+/// The group that owns the platform-indexed shared storage tree.
+///
+/// WHY a group and not a per-application owner: `/storage` is the one tree the
+/// content index describes to every application, so its directories have to
+/// accept entries from every application while the files inside them stay
+/// owned by whoever published them. Group write on the directory and owner
+/// write on the file express exactly that split.
+pub const SHARED_STORAGE_GID: u32 = 1;
+/// Where a group id reserved by the platform is moved to for an application.
+const APP_GID_BASE: u32 = 0x4000_0000;
+/// Mode of a directory inside an application's own tree.
+const APP_DIR_MODE: u16 = 0o700;
+/// Mode of a file inside an application's own tree.
+const APP_FILE_MODE: u16 = 0o600;
+/// Mode of a directory in the shared storage tree.
+const SHARED_DIR_MODE: u16 = 0o775;
+/// The one container both snapshot halves are published in.
+///
+/// WHY a container and not two files: the inode tree and the payloads it names
+/// are one filesystem state. Publishing them as two separate files gives a
+/// reset a window in which the tree describes payloads the data half does not
+/// carry, or the data half carries payloads no tree names. One InterFS write is
+/// one transaction with one commit point, so a reset leaves either the whole
+/// previous state or the whole new one.
+const COMMIT_SNAPSHOT_PATH: &str = "/data/.vfs.commit";
+/// Magic of the combined container: `VFC1`, then the metadata half's length.
+const COMMIT_MAGIC: &[u8; 4] = b"VFC1";
+const COMMIT_HEADER_LEN: usize = 8;
 
 /// Unique Inode identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -189,6 +217,15 @@ pub enum FsError {
     InvalidPath,
     /// A positioned read was asked of an object that has no positions.
     NotSeekable,
+    /// The change is in RAM but no backing device is bound, so it is not durable.
+    ///
+    /// WHY this is an error and not a silent `Ok`: a caller that is told its
+    /// write succeeded has been told the bytes survive a power failure. With no
+    /// device bound they do not, and the only honest answer is one the caller
+    /// can see. The durability barrier returns this; the RAM mutation itself
+    /// still succeeds, so a device-less boot keeps a working filesystem and
+    /// says out loud that it is RAM-only.
+    NotDurable,
 }
 
 /// The block-store operations the VFS uses for the payloads that are too
@@ -216,6 +253,17 @@ pub struct SpillStore {
     pub write_at: fn(&str, u64, &[u8]) -> bool,
     /// Publishes a new length for the named file, keeping the bytes it holds.
     pub truncate: fn(&str, u64) -> bool,
+    /// Commits the data half to the journal slot a legacy restore falls back to.
+    ///
+    /// WHY it is part of the store: the journal and the container are the two
+    /// places a publish asks the device to hold bytes, and a test that can only
+    /// inject one of them cannot show what a refusal of the other leaves behind.
+    pub journal: fn(&[u8]) -> bool,
+}
+
+/// Commits the data half to the legacy journal slot the restore falls back to.
+fn device_journal(sealed: &[u8]) -> bool {
+    crate::storage::persistent::commit_kind(&sealed,4).is_ok()
 }
 
 /// Writes a whole payload into a block-store file.
@@ -264,6 +312,7 @@ impl SpillStore {
             reserve: device_reserve,
             write_at: device_write_at,
             truncate: device_truncate,
+            journal: device_journal,
         }
     }
 }
@@ -306,6 +355,14 @@ pub struct Vfs {
     pub persisted_data_generation: core::cell::Cell<u64>,
     pub metadata_generation: core::cell::Cell<u64>,
     pub persisted_metadata_generation: core::cell::Cell<u64>,
+    /// Stands in for the backing device in the commit tests.
+    ///
+    /// WHY per instance and not a global: the host suite shares one process
+    /// table and runs its cases in parallel, so a global "a device is bound"
+    /// switch would leak into a case that is proving the opposite. `None` means
+    /// the real device is asked, which is what every other case gets.
+    #[cfg(test)]
+    test_backing_device: core::cell::Cell<Option<bool>>,
 }
 
 /// The refusal a filesystem operation gives when the caller holds no usable
@@ -328,6 +385,110 @@ fn no_filesystem_authority(task_caps: &CapabilityTable) -> FsError {
     })
 }
 
+/// The identity a mode check is decided against.
+///
+/// WHY `privileged` is a field and not a uid of zero: the exemption is the
+/// kernel-task and system-service role established by the sandbox predicate,
+/// not a numeric identity a caller could arrange to have. Keeping it separate
+/// means a mode check can never be satisfied by claiming uid 0.
+struct CallerIdentity {
+    uid: u32,
+    gid: u32,
+    privileged: bool,
+}
+
+/// The group id of an application package.
+///
+/// WHY a group derived from the package and not a uid per application: every
+/// application on the device runs as the same bound user, so uid cannot tell
+/// two applications apart and an owner check on uid alone would let every
+/// application write every other's files. The package id can tell them apart,
+/// and it is stable across boots, which is what a persisted gid has to be.
+///
+/// WHY a hash and not a registry: the group has to be derivable from the path
+/// alone, because the kernel creates an application's tree before the
+/// application runs and a restore recreates it with no application present.
+/// A collision would put two packages in one group; the owner class also
+/// requires the uid to match, and the path sandbox refuses cross-app paths
+/// regardless, so a collision cannot grant write access to another app's tree.
+fn app_group_id(package_id: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in package_id.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    if hash <= SHARED_STORAGE_GID {
+        hash | APP_GID_BASE
+    } else {
+        hash
+    }
+}
+
+/// The (uid, gid) an application-private path implies.
+fn app_path_owner(path: &str) -> Option<(u32, u32)> {
+    let rest = path.strip_prefix("/user/")?;
+    let mut parts = rest.splitn(3, '/');
+    let uid = parts.next()?.parse::<u32>().ok()?;
+    if parts.next()? != "apps" {
+        return None;
+    }
+    let package = parts.next()?.split('/').next()?;
+    if package.is_empty() || package == "." || package == ".." {
+        return None;
+    }
+    Some((uid, app_group_id(package)))
+}
+
+/// The ownership and mode a path is created with.
+///
+/// WHY ownership is structural and not stamped by the creating task: the kernel
+/// builds an application's tree with `mkdir` before the application exists, and
+/// a restore rebuilds it with no task at all. Deriving the owner from the path
+/// means those inodes belong to the application they are for, so the mode check
+/// has something true to decide against instead of a tree everything owns
+/// equally -- which is what made the stored mode meaningless before.
+fn ownership_for(path: &str, is_dir: bool) -> (u32, u32, u16) {
+    if let Some((uid, gid)) = app_path_owner(path) {
+        return (uid, gid, if is_dir { APP_DIR_MODE } else { APP_FILE_MODE });
+    }
+    if path == "/storage" || path.starts_with("/storage/") {
+        // The shared tree's directories accept entries from every application;
+        // its files stay owned by whoever published them, so a platform-seeded
+        // asset is readable by all and writable by none of them.
+        return (
+            ROOT_UID,
+            SHARED_STORAGE_GID,
+            if is_dir { SHARED_DIR_MODE } else { DEFAULT_FILE_MODE },
+        );
+    }
+    (
+        ROOT_UID,
+        ROOT_UID,
+        if is_dir { DEFAULT_DIR_MODE } else { DEFAULT_FILE_MODE },
+    )
+}
+
+/// Whether `caller` may read or write `inode` under its mode bits.
+///
+/// WHY the owner class needs both ids to match: every application shares one
+/// user, so a uid-only owner test would make every application the owner of
+/// every other application's files. The group is what carries the package
+/// identity, and the pair is what "owner" means here.
+fn mode_allows(inode: &Inode, caller: &CallerIdentity, write: bool) -> bool {
+    if caller.privileged {
+        return true;
+    }
+    let bits = if inode.uid == caller.uid && inode.gid == caller.gid {
+        (inode.mode >> 6) & 0o7
+    } else if inode.gid == caller.gid || inode.gid == SHARED_STORAGE_GID {
+        (inode.mode >> 3) & 0o7
+    } else {
+        inode.mode & 0o7
+    };
+    let want = if write { 0o2 } else { 0o4 };
+    bits & want != 0
+}
+
 impl Vfs {
     /// Creates a new, empty VFS instance.
     pub fn new() -> Self {
@@ -344,6 +505,8 @@ impl Vfs {
             persisted_data_generation: core::cell::Cell::new(0),
             metadata_generation: core::cell::Cell::new(0),
             persisted_metadata_generation: core::cell::Cell::new(0),
+            #[cfg(test)]
+            test_backing_device: core::cell::Cell::new(None),
         };
 
         // Create root directory "/"
@@ -366,6 +529,8 @@ impl Vfs {
             persisted_data_generation: core::cell::Cell::new(0),
             metadata_generation: core::cell::Cell::new(0),
             persisted_metadata_generation: core::cell::Cell::new(0),
+            #[cfg(test)]
+            test_backing_device: core::cell::Cell::new(None),
         }
     }
 
@@ -399,6 +564,8 @@ impl Vfs {
             persisted_data_generation: core::cell::Cell::new(0),
             metadata_generation: core::cell::Cell::new(0),
             persisted_metadata_generation: core::cell::Cell::new(0),
+            #[cfg(test)]
+            test_backing_device: core::cell::Cell::new(None),
         };
         vfs.mkdir("/");
         vfs
@@ -420,12 +587,13 @@ impl Vfs {
 
         let inode_id = self.allocate_inode();
         let name = path_filename(&norm_path);
+        let (owner_uid, owner_gid, dir_mode) = ownership_for(&norm_path, true);
 
         let inode = Inode {
             id: inode_id,
-            uid: ROOT_UID,
-            gid: ROOT_UID,
-            mode: DEFAULT_DIR_MODE,
+            uid: owner_uid,
+            gid: owner_gid,
+            mode: dir_mode,
             nlink: 1,
             atime: 0,
             mtime: 0,
@@ -544,6 +712,16 @@ impl Vfs {
     /// Truncates a writable regular file and publishes the mutation immediately.
     pub fn truncate(&mut self, task_id: TaskId, fd: FileDescriptor, length: usize) -> Result<(), FsError> {
         // Artificial per-file size limits removed; quota and capability checks preserved.
+        // M9: a resize is a write, so the node's mode is consulted before it.
+        let mode_inode = self
+            .task_file_tables
+            .get(&task_id)
+            .and_then(|t| t.get(fd.0 as usize))
+            .and_then(|h| h.as_ref())
+            .map(|h| h.inode_id);
+        if let Some(inode_id) = mode_inode {
+            self.enforce_mode(task_id, inode_id, true)?;
+        }
         let table=self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
         let handle=table.get_mut(fd.0 as usize).and_then(|x|x.as_mut()).ok_or(FsError::InvalidFd)?;
         if !handle.rights.contains(Rights::WRITE) { return Err(FsError::PermissionDenied); }
@@ -647,15 +825,34 @@ impl Vfs {
     }
 
     /// Explicitly flushes dirty VFS data and metadata snapshots to persistent storage media.
+    ///
+    /// WHY this is the durability barrier and not the write itself: a mutation
+    /// succeeds in RAM whether or not a device is bound, and this is the call
+    /// that says whether it survived. Every answer here is one the caller can
+    /// act on -- a refusal to publish, a device that is not there, a flush that
+    /// failed -- and none of them is discarded.
     pub fn sync(&self) -> Result<(), FsError> {
-        self.persist_data_snapshot()?;
-        self.persist_metadata_snapshot()?;
-        if let Some(mut ata) = crate::drivers::ATA_PRIMARY.try_lock() {
-            if let Some(drive) = ata.as_mut() {
-                let _ = drive.flush();
-            }
+        self.publish_commit()?;
+        self.flush_backing_device()
+    }
+
+    /// Asks the device to move its write cache onto the medium.
+    ///
+    /// WHY a `try_lock` that cannot be taken is an error: skipping the flush
+    /// because the driver was busy would report a durability the barrier never
+    /// established. The contention is surfaced as "not durable", which is the
+    /// truthful answer -- the bytes may still be in a cache a reset empties.
+    fn flush_backing_device(&self) -> Result<(), FsError> {
+        #[cfg(test)]
+        if self.test_backing_device.get() == Some(true) {
+            // The injected store stands in for the device and has no cache.
+            return Ok(());
         }
-        Ok(())
+        let mut ata = crate::drivers::ATA_PRIMARY
+            .try_lock()
+            .ok_or(FsError::NotDurable)?;
+        let drive = ata.as_mut().ok_or(FsError::NotDurable)?;
+        drive.flush().map_err(|_| FsError::IntegrityViolation)
     }
 
     pub fn list_dir_by_path(&self, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
@@ -777,12 +974,13 @@ impl Vfs {
 
         let inode_id = self.allocate_inode();
         let name = path_filename(&norm_path);
+        let (owner_uid, owner_gid, file_mode) = ownership_for(&norm_path, false);
 
         let inode = Inode {
             id: inode_id,
-            uid: ROOT_UID,
-            gid: ROOT_UID,
-            mode: if read_only { 0o444 } else { DEFAULT_FILE_MODE },
+            uid: owner_uid,
+            gid: owner_gid,
+            mode: if read_only { 0o444 } else { file_mode },
             nlink: 1,
             atime: 0,
             mtime: 0,
@@ -855,11 +1053,12 @@ impl Vfs {
 
         let inode_id = self.allocate_inode();
         let name = path_filename(&norm_path);
+        let (owner_uid, owner_gid, file_mode) = ownership_for(&norm_path, false);
         let inode = Inode {
             id: inode_id,
-            uid: ROOT_UID,
-            gid: ROOT_UID,
-            mode: DEFAULT_FILE_MODE,
+            uid: owner_uid,
+            gid: owner_gid,
+            mode: file_mode,
             nlink: 1,
             atime: 0,
             mtime: 0,
@@ -1390,9 +1589,20 @@ impl Vfs {
         let _cap = task_caps
             .find_capability_for_object(CapabilityType::FileSystemWrite, Rights::WRITE, inode_id.0)
             .ok_or(FsError::PermissionDenied)?;
+        // M9: removing a name is a write to the directory that holds it. That is
+        // the authority POSIX asks for, and it is what lets the shared area's
+        // group-writable directories govern deletion of a published file while
+        // the file's own owner governs rewriting it.
+        if let Some(parent_id) = self.lookup(parent_path(&normalize_path(path))) {
+            self.enforce_mode(task_id, parent_id, true)?;
+        }
         self.unlink(path)?;
-        let _ = self.persist_metadata_snapshot();
-        let _ = self.persist_data_snapshot();
+        // WHY the publish is not discarded: an unlink that is refused by the
+        // device has removed the name from RAM only. Reporting `Ok` told the
+        // caller the file was gone for good, and a reboot brought it back.
+        // `unlink`'s own write-behind tolerates a device-less boot so the RAM
+        // tree stays usable; this is the call that says whether it is durable.
+        self.publish_commit()?;
         Ok(())
     }
 
@@ -1432,6 +1642,9 @@ impl Vfs {
             .find_capability_for_object(CapabilityType::FileSystemWrite, Rights::WRITE, parent_inode.0)
             .or_else(|| task_caps.find_capability_for_object(CapabilityType::FileSystemRead, Rights::WRITE, parent_inode.0))
             .ok_or(FsError::PermissionDenied)?;
+        // M9: a new directory is an entry in its parent, so the parent's write
+        // bit is the authority for creating it.
+        self.enforce_mode(task_id, parent_inode, true)?;
         let id = self.mkdir(&normalized);
         self.bump_metadata_generation();
         let _ = self.persist_metadata_snapshot();
@@ -1516,15 +1729,96 @@ impl Vfs {
         Ok(root)
     }
 
+    /// Whether `task_id` is subject to the per-app VFS sandbox.
+    ///
+    /// A task is a sandbox subject when it is an installed application (marked at
+    /// the spawn boundary) or when its name resolves to a package identity. Kernel
+    /// tasks and system services carry neither: they are spawned by the kernel,
+    /// hold no package, and are deliberately exempt so they retain the broad VFS
+    /// access their role requires (init provisioning, storaged, shared surfaces).
+    ///
+    /// WHY an unreadable process table is a subject and not an exemption: the
+    /// exemption is the grant of the whole filesystem, so it has to be established
+    /// rather than assumed. `task_is_application` returns `None` when a table stayed
+    /// busy for its whole bounded spin; treating that as "not an application" would
+    /// give an application ambient VFS authority for the duration of the contention.
+    fn task_is_sandbox_subject(task_id: TaskId) -> bool {
+        match crate::task::process::task_is_application(task_id) {
+            Some(false) => Self::app_package_for_task(task_id).is_some(),
+            _ => true,
+        }
+    }
+
+    /// The identity the mode and ownership checks are decided against.
+    ///
+    /// WHY an unestablished identity is a refusal and not root: the same reason
+    /// the sandbox predicate treats an unreadable process table as a subject.
+    /// Root is the bypass of every mode check, so it has to be established from
+    /// the task's role rather than assumed when a lookup comes back empty. A
+    /// sandbox subject with no bound user or no resolvable package is refused.
+    fn caller_identity(task_id: TaskId) -> Result<CallerIdentity, FsError> {
+        if !Self::task_is_sandbox_subject(task_id) {
+            return Ok(CallerIdentity { uid: ROOT_UID, gid: ROOT_UID, privileged: true });
+        }
+        let package = Self::app_package_for_task(task_id).ok_or(FsError::PermissionDenied)?;
+        let uid = crate::task::process::user_for_task(task_id).ok_or(FsError::PermissionDenied)?;
+        Ok(CallerIdentity { uid, gid: app_group_id(&package), privileged: false })
+    }
+
+    /// Refuses an access the inode's own mode bits do not grant the caller.
+    fn enforce_mode(&self, task_id: TaskId, inode_id: InodeId, write: bool) -> Result<(), FsError> {
+        let caller = Self::caller_identity(task_id)?;
+        let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        if mode_allows(inode, &caller, write) {
+            Ok(())
+        } else {
+            Err(FsError::PermissionDenied)
+        }
+    }
+
     fn enforce_app_path(&self, task_id: TaskId, path: &str, write: bool) -> Result<(), FsError> {
         let Some(root) = Self::app_storage_root(task_id) else {
+            // C1: fail CLOSED. A sandbox subject whose root cannot be established
+            // (no bound user identity, or a package id that does not resolve to a
+            // safe path component) is refused, not granted the whole VFS. Only
+            // kernel tasks and system services -- which are not sandbox subjects --
+            // reach the open path below.
+            if Self::task_is_sandbox_subject(task_id) {
+                return Err(FsError::PermissionDenied);
+            }
             return Ok(());
         };
         let normalized = normalize_path(path);
         if normalized == root || normalized.starts_with(&(root.clone() + "/")) {
             return Ok(());
         }
+        // M8: `/storage` is the shared media namespace, and read access to it is
+        // deliberately universal -- the content index, the gallery, the music
+        // library and the launcher's search all describe it, so refusing one
+        // application's read of another's published media would break the
+        // platform's own indexing. Write access is not universal. It is the
+        // parent directory's write bit, which is what POSIX asks for adding or
+        // removing an entry, and the node's own write bit is checked by `open`
+        // and `write` for modifying a file that is already there. Together those
+        // mean an application may publish into the shared area and may not
+        // overwrite what another application published.
         if normalized == "/storage" || normalized.starts_with("/storage/") {
+            if !write {
+                return Ok(());
+            }
+            let caller = Self::caller_identity(task_id)?;
+            if caller.privileged {
+                return Ok(());
+            }
+            let parent = parent_path(&normalized);
+            let parent_id = self.lookup(parent).ok_or(FsError::FileNotFound)?;
+            let parent_inode = self.inodes.get(&parent_id).ok_or(FsError::FileNotFound)?;
+            if parent_inode.file_type != FileType::Directory {
+                return Err(FsError::NotADirectory);
+            }
+            if !mode_allows(parent_inode, &caller, true) {
+                return Err(FsError::PermissionDenied);
+            }
             return Ok(());
         }
         if !write && (normalized == "/system" || normalized.starts_with("/system/") || normalized == "/packages" || normalized.starts_with("/packages/") || normalized == "/data/models" || normalized.starts_with("/data/models/")) {
@@ -1586,7 +1880,12 @@ impl Vfs {
         path: &str,
     ) -> Result<FileStat, FsError> {
         self.enforce_app_path(task_id, path, false)?;
-        self.stat(task_caps, cap_slot, path)
+        let stat = self.stat(task_caps, cap_slot, path)?;
+        // M9: the mode is consulted, not just reported. The capability check
+        // above runs first so a caller with no filesystem authority still learns
+        // nothing about the node it asked for.
+        self.enforce_mode(task_id, stat.inode, false)?;
+        Ok(stat)
     }
 
     pub fn list_dir_for_task(
@@ -1598,7 +1897,11 @@ impl Vfs {
         out: &mut [u8],
     ) -> Result<usize, FsError> {
         self.enforce_app_path(task_id, path, false)?;
-        self.list_dir(task_caps, cap_slot, path, out)
+        let listed = self.list_dir(task_caps, cap_slot, path, out)?;
+        if let Some(inode_id) = self.lookup(path) {
+            self.enforce_mode(task_id, inode_id, false)?;
+        }
+        Ok(listed)
     }
 
     pub fn open(
@@ -1626,6 +1929,7 @@ impl Vfs {
             }
 
             let normalized = normalize_path(path);
+            let caller = Self::caller_identity(task_id)?;
             let (inode_id, newly_created) = if let Some(existing) = self.lookup(&normalized) {
                 (existing, false)
             } else {
@@ -1658,6 +1962,17 @@ impl Vfs {
                 } else {
                     self.create_file(&normalized, &[], false)
                 };
+                // M9: a file an application publishes belongs to that
+                // application. The structural owner of a shared-area file is
+                // the platform, so without this stamp every app-created file
+                // in `/storage` would be root-owned and no application could
+                // ever rewrite what it published itself.
+                if !caller.privileged {
+                    if let Some(inode) = self.inodes.get_mut(&created) {
+                        inode.uid = caller.uid;
+                        inode.gid = caller.gid;
+                    }
+                }
                 self.persist_metadata_snapshot().map_err(|_| FsError::IntegrityViolation)?;
                 self.persist_data_snapshot().map_err(|_| FsError::IntegrityViolation)?;
                 (created, true)
@@ -1678,6 +1993,14 @@ impl Vfs {
             if inode.file_type == FileType::ReadOnlySystem {
                 if newly_created { let _ = self.unlink(&normalized); }
                 return Err(FsError::ReadOnlyFileSystem);
+            }
+
+            // M8/M9: the write flag and the node's own mode are consulted. A
+            // capability over the object is authority to ask for a write; it is
+            // not authority over a file another application owns.
+            if !mode_allows(inode, &caller, true) {
+                if newly_created { let _ = self.unlink(&normalized); }
+                return Err(FsError::PermissionDenied);
             }
 
             // WHY the capability is matched to the object: a capability
@@ -1732,6 +2055,13 @@ impl Vfs {
 
             if inode.file_type == FileType::Directory {
                 return Err(FsError::IsADirectory);
+            }
+
+            // M9: a read is refused when the node's mode grants the caller no
+            // read bit, so a stored mode is a decision and not a decoration.
+            let caller = Self::caller_identity(task_id)?;
+            if !mode_allows(inode, &caller, false) {
+                return Err(FsError::PermissionDenied);
             }
         // WHY the capability is matched to the object: a capability scoped
             // to one inode is not authority over another, and a task may hold
@@ -1946,6 +2276,18 @@ pub fn read_file_for_task(
         {
             return Err(no_filesystem_authority(task_caps));
         }
+        // M9: the read path consults the mode as well, for the same reason the
+        // write path does -- authority established at open is not authority over
+        // a node that has since changed owner or mode.
+        let mode_inode = self
+            .task_file_tables
+            .get(&task_id)
+            .and_then(|t| t.get(fd.0 as usize))
+            .and_then(|h| h.as_ref())
+            .map(|h| h.inode_id);
+        if let Some(inode_id) = mode_inode {
+            self.enforce_mode(task_id, inode_id, false)?;
+        }
         let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
         let handle = table
             .get_mut(fd.0 as usize)
@@ -2043,6 +2385,20 @@ pub fn read_file_for_task(
             return Err(no_filesystem_authority(task_caps));
         }
 
+        // M9: the mode is consulted on the write path too, so a node whose owner
+        // or mode changed after the descriptor was opened cannot be written
+        // through a descriptor that predates the change. The descriptor is read
+        // immutably here and released before the mutation borrow below.
+        let mode_inode = self
+            .task_file_tables
+            .get(&task_id)
+            .and_then(|t| t.get(fd.0 as usize))
+            .and_then(|h| h.as_ref())
+            .map(|h| h.inode_id);
+        if let Some(inode_id) = mode_inode {
+            self.enforce_mode(task_id, inode_id, true)?;
+        }
+
         let table = self.task_file_tables.get_mut(&task_id).ok_or(FsError::InvalidFd)?;
         let handle = table
             .get_mut(fd.0 as usize)
@@ -2138,46 +2494,129 @@ pub fn read_file_for_task(
             self.bump_metadata_generation();
 
             // Publish the mutation immediately. Closing an FD is not the commit
-            // point: a process may write and crash before close().
-            self.persist_data_snapshot()?;
-            self.persist_metadata_snapshot()?;
+            // point: a process may write and crash before close(). One call, one
+            // container, one commit point -- the tree and the bytes it names are
+            // never published as two steps a reset can land between. Whether the
+            // commit reached a device is `sync`'s answer, not this one's.
+            self.publish_mutation()?;
         }
         Ok(buf.len())
     }
 
     /// Persists mutable /data regular files as one crash-consistent filesystem snapshot.
+    ///
+    /// WHY this and the metadata entry point are the same call: the inode tree
+    /// and the payloads it names are one state, so there is one commit. The
+    /// second of the two historical calls finds both generations already
+    /// published and does nothing, which is what makes the pair atomic rather
+    /// than two steps a reset can land between.
     fn persist_data_snapshot(&self) -> Result<(), FsError> {
+        self.publish_mutation()
+    }
+
+    /// Whether a backing device is bound to hold what a publish writes.
+    fn backing_device_bound(&self) -> bool {
+        #[cfg(test)]
+        if let Some(bound) = self.test_backing_device.get() {
+            return bound;
+        }
+        crate::drivers::ATA_PRIMARY.lock().is_some()
+    }
+
+    /// Publishes both snapshot halves as one commit, reporting a device-less boot.
+    ///
+    /// WHY the latch does not cover `NotDurable`: the latch exists for a refusal
+    /// that is a property of the device layout and cannot change while the system
+    /// runs. A missing device is not that -- the data disk binds during boot, and
+    /// latching on its absence would make every later publish a guaranteed
+    /// refusal for the rest of a boot that has a perfectly good disk.
+    fn publish_commit(&self) -> Result<(), FsError> {
         if self.persist_unavailable.get() {
             return Err(FsError::ReadOnlyFileSystem);
         }
-        let result = self.persist_data_snapshot_attempt();
-        if result.is_err() {
+        let result = self.publish_commit_attempt();
+        if result.is_err() && result != Err(FsError::NotDurable) {
             self.latch_persistence_unavailable();
         }
         result
     }
 
-    fn persist_data_snapshot_attempt(&self) -> Result<(), FsError> {
-        if self.data_generation.get() == self.persisted_data_generation.get() {
-            return Ok(());
+    /// Publishes a mutation that has already happened in RAM.
+    ///
+    /// WHY a device-less boot is tolerated here and not at the barrier: the
+    /// inode change is real and the caller is entitled to keep using it. What
+    /// must not happen is the caller being told the change is durable, and that
+    /// answer belongs to [`Self::sync`], which every durability-sensitive
+    /// syscall reaches. A genuine refusal still propagates and still latches.
+    fn publish_mutation(&self) -> Result<(), FsError> {
+        match self.publish_commit() {
+            Err(FsError::NotDurable) => Ok(()),
+            other => other,
         }
-        if crate::drivers::ATA_PRIMARY.lock().is_none() {
+    }
+
+    /// Writes the combined container, advancing both persisted generations only
+    /// once the whole of it is down.
+    fn publish_commit_attempt(&self) -> Result<(), FsError> {
+        // WHY the device is asked before the generations: a clean tree on a
+        // device-less boot is still not durable, and answering `Ok` from the
+        // dirty check would tell a caller its bytes survive a power failure
+        // when there is nothing to survive it on.
+        if !self.backing_device_bound() {
+            return Err(FsError::NotDurable);
+        }
+        let data_dirty = self.data_generation.get() != self.persisted_data_generation.get();
+        let meta_dirty = self.metadata_generation.get() != self.persisted_metadata_generation.get();
+        if !data_dirty && !meta_dirty {
             return Ok(());
         }
         // The payloads that do not fit an entry are written to the block store
-        // first, so the snapshot never records a payload the store does not
+        // first, so the container never records a payload the store does not
         // hold yet.
         let spilled = self.store_spilled_payloads();
-        let mut buf = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT];
-        let pos = self.encode_data_snapshot_with(&mut buf, &spilled);
-        let mut sealed = Vec::new();
-        crate::storage::encrypted::seal(&buf[..pos], &mut sealed)
+
+        let capacity = COMMIT_HEADER_LEN + METADATA_SNAPSHOT_LIMIT + DATA_SNAPSHOT_LIMIT;
+        let mut plain = Vec::new();
+        plain.try_reserve(capacity).map_err(|_| FsError::TableFull)?;
+        plain.resize(capacity, 0u8);
+        // Each half is encoded into its own bounded window: a half that could
+        // grow into the other's window would produce a container no restore
+        // buffer is sized for.
+        let meta_len = self.encode_metadata_snapshot(
+            &mut plain[COMMIT_HEADER_LEN..COMMIT_HEADER_LEN + METADATA_SNAPSHOT_LIMIT],
+        );
+        let data_start = COMMIT_HEADER_LEN + meta_len;
+        let data_len = self.encode_data_snapshot_with(
+            &mut plain[data_start..data_start + DATA_SNAPSHOT_LIMIT],
+            &spilled,
+        );
+        let total = data_start + data_len;
+        plain[..4].copy_from_slice(COMMIT_MAGIC);
+        plain[4..COMMIT_HEADER_LEN].copy_from_slice(&(meta_len as u32).to_le_bytes());
+
+        // The legacy journal keeps the data half alone, for a restore that finds
+        // no container. It is written before the commit point, so a reset here
+        // leaves the previous container authoritative and complete.
+        if data_dirty {
+            let mut sealed = Vec::new();
+            crate::storage::encrypted::seal(&plain[data_start..total], &mut sealed)
+                .map_err(|_| FsError::IntegrityViolation)?;
+            if !(self.spill.journal)(&sealed) {
+                return Err(FsError::IntegrityViolation);
+            }
+        }
+
+        let mut container = Vec::new();
+        crate::storage::encrypted::seal(&plain[..total], &mut container)
             .map_err(|_| FsError::IntegrityViolation)?;
-        crate::storage::persistent::commit_kind(&sealed,4).map(|_|()).map_err(|_|FsError::IntegrityViolation)?;
-        // The block-backed InterFS copy is the durable filesystem source of truth.
-        crate::storage::filesystem::store_data_file("/data/.vfs.snapshot", &sealed)
-            .map_err(|_| FsError::IntegrityViolation)?;
+        // One InterFS transaction: intent, extent, payload, then the inode
+        // publication that is its commit point. Both halves become visible
+        // together or not at all.
+        if !(self.spill.write)(COMMIT_SNAPSHOT_PATH, &container) {
+            return Err(FsError::IntegrityViolation);
+        }
         self.persisted_data_generation.set(self.data_generation.get());
+        self.persisted_metadata_generation.set(self.metadata_generation.get());
         Ok(())
     }
 
@@ -2333,33 +2772,10 @@ pub fn read_file_for_task(
         pos
     }
 
-    /// Persists the mutable /data inode tree separately from file payloads.
-    /// Paths and metadata are durable; file bytes remain in InterFS data files.
+    /// Persists the mutable /data inode tree together with the payloads it names.
+    /// Paths, ownership, modes and file bytes travel in one commit.
     fn persist_metadata_snapshot(&self) -> Result<(), FsError> {
-        if self.persist_unavailable.get() {
-            return Err(FsError::ReadOnlyFileSystem);
-        }
-        let result = self.persist_metadata_snapshot_attempt();
-        if result.is_err() {
-            self.latch_persistence_unavailable();
-        }
-        result
-    }
-
-    fn persist_metadata_snapshot_attempt(&self) -> Result<(), FsError> {
-        if self.metadata_generation.get() == self.persisted_metadata_generation.get() {
-            return Ok(());
-        }
-        if crate::drivers::ATA_PRIMARY.lock().is_none() {
-            return Ok(());
-        }
-        let mut buf = alloc::vec![0u8; METADATA_SNAPSHOT_LIMIT];
-        let pos = self.encode_metadata_snapshot(&mut buf);
-        let mut sealed = Vec::new();
-        crate::storage::encrypted::seal(&buf[..pos], &mut sealed).map_err(|_| FsError::IntegrityViolation)?;
-        crate::storage::filesystem::store_data_file("/data/.vfs.metadata", &sealed).map_err(|_| FsError::IntegrityViolation)?;
-        self.persisted_metadata_generation.set(self.metadata_generation.get());
-        Ok(())
+        self.publish_mutation()
     }
 
     /// Encodes the persistent inode tree into `buf` and returns the used length.
@@ -2405,8 +2821,81 @@ pub fn read_file_for_task(
         pos
     }
 
+    /// Loads and validates the combined commit container.
+    ///
+    /// WHY both halves are validated before either is applied: the container is
+    /// the atomic unit. A tree whose payload half is torn is not a filesystem
+    /// state, so a container that fails any check is refused whole and the
+    /// restore falls back to the legacy pair rather than applying half of it.
+    fn load_commit_container(&self) -> Option<Vec<u8>> {
+        let capacity = COMMIT_HEADER_LEN + METADATA_SNAPSHOT_LIMIT + DATA_SNAPSHOT_LIMIT;
+        let published = (self.spill.file_len)(COMMIT_SNAPSHOT_PATH)? as usize;
+        if published == 0 || published > capacity + crate::storage::encrypted::ENCRYPTED_OVERHEAD {
+            return None;
+        }
+        let mut sealed = alloc::vec![0u8; published];
+        if (self.spill.read_at)(COMMIT_SNAPSHOT_PATH, 0, &mut sealed) != Some(published) {
+            return None;
+        }
+        let mut plain = alloc::vec![0u8; capacity];
+        let n = crate::storage::encrypted::open(&sealed, &mut plain).ok()?;
+        if n < COMMIT_HEADER_LEN || &plain[..4] != COMMIT_MAGIC {
+            return None;
+        }
+        let meta_len = u32::from_le_bytes([plain[4], plain[5], plain[6], plain[7]]) as usize;
+        if meta_len < 6 || meta_len > METADATA_SNAPSHOT_LIMIT {
+            return None;
+        }
+        let data_start = COMMIT_HEADER_LEN + meta_len;
+        if data_start > n {
+            return None;
+        }
+        let data_len = n - data_start;
+        if data_len < 6 || data_len > DATA_SNAPSHOT_LIMIT {
+            return None;
+        }
+        if &plain[COMMIT_HEADER_LEN..COMMIT_HEADER_LEN + 4] != b"IVM2" {
+            return None;
+        }
+        if &plain[data_start..data_start + 4] != b"DTA1" {
+            return None;
+        }
+        plain.truncate(n);
+        Some(plain)
+    }
+
+    /// The metadata half's length inside a validated container.
+    fn commit_meta_len(plain: &[u8]) -> usize {
+        u32::from_le_bytes([plain[4], plain[5], plain[6], plain[7]]) as usize
+    }
+
+    /// Whether a container exists that the restore could not validate.
+    ///
+    /// WHY this is asked: a container that is present but unreadable must not
+    /// quietly fall back to an older pair of files. That would resurrect a
+    /// filesystem state the device has already moved past, which is the same
+    /// lie as reporting a durable write nothing held.
+    fn commit_container_rejected(&self) -> bool {
+        (self.spill.file_len)(COMMIT_SNAPSHOT_PATH).is_some()
+    }
+
     /// Restores the persistent /data inode tree before restoring file payloads.
     fn restore_metadata_snapshot(&mut self) {
+        if let Some(plain) = self.load_commit_container() {
+            let meta_len = Self::commit_meta_len(&plain);
+            crate::serial_println!(
+                "[VFS RESTORE] Commit container carries {} bytes of inode metadata.",
+                meta_len
+            );
+            self.decode_metadata_snapshot(&plain[COMMIT_HEADER_LEN..COMMIT_HEADER_LEN + meta_len], meta_len, true);
+            return;
+        }
+        if self.commit_container_rejected() {
+            crate::serial_println!(
+                "[VFS RESTORE] Integrity violation: rejecting unreadable commit container; no legacy fallback."
+            );
+            return;
+        }
         let mut sealed = alloc::vec![0u8; METADATA_SNAPSHOT_LIMIT + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
         let Ok(len) = crate::storage::filesystem::load_data_file("/data/.vfs.metadata", &mut sealed) else {
             crate::serial_println!("[VFS RESTORE] No /data/.vfs.metadata found.");
@@ -2542,6 +3031,22 @@ pub fn read_file_for_task(
     /// The metadata journal remains a recovery fallback until the transactional
     /// publication protocol finalizes the write.
     fn restore_data_snapshot(&mut self) {
+        if let Some(plain) = self.load_commit_container() {
+            let data_start = COMMIT_HEADER_LEN + Self::commit_meta_len(&plain);
+            let data_len = plain.len() - data_start;
+            crate::serial_println!(
+                "[VFS RESTORE] Commit container carries {} bytes of payload records.",
+                data_len
+            );
+            self.decode_data_snapshot(&plain[data_start..], data_len);
+            return;
+        }
+        if self.commit_container_rejected() {
+            crate::serial_println!(
+                "[VFS RESTORE] Integrity violation: rejecting unreadable commit container; no legacy fallback."
+            );
+            return;
+        }
         let mut sealed = alloc::vec![0u8; DATA_SNAPSHOT_LIMIT + crate::storage::encrypted::ENCRYPTED_OVERHEAD];
         let block_len = match crate::storage::filesystem::load_data_file("/data/.vfs.snapshot", &mut sealed) {
             Ok(len) => {
@@ -3109,6 +3614,8 @@ pub static VFS: Mutex<Vfs> = Mutex::new(Vfs {
     persisted_data_generation: core::cell::Cell::new(0),
     metadata_generation: core::cell::Cell::new(0),
     persisted_metadata_generation: core::cell::Cell::new(0),
+    #[cfg(test)]
+    test_backing_device: core::cell::Cell::new(None),
 });
 
 fn generate_ppm_p6(r_base: u8, g_base: u8, b_base: u8, r_step: i8, g_step: i8, b_step: i8) -> alloc::vec::Vec<u8> {
@@ -3203,11 +3710,13 @@ pub fn init() {
     vfs.create_file("/storage/downloads/preview_clip.ppm", &dl_preview, false);
 
     // 1. System Policy Configuration (Read-Only)
+    // This file is readable by any authorized app, so it must agree with the
+    // boot report: no partition is attested and no Merkle root is provisioned.
     let policy_content = br#"{
   "os": "Inter OS",
   "version": "0.3.0",
   "security_model": "Zero-Trust Object Capabilities",
-  "integrity_protection": "dm-verity Merkle Tree",
+  "integrity_protection": "NOT IMPLEMENTED (Merkle block primitive self-tested on a synthetic block only; no partition is measured and no root digest is provisioned)",
   "ambient_authority": false,
   "default_sandbox": "strict"
 }"#;
@@ -3378,7 +3887,17 @@ mod tests {
             reserve: memory_reserve,
             write_at: memory_write_at,
             truncate: memory_truncate,
+            journal: memory_journal,
         }
+    }
+
+    /// The journal records the in-memory store holds, in commit order.
+    static MEMORY_JOURNAL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+    /// Commits the data half to the in-memory journal.
+    fn memory_journal(sealed: &[u8]) -> bool {
+        MEMORY_JOURNAL.lock().push(sealed.to_vec());
+        true
     }
 
     #[test]
@@ -4721,26 +5240,274 @@ mod tests {
         let res_system = vfs.mkdir_for_task(app_task, &caps, 0, "/system/rogue");
         assert_eq!(res_system, Err(FsError::PermissionDenied));
 
-        // 4. Task without app storage root attempting to mkdir outside /storage
-        // WHY this id is drawn from the task counter and then left unbound: the
-        // expected `FileNotFound` below is only what a task with no scheduler entry
-        // and no process record gets -- `enforce_app_path` lets it through because
-        // `app_storage_root` resolves to nothing, and `mkdir_for_task` then refuses
-        // for want of a root. Binding an `OwnedLeader` here would supply the very
-        // record whose absence the case tests and turn the answer into
-        // `PermissionDenied`. What the literal id did cost was order dependence: one
-        // monotone counter is shared by every case in the host suite, so a
-        // hand-picked id could land on a task an earlier `spawn` was handed, complete
-        // with name and uid, and this assertion failed for a reason it does not
-        // mention.
-        let non_app_task = TaskId::new();
-        let res_no_root = vfs.mkdir_for_task(non_app_task, &caps, 0, "/user/1/apps/org.interos.notes/leak");
-        assert_eq!(res_no_root, Err(FsError::FileNotFound));
+        // 4. C1 fail-CLOSED: a third-party application is a sandbox subject (its
+        // dotted name resolves to a package identity) but has no bound user
+        // identity, so its root cannot be established. Before the fix
+        // `enforce_app_path` returned `Ok` here and handed the task the whole VFS;
+        // now it must refuse. The task is spawned with a dotted third-party name
+        // and deliberately left without a UID bind -- exactly the C1 attack shape.
+        let third_party = {
+            let mut sched = crate::task::SCHEDULER.lock();
+            sched.spawn("com.evil.thirdparty", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 4), 6)
+        };
+        let _tp_leader = crate::task::process::OwnedLeader::adopted(third_party);
+        let res_no_root = vfs.mkdir_for_task(third_party, &caps, 0, "/user/1/apps/org.interos.notes/leak");
+        assert_eq!(res_no_root, Err(FsError::PermissionDenied));
+        // The shared namespace is refused too: no root, no ambient access.
+        let res_storage = vfs.mkdir_for_task(third_party, &caps, 0, "/storage/evil");
+        assert_eq!(res_storage, Err(FsError::PermissionDenied));
 
         // 5. Valid mkdir inside task's own sandbox succeeds
         let res_valid = vfs.mkdir_for_task(app_task, &caps, 0, "/user/1/apps/org.interos.notes/files/subdir");
         assert!(res_valid.is_ok(), "mkdir within task sandbox root must succeed");
         assert!(vfs.lookup("/user/1/apps/org.interos.notes/files/subdir").is_some());
+    }
+
+    // ---- C1 regression suite: fail-CLOSED app sandbox -------------------------
+    //
+    // Before the fix `enforce_app_path` returned `Ok(())` whenever a task's
+    // storage root could not be established, handing any sandbox-subject task
+    // read+write over the whole VFS. These tests pin the closed behaviour for
+    // every attack shape and confirm kernel/system-service tasks keep access.
+
+    fn c1_write_read_caps(task: TaskId) -> CapabilityTable {
+        let mut caps = CapabilityTable::new_for_task(task, 4);
+        caps.insert(Capability {
+            id: CapabilityId(0x0C1A_0001),
+            cap_type: CapabilityType::FileSystemWrite,
+            rights: Rights::READ | Rights::WRITE,
+            object_id: 0,
+        }).unwrap();
+        caps.insert(Capability {
+            id: CapabilityId(0x0C1A_0002),
+            cap_type: CapabilityType::FileSystemRead,
+            rights: Rights::READ,
+            object_id: 0,
+        }).unwrap();
+        caps
+    }
+
+    #[test]
+    fn vfs_c1_third_party_without_uid_denied_read_and_write() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A dotted third-party package resolves to a package identity but is
+        // deliberately left WITHOUT a user bind: its root cannot be established.
+        let task = {
+            let mut sched = crate::task::SCHEDULER.lock();
+            sched.spawn("com.evil.nouid", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 4), 6)
+        };
+        let _leader = crate::task::process::OwnedLeader::adopted(task);
+
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/user");
+        vfs.mkdir("/user/1");
+        vfs.mkdir("/user/1/apps");
+        vfs.mkdir("/user/1/apps/org.interos.notes");
+        vfs.mkdir("/storage");
+        vfs.mkdir("/system");
+        vfs.create_file("/user/1/apps/org.interos.notes/secret.txt", b"private", false);
+
+        let caps = c1_write_read_caps(task);
+
+        // Write authority is refused everywhere, including the shared namespace.
+        assert_eq!(vfs.mkdir_for_task(task, &caps, 0, "/storage/evil"), Err(FsError::PermissionDenied));
+        assert_eq!(vfs.open(task, &caps, 0, "/user/1/apps/org.interos.notes/secret.txt", Rights::WRITE).err(), Some(FsError::PermissionDenied));
+        assert_eq!(vfs.unlink_for_task(task, &caps, 0, "/user/1/apps/org.interos.notes/secret.txt"), Err(FsError::PermissionDenied));
+        // Read authority is refused too: no root, no ambient visibility.
+        assert_eq!(vfs.stat_for_task(task, &caps, 0, "/user/1/apps/org.interos.notes/secret.txt").err(), Some(FsError::PermissionDenied));
+        assert!(!vfs.app_path_visible(task, "/user/1/apps/org.interos.notes/secret.txt"));
+        assert!(!vfs.app_path_visible(task, "/storage"));
+        assert!(!vfs.app_path_visible(task, "/system"));
+        // The victim file is untouched.
+        assert!(vfs.lookup("/user/1/apps/org.interos.notes/secret.txt").is_some());
+    }
+
+    #[test]
+    fn vfs_c1_forged_non_dotted_package_marked_application_is_denied() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A forged, non-dotted package id does not resolve through the dotted
+        // heuristic. The spawn boundary marks EVERY installed package as an
+        // application and binds a UID; simulate that here. Being marked an
+        // application makes it a sandbox subject even though no root resolves,
+        // so it must be refused rather than handed the whole VFS.
+        let task = {
+            let mut sched = crate::task::SCHEDULER.lock();
+            sched.spawn("evilapp", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 4), 6)
+        };
+        let _leader = crate::task::process::OwnedLeader::adopted(task);
+        crate::task::process::mark_application_for_task(task).unwrap();
+        crate::task::process::bind_user_for_task(task, 1).unwrap();
+        assert_eq!(crate::task::process::task_is_application(task), Some(true));
+
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/storage");
+        vfs.mkdir("/system");
+        let caps = c1_write_read_caps(task);
+
+        assert_eq!(vfs.mkdir_for_task(task, &caps, 0, "/storage/evil"), Err(FsError::PermissionDenied));
+        assert_eq!(vfs.open(task, &caps, 0, "/system/config", Rights::WRITE).err(), Some(FsError::PermissionDenied));
+        assert!(!vfs.app_path_visible(task, "/storage"));
+        assert!(!vfs.app_path_visible(task, "/system"));
+    }
+
+    /// WHY this exists: `task_is_application` used to answer `false` when a table
+    /// stayed busy for its whole bounded spin, and `false` is the sandbox
+    /// EXEMPTION -- the grant of the whole filesystem. So lock contention, which
+    /// an application can provoke by keeping the process tables hot, was a way to
+    /// be handed ambient VFS authority. An unknown subject is now a subject.
+    ///
+    /// The refusal itself is composed from this predicate by `enforce_app_path`'s
+    /// C1 branch, which the forged-package case above pins end to end. This case
+    /// pins the predicate under contention, and deliberately does not call the
+    /// open path while the thread table is held: that path takes SCHEDULER, and
+    /// holding THREAD_TABLE across it would invert the table lock order against
+    /// the scheduler's own contention cases.
+    #[test]
+    fn vfs_c1_an_unreadable_process_table_does_not_exempt_an_application() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let task = {
+            let mut sched = crate::task::SCHEDULER.lock();
+            sched.spawn("evilapp", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 4), 6)
+        };
+        let _leader = crate::task::process::OwnedLeader::adopted(task);
+        crate::task::process::mark_application_for_task(task).unwrap();
+        crate::task::process::bind_user_for_task(task, 1).unwrap();
+
+        // Established while the tables are readable: an application, and a
+        // subject even though no root resolves for a non-dotted package name.
+        assert_eq!(crate::task::process::task_is_application(task), Some(true));
+        assert!(Vfs::task_is_sandbox_subject(task));
+
+        {
+            let _held = crate::task::process::THREAD_TABLE.lock();
+            assert_eq!(
+                crate::task::process::task_is_application(task), None,
+                "a table that could not be read is not an answer"
+            );
+            assert!(
+                Vfs::task_is_sandbox_subject(task),
+                "an unknown subject must be sandboxed, not exempted: the exemption \
+                 is the grant of the whole VFS"
+            );
+        }
+
+        // Readable again, and the answer is the established one rather than a
+        // sticky refusal: the fix must not turn every task into a subject.
+        assert_eq!(crate::task::process::task_is_application(task), Some(true));
+    }
+
+    #[test]
+    fn vfs_c1_cross_app_private_path_read_and_write_denied() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let notes = {
+            let mut sched = crate::task::SCHEDULER.lock();
+            sched.spawn("org.interos.notes", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 4), 6)
+        };
+        let browser = {
+            let mut sched = crate::task::SCHEDULER.lock();
+            sched.spawn("org.interos.browser", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 4), 6)
+        };
+        let _n = crate::task::process::OwnedLeader::adopted(notes);
+        let _b = crate::task::process::OwnedLeader::adopted(browser);
+        crate::task::process::bind_user_for_task(notes, 1).unwrap();
+        crate::task::process::bind_user_for_task(browser, 1).unwrap();
+
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/user");
+        vfs.mkdir("/user/1");
+        vfs.mkdir("/user/1/apps");
+        vfs.mkdir("/user/1/apps/org.interos.notes");
+        vfs.mkdir("/user/1/apps/org.interos.browser");
+        vfs.create_file("/user/1/apps/org.interos.browser/private.txt", b"browser secret", false);
+
+        let caps = c1_write_read_caps(notes);
+        let victim = "/user/1/apps/org.interos.browser/private.txt";
+
+        // notes cannot READ browser's private file.
+        assert_eq!(vfs.stat_for_task(notes, &caps, 0, victim).err(), Some(FsError::PermissionDenied));
+        assert_eq!(vfs.open(notes, &caps, 0, victim, Rights::READ).err(), Some(FsError::PermissionDenied));
+        assert!(!vfs.app_path_visible(notes, victim));
+        // notes cannot WRITE or DELETE browser's private file.
+        assert_eq!(vfs.open(notes, &caps, 0, victim, Rights::WRITE).err(), Some(FsError::PermissionDenied));
+        assert_eq!(vfs.unlink_for_task(notes, &caps, 0, victim), Err(FsError::PermissionDenied));
+        assert_eq!(vfs.mkdir_for_task(notes, &caps, 0, "/user/1/apps/org.interos.browser/evil"), Err(FsError::PermissionDenied));
+        // notes retains its own root, and the victim file is untouched.
+        assert!(vfs.app_path_visible(notes, "/user/1/apps/org.interos.notes"));
+        assert!(vfs.lookup(victim).is_some());
+    }
+
+    #[test]
+    fn vfs_c1_traversal_attempts_denied_and_normalize_preserved() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let app = {
+            let mut sched = crate::task::SCHEDULER.lock();
+            sched.spawn("org.interos.notes", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 4), 6)
+        };
+        let _l = crate::task::process::OwnedLeader::adopted(app);
+        crate::task::process::bind_user_for_task(app, 1).unwrap();
+
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/user");
+        vfs.mkdir("/user/1");
+        vfs.mkdir("/user/1/apps");
+        vfs.mkdir("/user/1/apps/org.interos.notes");
+        vfs.mkdir("/user/1/apps/org.interos.browser");
+        vfs.mkdir("/storage");
+        vfs.mkdir("/system");
+        vfs.create_file("/user/1/apps/org.interos.browser/private.txt", b"secret", false);
+        let caps = c1_write_read_caps(app);
+
+        // Lexical traversal out of the sandbox normalizes to "/" and is refused
+        // for both mutation and visibility. The ".."->"/" collapse in
+        // normalize_path is the traversal defence and must stay intact.
+        for path in [
+            "/user/1/apps/org.interos.notes/../../org.interos.browser/private.txt",
+            "/user/1/apps/org.interos.notes/../notes/../../system/config",
+            "/storage/../system/config",
+            "/user/1/apps/org.interos.notes/./../../storage/evil",
+        ] {
+            assert_eq!(vfs.mkdir_for_task(app, &caps, 0, path), Err(FsError::PermissionDenied), "traversal write {path}");
+            assert_eq!(vfs.open(app, &caps, 0, path, Rights::WRITE).err(), Some(FsError::PermissionDenied), "traversal open {path}");
+            assert!(!vfs.app_path_visible(app, path), "traversal visible {path}");
+        }
+        // normalize_path itself still collapses ".." to the root and keeps clean
+        // paths verbatim.
+        assert_eq!(normalize_path("/a/b/../c"), "/");
+        assert_eq!(normalize_path("/user/1/apps/org.interos.notes/files"), "/user/1/apps/org.interos.notes/files");
+    }
+
+    #[test]
+    fn vfs_c1_system_service_and_identity_less_tasks_retain_access() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A kernel-spawned system service: non-dotted name, not marked an
+        // application, no package identity. It is deliberately exempt from the
+        // app sandbox and keeps the broad VFS access its role requires.
+        let service = {
+            let mut sched = crate::task::SCHEDULER.lock();
+            sched.spawn("storaged", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 4), 1)
+        };
+        let _s = crate::task::process::OwnedLeader::adopted(service);
+        assert_eq!(crate::task::process::task_is_application(service), Some(false));
+
+        let mut vfs = Vfs::new();
+        vfs.mkdir("/storage");
+        vfs.mkdir("/system");
+        vfs.mkdir("/data");
+        vfs.mkdir("/data/models");
+        let caps = c1_write_read_caps(service);
+
+        assert!(vfs.mkdir_for_task(service, &caps, 0, "/storage/service_dir").is_ok());
+        assert!(vfs.app_path_visible(service, "/system"));
+        assert!(vfs.app_path_visible(service, "/data/models"));
+        assert!(vfs.app_path_visible(service, "/storage"));
+
+        // An identity-less caller (no scheduler entry, no process record) is not
+        // a sandbox subject either: enforce_app_path does not refuse it. This is
+        // the kernel/init provisioning path and must keep working after C1.
+        let identity_less = TaskId::new();
+        assert!(vfs.app_path_visible(identity_less, "/storage"));
+        assert!(vfs.app_path_visible(identity_less, "/system"));
+        assert!(vfs.mkdir_for_task(identity_less, &caps, 0, "/storage/provision").is_ok());
     }
 
     #[test]

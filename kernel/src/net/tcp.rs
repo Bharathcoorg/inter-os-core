@@ -148,6 +148,104 @@ pub fn valid_established_segment(
     true
 }
 
+/// RFC 793 §3.3 segment acceptability: does any byte of this segment fall in
+/// the receive window `[recv_seq, recv_seq + rcv_wnd)`?
+///
+/// `seg_len` counts the FIN as one sequence number, because a bare FIN occupies
+/// one. With a zero window only the exact next expected sequence is acceptable,
+/// which lets a peer probe a closed window without being able to inject into it.
+pub fn seq_in_receive_window(seg_seq: u32, seg_len: u32, recv_seq: u32, rcv_wnd: u32) -> bool {
+    if rcv_wnd == 0 {
+        return seg_len == 0 && seg_seq == recv_seq;
+    }
+    let window_end = recv_seq.wrapping_add(rcv_wnd);
+    let in_window = |s: u32| seq_ge(s, recv_seq) && seq_lt(s, window_end);
+    if seg_len == 0 {
+        return in_window(seg_seq);
+    }
+    in_window(seg_seq) || in_window(seg_seq.wrapping_add(seg_len - 1))
+}
+
+/// What to do with a segment carrying RST.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RstAction {
+    /// In sequence: the peer really has forgotten this connection.
+    Accept,
+    /// In window but not at `recv_seq`: answer with our own sequence numbers
+    /// rather than tearing down, and let a genuine peer confirm.
+    ChallengeAck,
+    /// Out of window, or a SYN-SENT reset that does not acknowledge our SYN.
+    Drop,
+}
+
+/// RFC 5961 §5: a reset is only believable at the exact next expected sequence.
+///
+/// WHY an in-window reset gets a challenge instead of a teardown: accepting any
+/// in-window RST let a single forged segment kill the connection, so an off-path
+/// attacker needed only the 4-tuple -- not the 32-bit sequence space -- to abort
+/// any transfer. An out-of-window reset is dropped silently, so it cannot be
+/// used to make this host emit traffic at a chosen victim.
+pub fn rst_action(
+    state: TcpState,
+    seg_seq: u32,
+    seg_ack: u32,
+    recv_seq: u32,
+    snd_nxt: u32,
+    rcv_wnd: u32,
+) -> RstAction {
+    if state == TcpState::SynSent {
+        // No receive window exists yet, so the reset must acknowledge the SYN
+        // we sent. `snd_nxt` here is the sequence just past that SYN.
+        return if seg_ack == snd_nxt { RstAction::Accept } else { RstAction::Drop };
+    }
+    if seg_seq == recv_seq {
+        return RstAction::Accept;
+    }
+    if rcv_wnd != 0 && seq_gt(seg_seq, recv_seq) && seq_lt(seg_seq, recv_seq.wrapping_add(rcv_wnd)) {
+        return RstAction::ChallengeAck;
+    }
+    RstAction::Drop
+}
+
+/// The states in which a segment must be window- and acknowledgement-validated
+/// before it may move the connection or retire a pending FIN.
+pub fn is_closing_state(state: TcpState) -> bool {
+    matches!(
+        state,
+        TcpState::FinWait1
+            | TcpState::FinWait2
+            | TcpState::FinWait
+            | TcpState::CloseWait
+            | TcpState::LastAck
+            | TcpState::TimeWait
+    )
+}
+
+/// Window and acknowledgement validation for the closing states.
+///
+/// WHY this is separate from `valid_established_segment`: the closing states
+/// used to accept any segment at all, overwriting `recv_seq` from the wire and
+/// handing `segment.ack` straight to `acknowledge_fin`, whose only test was a
+/// lower bound. A forged ACK of `0xFFFFFFFF` satisfied that bound and closed the
+/// connection; a forged sequence rewound the receive stream.
+pub fn valid_closing_segment(
+    segment: &TcpSegment<'_>,
+    recv_seq: u32,
+    rcv_wnd: u32,
+    snd_una: u32,
+    snd_nxt: u32,
+) -> bool {
+    const SYN: u16 = 0x02;
+    const RST: u16 = 0x04;
+    const ACK: u16 = 0x10;
+    const FIN: u16 = 0x01;
+    if segment.flags & (SYN | RST) != 0 || segment.flags & ACK == 0 { return false; }
+    let len = segment.payload.len() as u32 + u32::from(segment.flags & FIN != 0);
+    if !seq_in_receive_window(segment.seq, len, recv_seq, rcv_wnd) { return false; }
+    if seq_lt(segment.ack, snd_una) || seq_gt(segment.ack, snd_nxt) { return false; }
+    true
+}
+
 pub fn next_state(state: TcpState, flags: u16) -> TcpState {
     const SYN: u16 = 0x02;
     const ACK: u16 = 0x10;
@@ -216,6 +314,160 @@ mod tests {
         assert!(retrans.is_some(), "Retransmission for slot 1 must not be starved by exhausted slot 0");
         assert_eq!(retrans.unwrap().seq, 200);
         assert_eq!(rel.pending(), 1, "Exhausted slot 0 must be evicted");
+    }
+
+    const ACK: u16 = 0x10;
+    const RST: u16 = 0x04;
+    const FIN: u16 = 0x01;
+
+    fn segment(seq: u32, ack: u32, flags: u16, payload: &'static [u8]) -> TcpSegment<'static> {
+        TcpSegment { src_port: 443, dst_port: 41000, seq, ack, flags, window: 4096, payload }
+    }
+
+    /// The attack RFC 5961 exists to stop: one forged RST at a sequence the
+    /// attacker never had to guess correctly. Before the fix every one of these
+    /// tore the connection down.
+    #[test]
+    fn a_reset_outside_the_receive_window_is_dropped_without_an_answer() {
+        let recv_seq = 5000u32;
+        let wnd = 4096u32;
+        for seq in [0u32, 4999, recv_seq.wrapping_add(wnd), u32::MAX] {
+            assert_eq!(
+                rst_action(TcpState::Established, seq, 0, recv_seq, 9000, wnd),
+                RstAction::Drop,
+                "a reset at {seq} is outside [{recv_seq}, {}) and must be dropped",
+                recv_seq.wrapping_add(wnd)
+            );
+        }
+    }
+
+    #[test]
+    fn a_reset_at_the_next_expected_sequence_is_accepted() {
+        assert_eq!(
+            rst_action(TcpState::Established, 5000, 0, 5000, 9000, 4096),
+            RstAction::Accept
+        );
+    }
+
+    #[test]
+    fn an_in_window_reset_is_challenged_rather_than_believed() {
+        for seq in [5001u32, 7000, 9095] {
+            assert_eq!(
+                rst_action(TcpState::Established, seq, 0, 5000, 9000, 4096),
+                RstAction::ChallengeAck,
+                "an in-window reset at {seq} must draw a challenge ACK, not a teardown"
+            );
+        }
+    }
+
+    #[test]
+    fn a_syn_sent_reset_must_acknowledge_the_syn_we_sent() {
+        // The SYN occupied 100, so snd_nxt is 101. Sequence is irrelevant here.
+        assert_eq!(rst_action(TcpState::SynSent, 777, 101, 0, 101, 0), RstAction::Accept);
+        for ack in [0u32, 100, 102, u32::MAX] {
+            assert_eq!(
+                rst_action(TcpState::SynSent, 777, ack, 0, 101, 0),
+                RstAction::Drop,
+                "a reset acknowledging {ack} does not acknowledge our SYN"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_window_accepts_only_the_exact_next_sequence() {
+        assert_eq!(rst_action(TcpState::Established, 5000, 0, 5000, 9000, 0), RstAction::Accept);
+        assert_eq!(
+            rst_action(TcpState::Established, 5001, 0, 5000, 9000, 0),
+            RstAction::Drop,
+            "with no window there is nothing to challenge about"
+        );
+    }
+
+    #[test]
+    fn reset_validation_survives_sequence_space_wrap() {
+        let recv_seq = 0xFFFF_FFF0u32;
+        let wnd = 32u32;
+        assert_eq!(rst_action(TcpState::Established, recv_seq, 0, recv_seq, 0, wnd), RstAction::Accept);
+        for seq in [0xFFFF_FFF1u32, 0xFFFF_FFFF, 0x0000_000F] {
+            assert_eq!(
+                rst_action(TcpState::Established, seq, 0, recv_seq, 0, wnd),
+                RstAction::ChallengeAck,
+                "{seq:#x} is inside the wrapped window"
+            );
+        }
+        assert_eq!(
+            rst_action(TcpState::Established, 0x0000_0010, 0, recv_seq, 0, wnd),
+            RstAction::Drop,
+            "the wrapped window end is exclusive"
+        );
+    }
+
+    #[test]
+    fn a_closing_state_refuses_an_ack_for_bytes_never_sent() {
+        let seg = segment(5000, 0, ACK, b"");
+        for ack in [99u32, 201, 0x8000_0000, u32::MAX] {
+            let forged = TcpSegment { ack, ..seg };
+            assert!(
+                !valid_closing_segment(&forged, 5000, 4096, 100, 200),
+                "ack {ack:#x} is outside [snd_una=100, snd_nxt=200]"
+            );
+        }
+        // Positive control: the boundaries themselves are legitimate.
+        for ack in [100u32, 150, 200] {
+            let honest = TcpSegment { ack, ..seg };
+            assert!(valid_closing_segment(&honest, 5000, 4096, 100, 200), "ack {ack} is in range");
+        }
+    }
+
+    #[test]
+    fn a_closing_state_refuses_a_segment_outside_the_receive_window() {
+        for seq in [0u32, 4999, 9096, u32::MAX] {
+            let seg = segment(seq, 150, ACK, b"x");
+            assert!(
+                !valid_closing_segment(&seg, 5000, 4096, 100, 200),
+                "sequence {seq} must not be allowed to move recv_seq"
+            );
+        }
+        let in_order = segment(5000, 150, ACK, b"payload");
+        assert!(valid_closing_segment(&in_order, 5000, 4096, 100, 200));
+    }
+
+    #[test]
+    fn a_closing_state_counts_the_fin_as_one_sequence_number() {
+        // Last byte of a bare FIN lands on the final in-window sequence.
+        let at_edge = segment(9095, 150, ACK | FIN, b"");
+        assert!(valid_closing_segment(&at_edge, 5000, 4096, 100, 200));
+        let past_edge = segment(9096, 150, ACK | FIN, b"");
+        assert!(!valid_closing_segment(&past_edge, 5000, 4096, 100, 200));
+        // A zero-window peer may still be probed at exactly recv_seq.
+        let probe = segment(5000, 150, ACK, b"");
+        assert!(valid_closing_segment(&probe, 5000, 0, 100, 200));
+        let inject = segment(5000, 150, ACK, b"x");
+        assert!(!valid_closing_segment(&inject, 5000, 0, 100, 200));
+    }
+
+    #[test]
+    fn closing_validation_refuses_syn_and_rst_bearing_segments() {
+        for flags in [0x02u16, ACK | 0x02, RST, ACK | RST, FIN] {
+            let seg = segment(5000, 150, flags, b"");
+            assert!(
+                !valid_closing_segment(&seg, 5000, 4096, 100, 200),
+                "flags {flags:#x} must not drive a closing state"
+            );
+        }
+    }
+
+    #[test]
+    fn the_closing_state_set_covers_every_post_established_state() {
+        for state in [
+            TcpState::FinWait1, TcpState::FinWait2, TcpState::FinWait,
+            TcpState::CloseWait, TcpState::LastAck, TcpState::TimeWait,
+        ] {
+            assert!(is_closing_state(state), "{state:?} must be window-validated");
+        }
+        for state in [TcpState::Closed, TcpState::Listen, TcpState::SynSent, TcpState::SynReceived, TcpState::Established] {
+            assert!(!is_closing_state(state), "{state:?} is not a closing state");
+        }
     }
 }
 

@@ -169,7 +169,8 @@ def test_process_thread_registry_binds_task_identity_to_process():
     # 9222f92 replaced the blocking THREAD_TABLE lock with a bounded try_lock
     # retry loop to avoid CR3 spinlock contention; the task-identity lookup
     # against THREAD_TABLE itself is unchanged.
-    assert "THREAD_TABLE.try_lock() {\n            return threads.iter().flatten().find(|r| r.task == task)" in source
+    assert "THREAD_TABLE.try_lock() {" in source
+    assert "threads.iter().flatten().find(|r| r.task == task)" in source
     assert "pub fn register_thread(process: ProcessId, task: TaskId)" in source
     assert "leader_binding" in source
 

@@ -11,6 +11,15 @@ use super::device::NetError;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
 
 pub const MAX_SOCKETS: usize = 8;
+/// Local ports the kernel reserves for its own DNS resolver (M5).
+///
+/// WHY the range is named: `sys_dns_resolve` binds one of these for every
+/// query, so a task able to bind all eight stops name resolution for the whole
+/// system while holding nothing but a legitimate `NetworkSocket` capability.
+pub const DNS_RESOLVER_PORT_MIN: u16 = 53000;
+pub const DNS_RESOLVER_PORT_MAX: u16 = 53007;
+/// Below this a port belongs to a system service, not to an application.
+pub const PRIVILEGED_PORT_LIMIT: u16 = 1024;
 pub const SOCKET_RX_SLOTS: usize = 4;
 pub const SOCKET_RX_BUF_SIZE: usize = 512;
 pub const TCP_RX_BUF_SIZE: usize = 16384;
@@ -173,6 +182,19 @@ impl SocketTable {
             if let Some(process) = process { crate::task::process::release_network_socket(process); }
             return Err(NetError::InvalidPort);
         }
+        // WHY a port policy on top of the capability (M5): `NetworkSocket` is a
+        // type-level capability with no object identity, so any holder could bind
+        // any port -- including all eight the resolver needs, which is a
+        // system-wide DNS outage caused by one application. The capability gate
+        // and the per-process quota above stay exactly as they were; this adds
+        // the object dimension they never had.
+        let port = match self.authorize_bind_port(owner_task_id, port) {
+            Ok(port) => port,
+            Err(err) => {
+                if let Some(process) = process { crate::task::process::release_network_socket(process); }
+                return Err(err);
+            }
+        };
         if self.sockets.iter().flatten().any(|sock| sock.is_bound && sock.local_port == port) {
             if let Some(process) = process { crate::task::process::release_network_socket(process); }
             return Err(NetError::PortInUse);
@@ -195,6 +217,56 @@ impl SocketTable {
 
         if let Some(process) = process { crate::task::process::release_network_socket(process); }
         Err(NetError::QueueFull)
+    }
+
+    /// Which local port this owner may actually bind, or a refusal.
+    ///
+    /// Three rules, in order: a system service port is not an application's to
+    /// claim; a port inside the resolver's reserved range is bindable only while
+    /// a resolution is in flight, and one owner may hold at most one of them;
+    /// inside that range the kernel picks the free port rather than the caller.
+    ///
+    /// WHY the kernel picks the port (M1): the resolver's source port was the
+    /// first free of eight, which in practice was always 53000 -- about zero port
+    /// entropy, so the 16-bit transaction id was the only thing an off-path
+    /// poisoner had to guess. Drawing the port adds what the range can carry.
+    ///
+    /// The honest bound: eight ports is three bits. Widening it means widening
+    /// the range `sys_dns_resolve` walks, which is a syscall change, not this one.
+    ///
+    /// WHY `try_lock` on the resolver: this runs under the socket table guard on
+    /// a path the receive poll also reaches, and the mutex is not reentrant.
+    /// Contention refuses the bind instead of waiting.
+    fn authorize_bind_port(&self, owner_task_id: u32, port: u16) -> Result<u16, NetError> {
+        if port < PRIVILEGED_PORT_LIMIT {
+            return Err(NetError::CapabilityDenied);
+        }
+        let reserved = |p: u16| (DNS_RESOLVER_PORT_MIN..=DNS_RESOLVER_PORT_MAX).contains(&p);
+        if !reserved(port) {
+            return Ok(port);
+        }
+        if self.sockets.iter().flatten().any(|s| s.is_bound && s.owner_task_id == owner_task_id && reserved(s.local_port)) {
+            return Err(NetError::PortInUse);
+        }
+        {
+            let resolver = crate::net::DNS_RESOLVER.try_lock().ok_or(NetError::NotReady)?;
+            if !resolver.has_inflight() {
+                return Err(NetError::CapabilityDenied);
+            }
+        }
+        let mut free = [0u16; (DNS_RESOLVER_PORT_MAX - DNS_RESOLVER_PORT_MIN + 1) as usize];
+        let mut count = 0usize;
+        for candidate in DNS_RESOLVER_PORT_MIN..=DNS_RESOLVER_PORT_MAX {
+            if !self.sockets.iter().flatten().any(|s| s.is_bound && s.local_port == candidate) {
+                free[count] = candidate;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return Err(NetError::PortInUse);
+        }
+        let draw = crate::net::net_entropy_u64().map_err(|_| NetError::NotReady)?;
+        Ok(free[(draw % count as u64) as usize])
     }
 
     /// Delivers an incoming UDP datagram to any bound socket matching the destination port.
@@ -291,6 +363,13 @@ pub struct TcpConnection {
     pub id: u32,
     pub owner_task_id: u32,
     pub local_port: u16,
+    /// The local address this connection was opened on.
+    ///
+    /// WHY it is recorded rather than re-derived at demux time: the IPv4 layer
+    /// accepts unicast, broadcast and loopback destinations, so matching only the
+    /// port pair let a segment addressed to the broadcast address drive a
+    /// connection bound to the host's unicast address.
+    pub local_ip: Ipv4Address,
     pub remote_ip: Ipv4Address,
     pub remote_port: u16,
     pub state: crate::net::TcpState,
@@ -337,11 +416,30 @@ impl TcpConnectionTable {
         local_port: u16,
         remote_ip: Ipv4Address,
         remote_port: u16,
-        initial_seq: u32,
+        _initial_seq: u32,
     ) -> Result<u32, NetError> {
         if local_port == 0 || remote_port == 0 {
             return Err(NetError::InvalidPort);
         }
+        // WHY the kernel draws the ISN and the argument is ignored (M6): the
+        // sequence number a connection starts from used to be whatever the
+        // caller passed in, so the kernel's own anti-hijack guarantee depended on
+        // every caller being well behaved. The browser happens to randomize and
+        // fail closed; a caller that did not would hand an off-path attacker the
+        // one value it needs to inject into the stream. The draw is 32 bits of a
+        // hardware-seeded word (`net::net_entropy_u64`), and a refusal to produce
+        // one refuses the connection -- there is no tick fallback.
+        //
+        // The parameter is kept so the syscall signature is unchanged; the transmit
+        // path re-reads `syn_seq` from this table so the wire and the table agree.
+        let isn = crate::net::net_entropy_u64().map_err(|_| NetError::NotReady)? as u32;
+        // The same source address the transmit path selects for this peer, so the
+        // demux compares against the address actually put on the wire.
+        let local_ip = if remote_ip.is_loopback() {
+            Ipv4Address::LOCALHOST
+        } else {
+            crate::net::DEFAULT_HOST_IP
+        };
         let process = crate::task::process::process_for_task(crate::task::TaskId(owner_task_id as u64));
         if let Some(process) = process {
             crate::task::process::reserve_network_socket(process)
@@ -349,6 +447,7 @@ impl TcpConnectionTable {
         }
         if self.entries.iter().flatten().any(|conn| {
             conn.local_port == local_port
+                && conn.local_ip == local_ip
                 && conn.remote_ip == remote_ip
                 && conn.remote_port == remote_port
                 && conn.state != crate::net::TcpState::Closed
@@ -367,11 +466,12 @@ impl TcpConnectionTable {
                         id,
                         owner_task_id,
                         local_port,
+                        local_ip,
                         remote_ip,
                         remote_port,
                         state: crate::net::TcpState::SynSent,
-                        send_seq: initial_seq,
-                        snd_una: initial_seq,
+                        send_seq: isn,
+                        snd_una: isn,
                         snd_wnd: 65535,
                         cwnd: crate::net::tcp::TCP_MAX_SEGMENT as u32,
                         ssthresh: 65535,
@@ -382,16 +482,16 @@ impl TcpConnectionTable {
                         rx_len: 0,
                         tx: [0u8; TCP_TX_BUF_SIZE],
                         tx_len: 0,
-                        tx_seq: initial_seq,
+                        tx_seq: isn,
                         tx_deadline: 0,
                         tx_retries: 0,
                         tx_pending: false,
                         fin_pending: false,
-                        fin_seq: initial_seq,
+                        fin_seq: isn,
                         fin_deadline: 0,
                         fin_retries: 0,
                         syn_pending: true,
-                        syn_seq: initial_seq,
+                        syn_seq: isn,
                         // A fresh connection's first retransmission is due one
                         // timeout from now. Using the bare timeout value made the
                         // SYN immediately overdue once system uptime passed it,
@@ -645,7 +745,13 @@ impl TcpConnectionTable {
 
     pub fn acknowledge_fin(&mut self, id: u32, ack: u32) -> bool {
         let conn = match self.get_mut(id) { Some(c) => c, None => return false };
-        if conn.fin_pending && crate::net::tcp::seq_ge(ack, conn.fin_seq.wrapping_add(1)) {
+        // Upper bound as well as lower: `seq_ge(ack, fin_seq + 1)` alone is
+        // satisfied by 0xFFFFFFFF, so a forged acknowledgement for bytes never
+        // sent retired the FIN and closed the connection.
+        if conn.fin_pending
+            && crate::net::tcp::seq_ge(ack, conn.fin_seq.wrapping_add(1))
+            && crate::net::tcp::seq_le(ack, conn.send_seq)
+        {
             conn.fin_pending = false;
             conn.fin_retries = 0;
             if conn.state == crate::net::TcpState::FinWait || conn.state == crate::net::TcpState::FinWait1 {
@@ -919,6 +1025,55 @@ mod tcp_reliability_tests {
         table
             .open(owner.0 as u32, 41_200, Ipv4Address::LOCALHOST, 41_201, 200)
             .expect("the freed tuple is open again");
+    }
+
+    /// `seq_ge(ack, fin_seq + 1)` on its own is satisfied by 0xFFFFFFFF, so a
+    /// forged acknowledgement for bytes never sent retired the FIN and closed the
+    /// connection. The upper bound is what makes the acknowledgement mean anything.
+    #[test]
+    fn a_fin_acknowledgement_beyond_the_send_sequence_is_refused() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
+        let owner = crate::task::TaskId::new();
+        let mut table = TcpConnectionTable::new();
+        let id = table
+            .open(owner.0 as u32, 41_300, Ipv4Address::LOCALHOST, 41_301, 100)
+            .expect("connection should open");
+        table.get_mut(id).expect("connection exists").state = crate::net::TcpState::Established;
+        let fin_seq = table.arm_fin(id, 0).expect("FIN should arm");
+
+        for ack in [fin_seq.wrapping_add(2), fin_seq.wrapping_add(1000), u32::MAX] {
+            assert!(!table.acknowledge_fin(id, ack), "ack {ack:#x} covers bytes that were never sent");
+            assert!(table.get(id).expect("entry exists").fin_pending, "the FIN must still be owed");
+        }
+        assert!(
+            table.acknowledge_fin(id, fin_seq.wrapping_add(1)),
+            "the acknowledgement that really covers the FIN must still work"
+        );
+    }
+
+    /// The demux compares the IPv4 destination against this field, so it has to be
+    /// the address the transmit path actually puts on the wire for this peer.
+    #[test]
+    fn a_connection_records_the_local_address_it_was_opened_on() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
+        let owner = crate::task::TaskId::new();
+        let mut table = TcpConnectionTable::new();
+
+        let loop_id = table
+            .open(owner.0 as u32, 41_400, Ipv4Address::LOCALHOST, 443, 100)
+            .expect("loopback connection should open");
+        assert_eq!(table.get(loop_id).expect("entry exists").local_ip, Ipv4Address::LOCALHOST);
+
+        let wan_id = table
+            .open(owner.0 as u32, 41_401, Ipv4Address([10, 0, 2, 2]), 443, 100)
+            .expect("on-link connection should open");
+        assert_eq!(
+            table.get(wan_id).expect("entry exists").local_ip,
+            crate::net::DEFAULT_HOST_IP,
+            "a non-loopback peer is reached from the host's unicast address"
+        );
     }
 
     /// A page load is a burst of short connections, and each one leaves a
@@ -1627,5 +1782,237 @@ mod tcp_reliability_tests {
             assert_eq!(conn.recv_seq, initial_recv_seq_2.wrapping_add(1), "recv_seq must advance by 1 for zero-length FIN");
             assert_eq!(conn.state, crate::net::TcpState::CloseWait, "state must transition to CloseWait on zero-length FIN");
         }
+    }
+}
+
+/// M5 and M6 at the socket layer: what a `NetworkSocket` holder may actually
+/// bind, and where the sequence number a connection starts from comes from.
+///
+/// Every case drives `SocketTable::create_socket` / `TcpConnectionTable::open`
+/// themselves -- the functions the syscalls call -- rather than a stand-in.
+#[cfg(test)]
+mod socket_port_policy_tests {
+    use super::*;
+    use crate::capability::{Capability, CapabilityId};
+    use crate::task::TaskId;
+
+    fn socket_caps(task: TaskId) -> CapabilityTable {
+        let mut caps = CapabilityTable::new_for_task(task, 8);
+        caps.insert(Capability {
+            id: CapabilityId(9101),
+            cap_type: CapabilityType::NetworkSocket,
+            rights: Rights::WRITE,
+            object_id: 0,
+        }).expect("insert NetworkSocket");
+        caps
+    }
+
+    /// M5: the capability is type-level, so before the policy one holder of a
+    /// legitimate `NetworkSocket` WRITE could bind all eight ports the resolver
+    /// needs and stop name resolution for the whole system. One owner may now
+    /// hold one reserved port, and the rest stay available to everyone else.
+    #[test]
+    fn one_task_cannot_squat_the_resolver_port_range() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
+        let (squatter, _caller_a) = crate::net::SendCallerGuard::fresh();
+        let (resolver, _caller_b) = crate::net::SendCallerGuard::fresh();
+        let caps_a = socket_caps(squatter);
+        let caps_b = socket_caps(resolver);
+        let _query_id = crate::net::DNS_RESOLVER.lock()
+            .begin(b"squat.example", 0)
+            .expect("a resolution is in flight");
+
+        let mut table = SocketTable::new();
+        let first = table
+            .create_socket(squatter.0 as u32, DNS_RESOLVER_PORT_MIN, &caps_a)
+            .expect("the first reserved bind is legitimate");
+        let held = table.get(first).expect("socket exists").local_port;
+        assert!((DNS_RESOLVER_PORT_MIN..=DNS_RESOLVER_PORT_MAX).contains(&held));
+
+        // Walking the range is what used to work. Every attempt now refuses,
+        // including the port the owner already holds.
+        for port in DNS_RESOLVER_PORT_MIN..=DNS_RESOLVER_PORT_MAX {
+            assert_eq!(
+                table.create_socket(squatter.0 as u32, port, &caps_a),
+                Err(NetError::PortInUse),
+                "one owner must not be able to hold a second reserved port (attempted {port})"
+            );
+        }
+        assert_eq!(
+            table.sockets.iter().flatten().filter(|s| s.is_bound).count(),
+            1,
+            "the refused binds must not have allocated a slot"
+        );
+
+        // Positive control: another owner still gets a reserved port, so the
+        // policy stops the squat without stopping resolution.
+        let second = table
+            .create_socket(resolver.0 as u32, DNS_RESOLVER_PORT_MIN, &caps_b)
+            .expect("a different owner can still bind inside the range");
+        let other = table.get(second).expect("socket exists").local_port;
+        assert_ne!(other, held, "two owners must not share one port");
+        assert!((DNS_RESOLVER_PORT_MIN..=DNS_RESOLVER_PORT_MAX).contains(&other));
+    }
+
+    /// M5: a system service port is not an application's to claim, and an
+    /// ordinary high port still binds exactly as it did before.
+    #[test]
+    fn an_application_cannot_bind_a_system_service_port() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
+        let (task, _caller) = crate::net::SendCallerGuard::fresh();
+        let caps = socket_caps(task);
+        let mut table = SocketTable::new();
+
+        for port in [1u16, 53, 67, 68, 443, 1023] {
+            assert_eq!(
+                table.create_socket(task.0 as u32, port, &caps),
+                Err(NetError::CapabilityDenied),
+                "port {port} belongs to a system service"
+            );
+        }
+        assert!(table.sockets.iter().flatten().all(|s| !s.is_bound));
+
+        // Positive controls: the ports the kernel and the applications actually
+        // use are untouched by the policy.
+        for port in [1024u16, 4242, 45000, 53008, 65535] {
+            let id = table
+                .create_socket(task.0 as u32, port, &caps)
+                .unwrap_or_else(|e| panic!("legitimate port {port} must still bind: {e:?}"));
+            assert_eq!(table.get(id).expect("socket exists").local_port, port);
+        }
+    }
+
+    /// M5: the reserved range is a resolver resource, not a general-purpose one.
+    /// With no query outstanding nobody may bind inside it.
+    #[test]
+    fn the_reserved_range_needs_an_outstanding_resolution() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
+        let (task, _caller) = crate::net::SendCallerGuard::fresh();
+        let caps = socket_caps(task);
+        let mut table = SocketTable::new();
+
+        assert!(!crate::net::DNS_RESOLVER.lock().has_inflight());
+        for port in DNS_RESOLVER_PORT_MIN..=DNS_RESOLVER_PORT_MAX {
+            assert_eq!(
+                table.create_socket(task.0 as u32, port, &caps),
+                Err(NetError::CapabilityDenied),
+                "port {port} is reserved for a resolution that is not happening"
+            );
+        }
+
+        let query_id = crate::net::DNS_RESOLVER.lock()
+            .begin(b"needed.example", 0)
+            .expect("query starts");
+        let id = table
+            .create_socket(task.0 as u32, DNS_RESOLVER_PORT_MIN, &caps)
+            .expect("with a query in flight the resolver may bind");
+        assert!(table.get(id).expect("socket exists").is_bound);
+        assert!(crate::net::DNS_RESOLVER.lock().abort(query_id));
+    }
+
+    /// M1: the resolver's source port was the first free of eight, which in
+    /// practice was always 53000. It is drawn now, so it moves.
+    #[test]
+    fn the_resolver_source_port_is_not_always_the_first_free_port() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
+        let (task, _caller) = crate::net::SendCallerGuard::fresh();
+        let caps = socket_caps(task);
+        let _query_id = crate::net::DNS_RESOLVER.lock()
+            .begin(b"ports.example", 0)
+            .expect("a resolution is in flight");
+        let mut table = SocketTable::new();
+
+        let mut seen = [0u16; 24];
+        for slot in seen.iter_mut() {
+            // Always asking for the same port, exactly as `sys_dns_resolve` does
+            // on the first iteration of its loop.
+            let id = table
+                .create_socket(task.0 as u32, DNS_RESOLVER_PORT_MIN, &caps)
+                .expect("resolver bind");
+            *slot = table.get(id).expect("socket exists").local_port;
+            assert!((DNS_RESOLVER_PORT_MIN..=DNS_RESOLVER_PORT_MAX).contains(slot));
+            table.close_owned(id, task.0 as u32).expect("close releases the port");
+        }
+        assert!(
+            seen.iter().any(|&p| p != DNS_RESOLVER_PORT_MIN),
+            "the source port never moved off the first free port: {seen:?}"
+        );
+    }
+
+    /// M5: the port policy must not spend the per-process socket allowance on a
+    /// bind it then refuses, or a handful of refusals would exhaust a legitimate
+    /// application's quota.
+    #[test]
+    fn a_refused_bind_does_not_consume_the_process_socket_quota() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
+        let (task, _caller) = crate::net::SendCallerGuard::fresh();
+        let caps = socket_caps(task);
+        let mut table = SocketTable::new();
+
+        for _ in 0..32 {
+            assert_eq!(
+                table.create_socket(task.0 as u32, 53, &caps),
+                Err(NetError::CapabilityDenied)
+            );
+        }
+        let id = table
+            .create_socket(task.0 as u32, 45000, &caps)
+            .expect("the allowance must still be intact after 32 refusals");
+        assert_eq!(table.get(id).expect("socket exists").local_port, 45000);
+    }
+
+    /// M6: two opens handed the same caller value must not produce the same
+    /// sequence number, and every field derived from the ISN must follow the
+    /// kernel's draw rather than the argument.
+    #[test]
+    fn the_kernel_draws_the_initial_sequence_number() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
+        let owner = TaskId::new();
+        let mut table = TcpConnectionTable::new();
+        let a = table
+            .open(owner.0 as u32, 41000, Ipv4Address::LOCALHOST, 443, 100)
+            .expect("first connection opens");
+        let b = table
+            .open(owner.0 as u32, 41001, Ipv4Address::LOCALHOST, 443, 100)
+            .expect("second connection opens");
+
+        let seq_a = table.get(a).expect("connection exists").send_seq;
+        let seq_b = table.get(b).expect("connection exists").send_seq;
+        assert_ne!(seq_a, seq_b, "the same caller ISN produced the same wire sequence twice");
+        assert_ne!(seq_a, 100, "the caller's value must not reach the wire");
+        assert_ne!(seq_b, 100);
+
+        let conn = table.get(a).expect("connection exists");
+        assert_eq!(conn.snd_una, seq_a);
+        assert_eq!(conn.tx_seq, seq_a);
+        assert_eq!(conn.fin_seq, seq_a);
+        assert_eq!(conn.syn_seq, seq_a, "the retransmission path must resend the same ISN");
+    }
+
+    /// M6: no entropy, no connection -- and the refusal must not leave a slot or
+    /// a process reservation behind.
+    #[test]
+    fn open_refuses_without_entropy_and_leaves_no_reservation() {
+        let _net_guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::net::reset_net_state();
+        let (task, _caller) = crate::net::SendCallerGuard::fresh();
+        let mut table = TcpConnectionTable::new();
+        let result = {
+            let _held = crate::crypto::TRNG.lock();
+            table.open(task.0 as u32, 41000, Ipv4Address::LOCALHOST, 443, 100)
+        };
+        assert_eq!(result, Err(NetError::NotReady));
+        assert!(table.entries().iter().flatten().next().is_none());
+        // The quota was never spent, so a later legitimate open still works.
+        let id = table
+            .open(task.0 as u32, 41000, Ipv4Address::LOCALHOST, 443, 100)
+            .expect("the refusal must not have consumed the allowance");
+        assert_ne!(table.get(id).expect("connection exists").send_seq, 100);
     }
 }

@@ -504,7 +504,15 @@ static GUEST_WRITE: Mutex<Option<GuestWrite>> = Mutex::new(None);
 /// convenience, and a convenience is not an authority. The console is
 /// outside the capability model, so the path is checked here, against
 /// the same shape the host uses, before anything is read or written.
-fn guest_path_is_safe(path: &str, writable: bool) -> bool {
+///
+/// WHY reads share the write whitelist: this channel moves the user's own
+/// documents -- a Studio screenshot, a host-delivered download, a file an app
+/// wrote into `/data` or media storage. It is not a window into the platform's
+/// private state. An unauthenticated console line must no more read
+/// `/user/.accounts` or the keystore than it may write there, so both
+/// directions are confined to one root whitelist. `_writable` is kept for
+/// call-site readability; the confinement no longer depends on it.
+fn guest_path_is_safe(path: &str, _writable: bool) -> bool {
     if path.is_empty() || path.len() > 192 {
         return false;
     }
@@ -517,13 +525,13 @@ fn guest_path_is_safe(path: &str, writable: bool) -> bool {
     {
         return false;
     }
-    // WHY writes reach the media directories too: a Studio screenshot or a
-    // host-delivered download belongs where the Gallery and File Manager
-    // list documents. /data stays the platform's own area; media storage is
-    // the user's. Anything else is refused so the console cannot place a
-    // file among the platform's packages.
-    if writable
-        && !path.starts_with("/data/")
+    // WHY these roots: a Studio screenshot or a host-delivered download belongs
+    // where the Gallery and File Manager list documents. /data is the platform's
+    // own scratch area; media storage is the user's. Anything else -- /user,
+    // /system, the keystore -- is refused for reads and writes alike, so the
+    // console can neither place a file among the platform's packages nor read
+    // back the account secrets it guards.
+    if !path.starts_with("/data/")
         && !path.starts_with("/storage/photos/")
         && !path.starts_with("/storage/pictures/")
         && !path.starts_with("/storage/videos/")
@@ -1101,6 +1109,14 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
+    // DEBUG-ONLY: installs a publisher trust root from the unauthenticated console.
+    // A trust root decides which signed .rapp packages the whole device accepts, so
+    // an attacker with the serial socket could get their own publisher trusted.
+    // Compiled out of production images behind `debug-control-plane`; the owner
+    // provisions a root once on a provisioning build and the journalled record is
+    // restored at boot (REVOCATION_REGISTRY.seed), so a production image keeps the
+    // roots it was provisioned with but cannot mint new ones over COM1.
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("RAPP_TRUST") {
         let Some(key_hex) = parts.next() else {
             serial_println!("[RAPP_HOST] REJECT trust key missing");
@@ -1158,6 +1174,17 @@ fn handle_rapp_command(s: &str) -> bool {
 /// operator of the device holds, which is the same reason `RAPP_TRUST` has no
 /// syscall wrapper.
 ///
+/// WHY the mutating verbs are compiled out of production: the console carries no
+/// CapHandle and no caller identity, so an attacker who reaches the serial socket
+/// could install their own CA and MITM every TLS connection the device makes, or
+/// revoke the legitimate anchors. `TLS_TRUST_BEGIN` / `CHUNK` / `COMMIT` / `REVOKE`
+/// and the single-line `TLS_TRUST` therefore exist only behind the
+/// `debug-control-plane` feature, which a provisioning/test build opts into
+/// explicitly. The store is RAM-only and empty at every boot, so there is no
+/// "factory window" to guard -- the only sound boundary is to keep the mutation
+/// out of the production binary entirely. `TLS_TRUST_LIST` is a read-only
+/// diagnostic and stays in every build: it observes the store, it cannot change it.
+///
 /// WHY the anchor can arrive two ways: one line is the friendly path, and it
 /// carries at most 250 anchor bytes -- a console line holds 511 characters, the
 /// verb and a space take 10 of them, and hex doubles what is left. A real root is
@@ -1171,6 +1198,7 @@ fn handle_tls_trust_command(s: &str) -> bool {
     let mut parts = s.split_ascii_whitespace();
     let Some(verb) = parts.next() else { return false; };
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("TLS_TRUST_BEGIN") {
         let Some(len) = parts.next().and_then(|v| v.parse::<usize>().ok()) else {
             serial_println!("[TLS_TRUST] REJECT anchor size missing");
@@ -1189,6 +1217,7 @@ fn handle_tls_trust_command(s: &str) -> bool {
         return true;
     }
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("TLS_TRUST_CHUNK") {
         let Some(offset) = parts.next().and_then(|v| v.parse::<usize>().ok()) else {
             serial_println!("[TLS_TRUST] REJECT chunk offset missing");
@@ -1232,6 +1261,7 @@ fn handle_tls_trust_command(s: &str) -> bool {
         return true;
     }
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("TLS_TRUST_COMMIT") {
         let label = parts.next().unwrap_or("");
         let mut transfer = ANCHOR_TRANSFER.lock();
@@ -1274,6 +1304,7 @@ fn handle_tls_trust_command(s: &str) -> bool {
         return true;
     }
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("TLS_TRUST_REVOKE") {
         let Some(position) = parts.next().and_then(|v| v.parse::<usize>().ok()) else {
             serial_println!("[TLS_TRUST] REJECT revoke position missing");
@@ -1292,6 +1323,7 @@ fn handle_tls_trust_command(s: &str) -> bool {
         };
     }
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("TLS_TRUST") {
         let Some(hex) = parts.next() else {
             serial_println!("[TLS_TRUST] REJECT anchor missing");
@@ -1489,11 +1521,17 @@ fn handle_serial_command(cmd: &[u8]) {
     // the payload multiplied console traffic roughly twentyfold and was the
     // pressure that exposed the unbounded UART wait. The `CHUNK_OK`
     // acknowledgement still proves the chunk was received.
-    let bulk = s.split_ascii_whitespace().next().is_some_and(|verb| {
-        verb.eq_ignore_ascii_case("STUDIO_FS_CHUNK")
-            || verb.eq_ignore_ascii_case("RAPP_CHUNK")
-            || verb.eq_ignore_ascii_case("TLS_TRUST_CHUNK")
+    let first_verb = s.split_ascii_whitespace().next();
+    let mut bulk = first_verb.is_some_and(|verb| {
+        verb.eq_ignore_ascii_case("STUDIO_FS_CHUNK") || verb.eq_ignore_ascii_case("RAPP_CHUNK")
     });
+    // The anchor-chunk verb only exists in a debug-control-plane build, so its
+    // echo-suppression clause is compiled out with it; a production binary carries
+    // neither the handler nor this string.
+    #[cfg(feature = "debug-control-plane")]
+    {
+        bulk |= first_verb.is_some_and(|verb| verb.eq_ignore_ascii_case("TLS_TRUST_CHUNK"));
+    }
     if !bulk {
         crate::serial_println!("[CMD] {}", s);
     }
@@ -1686,6 +1724,11 @@ fn handle_serial_command(cmd: &[u8]) {
         return;
     }
 
+    // DEBUG-ONLY: arbitrary-path write from the unauthenticated console. Compiled
+    // out of production images; see the `debug-control-plane` feature in
+    // kernel/Cargo.toml. The path-confined Studio channel (STUDIO_FS_BEGIN/CHUNK/
+    // COMMIT) remains available for legitimate host file delivery.
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("WRITE_FILE") {
         let Some(path) = parts.next() else {
             crate::serial_println!("[FILE_WRITE] status=ERR_SYNTAX");
@@ -1725,6 +1768,11 @@ fn handle_serial_command(cmd: &[u8]) {
         return;
     }
 
+    // DEBUG-ONLY: arbitrary-path read from the unauthenticated console. This verb
+    // had no root whitelist at all and could dump /user/.accounts. Compiled out of
+    // production images; the confined STUDIO_FS_READ channel remains for reading
+    // back the user's own documents.
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("READ_FILE") {
         if let Some(path) = parts.next() {
             if path.contains("..") || path.contains("//") {
@@ -1852,6 +1900,7 @@ fn handle_serial_command(cmd: &[u8]) {
                 let p = crate::panic::get_panic_policy();
                 crate::serial_println!("[PANIC_POLICY] current={}", p.as_str());
             }
+            #[cfg(feature = "debug-control-plane")]
             Some("SET") => {
                 if let Some(val) = parts.next() {
                     if val.eq_ignore_ascii_case("REBOOT") {
@@ -1865,6 +1914,16 @@ fn handle_serial_command(cmd: &[u8]) {
                     }
                 }
             }
+            // Production: the policy is fixed at the safe HALT default and no
+            // unauthenticated line may change it. The refusal names the state it
+            // measured against rather than claiming the verb is unsupported.
+            #[cfg(not(feature = "debug-control-plane"))]
+            Some("SET") => {
+                crate::serial_println!(
+                    "[PANIC_POLICY] err=REFUSED current={} production build: panic policy is fixed at HALT; SET requires the debug-control-plane feature",
+                    crate::panic::get_panic_policy().as_str()
+                );
+            }
             _ => {
                 crate::serial_println!("[PANIC_POLICY] err=SYNTAX");
             }
@@ -1872,6 +1931,10 @@ fn handle_serial_command(cmd: &[u8]) {
         return;
     }
 
+    // DEBUG-ONLY: forces a kernel panic from the unauthenticated console -- a
+    // trivial remote denial of service. Compiled out of production images; the
+    // crash-watchdog recovery suite opts in via `debug-control-plane`.
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("TRIGGER_KERNEL_PANIC") {
         let reason = parts.next().unwrap_or("Manual_Diagnostic_Panic_Test");
         panic!("Controlled diagnostic fault: {}", reason);
@@ -1967,13 +2030,23 @@ fn handle_serial_command(cmd: &[u8]) {
             sm.imu.update_gyro(crate::sensor::Vector3D::new(gx, gy, gz));
         }
         let orient = sm.imu.determine_orientation();
+        // Platform truth: no physical IMU is present on this board, so these are
+        // synthetic values driving orientation/shake logic only. sys_sensor_read
+        // still reports NOT_IMPLEMENTED to apps; label the console reply so it is
+        // never mistaken for a measured hardware reading.
         crate::serial_println!(
-            "[SENSOR_INJECT] accel=({}, {}, {}) orientation={:?}",
+            "[SENSOR_INJECT] synthetic=true hardware_present={} accel=({}, {}, {}) orientation={:?}",
+            sm.is_hardware_present(),
             x, y, z, orient
         );
         return;
     }
 
+    // DEBUG-ONLY: injects synthetic battery telemetry (soc, voltage, capacity,
+    // temperature) that the resource layer would otherwise report as measured.
+    // Compiled out of production images so no console line can fabricate a
+    // hardware reading. See the `debug-control-plane` feature.
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("BATTERY_SET") {
         let pct = parts.next().and_then(|v| v.parse::<u8>().ok()).unwrap_or(80).min(100);
         let charging_str = parts.next().unwrap_or("DISCHARGING");
@@ -1996,6 +2069,12 @@ fn handle_serial_command(cmd: &[u8]) {
         return;
     }
 
+    // DEBUG-ONLY: unlocks the owner account WITHOUT consulting any biometric
+    // matcher. This is a simulated injection for development, never a verified
+    // biometric authentication, and it is compiled out of production images so
+    // no unauthenticated console line can unlock the device. See the
+    // `debug-control-plane` feature in kernel/Cargo.toml.
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("FINGERPRINT_INJECT") {
         let result_str = parts.next().unwrap_or("PASS");
         if result_str.eq_ignore_ascii_case("PASS") {
@@ -2020,13 +2099,18 @@ fn handle_serial_command(cmd: &[u8]) {
                 alt: false,
                 meta: false,
             });
-            crate::serial_println!("[FINGERPRINT_INJECT] PASS: biometric match verified, UID=1000 unlocked");
+            crate::serial_println!("[FINGERPRINT_INJECT] SIMULATED PASS: debug injection unlocked UID=1000 (no biometric matcher consulted; NOT a verified match)");
         } else {
-            crate::serial_println!("[FINGERPRINT_INJECT] FAIL: biometric match rejected");
+            crate::serial_println!("[FINGERPRINT_INJECT] SIMULATED FAIL: debug injection rejected (no biometric matcher consulted)");
         }
         return;
     }
 
+    // DEBUG-ONLY: mutates the hardware kill-switch state (camera/mic/cellular/gps
+    // cut) from the unauthenticated console. Compiled out of production images.
+    // The read-only KILLSWITCH_STATUS / KILLSWITCH_GET diagnostics below stay
+    // available because they observe state rather than change it.
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("KILLSWITCH_TOGGLE") {
         let subsystem = parts.next().unwrap_or("ALL");
         let state_str = parts.next().unwrap_or("ON");
@@ -2250,34 +2334,408 @@ mod tests {
 
     #[test]
     fn test_serial_commands_extended_controls() {
-        // Test SENSOR_INJECT
+        // SENSOR_INJECT is a production sensor/input-injection verb and stays
+        // available in default builds. The authentication, battery-telemetry and
+        // kill-switch injections that used to share this test are now covered by
+        // the feature-gated `debug_control_plane_injections_work_when_enabled`
+        // (dev build) and `production_build_refuses_debug_control_plane` (default
+        // build) below, so no coverage was dropped to make the default build green.
+        capture_clear();
         handle_serial_command(b"SENSOR_INJECT 123 456 789");
+        let lines = capture_lines();
+        // Platform truth: no physical IMU exists on this board, so the reply must
+        // label the values synthetic and report hardware_present=false. The
+        // downstream syscall (sys_sensor_read) independently reports
+        // NOT_IMPLEMENTED, so these values never reach an app as a measurement.
+        assert!(
+            lines.iter().any(|l| l.contains("[SENSOR_INJECT] synthetic=true hardware_present=false")),
+            "SENSOR_INJECT reply did not label its values synthetic: {:?}",
+            lines
+        );
         let sm = crate::sensor::SENSOR_MANAGER.lock();
         assert_eq!(sm.imu.accel.x, 123);
         assert_eq!(sm.imu.accel.y, 456);
         assert_eq!(sm.imu.accel.z, 789);
         drop(sm);
+    }
 
-        // Test BATTERY_SET
+    /// Dev-only positive coverage for finding C5 / A5-01 / A5-05.
+    ///
+    /// With `debug-control-plane` enabled the injection verbs work, but the
+    /// fingerprint reply must label itself a SIMULATED injection and must never
+    /// claim a verified biometric match -- no matcher is consulted. These
+    /// assertions moved here from `test_serial_commands_extended_controls` so the
+    /// default build compiles the verbs out entirely.
+    #[cfg(feature = "debug-control-plane")]
+    #[test]
+    fn debug_control_plane_injections_work_when_enabled() {
+        // BATTERY_SET injects synthetic telemetry (dev only).
         handle_serial_command(b"BATTERY_SET 60 AC");
         let bg = crate::resource::BATTERY_GAUGE.lock();
         assert_eq!(bg.soc_percent, 60);
         assert_eq!(bg.charging_status, crate::resource::battery::ChargingStatus::ChargingAC);
         drop(bg);
 
-        // Test FINGERPRINT_INJECT
+        // FINGERPRINT_INJECT unlocks the owner when provisioned, but the reply is
+        // an injection label, not a fabricated verification claim. The global
+        // manager may be unprovisioned in a host test, so the state check stays
+        // soft exactly as the original coverage was; the wording check is
+        // unconditional because the handler prints its label regardless of the
+        // unlock result.
+        capture_clear();
         handle_serial_command(b"FINGERPRINT_INJECT PASS");
+        let lines = capture_lines();
         let um = crate::user::USER_MANAGER.lock();
         if let Ok(state) = um.get_lock_state(crate::user::UserId::OWNER) {
             assert_eq!(state, crate::user::UserLockState::Unlocked);
         }
         drop(um);
+        assert!(
+            lines.iter().any(|l| l.contains("[FINGERPRINT_INJECT] SIMULATED PASS")),
+            "fingerprint injection did not label itself simulated: {:?}",
+            lines
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("biometric match verified")),
+            "fingerprint injection still claims a verified biometric match: {:?}",
+            lines
+        );
 
-        // Test KILLSWITCH_TOGGLE
+        // KILLSWITCH_TOGGLE mutates kill-switch state (dev only).
         handle_serial_command(b"KILLSWITCH_TOGGLE CAMERA ON");
         assert!(HARDWARE_KILLSWITCHES.lock().camera_cut);
         handle_serial_command(b"KILLSWITCH_TOGGLE CAMERA OFF");
         assert!(!HARDWARE_KILLSWITCHES.lock().camera_cut);
+    }
+
+    /// Production exclusion for finding C5 / A5-01 / A5-05 (default build).
+    ///
+    /// With `debug-control-plane` OFF the dangerous verb handlers are not in the
+    /// binary, so an unauthenticated serial line can neither unlock the owner
+    /// account, fabricate battery telemetry, cut the radios, nor read/write
+    /// arbitrary guest paths. Each check holds the relevant state lock across the
+    /// dispatch: because the verb is compiled out the handler never re-acquires
+    /// that lock (no deadlock), and no sibling test can mutate the state mid-check.
+    #[cfg(not(feature = "debug-control-plane"))]
+    #[test]
+    fn production_build_refuses_debug_control_plane() {
+        use crate::user::{UserId, UserLockState, USER_MANAGER};
+
+        // --- FINGERPRINT_INJECT must NOT call unlock_biometric ---
+        // The global manager starts empty in a host test (boot provisions the
+        // owner via provision_owner). `lock` forces a known Locked state when the
+        // account exists and touches no VFS, so it is safe under the held guard.
+        let mut um = USER_MANAGER.lock();
+        let _ = um.lock(UserId::OWNER);
+        let before = um.get_lock_state(UserId::OWNER).ok();
+        capture_clear();
+        handle_serial_command(b"FINGERPRINT_INJECT PASS");
+        handle_serial_command(b"FINGERPRINT_INJECT");
+        let after = um.get_lock_state(UserId::OWNER).ok();
+        assert_eq!(
+            after, before,
+            "FINGERPRINT_INJECT changed the owner lock state in a production build"
+        );
+        if before.is_some() {
+            assert_eq!(
+                after,
+                Some(UserLockState::Locked),
+                "FINGERPRINT_INJECT unlocked a locked owner account in a production build"
+            );
+        }
+        let lines = capture_lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("[FINGERPRINT_INJECT]")
+                || l.contains("unlocked via biometric")),
+            "FINGERPRINT_INJECT produced a handler reply in a production build: {:?}",
+            lines
+        );
+        drop(um);
+
+        // --- BATTERY_SET must NOT inject synthetic telemetry ---
+        let bg = crate::resource::BATTERY_GAUGE.lock();
+        let soc_before = bg.soc_percent;
+        capture_clear();
+        handle_serial_command(b"BATTERY_SET 17 AC");
+        assert_eq!(
+            bg.soc_percent, soc_before,
+            "BATTERY_SET changed the battery gauge in a production build"
+        );
+        let lines = capture_lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("[BATTERY_SET]")),
+            "BATTERY_SET produced a handler reply in a production build: {:?}",
+            lines
+        );
+        drop(bg);
+
+        // --- KILLSWITCH_TOGGLE must NOT cut the radios ---
+        let mut ks = HARDWARE_KILLSWITCHES.lock();
+        ks.camera_cut = false;
+        ks.mic_cut = false;
+        ks.cellular_cut = false;
+        ks.gps_cut = false;
+        capture_clear();
+        handle_serial_command(b"KILLSWITCH_TOGGLE CAMERA ON");
+        handle_serial_command(b"KILLSWITCH_TOGGLE ALL ON");
+        assert!(
+            !ks.camera_cut && !ks.mic_cut && !ks.cellular_cut && !ks.gps_cut,
+            "KILLSWITCH_TOGGLE engaged a kill-switch in a production build"
+        );
+        let lines = capture_lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("[KILLSWITCH]")),
+            "KILLSWITCH_TOGGLE produced a handler reply in a production build: {:?}",
+            lines
+        );
+        drop(ks);
+
+        // --- WRITE_FILE must NOT create an arbitrary-path file ---
+        capture_clear();
+        handle_serial_command(b"WRITE_FILE /data/serial_production_probe.txt injected_payload");
+        let lines = capture_lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("[FILE_WRITE]")),
+            "WRITE_FILE produced a handler reply in a production build: {:?}",
+            lines
+        );
+        if let Some(vfs) = crate::fs::vfs::VFS.try_lock() {
+            let mut out = [0u8; 64];
+            assert!(
+                vfs.read_file_by_path("/data/serial_production_probe.txt", &mut out).is_err(),
+                "WRITE_FILE created a file in a production build"
+            );
+        }
+
+        // --- READ_FILE must NOT dump an arbitrary path ---
+        capture_clear();
+        handle_serial_command(b"READ_FILE /user/.accounts");
+        let lines = capture_lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("[FILE_READ]")),
+            "READ_FILE produced a handler reply in a production build: {:?}",
+            lines
+        );
+    }
+
+    /// Production exclusion for the residual trust/panic attack surface (default
+    /// build). The console carries no CapHandle and no caller identity, so an
+    /// attacker who reaches COM1 must not be able to install or revoke a TLS trust
+    /// anchor (MITM every TLS connection), mint a RAPP publisher trust root (trust
+    /// their own signed .rapp), change the panic policy, or force a kernel panic
+    /// (remote DoS). Each mutating handler is compiled out behind
+    /// `debug-control-plane`; these checks assert the underlying STATE is
+    /// unchanged -- anchor count, trusted-key set, panic policy -- not merely that
+    /// an error string appeared. The read-only diagnostics (TLS_TRUST_LIST,
+    /// PANIC_POLICY GET) must still answer.
+    #[cfg(not(feature = "debug-control-plane"))]
+    #[test]
+    fn production_build_refuses_trust_and_panic_mutations() {
+        use alloc::format;
+
+        // --- TLS trust store must stay empty ---
+        // BEGIN/CHUNK/COMMIT/REVOKE and the single-line TLS_TRUST are all compiled
+        // out. Hold the store lock across the dispatch: because every mutating verb
+        // is compiled out the handler never re-acquires it (no deadlock), and no
+        // sibling can mutate mid-check. TLS_TRUST_LIST is deliberately NOT
+        // dispatched under this lock -- it is read-only and ungated, so it would
+        // re-acquire the lock; it is checked separately below.
+        crate::crypto::tls_trust::TLS_TRUST_STORE.lock().clear();
+        let mut der: Vec<u8> = Vec::new();
+        der.extend_from_slice(&[0x30, 38, 0x06, 0x03, 0x2b, 0x65, 0x70]);
+        der.resize(40, 0x41);
+        let hex: String = der.iter().map(|b| format!("{:02x}", b)).collect();
+        {
+            let store = crate::crypto::tls_trust::TLS_TRUST_STORE.lock();
+            let before = store.len();
+            capture_clear();
+            handle_serial_command(b"TLS_TRUST_BEGIN 40");
+            handle_serial_command(format!("TLS_TRUST_CHUNK 0 {}", &hex[..40]).as_bytes());
+            handle_serial_command(format!("TLS_TRUST_CHUNK 20 {}", &hex[40..]).as_bytes());
+            handle_serial_command(b"TLS_TRUST_COMMIT probe-ca");
+            handle_serial_command(format!("TLS_TRUST {} probe-ca", hex).as_bytes());
+            handle_serial_command(b"TLS_TRUST_REVOKE 0");
+            assert_eq!(
+                store.len(),
+                before,
+                "a TLS trust mutation changed the anchor store in a production build"
+            );
+            let lines = capture_lines();
+            assert!(
+                !lines.iter().any(|l| l.contains("[TLS_TRUST] ANCHOR position=")
+                    || l.contains("[TLS_TRUST] REVOKED position=")
+                    || l.contains("[TLS_TRUST] READY bytes=")
+                    || l.contains("[TLS_TRUST] CHUNK offset=")),
+                "a TLS trust mutation produced a handler reply in a production build: {:?}",
+                lines
+            );
+        }
+
+        // The read-only listing still answers in a production build.
+        capture_clear();
+        handle_serial_command(b"TLS_TRUST_LIST");
+        let lines = capture_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("[TLS_TRUST] anchors=")),
+            "TLS_TRUST_LIST (read-only diagnostic) stopped answering in a production build: {:?}",
+            lines
+        );
+
+        // --- RAPP_TRUST must NOT mint a publisher trust root ---
+        let probe_key = [0xABu8; 32];
+        let key_hex: String = probe_key.iter().map(|b| format!("{:02x}", b)).collect();
+        {
+            let reg = crate::package::REVOCATION_REGISTRY.lock();
+            assert!(
+                !reg.is_key_trusted(&probe_key),
+                "probe key was already trusted before the production check"
+            );
+            capture_clear();
+            handle_serial_command(format!("RAPP_TRUST {} probe-publisher", key_hex).as_bytes());
+            assert!(
+                !reg.is_key_trusted(&probe_key),
+                "RAPP_TRUST minted a publisher trust root in a production build"
+            );
+            let lines = capture_lines();
+            assert!(
+                !lines.iter().any(|l| l.contains("[RAPP_HOST] TRUSTED")),
+                "RAPP_TRUST produced a TRUSTED reply in a production build: {:?}",
+                lines
+            );
+        }
+
+        // --- PANIC_POLICY SET must NOT change the policy; GET still answers ---
+        let before = crate::panic::get_panic_policy();
+        capture_clear();
+        handle_serial_command(b"PANIC_POLICY SET REBOOT");
+        assert_eq!(
+            crate::panic::get_panic_policy(),
+            before,
+            "PANIC_POLICY SET changed the panic policy in a production build"
+        );
+        let lines = capture_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("[PANIC_POLICY] err=REFUSED")),
+            "PANIC_POLICY SET did not refuse with a named-state message in a production build: {:?}",
+            lines
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("[PANIC_POLICY] updated=")),
+            "PANIC_POLICY SET reported an update in a production build: {:?}",
+            lines
+        );
+        capture_clear();
+        handle_serial_command(b"PANIC_POLICY GET");
+        let lines = capture_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("[PANIC_POLICY] current=")),
+            "PANIC_POLICY GET (read-only diagnostic) stopped answering in a production build: {:?}",
+            lines
+        );
+
+        // --- TRIGGER_KERNEL_PANIC must NOT panic (remote DoS) ---
+        // Reaching the assertion below proves the dispatch returned normally: the
+        // handler is compiled out, so no panic! is reachable from this line.
+        capture_clear();
+        handle_serial_command(b"TRIGGER_KERNEL_PANIC production_probe");
+        let lines = capture_lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("Controlled diagnostic fault")),
+            "TRIGGER_KERNEL_PANIC produced a diagnostic-fault reply in a production build: {:?}",
+            lines
+        );
+    }
+
+    /// Dev-only positive coverage for the trust/panic verbs: with
+    /// `debug-control-plane` enabled the provisioning mutations work, so the gate
+    /// is a production exclusion and not a removal of legitimate provisioning.
+    /// The TLS chunked-transfer positive path is covered by
+    /// `a_trust_anchor_arrives_over_several_console_lines`; this case covers the
+    /// RAPP publisher root and the panic-policy SET that the production test
+    /// refuses.
+    #[cfg(feature = "debug-control-plane")]
+    #[test]
+    fn debug_control_plane_trust_and_panic_mutations_work() {
+        use alloc::format;
+
+        // RAPP_TRUST installs a publisher root. On a host with no block device the
+        // journalled commit fails and the serial handler falls back to the
+        // in-memory grant, so the key is trusted for the life of the record.
+        let probe_key = [0xCDu8; 32];
+        let key_hex: String = probe_key.iter().map(|b| format!("{:02x}", b)).collect();
+        capture_clear();
+        handle_serial_command(format!("RAPP_TRUST {} probe-publisher", key_hex).as_bytes());
+        let lines = capture_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("[RAPP_HOST] TRUSTED publisher=probe-publisher")),
+            "RAPP_TRUST did not install the publisher root in a debug build: {:?}",
+            lines
+        );
+        assert!(
+            crate::package::REVOCATION_REGISTRY.lock().is_key_trusted(&probe_key),
+            "RAPP_TRUST reply said TRUSTED but the key is not trusted in a debug build"
+        );
+        // Clean up our own insertion so no sibling test inherits the probe root.
+        crate::package::REVOCATION_REGISTRY.lock().trusted_keys.remove(&probe_key);
+
+        // PANIC_POLICY SET changes the policy, then restore the safe HALT default
+        // so no sibling test inherits a reboot policy.
+        capture_clear();
+        handle_serial_command(b"PANIC_POLICY SET REBOOT");
+        let lines = capture_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("[PANIC_POLICY] updated=REBOOT")),
+            "PANIC_POLICY SET REBOOT did not take effect in a debug build: {:?}",
+            lines
+        );
+        assert_eq!(crate::panic::get_panic_policy(), crate::panic::PanicPolicy::Reboot);
+        handle_serial_command(b"PANIC_POLICY SET HALT");
+        assert_eq!(crate::panic::get_panic_policy(), crate::panic::PanicPolicy::Halt);
+    }
+
+    /// Finding C5 (arbitrary-path read leak via the Studio channel).
+    ///
+    /// `STUDIO_FS_READ` / `STUDIO_FS_LIST` used to accept any well-shaped path,
+    /// so an unauthenticated console line could dump `/user/.accounts` exactly
+    /// like the legacy `READ_FILE` verb. Reads now share the write root
+    /// whitelist: private platform state is refused, while a user document under
+    /// `/data` or media storage stays reachable. Runs in every build because the
+    /// confinement is not feature-gated.
+    #[test]
+    fn studio_fs_channel_refuses_private_paths() {
+        capture_clear();
+        handle_serial_command(b"STUDIO_FS_READ /user/.accounts 0 192");
+        let lines = capture_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("[STUDIO_FS] ERROR unsafe path")),
+            "STUDIO_FS_READ of /user/.accounts was not refused: {:?}",
+            lines
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("[STUDIO_FS_READ] hex=")),
+            "STUDIO_FS_READ leaked private file contents: {:?}",
+            lines
+        );
+
+        capture_clear();
+        handle_serial_command(b"STUDIO_FS_LIST /user");
+        let lines = capture_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("[STUDIO_FS] ERROR unsafe path")),
+            "STUDIO_FS_LIST of /user was not refused: {:?}",
+            lines
+        );
+
+        // A legitimate user-document path is not refused as unsafe (the read may
+        // still report a missing file, which is a different, honest answer).
+        capture_clear();
+        handle_serial_command(b"STUDIO_FS_READ /data/serial_probe_document.txt 0 192");
+        let lines = capture_lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("ERROR unsafe path")),
+            "STUDIO_FS_READ wrongly refused a legitimate /data document path: {:?}",
+            lines
+        );
     }
 
     /// The `field=value` pairs of one `[STUDIO_PKG]` catalogue line, exactly as
@@ -2511,6 +2969,11 @@ mod tests {
         );
     }
 
+    /// Dev-only: exercises the chunked TLS anchor transfer (BEGIN/CHUNK/COMMIT),
+    /// which is compiled out of production images behind `debug-control-plane`.
+    /// The production exclusion of those verbs is covered by
+    /// `production_build_refuses_trust_and_panic_mutations` below.
+    #[cfg(feature = "debug-control-plane")]
     #[test]
     fn a_trust_anchor_arrives_over_several_console_lines() {
         use alloc::format;

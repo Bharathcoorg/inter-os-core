@@ -6,7 +6,9 @@
 //! Initializes low-level architecture subsystems (GDT, TSS, IDT, PIC, PIT Timer,
 //! Serial COM1, Framebuffer Console, Physical Paging, and Heap Allocator),
 //! brings up the ATA PIO Block Driver, SHA-256 Cryptographic Subsystem,
-//! dm-verity Merkle Tree Verifier, Capability-Governed VFS, local Capability Tool Engine,
+//! a Merkle block-verification primitive (self-tested on a synthetic block only --
+//! verified boot / dm-verity measurement of the real system partition is NOT
+//! IMPLEMENTED), Capability-Governed VFS, local Capability Tool Engine,
 //! and pure `no_std` WebAssembly (WASM) Sandboxed Runtime.
 //!
 //! The modules themselves live in the `kernel` library so they can be unit
@@ -147,16 +149,26 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[TEST] SHA-256 cryptographic digest verified: {:02X}{:02X}{:02X}{:02X}...",
         hash1[0], hash1[1], hash1[2], hash1[3]);
 
-    // Test 8e: Cryptographic Merkle Block Verification (dm-verity)
-    let block_data = b"Dm-verity verified system partition block #0001";
-    let expected_hash = Sha256::digest(block_data);
-    let verify_pass = MerkleVerifier::verify_block(block_data, &expected_hash);
+    // Test 8e: Merkle block-verification PRIMITIVE self-test on a SYNTHETIC block.
+    //
+    // WHY this is a primitive self-test and not a boot attestation: the bytes below
+    // are a hardcoded literal, not a block read from the system partition.
+    // `verify_block` only compares the SHA-256 digest of its input against an
+    // expected digest, so hashing a literal and comparing it to itself exercises
+    // that comparator and nothing more. No partition is read, no Merkle tree is
+    // walked, and no fixed root digest is provisioned (`MerkleVerifier::new` has no
+    // production caller). This proves the primitive rejects a tampered synthetic
+    // block; it does NOT measure or attest the device's real storage.
+    let synthetic_block = b"InterOS Merkle primitive self-test synthetic block #0001";
+    let expected_hash = Sha256::digest(synthetic_block);
+    let verify_pass = MerkleVerifier::verify_block(synthetic_block, &expected_hash);
     assert!(verify_pass.is_ok());
 
-    let corrupted_block = b"Dm-verity TAMPERED system partition block #0001";
-    let verify_tamper = MerkleVerifier::verify_block(corrupted_block, &expected_hash);
+    let tampered_synthetic_block = b"InterOS Merkle primitive self-test TAMPERED block #0001";
+    let verify_tamper = MerkleVerifier::verify_block(tampered_synthetic_block, &expected_hash);
     assert_eq!(verify_tamper, Err(StorageError::IntegrityViolation));
-    serial_println!("[TEST] Merkle integrity attestation: VALIDATED (Tampering rejected).");
+    serial_println!("[TEST] Merkle verify_block primitive self-test on a synthetic block: PASS (tampered synthetic block rejected).");
+    serial_println!("[BOOT] Verified boot: NOT IMPLEMENTED. No dm-verity measurement of the real system partition exists; no fixed Merkle root is provisioned and no partition block is attested at boot.");
 
     // Initialize x86_64 Fast System Call MSRs (IA32_EFER.SCE, STAR, LSTAR, FMASK)
     kernel::syscall::entry::init();

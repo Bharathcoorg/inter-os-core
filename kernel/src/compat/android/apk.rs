@@ -20,6 +20,44 @@ pub const ZIP_CENTRAL_DIR_SIG: u32 = 0x02014b50;
 pub const ZIP_END_OF_CENTRAL_DIR_SIG: u32 = 0x06054b50;
 pub const MAX_MEMBER_BYTES: usize = 128 * 1024 * 1024;
 
+/// Absolute ceiling on bytes one inflated member may actually produce.
+pub const MAX_INFLATED_MEMBER_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum accepted ratio of produced output bytes to compressed input bytes.
+pub const MAX_MEMBER_COMPRESSION_RATIO: usize = 100;
+/// Additive slack so small legitimate members are not refused by the ratio alone.
+pub const MEMBER_RATIO_SLACK_BYTES: usize = 64 * 1024;
+
+/// Output budget for one inflated member, derived only from the compressed
+/// input length: `min(MAX_INFLATED_MEMBER_BYTES, compressed_len *
+/// MAX_MEMBER_COMPRESSION_RATIO + MEMBER_RATIO_SLACK_BYTES)`.
+/// WHY: the central-directory `uncompressed_size` is attacker-declared and
+/// must never dictate an allocation; the budget is measured against bytes the
+/// archive actually carries.
+pub fn member_output_limit(compressed_len: usize) -> usize {
+    let ratio_bound = compressed_len
+        .checked_mul(MAX_MEMBER_COMPRESSION_RATIO)
+        .and_then(|v| v.checked_add(MEMBER_RATIO_SLACK_BYTES))
+        .unwrap_or(MAX_INFLATED_MEMBER_BYTES);
+    core::cmp::min(MAX_INFLATED_MEMBER_BYTES, ratio_bound)
+}
+
+static MEMBER_BUFFER_HIGH_WATER: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Largest member output buffer (bytes) allocated by `extract_file` since the
+/// last reset. A real high-water mark of actual allocations, not a declaration.
+pub fn member_buffer_high_water() -> usize {
+    MEMBER_BUFFER_HIGH_WATER.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn reset_member_buffer_high_water() {
+    MEMBER_BUFFER_HIGH_WATER.store(0, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn record_member_buffer(bytes: usize) {
+    MEMBER_BUFFER_HIGH_WATER.fetch_max(bytes, core::sync::atomic::Ordering::Relaxed);
+}
+
 // Android Binary XML (AXML) Chunk Types
 pub const RES_XML_TYPE: u16 = 0x0003;
 pub const RES_STRING_POOL_TYPE: u16 = 0x0001;
@@ -46,6 +84,10 @@ pub enum ApkError {
     InvalidSignature,
     MalformedSigningBlock,
     UnsupportedCompression,
+    /// A member refused against a measured output budget. `bytes` is the
+    /// quantity measured (declared size, filled buffer, or produced output)
+    /// and `limit` is the budget it was measured against.
+    MemberTooLarge { bytes: usize, limit: usize },
 }
 
 /// Audit decision status for Android APK packages.
@@ -232,23 +274,40 @@ impl<'a> ZipArchive<'a> {
                     if entry.uncompressed_size != entry.compressed_size || compressed.len() != entry.uncompressed_size as usize {
                         return Err(ApkError::InvalidCentralDirectory);
                     }
-                    let mut out = Vec::with_capacity(entry.uncompressed_size as usize);
+                    record_member_buffer(compressed.len());
+                    let mut out = Vec::with_capacity(compressed.len());
                     out.extend_from_slice(compressed);
                     return Ok(out);
                 } else if entry.compression_method == 8 {
-                    if entry.uncompressed_size as usize > MAX_MEMBER_BYTES {
-                        return Err(ApkError::InvalidCentralDirectory);
+                    // WHY the declared size never sizes an allocation: it is an
+                    // attacker-controlled u32. The budget comes from the compressed
+                    // bytes actually present, and the buffer grows geometrically
+                    // toward that budget, so a zip bomb is refused by number.
+                    let limit = member_output_limit(compressed.len());
+                    let declared = entry.uncompressed_size as usize;
+                    if declared > limit {
+                        return Err(ApkError::MemberTooLarge { bytes: declared, limit });
                     }
-                    let mut out = alloc::vec![0u8; entry.uncompressed_size as usize];
-                    match super::inflate::inflate_raw(compressed, &mut out) {
-                        Ok(len) => {
-                            if len != entry.uncompressed_size as usize {
-                                return Err(ApkError::InvalidCentralDirectory);
+                    let mut cap = core::cmp::min(limit, core::cmp::max(4096, compressed.len().saturating_mul(2)));
+                    loop {
+                        record_member_buffer(cap);
+                        let mut out = alloc::vec![0u8; cap];
+                        match super::inflate::inflate_raw(compressed, &mut out) {
+                            Ok(len) => {
+                                if len != declared {
+                                    return Err(ApkError::InvalidCentralDirectory);
+                                }
+                                out.truncate(len);
+                                return Ok(out);
                             }
-                            out.truncate(len);
-                            return Ok(out);
+                            Err(super::inflate::InflateError::OutputLimit) => {
+                                if cap >= limit {
+                                    return Err(ApkError::MemberTooLarge { bytes: cap, limit });
+                                }
+                                cap = core::cmp::min(limit, cap.saturating_mul(2));
+                            }
+                            Err(_) => return Err(ApkError::UnsupportedCompression),
                         }
-                        Err(_) => return Err(ApkError::UnsupportedCompression),
                     }
                 } else {
                     return Err(ApkError::UnsupportedCompression);
@@ -867,5 +926,187 @@ mod tests {
         assert_eq!(ZipArchive::parse(&[1, 2, 3, 4]).err(), Some(ApkError::TooSmall));
         let bad = [0u8; 30];
         assert_eq!(ZipArchive::parse(&bad).err(), Some(ApkError::EndOfCentralDirectoryNotFound));
+    }
+
+    // ------------------------------------------------------------------
+    // Adversarial parser-bounds tests (H6): call the real production
+    // ZipArchive::extract_file / ApkPackage::parse paths.
+    // ------------------------------------------------------------------
+
+    fn put_bits(out: &mut Vec<u8>, bitpos: &mut usize, value: u32, n: u8) {
+        for i in 0..n {
+            let bit = (value >> i) & 1;
+            let byte = *bitpos / 8;
+            if out.len() <= byte { out.push(0); }
+            out[byte] |= (bit as u8) << (*bitpos % 8);
+            *bitpos += 1;
+        }
+    }
+
+    fn rev_code(code: u32, n: u8) -> u32 {
+        code.reverse_bits() >> (32 - n)
+    }
+
+    /// Hand-built RFC 1951 fixed-Huffman stream: one zero literal followed by
+    /// `matches` length-258/distance-1 back-references. Produces
+    /// `1 + matches * 258` bytes from roughly `matches * 13 / 8` input bytes.
+    fn deflate_zero_bomb(matches: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut bp = 0usize;
+        put_bits(&mut out, &mut bp, 1, 1); // BFINAL
+        put_bits(&mut out, &mut bp, 1, 2); // BTYPE = fixed Huffman
+        put_bits(&mut out, &mut bp, rev_code(0x30, 8), 8); // literal 0
+        for _ in 0..matches {
+            put_bits(&mut out, &mut bp, rev_code(0xC5, 8), 8); // symbol 285 = length 258
+            put_bits(&mut out, &mut bp, 0, 5); // distance symbol 0 = distance 1
+        }
+        put_bits(&mut out, &mut bp, 0, 7); // end-of-block (symbol 256)
+        out
+    }
+
+    fn deflate_literals(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut bp = 0usize;
+        put_bits(&mut out, &mut bp, 1, 1);
+        put_bits(&mut out, &mut bp, 1, 2);
+        for &b in data {
+            assert!(b < 144);
+            put_bits(&mut out, &mut bp, rev_code(0x30 + b as u32, 8), 8);
+        }
+        put_bits(&mut out, &mut bp, 0, 7);
+        out
+    }
+
+    struct TestMember<'a> {
+        name: &'a str,
+        method: u16,
+        payload: &'a [u8],
+        declared: u32,
+    }
+
+    fn build_zip(members: &[TestMember<'_>]) -> Vec<u8> {
+        let mut apk = Vec::new();
+        let mut cd = Vec::new();
+        for m in members {
+            let local_offset = apk.len() as u32;
+            let name = m.name.as_bytes();
+            apk.extend_from_slice(&ZIP_LOCAL_FILE_HEADER_SIG.to_le_bytes());
+            apk.extend_from_slice(&20u16.to_le_bytes());
+            apk.extend_from_slice(&0u16.to_le_bytes()); // flags
+            apk.extend_from_slice(&m.method.to_le_bytes());
+            apk.extend_from_slice(&0u32.to_le_bytes()); // time/date
+            apk.extend_from_slice(&0u32.to_le_bytes()); // crc32
+            apk.extend_from_slice(&(m.payload.len() as u32).to_le_bytes());
+            apk.extend_from_slice(&m.declared.to_le_bytes());
+            apk.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            apk.extend_from_slice(&0u16.to_le_bytes());
+            apk.extend_from_slice(name);
+            apk.extend_from_slice(m.payload);
+
+            cd.extend_from_slice(&ZIP_CENTRAL_DIR_SIG.to_le_bytes());
+            cd.extend_from_slice(&20u16.to_le_bytes());
+            cd.extend_from_slice(&20u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&m.method.to_le_bytes());
+            cd.extend_from_slice(&0u32.to_le_bytes());
+            cd.extend_from_slice(&0u32.to_le_bytes());
+            cd.extend_from_slice(&(m.payload.len() as u32).to_le_bytes());
+            cd.extend_from_slice(&m.declared.to_le_bytes());
+            cd.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes()); // extra
+            cd.extend_from_slice(&0u16.to_le_bytes()); // comment
+            cd.extend_from_slice(&0u16.to_le_bytes()); // disk
+            cd.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+            cd.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+            cd.extend_from_slice(&local_offset.to_le_bytes());
+            cd.extend_from_slice(name);
+        }
+        let cd_offset = apk.len() as u32;
+        let cd_size = cd.len() as u32;
+        apk.extend_from_slice(&cd);
+        apk.extend_from_slice(&ZIP_END_OF_CENTRAL_DIR_SIG.to_le_bytes());
+        apk.extend_from_slice(&0u16.to_le_bytes());
+        apk.extend_from_slice(&0u16.to_le_bytes());
+        apk.extend_from_slice(&(members.len() as u16).to_le_bytes());
+        apk.extend_from_slice(&(members.len() as u16).to_le_bytes());
+        apk.extend_from_slice(&cd_size.to_le_bytes());
+        apk.extend_from_slice(&cd_offset.to_le_bytes());
+        apk.extend_from_slice(&0u16.to_le_bytes());
+        apk
+    }
+
+    fn valid_manifest_bytes() -> Vec<u8> {
+        let base = create_test_apk("org.bounds.fixture", &[]);
+        let zip = ZipArchive::parse(&base).expect("fixture APK must parse");
+        zip.get_file("AndroidManifest.xml").expect("fixture manifest").to_vec()
+    }
+
+    #[test]
+    fn apk_bounds_zip_bomb_declared_huge_refused_with_bounded_peak() {
+        let bomb = deflate_zero_bomb(4096);
+        // Sanity: the hand-built stream really decodes to 1 + 4096*258 bytes.
+        let mut probe = alloc::vec![0u8; 1 + 4096 * 258];
+        let n = super::super::inflate::inflate_raw(&bomb, &mut probe).expect("bomb stream must decode");
+        assert_eq!(n, 1 + 4096 * 258);
+
+        let manifest = valid_manifest_bytes();
+        let declared = 128 * 1024 * 1024u32;
+        let apk = build_zip(&[
+            TestMember { name: "AndroidManifest.xml", method: 0, payload: &manifest, declared: manifest.len() as u32 },
+            TestMember { name: "classes.dex", method: 8, payload: &bomb, declared },
+        ]);
+        let limit = member_output_limit(bomb.len());
+        assert!(limit <= MAX_INFLATED_MEMBER_BYTES);
+        assert!(limit < 1024 * 1024, "a ~{}-byte member must not earn a MiB-scale budget", bomb.len());
+
+        reset_member_buffer_high_water();
+        let zip = ZipArchive::parse(&apk).expect("bomb container structure is valid");
+        let err = zip.extract_file("classes.dex").unwrap_err();
+        assert_eq!(err, ApkError::MemberTooLarge { bytes: declared as usize, limit });
+        let peak = member_buffer_high_water();
+        assert!(peak <= limit, "peak member buffer {} exceeded budget {}", peak, limit);
+
+        // Production syscall path: ApkPackage::parse must also stay bounded.
+        reset_member_buffer_high_water();
+        let pkg = ApkPackage::parse(&apk).expect("parse swallows a refused dex into an empty payload");
+        assert!(!pkg.has_classes_dex);
+        let peak = member_buffer_high_water();
+        assert!(peak <= limit, "ApkPackage::parse peak {} exceeded budget {}", peak, limit);
+        std::println!("[APK-BOUNDS] declared bomb: input={} compressed={} limit={} peak={}", apk.len(), bomb.len(), limit, peak);
+    }
+
+    #[test]
+    fn apk_bounds_zip_bomb_lying_declared_refused_at_ratio_budget() {
+        let bomb = deflate_zero_bomb(4096); // produces 1_056_769 bytes
+        let manifest = valid_manifest_bytes();
+        let limit = member_output_limit(bomb.len());
+        // Declared below the budget so the early refusal cannot fire: the
+        // inflate loop itself must hit the ratio/absolute budget.
+        let declared = (limit - 1) as u32;
+        let apk = build_zip(&[
+            TestMember { name: "AndroidManifest.xml", method: 0, payload: &manifest, declared: manifest.len() as u32 },
+            TestMember { name: "classes.dex", method: 8, payload: &bomb, declared },
+        ]);
+        reset_member_buffer_high_water();
+        let zip = ZipArchive::parse(&apk).expect("bomb container structure is valid");
+        let err = zip.extract_file("classes.dex").unwrap_err();
+        assert_eq!(err, ApkError::MemberTooLarge { bytes: limit, limit });
+        let peak = member_buffer_high_water();
+        assert!(peak <= limit, "peak member buffer {} exceeded budget {}", peak, limit);
+        assert!(peak > 0, "the inflate path must actually have allocated");
+        std::println!("[APK-BOUNDS] ratio bomb: input={} compressed={} produced={} limit={} peak={}",
+            apk.len(), bomb.len(), 1 + 4096 * 258, limit, peak);
+    }
+
+    #[test]
+    fn apk_bounds_legitimate_deflate_member_still_extracts() {
+        let payload = b"InterOS legitimate deflate member";
+        let stream = deflate_literals(payload);
+        let apk = build_zip(&[
+            TestMember { name: "classes.dex", method: 8, payload: &stream, declared: payload.len() as u32 },
+        ]);
+        let zip = ZipArchive::parse(&apk).expect("legit deflate APK must parse");
+        let out = zip.extract_file("classes.dex").expect("legit deflate member must extract");
+        assert_eq!(out, payload);
     }
 }

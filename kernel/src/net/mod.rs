@@ -25,7 +25,7 @@ pub use arp::{ArpOpcode, ArpPacket, ArpTable};
 pub use device::{LoopbackDevice, NetDeviceInfo, NetError, NetworkBackend, NetworkDevice, NetworkDeviceManager, NETWORK_DEVICE, LOOPBACK_DEVICE, ENABLE_E1000_BINDING};
 pub use e1000::E1000Device;
 pub use dns::{encode_query as dns_encode_query, parse_a_answer, DnsAnswer, DnsQuestion, DnsResolver, DNS_SERVER};
-pub use tcp::{next_state as tcp_next_state, seq_ge, seq_gt, seq_le, seq_lt, valid_established_segment, valid_syn_ack, TcpSegment, TcpState};
+pub use tcp::{is_closing_state as tcp_is_closing_state, next_state as tcp_next_state, rst_action as tcp_rst_action, seq_ge, seq_gt, seq_le, seq_lt, valid_closing_segment, valid_established_segment, valid_syn_ack, RstAction, TcpSegment, TcpState};
 use crate::task::TaskId;
 pub use tls::{ContentType as TlsContentType, TlsRecord};
 pub use ethernet::{EtherType, EthernetFrame, MacAddress};
@@ -117,7 +117,7 @@ pub fn log_net_drop(reason: &str) {
     let kind = match reason {
         "ipv4_fragment_discarded_no_reassembly" => NetDropKind::Ipv4Fragment,
         "tcp_checksum_mismatch" | "tcp_parse_failed" | "udp_parse_failed" | "ipv4_parse_failed" => NetDropKind::MalformedChecksumOrLength,
-        "tcp_no_matching_connection" => NetDropKind::PortOrConnectionMismatch,
+        "tcp_no_matching_connection" | "tcp_reset_out_of_window" | "tcp_closing_segment_out_of_window" => NetDropKind::PortOrConnectionMismatch,
         _ => NetDropKind::UnknownL4Protocol,
     };
     record_net_drop(kind, reason);
@@ -220,6 +220,50 @@ pub static IPV6_ADDRESSES: Mutex<crate::net::ipv6::Ipv6AddressTable> = Mutex::ne
 /// Host link-local IPv6 address (e.g. fe80::... derived from MAC or SLAAC).
 pub static HOST_IPV6_LINK_LOCAL: Mutex<crate::net::ipv6::Ipv6Address> = Mutex::new(crate::net::ipv6::Ipv6Address::UNSPECIFIED);
 
+/// One word from the kernel's real entropy source, or a refusal.
+///
+/// WHY this exists (M1, M6): the DNS transaction id was computed from
+/// `get_system_ticks()` and the TCP initial sequence number was whatever the
+/// caller handed in, so an off-path observer could derive both. The source is
+/// `crypto::rng::TRNG`. `HardwareRng::init` reads CPUID leaf 1 ECX bit 30 before
+/// it will execute RDRAND at all (`crypto/rng.rs:106`) and retries the
+/// instruction ten times per draw (`crypto/rng.rs:255`), so on the x86_64 guest
+/// -- whose CPU model is `qemu64,+rdrand` -- a word is 64 bits of hardware
+/// randomness. This is not a tick-seeded mixer and is not described as one.
+///
+/// The honest bound per consumer: DNS takes 16 bits of the word (the wire id
+/// field), the resolver source port takes at most 3 bits because only eight
+/// ports are reserved for it, and the TCP ISN takes 32 bits.
+///
+/// WHY fail-closed: `try_next_u64` refuses when the CPU has no RDRAND and no
+/// firmware seed was injected (`DegradedPseudoOnly`), and when the pool was
+/// never initialized. A caller that cannot get a word must refuse to start the
+/// query or open the connection; falling back to ticks would restore exactly
+/// the predictability this removes.
+///
+/// WHY `try_lock` and not `lock`: parts of the receive path run in interrupt
+/// context on this single-CPU guest, where blocking on a mutex the interrupted
+/// code already holds can never be satisfied. Contention is a refusal, not a
+/// wait, so this adds no blocking lock to any network path.
+pub(crate) fn net_entropy_u64() -> Result<u64, crate::crypto::EntropyError> {
+    let mut rng = crate::crypto::TRNG
+        .try_lock()
+        .ok_or(crate::crypto::EntropyError::HardwareUnavailable)?;
+    if rng.state == crate::crypto::EntropyState::Uninitialized {
+        // Boot initializes the TRNG (`main.rs`), so an uninitialized pool in a
+        // guest is a refusal. A unit test has no boot sequence; it gets the same
+        // deterministic fixture `HardwareRng::init` installs under `cfg(test)`.
+        #[cfg(test)]
+        {
+            rng.inject_test_seed(&[0x5A; 32]);
+        }
+        #[cfg(not(test))]
+        {
+            return Err(crate::crypto::EntropyError::InsufficientEntropy);
+        }
+    }
+    rng.try_next_u64()
+}
 
 fn transmit_arp_request(target_ip: Ipv4Address) -> Result<(), NetError> {
     let info = NETWORK_DEVICE.lock().info();
@@ -557,6 +601,29 @@ fn transmit_tcp_syn(
 }
 
 fn transmit_tcp_syn_with_window(src_ip: Ipv4Address, src_port: u16, dst_ip: Ipv4Address, dst_port: u16, seq: u32, window: u16) -> Result<(), NetError> {
+    // WHY the sequence on the wire is re-read from the connection (M6): the ISN
+    // is now drawn by the kernel inside `TcpConnectionTable::open`, but the
+    // connect syscall still forwards the value its caller supplied. Putting that
+    // value on the wire while the table holds a different one would desynchronise
+    // the handshake from itself -- `valid_syn_ack` compares against
+    // `conn.send_seq + 1`, so the connection could never establish. The table is
+    // the authority; the argument is only a fallback.
+    //
+    // WHY `try_lock`: `poll_tcp_retransmissions` calls this from an `if let`
+    // scrutinee whose temporary `TCP_TABLE` guard lives for the whole body, and
+    // the mutex is not reentrant. When that guard is held the argument is already
+    // `conn.syn_seq`, so declining to re-read it is correct, not a compromise.
+    let seq = match TCP_TABLE.try_lock() {
+        Some(table) => table.entries().iter().flatten()
+            .find(|c| c.syn_pending
+                && c.local_ip == src_ip
+                && c.local_port == src_port
+                && c.remote_ip == dst_ip
+                && c.remote_port == dst_port)
+            .map(|c| c.syn_seq)
+            .unwrap_or(seq),
+        None => seq,
+    };
     let segment = TcpSegment {
         src_port, dst_port, seq, ack: 0, flags: 0x02, window, payload: &[],
     };
@@ -664,25 +731,34 @@ pub fn poll_network_interface() -> usize {
                                     continue;
                                 }
 
-                                if arp_pkt.sender_ip == GATEWAY_IP {
-                                    let mut table = ARP_TABLE.lock();
-                                    if !table.is_permanent(GATEWAY_IP) {
-                                        table.insert_permanent(GATEWAY_IP, arp_pkt.sender_mac);
-                                    }
-                                    drop(table);
+                                // WHY the gateway is no longer pinned permanently (M2): the
+                                // first reply to a correlated request was written with
+                                // `insert_permanent`, and `arp.rs` refuses to overwrite a
+                                // permanent entry, so whichever responder won that one race
+                                // owned the L2 next hop for the whole uptime -- a persistent
+                                // MITM, not a transient one. The mapping now ages on the same
+                                // bounded lifetime as every other neighbour (`ARP_CACHE_TICKS`)
+                                // and a later correlated reply replaces it.
+                                //
+                                // The residual race, stated plainly: in-flight correlation
+                                // proves only that *we* asked, not who answered. An attacker
+                                // who replies before the real gateway still wins that round,
+                                // and `resolve_destination_mac` keeps serving the cached MAC
+                                // while it revalidates. What changed is the bound -- one cache
+                                // lifetime instead of forever -- and replaceability.
+                                let now = crate::interrupts::get_system_ticks();
+                                ARP_TABLE.lock().insert_at(arp_pkt.sender_ip, arp_pkt.sender_mac, now);
 
-                                    if !LIVE_GATEWAY_ARP_LOGGED.swap(true, Ordering::SeqCst) {
-                                        serial_println!(
-                                            "[NET LIVE] Real ARP reply received: gateway {}.{}.{}.{} is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}; a real packet left the guest and came back ({} byte Ethernet frame).",
-                                            GATEWAY_IP.0[0], GATEWAY_IP.0[1], GATEWAY_IP.0[2], GATEWAY_IP.0[3],
-                                            arp_pkt.sender_mac.0[0], arp_pkt.sender_mac.0[1], arp_pkt.sender_mac.0[2],
-                                            arp_pkt.sender_mac.0[3], arp_pkt.sender_mac.0[4], arp_pkt.sender_mac.0[5],
-                                            len
-                                        );
-                                    }
-                                } else {
-                                    let now = crate::interrupts::get_system_ticks();
-                                    ARP_TABLE.lock().insert_at(arp_pkt.sender_ip, arp_pkt.sender_mac, now);
+                                if arp_pkt.sender_ip == GATEWAY_IP
+                                    && !LIVE_GATEWAY_ARP_LOGGED.swap(true, Ordering::SeqCst)
+                                {
+                                    serial_println!(
+                                        "[NET LIVE] Real ARP reply received: gateway {}.{}.{}.{} is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}; a real packet left the guest and came back ({} byte Ethernet frame).",
+                                        GATEWAY_IP.0[0], GATEWAY_IP.0[1], GATEWAY_IP.0[2], GATEWAY_IP.0[3],
+                                        arp_pkt.sender_mac.0[0], arp_pkt.sender_mac.0[1], arp_pkt.sender_mac.0[2],
+                                        arp_pkt.sender_mac.0[3], arp_pkt.sender_mac.0[4], arp_pkt.sender_mac.0[5],
+                                        len
+                                    );
                                 }
                             }
                             ArpOpcode::Request => {
@@ -740,7 +816,7 @@ pub fn poll_network_interface() -> usize {
                                     let conn_id = {
                                         let table = TCP_TABLE.lock();
                                         table.entries().iter().flatten().find(|c| {
-                                            c.remote_ip == ip_pkt.src && c.remote_port == segment.src_port && c.local_port == segment.dst_port
+                                            c.remote_ip == ip_pkt.src && c.remote_port == segment.src_port && c.local_port == segment.dst_port && c.local_ip == ip_pkt.dst
                                         }).map(|c| c.id)
                                     };
                                     if let Some(id) = conn_id {
@@ -749,15 +825,35 @@ pub fn poll_network_interface() -> usize {
                                         let mut need_ack: Option<u32> = None;
                                         let mut closing_ack: Option<u32> = None;
                                         let mut reset_by_peer = false;
+                                        let mut to_challenge: Option<(u16, u16, u32, u32, u16)> = None;
                                         {
                                             let mut table = TCP_TABLE.lock();
-                                            let _ = table.update_peer_window(id, segment.window);
+                                            // The advertised window is only believed once the segment
+                                            // carrying it has been accepted. Updating it up front let a
+                                            // forged segment -- including a reset we were about to drop --
+                                            // set snd_wnd to zero and stall the connection for good.
+                                            let mut segment_accepted = false;
                                             if let Some(conn) = table.get_mut(id) {
                                                 let old_state = conn.state;
                                                 if segment.flags & 0x04 != 0 {
-                                                    reset_by_peer = true;
+                                                    // In SYN-SENT the SYN is on the wire but send_seq
+                                                    // has not advanced past it yet, so snd_nxt is one
+                                                    // beyond send_seq there and equal to it elsewhere.
+                                                    let snd_nxt = if old_state == TcpState::SynSent {
+                                                        conn.send_seq.wrapping_add(1)
+                                                    } else {
+                                                        conn.send_seq
+                                                    };
+                                                    match tcp_rst_action(old_state, segment.seq, segment.ack, conn.recv_seq, snd_nxt, conn.rcv_wnd) {
+                                                        RstAction::Accept => reset_by_peer = true,
+                                                        RstAction::ChallengeAck => {
+                                                            to_challenge = Some((conn.local_port, conn.remote_port, conn.send_seq, conn.recv_seq, conn.rcv_wnd.min(u16::MAX as u32) as u16));
+                                                        }
+                                                        RstAction::Drop => log_net_drop("tcp_reset_out_of_window"),
+                                                    }
                                                 } else if old_state == TcpState::SynSent {
                                                     if valid_syn_ack(&segment, conn.send_seq.wrapping_add(1)) {
+                                                        segment_accepted = true;
                                                         conn.recv_seq = segment.seq.wrapping_add(1);
                                                         conn.send_seq = conn.send_seq.wrapping_add(1);
                                                         conn.snd_una = conn.send_seq;
@@ -772,6 +868,7 @@ pub fn poll_network_interface() -> usize {
                                                     }
                                                 } else if old_state == TcpState::Established {
                                                     if valid_established_segment(&segment, conn.recv_seq, conn.snd_una, conn.send_seq) {
+                                                        segment_accepted = true;
                                                         need_ack = Some(segment.ack);
                                                         let fin = segment.flags & 0x01 != 0;
                                                         if !segment.payload.is_empty() || fin {
@@ -779,19 +876,33 @@ pub fn poll_network_interface() -> usize {
                                                         }
                                                     }
                                                 } else {
-                                                    conn.recv_seq = segment.seq.wrapping_add(segment.payload.len() as u32);
-                                                    if conn.fin_pending {
-                                                        // A FIN we sent is still unacknowledged, so the
-                                                        // state only moves once this segment's ACK has
-                                                        // been recorded: acknowledge_fin is what stamps
-                                                        // the TIME-WAIT hold. Letting the generic table
-                                                        // jump to Closed first leaves the retry timer
-                                                        // armed against a slot nobody will free.
-                                                        closing_ack = Some(segment.ack);
+                                                    // M4: the closing states used to believe any segment,
+                                                    // overwriting recv_seq from the wire and handing an
+                                                    // unvalidated ack to acknowledge_fin. SYN-RECEIVED has
+                                                    // no established receive window to validate against.
+                                                    let acceptable = !tcp_is_closing_state(old_state)
+                                                        || valid_closing_segment(&segment, conn.recv_seq, conn.rcv_wnd, conn.snd_una, conn.send_seq);
+                                                    if !acceptable {
+                                                        log_net_drop("tcp_closing_segment_out_of_window");
                                                     } else {
-                                                        conn.state = tcp_next_state(old_state, segment.flags);
+                                                        segment_accepted = true;
+                                                        conn.recv_seq = segment.seq.wrapping_add(segment.payload.len() as u32);
+                                                        if conn.fin_pending {
+                                                            // A FIN we sent is still unacknowledged, so the
+                                                            // state only moves once this segment's ACK has
+                                                            // been recorded: acknowledge_fin is what stamps
+                                                            // the TIME-WAIT hold. Letting the generic table
+                                                            // jump to Closed first leaves the retry timer
+                                                            // armed against a slot nobody will free.
+                                                            closing_ack = Some(segment.ack);
+                                                        } else {
+                                                            conn.state = tcp_next_state(old_state, segment.flags);
+                                                        }
                                                     }
                                                 }
+                                            }
+                                            if segment_accepted {
+                                                let _ = table.update_peer_window(id, segment.window);
                                             }
                                             if let Some(ack) = need_ack {
                                                 let _ = table.acknowledge_tx(id, ack);
@@ -802,6 +913,15 @@ pub fn poll_network_interface() -> usize {
                                             } else if let Some(ack) = closing_ack {
                                                 let _ = table.acknowledge_fin(id, ack);
                                             }
+                                        }
+                                        if let Some((ch_local_port, ch_remote_port, ch_seq, ch_recv_seq, ch_window)) = to_challenge {
+                                            // RFC 5961 challenge ACK: our own sequence numbers, no reset
+                                            // and no state change. A peer that genuinely lost state answers
+                                            // with a reset at the sequence we just told it; a forger cannot.
+                                            let _ = transmit_tcp_segment_with_window(
+                                                ip_pkt.dst, ch_local_port, ip_pkt.src, ch_remote_port,
+                                                ch_seq, ch_recv_seq, 0x10, ch_window,
+                                            );
                                         }
                                         if let Some((ack_local_port, ack_remote_port, ack_seq, ack_recv_seq, ack_window)) = to_ack_syn {
                                             let _ = transmit_tcp_segment_with_window(
@@ -1387,6 +1507,10 @@ pub(crate) fn reset_net_state() {
     *IPV6_ADDRESSES.lock() = crate::net::ipv6::Ipv6AddressTable::new();
     *HOST_IPV6_LINK_LOCAL.lock() = Ipv6Address::UNSPECIFIED;
     *ARP_REQUESTS.lock() = [ArpRequestState::EMPTY; 8];
+    // The resolver is a network global like the tables above: its inflight slots
+    // decide whether a bind inside the reserved port range is legitimate, so a
+    // query one case left outstanding would decide another case's verdict.
+    *DNS_RESOLVER.lock() = DnsResolver::new();
     LIVE_GATEWAY_ARP_LOGGED.store(false, Ordering::SeqCst);
     DROP_STATS.net_drop_stats_reset();
 }
@@ -2010,6 +2134,244 @@ mod tests {
         );
     }
 
+    /// Injects one TCP segment through the real receive path: Ethernet -> IPv4 ->
+    /// the TCP demultiplexer in `poll_network_interface`. Both checksums are
+    /// computed, so the segment passes the same validation production traffic does.
+    fn inject_tcp_segment(src_ip: Ipv4Address, dst_ip: Ipv4Address, dst_mac: MacAddress, seg: &TcpSegment<'_>) {
+        let mut tcp_buf = [0u8; 128];
+        let tcp_len = crate::net::tcp::serialize_with_checksum(seg, src_ip.0, dst_ip.0, &mut tcp_buf).unwrap();
+        let mut ip_buf = [0u8; 160];
+        let ip_len = Ipv4Packet::serialize(src_ip, dst_ip, IpProtocol::Tcp, 64, &tcp_buf[..tcp_len], &mut ip_buf).unwrap();
+        let frame = EthernetFrame {
+            dst_mac,
+            src_mac: LOOPBACK_MAC,
+            ethertype: EtherType::Ipv4,
+            payload: &ip_buf[..ip_len],
+        };
+        let mut eth_buf = [0u8; 1514];
+        let n = frame.serialize(&mut eth_buf).unwrap();
+        LOOPBACK_DEVICE.lock().transmit(&eth_buf[..n]).unwrap();
+    }
+
+    /// Opens a loopback connection and puts it in ESTABLISHED with known sequence
+    /// numbers, so a case can state exactly which window a forged segment lands in.
+    fn established_loopback_connection(local_port: u16) -> u32 {
+        let owner = TaskId::new();
+        let id = TCP_TABLE.lock()
+            .open(owner.0 as u32, local_port, Ipv4Address::LOCALHOST, 443, 100)
+            .expect("connection should open");
+        let mut table = TCP_TABLE.lock();
+        let conn = table.get_mut(id).expect("connection exists");
+        conn.state = TcpState::Established;
+        conn.syn_pending = false;
+        conn.recv_seq = 5000;
+        conn.send_seq = 9000;
+        conn.snd_una = 9000;
+        conn.rcv_wnd = 4096;
+        conn.snd_wnd = 65535;
+        id
+    }
+
+    /// H5: the attack RFC 5961 exists to stop. One forged RST at a sequence the
+    /// attacker never had to guess, carrying a zero advertised window. Before the
+    /// fix this closed the connection; even once the reset was refused, the window
+    /// update ran first and left the peer unable to send ever again.
+    #[test]
+    fn a_forged_reset_can_neither_kill_nor_stall_an_established_connection() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+        let id = established_loopback_connection(41_000);
+        let peer = Ipv4Address::LOCALHOST;
+
+        let forged = TcpSegment {
+            src_port: 443, dst_port: 41_000, seq: 123_456, ack: 0,
+            flags: 0x04, window: 0, payload: &[],
+        };
+        inject_tcp_segment(peer, peer, LOOPBACK_MAC, &forged);
+        let tx_before = LOOPBACK_DEVICE.lock().packets_transmitted;
+        let drops_before = DROP_STATS.port_conn_mismatch.load(Ordering::Relaxed);
+        poll_network_interface();
+
+        {
+            let table = TCP_TABLE.lock();
+            let conn = table.get(id).expect("the connection must survive a forged reset");
+            assert_eq!(conn.state, TcpState::Established, "an out-of-window reset must not close the connection");
+            assert_eq!(conn.recv_seq, 5000, "a refused segment must not move the receive stream");
+            assert_eq!(conn.snd_wnd, 65535, "a refused segment must not be allowed to zero the send window");
+        }
+        assert_eq!(
+            LOOPBACK_DEVICE.lock().packets_transmitted, tx_before,
+            "an out-of-window reset is dropped silently, so it cannot make us emit traffic"
+        );
+        assert_eq!(
+            DROP_STATS.port_conn_mismatch.load(Ordering::Relaxed), drops_before + 1,
+            "the refused reset must be counted, not vanish"
+        );
+
+        // Positive control: the very same reset at the exact next expected sequence
+        // is believable, so the case proves validation rather than blanket refusal.
+        let honest = TcpSegment { seq: 5000, ..forged };
+        inject_tcp_segment(peer, peer, LOOPBACK_MAC, &honest);
+        poll_network_interface();
+        let table = TCP_TABLE.lock();
+        assert_eq!(
+            table.get(id).expect("the entry survives until the reaper runs").state,
+            TcpState::Closed,
+            "a reset at recv_seq must still tear the connection down"
+        );
+    }
+
+    /// H5: an in-window reset is not believed, but it is not ignored either -- the
+    /// peer may genuinely have lost state, so it gets our sequence numbers back and
+    /// can confirm by resetting at the right one.
+    #[test]
+    fn an_in_window_reset_draws_a_challenge_ack_and_keeps_the_connection() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+        let id = established_loopback_connection(41_001);
+        let peer = Ipv4Address::LOCALHOST;
+
+        let in_window = TcpSegment {
+            src_port: 443, dst_port: 41_001, seq: 5001, ack: 0,
+            flags: 0x04, window: 0, payload: &[],
+        };
+        inject_tcp_segment(peer, peer, LOOPBACK_MAC, &in_window);
+        let tx_before = LOOPBACK_DEVICE.lock().packets_transmitted;
+        poll_network_interface();
+
+        {
+            let table = TCP_TABLE.lock();
+            let conn = table.get(id).expect("the connection must survive an in-window reset");
+            assert_eq!(conn.state, TcpState::Established);
+            assert_eq!(conn.recv_seq, 5000);
+        }
+        assert_eq!(
+            LOOPBACK_DEVICE.lock().packets_transmitted, tx_before + 1,
+            "exactly one challenge ACK must go out: no reset, no state change"
+        );
+    }
+
+    /// H5: the IPv4 layer accepts unicast, broadcast and loopback destinations, so
+    /// matching only the port pair let a broadcast-addressed segment drive a
+    /// connection bound to a unicast address. The reset here is at exactly recv_seq,
+    /// which means it would have been accepted before local_ip was matched.
+    #[test]
+    fn a_broadcast_addressed_segment_does_not_drive_a_unicast_connection() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+        let id = established_loopback_connection(41_002);
+
+        let reset = TcpSegment {
+            src_port: 443, dst_port: 41_002, seq: 5000, ack: 0,
+            flags: 0x04, window: 4096, payload: &[],
+        };
+        inject_tcp_segment(Ipv4Address::LOCALHOST, Ipv4Address::BROADCAST, MacAddress::BROADCAST, &reset);
+        let drops_before = DROP_STATS.port_conn_mismatch.load(Ordering::Relaxed);
+        poll_network_interface();
+
+        let table = TCP_TABLE.lock();
+        let conn = table.get(id).expect("the connection must not be addressable via broadcast");
+        assert_eq!(conn.state, TcpState::Established, "a broadcast segment must not reset a unicast connection");
+        assert_eq!(conn.recv_seq, 5000);
+        drop(table);
+        assert_eq!(
+            DROP_STATS.port_conn_mismatch.load(Ordering::Relaxed), drops_before + 1,
+            "the segment must fall out of the demux as unmatched"
+        );
+    }
+
+    /// M4: `acknowledge_fin` tested only a lower bound, so an acknowledgement of
+    /// 0xFFFFFFFF retired a FIN that was never acknowledged and closed the
+    /// connection. The closing states now window-validate before believing it.
+    #[test]
+    fn a_forged_ack_cannot_retire_a_pending_fin() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+        let owner = TaskId::new();
+        let id = TCP_TABLE.lock()
+            .open(owner.0 as u32, 41_003, Ipv4Address::LOCALHOST, 443, 100)
+            .expect("connection should open");
+        let fin_seq = {
+            let mut table = TCP_TABLE.lock();
+            let conn = table.get_mut(id).expect("connection exists");
+            conn.state = TcpState::Established;
+            conn.syn_pending = false;
+            conn.recv_seq = 5000;
+            conn.rcv_wnd = 4096;
+            // M6: the ISN is kernel-drawn now, so the case states the send side
+            // explicitly rather than relying on the value it passed to `open`.
+            conn.send_seq = 100;
+            conn.snd_una = 100;
+            table.arm_fin(id, 0).expect("FIN should arm")
+        };
+        let peer = Ipv4Address::LOCALHOST;
+
+        let forged = TcpSegment {
+            src_port: 443, dst_port: 41_003, seq: 5000, ack: u32::MAX,
+            flags: 0x10, window: 4096, payload: &[],
+        };
+        inject_tcp_segment(peer, peer, LOOPBACK_MAC, &forged);
+        poll_network_interface();
+        {
+            let table = TCP_TABLE.lock();
+            let conn = table.get(id).expect("connection exists");
+            assert!(conn.fin_pending, "an ack for bytes never sent must not retire the FIN");
+            assert_eq!(conn.state, TcpState::FinWait1);
+            assert_eq!(conn.recv_seq, 5000);
+        }
+
+        // Positive control: the acknowledgement that really covers the FIN works.
+        let honest = TcpSegment { ack: fin_seq.wrapping_add(1), ..forged };
+        inject_tcp_segment(peer, peer, LOOPBACK_MAC, &honest);
+        poll_network_interface();
+        let table = TCP_TABLE.lock();
+        let conn = table.get(id).expect("connection exists");
+        assert!(!conn.fin_pending, "the genuine FIN acknowledgement must still retire it");
+        assert_eq!(conn.state, TcpState::TimeWait);
+    }
+
+    /// M4, the sequence half: the acknowledgement bound alone does not stop a
+    /// closing state from overwriting recv_seq with whatever the wire claimed. The
+    /// ack here is in range but does not cover the FIN, so only the window check
+    /// stands between the forged sequence and the receive stream.
+    #[test]
+    fn a_closing_state_does_not_rewind_or_jump_the_receive_stream() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+        let owner = TaskId::new();
+        let id = TCP_TABLE.lock()
+            .open(owner.0 as u32, 41_004, Ipv4Address::LOCALHOST, 443, 100)
+            .expect("connection should open");
+        {
+            let mut table = TCP_TABLE.lock();
+            let conn = table.get_mut(id).expect("connection exists");
+            conn.state = TcpState::Established;
+            conn.syn_pending = false;
+            conn.recv_seq = 5000;
+            conn.rcv_wnd = 4096;
+            // M6: as above, the send side is stated rather than inherited from
+            // the caller's now-ignored initial sequence argument.
+            conn.send_seq = 100;
+            conn.snd_una = 100;
+            table.arm_fin(id, 0).expect("FIN should arm");
+        }
+        let peer = Ipv4Address::LOCALHOST;
+
+        for seq in [0u32, 4999, 99_999, u32::MAX] {
+            let forged = TcpSegment {
+                src_port: 443, dst_port: 41_004, seq, ack: 100,
+                flags: 0x10, window: 4096, payload: &[],
+            };
+            inject_tcp_segment(peer, peer, LOOPBACK_MAC, &forged);
+            poll_network_interface();
+            let table = TCP_TABLE.lock();
+            let conn = table.get(id).expect("connection exists");
+            assert_eq!(conn.recv_seq, 5000, "a segment at {seq} is outside the window and must not move recv_seq");
+            assert!(conn.fin_pending, "an ack that does not cover the FIN must not retire it");
+            assert_eq!(conn.state, TcpState::FinWait1);
+        }
+    }
+
     #[test]
     fn live_rx_dispatch_arp_cross_layer_mac_consistency() {
         let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2054,8 +2416,12 @@ mod tests {
         );
     }
 
+    /// M2: the in-flight correlation gate is unchanged -- an unsolicited reply is
+    /// still dropped, and a reply correlated with a request for a *different*
+    /// address still cannot rewrite the gateway. What changed is that the entry
+    /// the solicited reply creates is bounded and replaceable, not permanent.
     #[test]
-    fn test_unsolicited_arp_reply_rejected_and_solicited_pins_permanent() {
+    fn test_unsolicited_arp_reply_rejected_and_solicited_learns_a_bounded_gateway_mapping() {
         let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_net_state();
 
@@ -2114,10 +2480,11 @@ mod tests {
         assert_eq!(
             ARP_TABLE.lock().lookup(GATEWAY_IP),
             Some(gw_mac),
-            "Solicited ARP reply for gateway must be learned and pinned permanent"
+            "Solicited ARP reply for gateway must be learned with a bounded lifetime"
         );
 
-        // 3. Subsequent unsolicited reply cannot poison or overwrite permanent gateway entry
+        // 3. A reply correlated with a request for another address still cannot
+        //    rewrite the gateway entry: the in-flight gate is what stops it.
         let _ = transmit_arp_request(Ipv4Address([10, 0, 2, 99])); // request for unrelated IP
         let arp_poison = ArpPacket {
             opcode: ArpOpcode::Reply,
@@ -2141,8 +2508,143 @@ mod tests {
         assert_eq!(
             ARP_TABLE.lock().lookup(GATEWAY_IP),
             Some(gw_mac),
-            "Permanent gateway entry must not be overwritten by spoofed reply"
+            "An uncorrelated reply must not overwrite the gateway entry"
         );
+    }
+
+    /// Delivers one ARP reply through the real receive path, unicast to our MAC.
+    fn deliver_arp_reply(sender_ip: Ipv4Address, sender_mac: MacAddress) {
+        let host_mac = NETWORK_DEVICE.lock().info().mac;
+        let reply = ArpPacket {
+            opcode: ArpOpcode::Reply,
+            sender_mac,
+            sender_ip,
+            target_mac: host_mac,
+            target_ip: DEFAULT_HOST_IP,
+        };
+        let mut arp_buf = [0u8; 28];
+        let n_arp = reply.serialize(&mut arp_buf).unwrap();
+        let frame = EthernetFrame {
+            dst_mac: host_mac,
+            src_mac: sender_mac,
+            ethertype: EtherType::Arp,
+            payload: &arp_buf[..n_arp],
+        };
+        let mut eth_buf = [0u8; 1514];
+        let n_eth = frame.serialize(&mut eth_buf).unwrap();
+        NETWORK_DEVICE.lock().transmit(&eth_buf[..n_eth]).unwrap();
+        poll_network_interface();
+    }
+
+    /// M2: the defect was permanence, not the absence of a cache. The first
+    /// responder to a correlated request used to be written with
+    /// `insert_permanent`, which `arp.rs` then refuses to overwrite, so one
+    /// spoofed reply that won the race owned the next hop for the whole uptime.
+    /// A later correlated reply must replace it, and the entry must age out.
+    #[test]
+    fn a_gateway_mapping_is_replaceable_and_expires() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+
+        let first_mac = MacAddress([0x00, 0x50, 0x56, 0xaa, 0xbb, 0xcc]);
+        let real_mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+
+        let _ = transmit_arp_request(GATEWAY_IP);
+        deliver_arp_reply(GATEWAY_IP, first_mac);
+        assert_eq!(ARP_TABLE.lock().lookup(GATEWAY_IP), Some(first_mac));
+        assert!(
+            !ARP_TABLE.lock().is_permanent(GATEWAY_IP),
+            "the gateway must not be pinned permanently: that is what made a single spoofed reply a persistent MITM"
+        );
+
+        // The real gateway answers a later request. Under the permanent pin this
+        // reply was discarded and the attacker's MAC survived for the whole uptime.
+        let _ = transmit_arp_request(GATEWAY_IP);
+        deliver_arp_reply(GATEWAY_IP, real_mac);
+        assert_eq!(
+            ARP_TABLE.lock().lookup(GATEWAY_IP),
+            Some(real_mac),
+            "a stale gateway mapping must be replaceable by a later correlated reply"
+        );
+
+        // And it ages on the same bounded lifetime as every other neighbour.
+        let later = crate::interrupts::get_system_ticks()
+            .saturating_add(crate::net::arp::ARP_CACHE_TICKS.saturating_mul(2));
+        assert_eq!(
+            ARP_TABLE.lock().lookup_at(GATEWAY_IP, later),
+            None,
+            "the gateway mapping must expire, so the host re-ARPs instead of trusting it forever"
+        );
+
+        // The correlation gate is intact: a reply correlated with a request for
+        // another address cannot rewrite the gateway even now that it is dynamic.
+        let _ = transmit_arp_request(Ipv4Address([10, 0, 2, 99]));
+        deliver_arp_reply(GATEWAY_IP, first_mac);
+        assert_eq!(
+            ARP_TABLE.lock().lookup(GATEWAY_IP),
+            Some(real_mac),
+            "an uncorrelated reply must still be refused"
+        );
+    }
+
+    /// M6: the ISN is drawn by the kernel inside `open`, but the connect syscall
+    /// still forwards its caller's value to the transmit path. The wire and the
+    /// table must agree, or `valid_syn_ack` compares against a sequence the peer
+    /// never saw and the connection can never establish.
+    #[test]
+    fn the_syn_on_the_wire_carries_the_kernel_isn_and_the_handshake_still_completes() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+        let owner = TaskId::new();
+        let peer = Ipv4Address::LOCALHOST;
+        let id = TCP_TABLE.lock()
+            .open(owner.0 as u32, 41_010, peer, 443, 100)
+            .expect("connection should open");
+        let isn = TCP_TABLE.lock().get(id).expect("connection exists").syn_seq;
+        assert_ne!(isn, 100, "the kernel must not put the caller's value on the wire");
+
+        // The caller's value is what the syscall forwards; the table is the authority.
+        transmit_tcp_syn_with_window(peer, 41_010, peer, 443, 100, 65535)
+            .expect("the SYN transmits");
+        let mut buf = [0u8; 1514];
+        let n = LOOPBACK_DEVICE.lock().receive(&mut buf).expect("the SYN is queued");
+        let frame = EthernetFrame::parse(&buf[..n]).expect("ethernet frame");
+        let ip = Ipv4Packet::parse(frame.payload).expect("ipv4 packet");
+        let syn = TcpSegment::parse(ip.payload).expect("tcp segment");
+        assert_eq!(syn.seq, isn, "the SYN on the wire must carry the connection's own ISN");
+        assert_eq!(syn.flags, 0x02);
+
+        // Positive control: the peer acknowledges that ISN and the connection
+        // establishes exactly as it did before the kernel took the draw over.
+        let syn_ack = TcpSegment {
+            src_port: 443, dst_port: 41_010, seq: 7000, ack: isn.wrapping_add(1),
+            flags: 0x12, window: 4096, payload: &[],
+        };
+        inject_tcp_segment(peer, peer, LOOPBACK_MAC, &syn_ack);
+        poll_network_interface();
+        let table = TCP_TABLE.lock();
+        let conn = table.get(id).expect("connection exists");
+        assert_eq!(conn.state, TcpState::Established, "a kernel-drawn ISN must still complete the handshake");
+        assert!(!conn.syn_pending);
+        assert_eq!(conn.send_seq, isn.wrapping_add(1));
+        assert_eq!(conn.recv_seq, 7001);
+    }
+
+    /// M6: without entropy the connection does not open. This drives the
+    /// production refusal branch -- `net_entropy_u64` declines a contended TRNG
+    /// rather than waiting -- and checks no slot or quota was consumed.
+    #[test]
+    fn a_connection_is_refused_when_entropy_cannot_be_drawn() {
+        let _net_guard = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_net_state();
+        let owner = TaskId::new();
+        let _held = crate::crypto::TRNG.lock();
+        assert_eq!(
+            TCP_TABLE.lock().open(owner.0 as u32, 41_011, Ipv4Address::LOCALHOST, 443, 100),
+            Err(NetError::NotReady),
+            "a predictable ISN is worse than no connection"
+        );
+        assert!(TCP_TABLE.lock().entries().iter().flatten().next().is_none());
     }
 
     #[test]

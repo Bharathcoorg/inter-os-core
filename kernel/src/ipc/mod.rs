@@ -383,7 +383,17 @@ impl IpcRouter {
     }
 
     /// Receives a message directly from the target mailbox for a pre-verified receiver.
+    ///
+    /// WHY the endpoint check is repeated here: `receive` refuses a revoked
+    /// endpoint, and this is the path the syscall layer actually takes after it
+    /// has verified `IpcReceive`. Without the same guard a peer whose channel
+    /// was revoked could still drain whatever the endpoint had already
+    /// buffered, which is the half of the revocation the sender-side check
+    /// cannot enforce.
     pub fn receive_direct(&mut self, receiver: TaskId) -> Result<Option<IpcMessage>, IpcError> {
+        if self.endpoints.iter().any(|e| e.owner == receiver && e.is_revoked) {
+            return Err(IpcError::EndpointRevoked);
+        }
         let mailbox = self
             .mailboxes
             .iter_mut()
@@ -543,6 +553,54 @@ mod tests {
         assert_eq!(prov, MessageProvenance::UserTask(rogue_task));
         assert_ne!(prov, MessageProvenance::Kernel);
         assert_ne!(prov, MessageProvenance::SystemService(0));
+    }
+
+    /// A revoked endpoint must block the *direct* read path too.
+    ///
+    /// WHY this is a separate case from `receive`: the syscall layer verifies
+    /// `IpcReceive` itself and then calls `receive_direct`, so the guard in
+    /// `receive` never runs for a real application. Without it, revoking a
+    /// peer's channel stopped new deliveries but left everything already
+    /// buffered readable -- the revoked peer kept draining its mailbox.
+    #[test]
+    fn receive_direct_refuses_a_revoked_endpoint_and_leaves_the_mailbox_intact() {
+        let mut router = IpcRouter::new();
+        let peer = TaskId(7701);
+        let sender = TaskId(7702);
+        assert!(router.register_task(peer));
+        assert!(router.register_task(sender));
+
+        assert_eq!(router.send_direct(sender, peer, 0x1234, b"BUFFERED"), Ok(()));
+        // Before revocation the direct path drains normally.
+        assert!(router.receive_direct(peer).unwrap().is_some());
+
+        assert_eq!(router.send_direct(sender, peer, 0x1235, b"AFTER_REVOKE"), Ok(()));
+        router.revoke_endpoint(peer);
+
+        assert_eq!(router.receive_direct(peer).unwrap_err(), IpcError::EndpointRevoked);
+        // The refusal must not consume the message: a later unrevocation (a
+        // fresh endpoint after cleanup) still sees what was buffered.
+        assert_eq!(router.receive_direct(peer).unwrap_err(), IpcError::EndpointRevoked);
+        assert_eq!(
+            router.mailboxes.iter().find(|m| m.task_id == peer).map(|m| m.queue.len()),
+            Some(1),
+            "a refused read must not drain the mailbox"
+        );
+
+        // A revoked endpoint also refuses the checked read path, so both agree.
+        let mut caps = CapabilityTable::new_for_task(peer, 4);
+        let recv_slot = caps
+            .insert(Capability {
+                id: CapabilityId(7703),
+                cap_type: CapabilityType::IpcReceive,
+                rights: Rights::READ,
+                object_id: 0,
+            })
+            .unwrap();
+        assert_eq!(
+            router.receive(peer, &caps, recv_slot).unwrap_err(),
+            IpcError::EndpointRevoked
+        );
     }
 }
 

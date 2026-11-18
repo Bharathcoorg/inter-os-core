@@ -213,28 +213,30 @@ pub fn detect_cpu_simd() -> CpuSimdCapabilities {
     unsafe {
         let (edx1, ecx1): (u32, u32);
         core::arch::asm!(
-            "push rbx",
+            "mov {tmp}, rbx",
             "mov eax, 1",
             "cpuid",
-            "pop rbx",
+            "mov rbx, {tmp}",
             lateout("edx") edx1,
             lateout("ecx") ecx1,
             out("eax") _,
+            tmp = out(reg) _,
             options(nomem, nostack)
         );
 
         let ebx7: u32;
         core::arch::asm!(
-            "push rbx",
+            "mov {tmp}, rbx",
             "mov eax, 7",
             "xor ecx, ecx",
             "cpuid",
             "mov {0:e}, ebx",
-            "pop rbx",
+            "mov rbx, {tmp}",
             out(reg) ebx7,
             out("eax") _,
             out("ecx") _,
             out("edx") _,
+            tmp = out(reg) _,
             options(nomem, nostack)
         );
 

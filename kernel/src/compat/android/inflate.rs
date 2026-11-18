@@ -132,6 +132,16 @@ impl Huffman {
             self.counts[length as usize] += 1;
         }
         self.counts[0] = 0;
+        // Check for over-subscribed code tree (Kraft inequality):
+        // At each bit length, the number of available prefixes (left) must not drop below 0.
+        let mut left = 1i32;
+        for length in 1..=MAX_BITS {
+            left <<= 1;
+            left -= self.counts[length] as i32;
+            if left < 0 {
+                return Err(InflateError::InvalidHuffman);
+            }
+        }
         let mut offsets = [0u16; MAX_BITS + 1];
         for length in 1..=MAX_BITS {
             offsets[length] = offsets[length - 1] + self.counts[length - 1];
@@ -372,4 +382,26 @@ fn dynamic_trees(reader: &mut BitReader<'_>) -> Result<(Huffman, Huffman), Infla
 pub fn inflate_raw(input: &[u8], out: &mut [u8]) -> Result<usize, InflateError> {
     let mut reader = BitReader::new(input);
     inflate_compressed(&mut reader, out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn huffman_rejects_oversubscribed_tree() {
+        let mut tree = Huffman::EMPTY;
+        // 3 symbols of length 1: maximum possible symbols of length 1 in binary tree is 2.
+        // This is over-subscribed and must be rejected by Kraft inequality check.
+        let oversubscribed = [1u8, 1u8, 1u8];
+        assert_eq!(tree.build(&oversubscribed), Err(InflateError::InvalidHuffman));
+    }
+
+    #[test]
+    fn huffman_accepts_valid_tree() {
+        let mut tree = Huffman::EMPTY;
+        // 2 symbols of length 1 (full tree):
+        let valid = [1u8, 1u8];
+        assert!(tree.build(&valid).is_ok());
+    }
 }

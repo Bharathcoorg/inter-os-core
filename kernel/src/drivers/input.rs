@@ -192,8 +192,162 @@ pub fn cleanup_task(task: TaskId) -> usize {
     INPUT_PIPELINE.lock().cleanup_task(task)
 }
 
-/// Moves recognized hardware gestures into the stable userspace event queue.
-/// Routes normalized input events to the currently focused surface owner.
+// ---------------------------------------------------------------------------
+// Interrupt-context deferral
+// ---------------------------------------------------------------------------
+//
+// WHY this exists: `dispatch_to_focused_window` is reached from the PS/2
+// keyboard IRQ (`interrupts::keyboard_interrupt_handler` -> `post_char_event`
+// -> `post_key_event`) as well as from normal task context. Dispatching asks
+// who owns the screen, and answering that takes `DRM_KMS` -- a raw `spin::Mutex`
+// with no interrupt masking and no preemption gate. A surface or composite
+// syscall holds that lock with interrupts enabled, so a Home/Back/Recents key
+// arriving while it is held used to spin in the handler with IF clear on the
+// only CPU this kernel has. The holder could never resume to release it: a
+// permanent hard hang, not a slow path. `go_home` was worse still -- it ran a
+// full `composite_and_flip` from interrupt context.
+//
+// The handler therefore does no dispatching at all. It queues the normalized
+// event here and returns; the queue is drained in task context by
+// `drain_deferred_input`, from the kernel loop and from `sys_touch_poll`. This
+// is the same shape `drivers::ps2_mouse` already uses for pointer contacts:
+// bounded atomic work in the handler, the real work outside it.
+//
+// Deferral is not dropping. An event that cannot be dispatched yet -- because
+// the compositor lock is still held by whoever is drawing -- is re-queued, so
+// the Home key a person pressed is eventually delivered rather than lost.
+
+/// How many events the interrupt path may have outstanding at once.
+///
+/// A keypress is one event, and the drain runs on every pass of the kernel
+/// loop, so this is far more than a burst of typing can fill. It is bounded
+/// because the handler must not allocate: the heap lock is exactly the kind of
+/// lock an interrupt may not wait on.
+pub const DEFERRED_INPUT_CAPACITY: usize = 64;
+
+/// How many events one drain dispatches before returning.
+///
+/// The batch is copied out with interrupts masked, so the mask window has to
+/// be bounded by something other than "however much arrived".
+const DEFERRED_INPUT_BATCH: usize = 16;
+
+/// Bounded spin for the queue lock. With interrupts masked on one CPU the
+/// queue cannot be contended, so this budget is never spent; it exists so the
+/// acquisition is a `try_lock` like every other lock on an IRQ-reachable path.
+const DEFERRED_LOCK_SPINS: usize = 64;
+
+/// Bounded spin for the compositor lock in task context, matching the budget
+/// the routing path below already uses.
+const KMS_TRY_LOCK_SPINS: usize = 1000;
+
+/// Events queued by an interrupt handler, or re-queued by a dispatch that could
+/// not take the compositor lock yet.
+struct DeferredInput {
+    events: [InputEvent; DEFERRED_INPUT_CAPACITY],
+    head: usize,
+    len: usize,
+}
+
+impl DeferredInput {
+    const fn new() -> Self {
+        Self {
+            events: [InputEvent::EMPTY; DEFERRED_INPUT_CAPACITY],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    /// Queues `event`, discarding the *oldest* outstanding event when full.
+    ///
+    /// WHY the oldest goes: the newest event is the intent the person is
+    /// holding right now. Dropping it would lose the Home press that this whole
+    /// path exists to deliver, while a stale tap from a burst that has already
+    /// been overtaken is the one worth losing.
+    fn push(&mut self, event: InputEvent) {
+        let tail = (self.head + self.len) % DEFERRED_INPUT_CAPACITY;
+        self.events[tail] = event;
+        if self.len == DEFERRED_INPUT_CAPACITY {
+            self.head = (self.head + 1) % DEFERRED_INPUT_CAPACITY;
+            DEFERRED_INPUT_OVERRUN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.len += 1;
+        }
+    }
+
+    fn pop(&mut self) -> Option<InputEvent> {
+        if self.len == 0 {
+            return None;
+        }
+        let event = self.events[self.head];
+        self.head = (self.head + 1) % DEFERRED_INPUT_CAPACITY;
+        self.len -= 1;
+        Some(event)
+    }
+}
+
+static DEFERRED_INPUT: Mutex<DeferredInput> = Mutex::new(DeferredInput::new());
+
+/// Events the deferred queue could not accept. Reported, never silent.
+pub static DEFERRED_INPUT_OVERRUN: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Queues an event for dispatch in task context.
+///
+/// Safe from an interrupt handler: interrupts are masked around a bounded
+/// `try_lock`, so on this single-CPU kernel the queue cannot be contended by
+/// another handler, and the drain releases the lock before it dispatches so it
+/// cannot be contended by re-entrancy either.
+fn defer_input(event: InputEvent) {
+    crate::arch::with_interrupts_disabled(|| {
+        for _ in 0..DEFERRED_LOCK_SPINS {
+            if let Some(mut queue) = DEFERRED_INPUT.try_lock() {
+                queue.push(event);
+                return;
+            }
+            core::hint::spin_loop();
+        }
+        // Unreachable on one CPU with interrupts masked. Counted rather than
+        // returned silently, so a future caller that breaks the invariant
+        // leaves evidence instead of a key that does nothing.
+        DEFERRED_INPUT_OVERRUN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    });
+}
+
+/// Dispatches events an interrupt handler queued. Must run in task context.
+///
+/// Returns how many events it dispatched. Called from the kernel loop
+/// (`interrupts::service_deferred_diagnostics`) and from `pump_touch_events`,
+/// so a keypress is answered on the next pass of either rather than waiting for
+/// one particular task to be scheduled.
+pub fn drain_deferred_input() -> usize {
+    let mut batch = [InputEvent::EMPTY; DEFERRED_INPUT_BATCH];
+    let count = crate::arch::with_interrupts_disabled(|| {
+        let mut count = 0;
+        for _ in 0..DEFERRED_LOCK_SPINS {
+            if let Some(mut queue) = DEFERRED_INPUT.try_lock() {
+                while count < batch.len() {
+                    match queue.pop() {
+                        Some(event) => {
+                            batch[count] = event;
+                            count += 1;
+                        }
+                        None => break,
+                    }
+                }
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        count
+    });
+    // Dispatched with interrupts enabled and the queue lock released: this is
+    // the part that may take the compositor lock and flip a frame.
+    for event in &batch[..count] {
+        dispatch_in_task_context(*event);
+    }
+    count
+}
+
 /// Brings the shell back to the front of the screen.
 ///
 /// WHY the platform does this and not the application: the gesture is the
@@ -203,14 +357,27 @@ pub fn cleanup_task(task: TaskId) -> usize {
 /// surfaces come forward and the foreground application's surfaces go
 /// behind them, so the application keeps its state and the person gets
 /// their desk back.
-fn go_home() {
+///
+/// Returns whether the request was carried out. `false` means the compositor
+/// lock was still held and the caller must re-queue the event: this runs in
+/// task context, but the task that is drawing holds `DRM_KMS` without a
+/// preemption gate, so it can still be the lock's owner when we ask.
+fn go_home() -> bool {
     let Some(shell) = crate::syscall::shell_task_id() else {
-        return;
+        // No shell to bring forward. The request is answered as far as this
+        // platform can answer it, exactly as before.
+        return true;
     };
-    let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
-    apply_home_to_surfaces(&mut kms, shell);
-    let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
-    let _ = display.composite_and_flip();
+    for _ in 0..KMS_TRY_LOCK_SPINS {
+        if let Some(mut kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
+            apply_home_to_surfaces(&mut kms, shell);
+            let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+            let _ = display.composite_and_flip();
+            return true;
+        }
+        core::hint::spin_loop();
+    }
+    false
 }
 
 /// Brings the shell's surfaces forward and the others' back.
@@ -238,22 +405,34 @@ fn apply_home_to_surfaces(
     }
 }
 
-/// Whether the shell is the surface that owns the screen.
+/// Whether the shell is the surface that owns the screen, or `None` when the
+/// compositor lock could not be taken within the bounded spin.
 ///
 /// WHY this is asked at all: the shell handles its own home gesture (it
 /// draws the unlocked desk), so the platform's action must not run a
 /// second time on top of the shell's own handling.
-fn shell_owns_the_screen() -> bool {
+///
+/// WHY `Option` and not `bool`: "the shell is not in front" and "I could not
+/// look" are different answers, and collapsing them is what let a busy
+/// compositor silently swallow a Home press. `None` re-queues the event.
+fn shell_owns_the_screen() -> Option<bool> {
     let Some(shell) = crate::syscall::shell_task_id() else {
-        return false;
+        return Some(false);
     };
-    let kms = crate::drivers::display_kms::DRM_KMS.lock();
-    kms.surfaces
-        .iter()
-        .filter(|s| s.visible && s.input_enabled)
-        .max_by_key(|s| s.z_order)
-        .map(|s| s.owner_task == shell)
-        .unwrap_or(false)
+    for _ in 0..KMS_TRY_LOCK_SPINS {
+        if let Some(kms) = crate::drivers::display_kms::DRM_KMS.try_lock() {
+            return Some(
+                kms.surfaces
+                    .iter()
+                    .filter(|s| s.visible && s.input_enabled)
+                    .max_by_key(|s| s.z_order)
+                    .map(|s| s.owner_task == shell)
+                    .unwrap_or(false),
+            );
+        }
+        core::hint::spin_loop();
+    }
+    None
 }
 
 /// Whether an event asks for the home screen, in either of its two encodings.
@@ -271,14 +450,51 @@ fn is_home_request(event: &InputEvent) -> bool {
         || (event.kind == InputEventKind::Key && event.x == KEY_HOME && event.y == 1)
 }
 
+/// Whether an event is one of the platform's own navigation requests.
+fn is_system_navigation(event: &InputEvent) -> bool {
+    is_home_request(event)
+        || event.kind == InputEventKind::Back
+        || event.kind == InputEventKind::Recents
+}
+
+/// Routes a normalized input event to whoever owns the screen.
+///
+/// This is the entry point every producer calls, including the keyboard IRQ.
+/// In interrupt context it does nothing but queue the event: see the deferral
+/// note above for why dispatching from a handler is a single-CPU deadlock.
 pub fn dispatch_to_focused_window(event: InputEvent) {
+    if crate::sync::in_interrupt_context() {
+        defer_input(event);
+        return;
+    }
+    dispatch_in_task_context(event);
+}
+
+/// The dispatch itself. Task context only -- it may take the compositor lock,
+/// ask the scheduler who the shell is, and flip a frame.
+fn dispatch_in_task_context(event: InputEvent) {
     // WHY the home, back and recents gestures are taken here: this is the one point where the
     // platform knows both what was recognised and who is in front. An
     // application in front that does not implement the gesture would
     // otherwise swallow it, and the person would be stuck in the app.
-    if (is_home_request(&event) || event.kind == InputEventKind::Back || event.kind == InputEventKind::Recents) && !shell_owns_the_screen() {
-        go_home();
-        return;
+    if is_system_navigation(&event) {
+        match shell_owns_the_screen() {
+            // The compositor is busy. Re-queue instead of dropping: the person
+            // asked for the desk and the platform still owes it to them.
+            None => {
+                defer_input(event);
+                return;
+            }
+            Some(false) => {
+                if !go_home() {
+                    defer_input(event);
+                }
+                return;
+            }
+            // The shell already owns the screen and handles its own home
+            // gesture, so the event is routed to it like any other.
+            Some(true) => {}
+        }
     }
     let owner = {
         // WHY only the power key is a system key here: the system owns the
@@ -424,6 +640,10 @@ pub fn dispatch_to_focused_window(event: InputEvent) {
 }
 
 pub fn pump_touch_events() {
+    // Answer what the interrupt handlers queued before looking for new
+    // gestures: this runs in task context (sys_touch_poll), so it is one of the
+    // two places a deferred Home keypress can be carried out.
+    drain_deferred_input();
     let gestures: alloc::vec::Vec<_> = {
         let mut g = alloc::vec::Vec::new();
         for _ in 0..1000 {
@@ -681,5 +901,287 @@ mod tests {
         pipe.clear();
         assert!(pipe.queue.is_empty());
         assert!(pipe.service_queue.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // C3: the keyboard IRQ must not dispatch, and must not lose the key
+    // -------------------------------------------------------------------------
+
+    /// Serializes the tests that touch the global deferred queue, so a
+    /// neighbour's push cannot be counted as this test's event.
+    static DEFERRED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn home_key() -> InputEvent {
+        InputEvent::from_key(crate::input::KeyEvent {
+            source: crate::input::InputSource::Keyboard,
+            action: crate::input::KeyAction::Down,
+            code: crate::input::KeyCode::Home,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        })
+    }
+
+    #[test]
+    fn the_deferred_queue_round_trips_events_in_order() {
+        let mut queue = DeferredInput::new();
+        assert_eq!(queue.pop(), None);
+        let first = InputEvent { kind: InputEventKind::Tap, x: 1, y: 2, ..InputEvent::EMPTY };
+        let second = home_key();
+        queue.push(first);
+        queue.push(second);
+        assert_eq!(queue.pop(), Some(first));
+        assert_eq!(queue.pop(), Some(second));
+        assert_eq!(queue.pop(), None);
+    }
+
+    /// A full queue loses the oldest event, never the newest: the newest is the
+    /// Home press the person is holding, and dropping it is the failure this
+    /// whole deferral path exists to prevent.
+    #[test]
+    fn a_full_deferred_queue_keeps_the_newest_intent() {
+        let mut queue = DeferredInput::new();
+        for i in 0..DEFERRED_INPUT_CAPACITY {
+            queue.push(InputEvent { kind: InputEventKind::Tap, x: i as u32, ..InputEvent::EMPTY });
+        }
+        let home = home_key();
+        queue.push(home);
+        assert_eq!(queue.len, DEFERRED_INPUT_CAPACITY, "the queue must stay bounded");
+
+        let mut drained = alloc::vec::Vec::new();
+        while let Some(event) = queue.pop() {
+            drained.push(event);
+        }
+        assert_eq!(drained.len(), DEFERRED_INPUT_CAPACITY);
+        assert_eq!(drained.last(), Some(&home), "the newest event must survive the overrun");
+        assert_eq!(drained[0].x, 1, "the oldest event is the one that was discarded");
+    }
+
+    /// The IRQ half of the fix, asserted behaviourally.
+    ///
+    /// With an interrupt context active, dispatch must queue the event and
+    /// return without asking who owns the screen. If it dispatched inline the
+    /// queue would stay empty -- and on the guest it would also be spinning on
+    /// `DRM_KMS` with IF clear, which is the hang. The queue assertion is the
+    /// host-observable half of that; the structural test below is the half that
+    /// fails loudly instead of hanging if the blocking lock ever comes back.
+    #[test]
+    fn an_interrupt_context_dispatch_queues_the_key_instead_of_dispatching_it() {
+        let _serialized = DEFERRED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _irq = crate::sync::InterruptGuard::enter();
+        assert!(crate::sync::in_interrupt_context());
+
+        let home = home_key();
+        dispatch_to_focused_window(home);
+
+        let queued = DEFERRED_INPUT.lock().pop();
+        assert_eq!(
+            queued, Some(home),
+            "a Home key arriving in interrupt context must be deferred, not dispatched or dropped"
+        );
+        assert_eq!(DEFERRED_INPUT.lock().pop(), None, "exactly one event was queued");
+    }
+
+    /// Every system navigation request defers, not just Home: Back and Recents
+    /// reach the same compositor lock through the same branch.
+    #[test]
+    fn back_and_recents_defer_from_interrupt_context_too() {
+        let _serialized = DEFERRED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _irq = crate::sync::InterruptGuard::enter();
+        for kind in [InputEventKind::Back, InputEventKind::Recents, InputEventKind::Home] {
+            let event = InputEvent { kind, x: 360, y: 1400, ..InputEvent::EMPTY };
+            dispatch_to_focused_window(event);
+            assert_eq!(DEFERRED_INPUT.lock().pop(), Some(event), "{kind:?} was not deferred");
+        }
+        assert_eq!(DEFERRED_INPUT.lock().pop(), None);
+    }
+
+    /// A plain key is deferred as well: the handler cannot know which keys will
+    /// need the compositor, so none of them are dispatched from interrupt
+    /// context.
+    #[test]
+    fn an_ordinary_keypress_is_deferred_rather_than_routed_in_the_handler() {
+        let _serialized = DEFERRED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _irq = crate::sync::InterruptGuard::enter();
+        let event = InputEvent { kind: InputEventKind::Key, x: 'a' as u32, y: 1, ..InputEvent::EMPTY };
+        dispatch_to_focused_window(event);
+        assert_eq!(DEFERRED_INPUT.lock().pop(), Some(event));
+    }
+
+    // -------------------------------------------------------------------------
+    // Structural guard: no blocking lock on the IRQ-reachable input path
+    // -------------------------------------------------------------------------
+
+    /// Returns the body of `fn name(...)` from `source`, by brace matching.
+    ///
+    /// A concurrency rule cannot be proved by a host unit test: the race needs
+    /// a real interrupt landing on a real lock holder. What a host test *can*
+    /// do is refuse to let the shape that causes the race back into the source.
+    /// This is the same technique `interrupts.rs` already uses to guard its
+    /// fault banners.
+    fn fn_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let needle = alloc::format!("fn {name}(");
+        let start = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("no fn {name} in the scanned source"));
+        let open = source[start..].find('{').map(|i| start + i).expect("fn body");
+        let mut depth = 0usize;
+        for (offset, byte) in source[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open + 1..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces in fn {name}");
+    }
+
+    /// Strips line comments so a comment *about* a lock is not read as a call.
+    fn without_comments(body: &str) -> alloc::string::String {
+        body.lines()
+            .map(|line| match line.find("//") {
+                Some(index) => &line[..index],
+                None => line,
+            })
+            .collect::<alloc::vec::Vec<_>>()
+            .join("\n")
+    }
+
+    fn assert_no_blocking_lock(source: &str, file: &str, functions: &[&str]) {
+        for name in functions {
+            let body = without_comments(fn_body(source, name));
+            assert!(
+                !body.contains(".lock()"),
+                "{file}: fn {name} is reachable from an interrupt handler and takes a blocking \
+                 lock. On this single-CPU kernel the interrupted task may already hold it, and \
+                 the handler spins with IF clear forever. Use a bounded try_lock and defer the \
+                 work to task context.\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_irq_reachable_input_path_takes_no_blocking_lock() {
+        let input_rs = include_str!("input.rs");
+        let production = input_rs
+            .split_once("#[cfg(test)]")
+            .map_or(input_rs, |(head, _)| head);
+        assert_no_blocking_lock(
+            production,
+            "drivers/input.rs",
+            &[
+                "dispatch_to_focused_window",
+                "dispatch_in_task_context",
+                "defer_input",
+                "drain_deferred_input",
+                "go_home",
+                "shell_owns_the_screen",
+            ],
+        );
+
+        // `post_char_event` is what the keyboard handler actually calls, and
+        // `post_pointer_contact` is the same path for a touch contact. Both
+        // reach `dispatch_to_focused_window`, so both are IRQ-reachable.
+        let mod_rs = include_str!("../input/mod.rs");
+        assert_no_blocking_lock(
+            mod_rs,
+            "input/mod.rs",
+            &["post_char_event", "post_key_event", "post_pointer_contact"],
+        );
+    }
+
+    /// The compositor lock specifically: `DRM_KMS` is a raw `spin::Mutex` with
+    /// no interrupt masking, so a blocking acquisition anywhere in this file is
+    /// a hang waiting for a surface syscall to be interrupted.
+    #[test]
+    fn this_file_never_blocking_locks_the_compositor() {
+        let source = include_str!("input.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .map_or(source, |(head, _)| head);
+        let code = without_comments(production);
+        assert!(
+            !code.contains("DRM_KMS.lock()"),
+            "drivers/input.rs blocking-locks DRM_KMS; every acquisition here must be a bounded \
+             try_lock whose failure re-queues the event"
+        );
+    }
+
+    /// WHY this exists: `DEFERRED_INPUT_OVERRUN` was written by `push` and by the
+    /// exhausted `try_lock` budget, and read by nobody. A dropped tap or a Home
+    /// key that did nothing was silent. This fills the real queue through the
+    /// real producer and asserts the reporter the kernel loop calls says so.
+    #[test]
+    fn a_lost_deferred_event_reaches_the_console_exactly_once() {
+        let _serialized = crate::interrupts::pending_scancode_tests::RING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Both counters start known: the reporter consumes them together, and an
+        // earlier test may have left either one non-zero.
+        crate::interrupts::PENDING_SCANCODE_OVERRUN.store(0, core::sync::atomic::Ordering::Relaxed);
+        DEFERRED_INPUT_OVERRUN.store(0, core::sync::atomic::Ordering::Relaxed);
+        {
+            let mut queue = DEFERRED_INPUT.lock();
+            queue.head = 0;
+            queue.len = 0;
+        }
+
+        let press = InputEvent {
+            kind: InputEventKind::Key,
+            x: KEY_HOME,
+            y: 1,
+            ..InputEvent::EMPTY
+        };
+        for _ in 0..DEFERRED_INPUT_CAPACITY {
+            defer_input(press);
+        }
+        assert_eq!(
+            DEFERRED_INPUT_OVERRUN.load(core::sync::atomic::Ordering::Relaxed),
+            0,
+            "a queue filled exactly to capacity has not lost anything yet"
+        );
+
+        // One more: the oldest event goes so the newest intent survives, and the
+        // loss is counted rather than dropped on the floor.
+        defer_input(press);
+        assert_eq!(
+            DEFERRED_INPUT_OVERRUN.load(core::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        crate::serial::capture_clear();
+        assert_eq!(crate::interrupts::report_input_loss(), (0, 1));
+        let lines = crate::serial::capture_lines();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("[INPUT] 1 deferred input event(s) lost")),
+            "the lost event was counted but never reported: {:?}",
+            lines
+        );
+
+        crate::serial::capture_clear();
+        assert_eq!(crate::interrupts::report_input_loss(), (0, 0));
+        assert!(
+            !crate::serial::capture_lines()
+                .iter()
+                .any(|l| l.contains("deferred input event(s) lost")),
+            "a consumed loss was reported a second time"
+        );
+
+        // Empty the queue without dispatching: these events were never meant for
+        // a window, and dispatching them would move another test's surfaces.
+        {
+            let mut queue = DEFERRED_INPUT.lock();
+            queue.head = 0;
+            queue.len = 0;
+        }
     }
 }

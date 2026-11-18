@@ -34,7 +34,13 @@ impl Value {
 /// Errors returned by the WASM sandbox environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WasmError {
+    /// Reserved for a WASM binary-container decoder that is NOT IMPLEMENTED.
+    /// Modules are built programmatically (`WasmModule::add_function` takes
+    /// interpreter bytecode, not `\0asm` bytes); no magic check exists anywhere
+    /// in the kernel, so this variant is never constructed.
     InvalidMagic,
+    /// Reserved for the same NOT IMPLEMENTED binary-container decoder.
+    /// No version check exists; this variant is never constructed.
     UnsupportedVersion,
     OutOfBoundsMemory,
     StackUnderflow,
@@ -45,6 +51,18 @@ pub enum WasmError {
     Trap(String),
     HostCallFailed(String),
     CapabilityDenied,
+    /// The operand-stack value cap (`WASM_MAX_STACK_VALUES`) was reached, or a
+    /// bounded stack-growth reservation failed. Reported instead of growing the
+    /// stack without limit or reaching the kernel's halt-on-OOM policy.
+    StackOverflow,
+    /// A function declares more parameters/locals than `WASM_MAX_LOCALS`, a
+    /// CALL passes more arguments than that cap, or a bounded locals/argument
+    /// reservation failed. Refused before the amplifying allocation is made.
+    TooManyLocals,
+    /// The native call-depth limit (`WASM_MAX_CALL_DEPTH`) was reached.
+    /// Protects the Ring-0 stack: fuel is per-instruction, so without this
+    /// limit a CALL chain could recurse as deep as the fuel budget allows.
+    CallDepthExceeded,
 }
 
 /// WASM Opcode constants.
