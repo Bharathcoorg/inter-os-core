@@ -24,6 +24,15 @@ use super::TlsError;
 /// after the handshake can recognise it and drop it.
 const HANDSHAKE_NEW_SESSION_TICKET: u8 = 4;
 
+/// The one alert that means "this response is complete" (RFC 8446 6.1).
+///
+/// WHY both bytes are named: `close_notify` is description 0 at warning level 1.
+/// A description of 0 at fatal level is a peer aborting, not a peer finishing,
+/// and treating it as a clean end would let an injected fatal alert truncate a
+/// response that the reader then reported as whole.
+const ALERT_LEVEL_WARNING: u8 = 1;
+const ALERT_DESCRIPTION_CLOSE_NOTIFY: u8 = 0;
+
 /// How many records that are not the document one read will step over.
 ///
 /// WHY a bound at all: a peer may send as many tickets as it likes, and a fetch
@@ -473,6 +482,14 @@ pub struct TlsClient<'a, S: TlsStream> {
     payload_end: usize,
     /// How much of that payload the caller has already taken.
     payload_pos: usize,
+    /// Has the peer authenticated the end of this stream with `close_notify`?
+    ///
+    /// WHY the reader remembers it (M3): a transport EOF and a TLS closure are
+    /// different facts. Only this one is authenticated, so only this one may be
+    /// reported as a clean end of stream; a FIN that arrives without it is a
+    /// truncated response, which the caller has to be told about. One bool, so
+    /// the record path still allocates nothing.
+    peer_closed: bool,
 }
 
 impl<'a, S: TlsStream> TlsClient<'a, S> {
@@ -485,6 +502,7 @@ impl<'a, S: TlsStream> TlsClient<'a, S> {
             record: [0u8; MAX_READ_RECORD_BYTES],
             payload_end: 0,
             payload_pos: 0,
+            peer_closed: false,
         }
     }
 
@@ -606,9 +624,15 @@ impl<'a, S: TlsStream> TlsClient<'a, S> {
     /// client never resumes a session.
     ///
     /// WHY the skip is bounded and the rest still refused: a peer can stream
-    /// records that are not the document forever, and an alert genuinely means
-    /// the peer stopped talking. Both have to end with something the reader can
-    /// name, not with a silent empty read.
+    /// records that are not the document forever, and an alert other than
+    /// `close_notify` genuinely means the peer aborted. Both have to end with
+    /// something the reader can name, not with a silent empty read.
+    ///
+    /// WHY the two ways a stream can stop are not the same answer (M3): only
+    /// `close_notify` is authenticated by the record layer, so only it may be
+    /// reported as `Ok(0)`. The transport stopping without it is a truncated
+    /// response and is reported as `IoError`, because a caller that cannot tell
+    /// the two apart accepts half a document as the whole one.
     ///
     /// WHY the answer is handed over in pieces: a server puts the opening
     /// kilobytes of a page inside one record of up to 16 KiB, while the caller
@@ -624,19 +648,34 @@ impl<'a, S: TlsStream> TlsClient<'a, S> {
             return self.take_payload(out);
         }
 
+        // The peer authenticated the end of this stream, so every later read is
+        // that same end rather than a fresh request to a transport that stopped.
+        if self.peer_closed {
+            return Ok(0);
+        }
+
         let mut skipped = 0usize;
         loop {
             let total_len = self.read_record_into()?;
             if total_len == 0 {
-                return Ok(0); // EOF
+                // WHY this is a refusal and not `Ok(0)` (M3): the transport
+                // cannot authenticate anything. A FIN injected after the first
+                // records of a response arrived here and was reported as a clean
+                // end of stream, so a truncated body was accepted as the whole
+                // document. `IoError` is what this client already names a
+                // transport failure with, and it is distinguishable both from
+                // `Ok(0)` (the peer closed properly) and from `UnexpectedMessage`
+                // (a record was refused).
+                return Err(TlsError::IoError);
             }
 
             let (content_type, len) = self
                 .session
                 .open_record_in_place(&mut self.record[..total_len])?;
             // WHY an empty application-data record is stepped over: `Ok(0)` is
-            // this reader's only word for the peer having stopped talking, and a
-            // record carrying no bytes is the peer still talking.
+            // this reader's only word for the peer having authenticated the end
+            // of the stream, and a record carrying no bytes is the peer still
+            // talking.
             match content_type {
                 ContentType::ApplicationData if len > 0 => {
                     self.payload_end = len;
@@ -649,6 +688,26 @@ impl<'a, S: TlsStream> TlsClient<'a, S> {
                         &self.record[RECORD_HEADER_LEN..RECORD_HEADER_LEN + len],
                     ) => {}
                 ContentType::ChangeCipherSpec => {}
+                ContentType::Alert => {
+                    // WHY the level is checked as well as the description: RFC
+                    // 8446 6.1 defines `close_notify` as a warning-level closure.
+                    // Description 0 at fatal level is a peer aborting, and
+                    // believing it would let an injected alert end the stream
+                    // "cleanly" at a point the attacker chose. Every other alert
+                    // is a refusal, so a peer that failed is never reported as a
+                    // peer that finished.
+                    let alert = &self.record[RECORD_HEADER_LEN..RECORD_HEADER_LEN + len];
+                    if alert.len() < 2 {
+                        return Err(TlsError::BadRecordLength);
+                    }
+                    if alert[0] != ALERT_LEVEL_WARNING
+                        || alert[1] != ALERT_DESCRIPTION_CLOSE_NOTIFY
+                    {
+                        return Err(TlsError::UnexpectedMessage);
+                    }
+                    self.peer_closed = true;
+                    return Ok(0);
+                }
                 _ => return Err(TlsError::UnexpectedMessage),
             }
             skipped += 1;
@@ -683,4 +742,227 @@ impl<'a, S: TlsStream> TlsClient<'a, S> {
 /// key change would decrypt garbage and present it as the peer's answer.
 fn is_new_session_ticket(payload: &[u8]) -> bool {
     payload.first() == Some(&HANDSHAKE_NEW_SESSION_TICKET)
+}
+
+/// M3: how the reader tells an authenticated closure from a truncated response.
+///
+/// Every case here drives `TlsClient::read` itself over records sealed with the
+/// real AEAD, so what is exercised is the production record path and not a
+/// stand-in for it. The fixtures live in fixed arrays: the record path allocates
+/// nothing, and a test that allocated would not be measuring the same path.
+#[cfg(test)]
+mod closure_tests {
+    use super::*;
+    use crate::crypto::chacha20_poly1305::{ChaCha20Poly1305, TAG_LEN};
+    use crate::tls::record::{compute_nonce, TLS_LEGACY_VERSION};
+
+    const PEER_KEY: [u8; 32] = [0x6eu8; 32];
+    const PEER_IV: [u8; 12] = [0x74u8; 12];
+    const WIRE_CAP: usize = 2048;
+    const INNER_CAP: usize = 1024;
+
+    /// Seals records the way a server does, into a caller-owned buffer.
+    ///
+    /// WHY the AEAD is driven directly rather than through `encrypt_record`: the
+    /// client's own sealing path frames one request-sized record, and a peer that
+    /// could only make small records could not produce the answers a reader has
+    /// to cope with. The sequence numbers match what the receive cipher expects.
+    fn peer_wire(items: &[(ContentType, &[u8])], out: &mut [u8]) -> usize {
+        let mut pos = 0usize;
+        for (seq, (kind, plaintext)) in items.iter().enumerate() {
+            let inner_len = plaintext.len() + 1;
+            assert!(inner_len <= INNER_CAP);
+            let mut inner = [0u8; INNER_CAP];
+            inner[..plaintext.len()].copy_from_slice(plaintext);
+            inner[plaintext.len()] = *kind as u8;
+
+            let mut header = [0u8; RECORD_HEADER_LEN];
+            header[0] = ContentType::ApplicationData as u8;
+            header[1..3].copy_from_slice(&TLS_LEGACY_VERSION.to_be_bytes());
+            header[3..5].copy_from_slice(&((inner_len + TAG_LEN) as u16).to_be_bytes());
+
+            let nonce = compute_nonce(&PEER_IV, seq as u64);
+            let mut ciphertext = [0u8; INNER_CAP];
+            let mut tag = [0u8; TAG_LEN];
+            ChaCha20Poly1305::encrypt(
+                &PEER_KEY,
+                &nonce,
+                &header,
+                &inner[..inner_len],
+                &mut ciphertext[..inner_len],
+                &mut tag,
+            );
+
+            assert!(pos + RECORD_HEADER_LEN + inner_len + TAG_LEN <= out.len());
+            out[pos..pos + RECORD_HEADER_LEN].copy_from_slice(&header);
+            pos += RECORD_HEADER_LEN;
+            out[pos..pos + inner_len].copy_from_slice(&ciphertext[..inner_len]);
+            pos += inner_len;
+            out[pos..pos + TAG_LEN].copy_from_slice(&tag);
+            pos += TAG_LEN;
+        }
+        pos
+    }
+
+    /// A client that finished the handshake and holds the keys `peer_wire` seals
+    /// under. The state is placed directly because what is under test is the
+    /// record reader; replaying the key schedule would prove nothing about it.
+    fn awaiting<'w>(wire: &'w [u8], sink: &'w mut [u8]) -> TlsClient<'w, MemoryStream<'w>> {
+        let mut client = TlsClient::new(MemoryStream::new(wire, sink), TlsConfig::default());
+        client.session.handshake.state = HandshakeState::Connected;
+        client.session.app_recv_cipher = Some(RecordCipher::new(PEER_KEY, PEER_IV));
+        client
+    }
+
+    /// Positive control: a peer that closes properly still ends the stream with
+    /// a zero-length read, and the document ahead of the alert is delivered whole.
+    #[test]
+    fn a_close_notify_ends_the_stream_and_keeps_ending_it() {
+        let document = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let mut wire = [0u8; WIRE_CAP];
+        let n = peer_wire(
+            &[
+                (ContentType::ApplicationData, &document[..]),
+                (ContentType::Alert, &[ALERT_LEVEL_WARNING, ALERT_DESCRIPTION_CLOSE_NOTIFY]),
+            ],
+            &mut wire,
+        );
+        let mut sink = [0u8; 64];
+        let mut client = awaiting(&wire[..n], &mut sink);
+        let mut out = [0u8; 512];
+        let read = client.read(&mut out).expect("the document is readable");
+        assert_eq!(&out[..read], &document[..]);
+        assert_eq!(client.read(&mut out), Ok(0), "close_notify is the authenticated end of the stream");
+        assert_eq!(client.read(&mut out), Ok(0), "the end stays the end on every later read");
+    }
+
+    /// An empty response the peer authenticated is still a clean end, not a fault.
+    #[test]
+    fn a_close_notify_with_no_document_is_a_clean_empty_response() {
+        let mut wire = [0u8; WIRE_CAP];
+        let n = peer_wire(
+            &[(ContentType::Alert, &[ALERT_LEVEL_WARNING, ALERT_DESCRIPTION_CLOSE_NOTIFY])],
+            &mut wire,
+        );
+        let mut sink = [0u8; 64];
+        let mut client = awaiting(&wire[..n], &mut sink);
+        let mut out = [0u8; 64];
+        assert_eq!(client.read(&mut out), Ok(0));
+    }
+
+    /// M3, the attack: a FIN injected after the response began. The bytes that
+    /// did arrive are still delivered -- they are authenticated -- but the read
+    /// that follows must not report a clean end of stream.
+    #[test]
+    fn a_transport_eof_without_close_notify_is_a_truncation_not_a_clean_end() {
+        let partial = b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\nonly the first bytes";
+        let mut wire = [0u8; WIRE_CAP];
+        let n = peer_wire(&[(ContentType::ApplicationData, &partial[..])], &mut wire);
+        let mut sink = [0u8; 64];
+        let mut client = awaiting(&wire[..n], &mut sink);
+        let mut out = [0u8; 512];
+        let read = client.read(&mut out).expect("the records that arrived are authentic");
+        assert_eq!(&out[..read], &partial[..]);
+        assert_eq!(
+            client.read(&mut out),
+            Err(TlsError::IoError),
+            "an unauthenticated FIN must be distinguishable from a proper close, not Ok(0)"
+        );
+    }
+
+    /// The same defect one record later: the body arrived in pieces and the
+    /// transport stopped between them, so a caller that loops to `Ok(0)` would
+    /// have accepted half a document as the whole one.
+    #[test]
+    fn a_body_whose_later_record_never_arrives_is_not_reported_as_complete() {
+        let mut wire = [0u8; WIRE_CAP];
+        let n = peer_wire(
+            &[
+                (ContentType::ApplicationData, &b"first"[..]),
+                (ContentType::ApplicationData, &b"second"[..]),
+            ],
+            &mut wire,
+        );
+        let first_record = RECORD_HEADER_LEN + b"first".len() + 1 + TAG_LEN;
+        assert!(first_record < n);
+        let mut sink = [0u8; 64];
+        let mut client = awaiting(&wire[..first_record], &mut sink);
+        let mut out = [0u8; 64];
+        assert_eq!(client.read(&mut out).expect("first record"), 5);
+        assert_eq!(&out[..5], &b"first"[..]);
+        assert_eq!(client.read(&mut out), Err(TlsError::IoError));
+    }
+
+    /// A record cut in half by the transport stopping is refused where it is
+    /// gathered, before any of its bytes can reach the caller.
+    #[test]
+    fn a_record_cut_in_half_by_a_fin_is_refused() {
+        let mut wire = [0u8; WIRE_CAP];
+        let n = peer_wire(
+            &[(ContentType::ApplicationData, &b"a document that does not arrive whole"[..])],
+            &mut wire,
+        );
+        let mut sink = [0u8; 64];
+        let mut client = awaiting(&wire[..n - TAG_LEN / 2], &mut sink);
+        let mut out = [0u8; 512];
+        assert_eq!(client.read(&mut out), Err(TlsError::BadRecordLength));
+    }
+
+    /// M3 did not turn every alert into a clean close. A fatal alert, a warning
+    /// that is not `close_notify`, and a truncated alert body are all refusals,
+    /// so a peer that failed is never reported as a peer that finished.
+    #[test]
+    fn an_alert_that_is_not_a_warning_close_notify_is_refused() {
+        for alert in [
+            [2u8, ALERT_DESCRIPTION_CLOSE_NOTIFY],
+            [ALERT_LEVEL_WARNING, 40u8],
+            [2u8, 40u8],
+        ] {
+            let mut wire = [0u8; WIRE_CAP];
+            let n = peer_wire(&[(ContentType::Alert, &alert[..])], &mut wire);
+            let mut sink = [0u8; 64];
+            let mut client = awaiting(&wire[..n], &mut sink);
+            let mut out = [0u8; 64];
+            assert_eq!(
+                client.read(&mut out),
+                Err(TlsError::UnexpectedMessage),
+                "alert {alert:?} is not an authenticated closure"
+            );
+        }
+
+        let mut wire = [0u8; WIRE_CAP];
+        let n = peer_wire(&[(ContentType::Alert, &[ALERT_LEVEL_WARNING])], &mut wire);
+        let mut sink = [0u8; 64];
+        let mut client = awaiting(&wire[..n], &mut sink);
+        let mut out = [0u8; 64];
+        assert_eq!(client.read(&mut out), Err(TlsError::BadRecordLength));
+    }
+
+    /// A document handed over in pieces is still followed by the same distinction:
+    /// the pieces are authentic, the transport stopping after them is not a close.
+    #[test]
+    fn a_record_larger_than_the_callers_window_still_reports_the_truncation() {
+        let mut document = [0u8; 900];
+        for (i, slot) in document.iter_mut().enumerate() {
+            *slot = b'a' + (i % 26) as u8;
+        }
+        let mut wire = [0u8; WIRE_CAP];
+        let n = peer_wire(&[(ContentType::ApplicationData, &document[..])], &mut wire);
+        let mut sink = [0u8; 64];
+        let mut client = awaiting(&wire[..n], &mut sink);
+        let mut out = [0u8; 64];
+        let mut taken = 0usize;
+        loop {
+            match client.read(&mut out) {
+                Ok(0) => panic!("the peer never sent close_notify, so a clean end is not available"),
+                Ok(k) => {
+                    assert_eq!(&out[..k], &document[taken..taken + k]);
+                    taken += k;
+                }
+                Err(TlsError::IoError) => break,
+                Err(other) => panic!("unexpected refusal while draining an authentic record: {other:?}"),
+            }
+        }
+        assert_eq!(taken, document.len(), "the whole authentic record was delivered before the truncation");
+    }
 }

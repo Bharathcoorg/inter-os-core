@@ -375,3 +375,33 @@ pub fn x25519(scalar: &[u8; 32], point: &[u8; 32]) -> [u8; 32] {
 pub fn x25519_base(scalar: &[u8; 32]) -> [u8; 32] {
     x25519(scalar, &BASE_POINT)
 }
+
+/// Constant-time test for an all-zero 32-byte value.
+///
+/// WHY OR-accumulate instead of `.iter().all(...)`: `all` short-circuits on the
+/// first non-zero byte, so its running time leaks the position of that byte.
+/// This module promises constant time; the accumulator visits every byte
+/// unconditionally and only the final comparison branches.
+pub fn is_all_zero_ct(bytes: &[u8; 32]) -> bool {
+    let mut acc = 0u8;
+    for &b in bytes.iter() {
+        acc |= b;
+    }
+    acc == 0
+}
+
+/// X25519 with the RFC 7748 Section 6.1 contributory-behaviour check applied.
+///
+/// WHY a separate function: `x25519` stays the faithful RFC 7748 primitive,
+/// but a small-order peer point (u = 0, u = 1, and the other small-order
+/// u-coordinates on the curve and its twist) forces the shared secret to
+/// all-zero -- a value the peer already knows. Protocol callers MUST abort on
+/// that output; this variant returns `None` so they cannot forget to.
+pub fn x25519_checked(scalar: &[u8; 32], point: &[u8; 32]) -> Option<[u8; 32]> {
+    let shared = x25519(scalar, point);
+    if is_all_zero_ct(&shared) {
+        None
+    } else {
+        Some(shared)
+    }
+}

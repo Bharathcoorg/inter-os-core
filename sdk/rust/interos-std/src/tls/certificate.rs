@@ -290,6 +290,214 @@ pub const TAG_GENERALIZED_TIME: u8 = 0x18;
 pub const TAG_SEQUENCE: u8 = 0x30;
 pub const TAG_SET: u8 = 0x31;
 
+/// basicConstraints (RFC 5280 §4.2.1.9), OID 2.5.29.19.
+pub const BASIC_CONSTRAINTS_OID: [u8; 3] = [0x55, 0x1d, 0x13];
+/// keyUsage (RFC 5280 §4.2.1.3), OID 2.5.29.15.
+pub const KEY_USAGE_OID: [u8; 3] = [0x55, 0x1d, 0x0f];
+/// keyCertSign is bit 5 of the keyUsage BIT STRING, numbered from the MSB of
+/// the first content octet (bit 0 = digitalSignature). The bits are stored
+/// MSB-first in a `u16`, so bit n is `bits & (0x8000 >> n)` and keyCertSign is
+/// `0x0400`.
+pub const KEY_USAGE_KEY_CERT_SIGN: u16 = 0x8000 >> 5;
+
+/// The basicConstraints extension value (RFC 5280 §4.2.1.9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BasicConstraints {
+    /// cA: whether this certificate's subject may act as a certification
+    /// authority. The DER BOOLEAN defaults to FALSE when the field is omitted,
+    /// so an empty SEQUENCE (`30 00`) reads as CA:FALSE.
+    pub ca: bool,
+    /// pathLenConstraint: the maximum number of non-self-issued intermediate
+    /// certificates that may follow this one in a certification path. The
+    /// end-entity certificate at the bottom of the path is not counted.
+    pub path_len: Option<u32>,
+}
+
+/// Reads `BasicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE,
+/// pathLenConstraint INTEGER OPTIONAL }` from an extension's extnValue.
+///
+/// Every shape this parser cannot read is a parse error, never a silent
+/// default: a truncated or malformed constraint must not degrade into "no
+/// constraint recorded".
+fn parse_basic_constraints(der: &[u8]) -> Result<BasicConstraints, TlsError> {
+    let (content, rest) = read_sequence(der)?;
+    if !rest.is_empty() {
+        return Err(TlsError::CertificateParsingError);
+    }
+    let mut ca = false;
+    let mut path_len = None;
+    if !content.is_empty() {
+        let (tag, val, rem) = read_tlv(content)?;
+        if tag != TAG_BOOLEAN {
+            // cA omitted while pathLenConstraint is present: RFC 5280 makes
+            // pathLen meaningful only with cA TRUE, so this shape is refused
+            // rather than quietly read as a CA.
+            return Err(TlsError::CertificateParsingError);
+        }
+        if val.len() != 1 {
+            return Err(TlsError::CertificateParsingError);
+        }
+        match val[0] {
+            0x00 => ca = false,
+            0xff => ca = true,
+            _ => return Err(TlsError::CertificateParsingError),
+        }
+        if !rem.is_empty() {
+            let (tag2, val2, rest2) = read_tlv(rem)?;
+            if tag2 != TAG_INTEGER || !rest2.is_empty() {
+                return Err(TlsError::CertificateParsingError);
+            }
+            path_len = Some(parse_path_len(val2)?);
+        }
+    }
+    if path_len.is_some() && !ca {
+        return Err(TlsError::CertificateParsingError);
+    }
+    Ok(BasicConstraints { ca, path_len })
+}
+
+/// A pathLenConstraint is a non-negative INTEGER; anything wider than a `u32`
+/// cannot be a chain bound this walk could ever honour.
+fn parse_path_len(val: &[u8]) -> Result<u32, TlsError> {
+    if val.is_empty() || val[0] & 0x80 != 0 {
+        return Err(TlsError::CertificateParsingError);
+    }
+    let v = unsigned_integer(val);
+    if v.len() > 4 {
+        return Err(TlsError::CertificateParsingError);
+    }
+    let mut n = 0u32;
+    for b in v {
+        n = (n << 8) | *b as u32;
+    }
+    Ok(n)
+}
+
+/// Reads `KeyUsage ::= BIT STRING` from an extension's extnValue into the
+/// first two content octets, MSB-first (bit n = `bits & (0x8000 >> n)`).
+///
+/// The leading octet of a DER BIT STRING is the count of unused trailing bits,
+/// not a key-usage bit; it is consumed here. keyUsage names nine bits (0..8),
+/// so the content is one octet, or two with exactly seven unused bits.
+fn parse_key_usage(der: &[u8]) -> Result<u16, TlsError> {
+    let (tag, content, rest) = read_tlv(der)?;
+    if tag != TAG_BIT_STRING || !rest.is_empty() || content.is_empty() {
+        return Err(TlsError::CertificateParsingError);
+    }
+    let unused = content[0];
+    let bytes = &content[1..];
+    if bytes.is_empty() || bytes.len() > 2 || unused > 7 {
+        return Err(TlsError::CertificateParsingError);
+    }
+    if bytes.len() == 2 && unused != 7 {
+        return Err(TlsError::CertificateParsingError);
+    }
+    // DER requires the unused trailing bits to be zero.
+    if unused > 0 && bytes[bytes.len() - 1] & ((1u8 << unused) - 1) != 0 {
+        return Err(TlsError::CertificateParsingError);
+    }
+    let mut bits = (bytes[0] as u16) << 8;
+    if bytes.len() == 2 {
+        bits |= bytes[1] as u16;
+    }
+    Ok(bits)
+}
+
+/// Walks `Extensions ::= SEQUENCE OF Extension` from the `[3]` field, strictly.
+///
+/// `Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE,
+/// extnValue OCTET STRING }`. Framing is validated for every extension;
+/// basicConstraints and keyUsage are decoded, duplicates of either are refused,
+/// and any malformed or truncated extension is a parse error. Other extensions
+/// keep their content for the readers that own them (e.g. `SubjectAltNames`).
+fn parse_extensions(
+    mut cur: &[u8],
+    basic_constraints: &mut Option<BasicConstraints>,
+    key_usage: &mut Option<u16>,
+) -> Result<(), TlsError> {
+    while !cur.is_empty() {
+        let (tag, ext, rem) = read_tlv(cur)?;
+        cur = rem;
+        if tag != TAG_SEQUENCE {
+            return Err(TlsError::CertificateParsingError);
+        }
+        let (oid_tag, oid, after_oid) = read_tlv(ext)?;
+        if oid_tag != TAG_OID || oid.is_empty() {
+            return Err(TlsError::CertificateParsingError);
+        }
+        let (tag1, val1, after1) = read_tlv(after_oid)?;
+        let octets = if tag1 == TAG_BOOLEAN {
+            if val1.len() != 1 || (val1[0] != 0x00 && val1[0] != 0xff) {
+                return Err(TlsError::CertificateParsingError);
+            }
+            let (tag2, val2, rest2) = read_tlv(after1)?;
+            if tag2 != TAG_OCTET_STRING || !rest2.is_empty() {
+                return Err(TlsError::CertificateParsingError);
+            }
+            val2
+        } else if tag1 == TAG_OCTET_STRING {
+            if !after1.is_empty() {
+                return Err(TlsError::CertificateParsingError);
+            }
+            val1
+        } else {
+            return Err(TlsError::CertificateParsingError);
+        };
+        if oid == BASIC_CONSTRAINTS_OID {
+            if basic_constraints.is_some() {
+                return Err(TlsError::CertificateParsingError);
+            }
+            *basic_constraints = Some(parse_basic_constraints(octets)?);
+        } else if oid == KEY_USAGE_OID {
+            if key_usage.is_some() {
+                return Err(TlsError::CertificateParsingError);
+            }
+            *key_usage = Some(parse_key_usage(octets)?);
+        }
+    }
+    Ok(())
+}
+
+/// Decides whether `issuer` is authorized to sign the certificates below it in
+/// a certification path (RFC 5280 §4.2.1.9 and §4.2.1.3). Called for EVERY
+/// issuer-position certificate the handshake walk accepts.
+///
+/// Fail closed:
+/// - basicConstraints must be present and cA TRUE. An absent extension is a
+///   refusal, never a default: a CA:FALSE end-entity certificate signed by a
+///   pinned anchor must not be usable as an issuer — that is a MITM path.
+/// - When keyUsage is present, keyCertSign (bit 5) must be set.
+/// - pathLenConstraint bounds `intermediates_below`, the number of
+///   non-self-issued intermediate certificates already walked between this
+///   issuer and the leaf. The end-entity leaf is never counted.
+///
+/// A self-issued or self-signed root PRESENTED on the wire is judged by these
+/// same rules. The pinned trust-store copy is trusted by its pin (see
+/// `DefaultCertVerifier::verify_reaches_trust_store`), not by this walk, so a
+/// cross-signed root copy still has to carry CA:TRUE like any other issuer.
+pub fn enforce_ca_constraints(
+    issuer: &ParsedCertificate<'_>,
+    intermediates_below: usize,
+) -> Result<(), TlsError> {
+    let bc = issuer
+        .basic_constraints
+        .ok_or(TlsError::CertificateVerificationFailed)?;
+    if !bc.ca {
+        return Err(TlsError::CertificateVerificationFailed);
+    }
+    if let Some(ku) = issuer.key_usage {
+        if ku & KEY_USAGE_KEY_CERT_SIGN == 0 {
+            return Err(TlsError::CertificateVerificationFailed);
+        }
+    }
+    if let Some(limit) = bc.path_len {
+        if intermediates_below > limit as usize {
+            return Err(TlsError::CertificateVerificationFailed);
+        }
+    }
+    Ok(())
+}
+
 /// Decodes a single ASN.1 DER TLV (Tag, Length, Value) from `input`.
 /// Returns `(tag, value, remainder)`.
 pub fn read_tlv<'a>(input: &'a [u8]) -> Result<(u8, &'a [u8], &'a [u8]), TlsError> {
@@ -508,6 +716,13 @@ pub struct ParsedCertificate<'a> {
     pub spki_public_key: &'a [u8],
     pub sig_alg_oid: &'a [u8],
     pub signature_value: &'a [u8],
+    /// basicConstraints (RFC 5280 §4.2.1.9) when the extension is present.
+    /// `None` means absent; an issuer-position certificate without it is
+    /// refused by [`enforce_ca_constraints`], never treated as a CA.
+    pub basic_constraints: Option<BasicConstraints>,
+    /// keyUsage (RFC 5280 §4.2.1.3) when present, as the first two BIT STRING
+    /// content octets stored MSB-first: bit n is `bits & (0x8000 >> n)`.
+    pub key_usage: Option<u16>,
 }
 
 impl<'a> ParsedCertificate<'a> {
@@ -595,7 +810,7 @@ impl<'a> ParsedCertificate<'a> {
         cur = cur_rem;
 
         // SubjectPublicKeyInfo: SEQUENCE { algorithm AlgorithmIdentifier, subjectPublicKey BIT STRING }
-        let (tag, spki_val, _) = read_tlv(cur)?;
+        let (tag, spki_val, mut tail) = read_tlv(cur)?;
         if tag != TAG_SEQUENCE {
             return Err(TlsError::CertificateParsingError);
         }
@@ -621,6 +836,43 @@ impl<'a> ParsedCertificate<'a> {
         }
         let spki_public_key = &bit_val[1..]; // skip unused bits octet
 
+        // Optional trailing TBSCertificate fields: [1] issuerUniqueID,
+        // [2] subjectUniqueID (v2/v3), [3] EXPLICIT extensions (v3 only).
+        // Anything else in this position is not a certificate this parser
+        // speaks for, and a malformed extension is a parse error — never a
+        // silent "no constraints recorded".
+        let mut basic_constraints = None;
+        let mut key_usage = None;
+        let mut saw_extensions = false;
+        while !tail.is_empty() {
+            let (tag, val, rem) = read_tlv(tail)?;
+            tail = rem;
+            match tag {
+                0x81 | 0x82 => {
+                    // UniqueIDs are BIT STRINGs; the unused-bits octet must exist.
+                    if val.is_empty() {
+                        return Err(TlsError::CertificateParsingError);
+                    }
+                }
+                0xa3 => {
+                    if saw_extensions {
+                        return Err(TlsError::CertificateParsingError);
+                    }
+                    saw_extensions = true;
+                    let (exts, rest) = read_sequence(val)?;
+                    if !rest.is_empty() {
+                        return Err(TlsError::CertificateParsingError);
+                    }
+                    parse_extensions(exts, &mut basic_constraints, &mut key_usage)?;
+                }
+                _ => return Err(TlsError::CertificateParsingError),
+            }
+        }
+        // Extensions exist only in v3 certificates (RFC 5280 §4.1.2.1).
+        if saw_extensions && version != 3 {
+            return Err(TlsError::CertificateParsingError);
+        }
+
         Ok(Self {
             raw,
             tbs_raw,
@@ -635,6 +887,8 @@ impl<'a> ParsedCertificate<'a> {
             spki_public_key,
             sig_alg_oid,
             signature_value,
+            basic_constraints,
+            key_usage,
         })
     }
 

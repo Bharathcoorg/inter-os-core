@@ -103,23 +103,40 @@ class TestWebPortingContract(unittest.TestCase):
         self.assertEqual(int.from_bytes(data[4:6], "little"), 2)  # Format version 2
         self.assertEqual(int.from_bytes(data[6:8], "little"), 3)  # Arch 3 = Web
 
-        # Verify capabilities:
-        # camera -> 22 (CameraCapture)
-        # geolocation -> 24 (LocationAccess)
-        # storage -> 9 (FileSystemRead), 10 (FileSystemWrite)
-        # notifications -> 17 (EventPoll)
+        # Verify capabilities against the kernel's MANIFEST id space
+        # (kernel/src/capability/mod.rs, CapabilityType::to_raw):
+        # camera       -> 22 (SystemControlCamera, the scoped camera service)
+        # storage      -> 9 (FileSystemRead), 10 (FileSystemWrite)
+        # geolocation  -> no manifest id; consent 8 (Location) only
+        # notifications-> no manifest id; consent 14 (Notifications) only
+        #
+        # WHY 24 and 17 are asserted ABSENT: this contract used to demand them,
+        # naming 24 "LocationAccess" and 17 "Notifications". Neither name exists
+        # in the kernel. 24 is RealtimeClockRead (rtc.read) and 17 is EventPoll
+        # (event.poll), so demanding them for a geolocation/notifications prompt
+        # pinned the very id-space conflation that handed a web app clock and
+        # event-polling authority it never asked for. The ladder defines no GNSS
+        # object, and NotificationPost authorizes on the caller's own package
+        # identity, so the only honest grant for either is a consent request.
+        # tests/test_permission_mapping_contract.py pins the consent half across
+        # the Go, TypeScript and Python mappers.
         caps_count = int.from_bytes(data[0x4E:0x50], "little")
         caps = [
             int.from_bytes(data[0xB4 + i*2 : 0xB4 + (i+1)*2], "little")
             for i in range(caps_count)
         ]
-        self.assertIn(22, caps, "CameraCapture (22) missing from mapped capabilities")
-        self.assertIn(24, caps, "LocationAccess (24) missing from mapped capabilities")
+        self.assertIn(22, caps, "SystemControlCamera (22) missing from mapped capabilities")
         self.assertIn(9, caps, "FileSystemRead (9) missing from mapped capabilities")
         self.assertIn(10, caps, "FileSystemWrite (10) missing from mapped capabilities")
-        self.assertIn(17, caps, "Notifications/EventPoll (17) missing from mapped capabilities")
+        self.assertNotIn(24, caps, "geolocation must not grant RealtimeClockRead (24)")
+        self.assertNotIn(17, caps, "notifications must not grant EventPoll (17)")
+        self.assertEqual(
+            sorted(caps), [9, 10, 22],
+            "a camera+geolocation+notifications+storage PWA must receive exactly the "
+            "manifest ids those permissions can express, and no ambient extra",
+        )
 
-        # Verify Ed25519 signature
+        # Payload digest and layout must still be canonical.
         pub_key = bytes(data[0x28:0x48])
         sig = bytes(data[0x70:0xB0])
         payload_len = int.from_bytes(data[0xB0:0xB4], "little")
@@ -130,10 +147,73 @@ class TestWebPortingContract(unittest.TestCase):
         expected_digest = hashlib.sha256(payload).digest()
         self.assertEqual(data[0x50:0x70], expected_digest)
 
+        # WHY this asserts the package is UNSIGNED: porting third-party web
+        # content used to sign it implicitly with the local developer key, which
+        # turned any exfiltrated host file into an installable trusted package.
+        # Signing is now an explicit opt-in (--sign), so the default output must
+        # carry a zero publisher key and a zero signature and the kernel must
+        # refuse it until a publisher deliberately signs it and the owner
+        # provisions that publisher's trust root. test_02b covers the signed path.
+        self.assertEqual(pub_key, b"\0" * 32, "default port must not embed a publisher key")
+        self.assertEqual(sig, b"\0" * 64, "default port must not embed a signature")
+
+    def test_02b_explicit_signing_produces_a_verifiable_package(self):
+        """--sign with an explicit key signs the canonical bytes; the default does not."""
+        app_dir = self.work_dir / "signed_web_pwa"
+        app_dir.mkdir()
+        (app_dir / "index.html").write_text(
+            "<!DOCTYPE html><html><head><title>Signed</title></head><body>Hi</body></html>",
+            encoding="utf-8"
+        )
+        (app_dir / "manifest.json").write_text(
+            json.dumps({"name": "Signed PWA", "short_name": "signed_pwa", "version": "1.0.0",
+                        "permissions": ["storage"]}),
+            encoding="utf-8"
+        )
+
+        # An EPHEMERAL key generated inside this test's own work dir. The repo's
+        # developer key is never read, copied or used here.
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.hazmat.primitives import serialization
+        priv = ed25519.Ed25519PrivateKey.generate()
+        key_path = self.work_dir / "ephemeral_ed25519.key"
+        key_path.write_bytes(priv.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        ))
+        expected_pub = priv.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+
+        out_rapp = self.work_dir / "signed_pwa.rapp"
+        cmd = [
+            sys.executable, str(ROOT / "tools" / "port_web.py"), str(app_dir),
+            "--output", str(out_rapp), "--arch", "web",
+            "--sign", "--key", str(key_path),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, f"port_web --sign failed: {res.stderr}\n{res.stdout}")
+
+        data = out_rapp.read_bytes()
+        caps_count = int.from_bytes(data[0x4E:0x50], "little")
+        self.assertEqual(bytes(data[0x28:0x48]), expected_pub)
+        sig = bytes(data[0x70:0xB0])
+        self.assertNotEqual(sig, b"\0" * 64, "--sign must produce a real signature")
+
         signing_bytes = bytearray(data)
         signing_bytes[0x70:0xB0] = b"\0" * 64
-        verifier = ed25519.Ed25519PublicKey.from_public_bytes(pub_key)
+        verifier = ed25519.Ed25519PublicKey.from_public_bytes(expected_pub)
         verifier.verify(sig, bytes(signing_bytes))
+
+        # The signature must cover the capability array too: flipping a declared
+        # capability id has to invalidate it, or a manifest could be escalated
+        # after signing without breaking the seal.
+        self.assertGreater(caps_count, 0)
+        tampered = bytearray(signing_bytes)
+        tampered[0xB4] ^= 0x01
+        with self.assertRaises(Exception):
+            verifier.verify(sig, bytes(tampered))
 
     def test_03_csp_and_interos_js_injection(self):
         """port_web injects strict CSP meta tag and interos.js script into index.html."""

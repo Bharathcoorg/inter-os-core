@@ -901,6 +901,23 @@ def main():
         print("SKIP: the local test CA needs the `cryptography` module, absent here")
         return 0
 
+    # Preflight opt-in detection. The install/revoke dials drive TLS_TRUST_BEGIN /
+    # CHUNK / COMMIT / REVOKE, which are compiled OUT of production images behind the
+    # `debug-control-plane` cargo feature: the COM1 console carries no CapHandle, so a
+    # production image must not let a serial line install or revoke a device-wide TLS
+    # trust anchor (that would MITM every TLS connection). The packaged image embeds
+    # the kernel's read-only strings, so a byte scan tells us whether this image was
+    # built with the feature ON. Against a production image every dial would time out,
+    # so skip loudly and name the opt-in rather than certify a confusing failure.
+    with open(BOOT_IMAGE, "rb") as handle:
+        image_blob = handle.read()
+    if b"TLS_TRUST_BEGIN" not in image_blob:
+        print("SKIP: production image (debug-control-plane OFF): the TLS_TRUST_BEGIN /")
+        print("      CHUNK / COMMIT / REVOKE verbs are compiled out, so the trust dials")
+        print("      cannot run. Rebuild with INTEROS_DEBUG_CONTROL_PLANE=1")
+        print("      (`python tools/interos.py build demo`) and re-run. SKIP, not a pass.")
+        return 0
+
     if DATA_DISK == MASTER_DISK:
         print("FAIL: DATA_DISK_PATH points at the 6 GiB master image, which this "
               "suite must never attach, copy or hash: %s" % MASTER_DISK)

@@ -602,6 +602,7 @@ fn a_ticket_before_the_document_still_delivers_the_document() {
     let wire = peer_records(&[
         (ContentType::Handshake, new_session_ticket(64)),
         (ContentType::ApplicationData, document.to_vec()),
+        (ContentType::Alert, vec![1, 0]),
     ]);
 
     let mut sink = [0u8; 512];
@@ -625,6 +626,7 @@ fn a_ticket_larger_than_the_callers_window_does_not_eat_the_document() {
     let wire = peer_records(&[
         (ContentType::Handshake, new_session_ticket(400)),
         (ContentType::ApplicationData, document.to_vec()),
+        (ContentType::Alert, vec![1, 0]),
     ]);
 
     let mut sink = [0u8; 512];
@@ -695,7 +697,10 @@ fn a_record_larger_than_the_callers_window_arrives_whole() {
     let mut document = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n".to_vec();
     document.extend_from_slice(&vec![b'x'; 9000]);
     let expected = document.clone();
-    let wire = peer_records(&[(ContentType::ApplicationData, document)]);
+    let wire = peer_records(&[
+        (ContentType::ApplicationData, document),
+        (ContentType::Alert, vec![1, 0]),
+    ]);
 
     let mut sink = [0u8; 64];
     let mut client = client_awaiting_records(&wire, &mut sink);
@@ -730,7 +735,10 @@ fn a_record_larger_than_the_callers_window_arrives_whole() {
 #[test]
 fn the_biggest_record_the_protocol_allows_is_read_whole() {
     let document = vec![b'A'; MAX_PLAINTEXT_LEN];
-    let wire = peer_records(&[(ContentType::ApplicationData, document.clone())]);
+    let wire = peer_records(&[
+        (ContentType::ApplicationData, document.clone()),
+        (ContentType::Alert, vec![1, 0]),
+    ]);
 
     let mut sink = [0u8; 64];
     let mut client = client_awaiting_records(&wire, &mut sink);
@@ -783,7 +791,10 @@ impl<'a> TlsStream for CappedStream<'a> {
 #[test]
 fn a_page_sized_record_is_gathered_from_a_transport_that_hands_out_two_kib() {
     let document = vec![b'B'; MAX_PLAINTEXT_LEN];
-    let wire = peer_records(&[(ContentType::ApplicationData, document.clone())]);
+    let wire = peer_records(&[
+        (ContentType::ApplicationData, document.clone()),
+        (ContentType::Alert, vec![1, 0]),
+    ]);
 
     let mut sink = [0u8; 64];
     let mut client = TlsClient::new(

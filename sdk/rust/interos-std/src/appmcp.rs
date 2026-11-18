@@ -8,8 +8,19 @@
 //! and the Agent Manager to invoke application functions autonomously.
 //!
 //! ZERO AMBIENT AUTHORITY: Every tool request carries an explicit, generation-counted
-//! `cap_handle` (typically targeting `SensitivePermission::AgentTask = 15`). An app verifies
-//! this token before performing any mutation or reading protected state.
+//! `cap_handle`. The receiving app does NOT inspect that integer itself -- it asks the
+//! kernel (syscall 166, [`crate::appmcp_authorize`]) whether the *sender* genuinely holds
+//! the capability, passing the TaskId the IPC router stamped on the message. The kernel
+//! resolves the handle by generation in the sender's own capability table and checks type,
+//! rights, object scope, global revocation and delegated-lease validity, failing closed.
+//! [`authorize_tool_sender`] is the gate every receiver calls before performing any
+//! mutation or reading protected state.
+//!
+//! WHY the capability is named in the KERNEL's numeric space: the authority to run agent
+//! tools is `CapabilityType::AgentTask = 33`. `SensitivePermission::AgentTask = 15` and the
+//! manifest ids `0x5000_0000 + slot` are different spaces that happen to describe the same
+//! permission; passing either of those numbers here would ask the kernel about a capability
+//! that does not exist (15 is `ShmProducer`).
 //!
 //! BOUNDED IPC INVARIANT: All requests and responses are exactly 64 bytes (`repr(C)`),
 //! fitting squarely into the InterOS microkernel's `IPC_MAX_PAYLOAD = 64` mailbox.
@@ -88,6 +99,57 @@ pub const TOOL_ID_MUSIC_PLAY: u32               = 0x4D43_504C; // b"MCPL"
 pub const TOOL_ID_MUSIC_PAUSE: u32              = 0x4D43_5053; // b"MCPS"
 pub const TOOL_ID_MUSIC_STATUS: u32             = 0x4D43_5354; // b"MCST"
 pub const TOOL_ID_MUSIC_LIST: u32               = 0x4D43_4C53; // b"MCLS"
+
+/// The kernel capability type that authorises running an agent tool.
+///
+/// This is `CapabilityType::AgentTask` in the kernel's own encoding, which is
+/// the space syscall 166's `cap_type_raw` argument reads. It is deliberately
+/// not `SensitivePermission::AgentTask` (15) -- in the kernel's space 15 is
+/// `ShmProducer`, so passing the permission number would verify the wrong
+/// authority entirely.
+pub const TOOL_CAP_TYPE: u64 = crate::cap_type::AGENT_TASK;
+
+/// `Rights::INVOKE` (1 << 5) in the kernel's rights encoding: the right to
+/// exercise a capability rather than merely read or write the object it names.
+pub const TOOL_CAP_RIGHTS: u64 = 1 << 5;
+
+/// The object the agent-tool grant is scoped to: the whole bounded tool domain.
+///
+/// WHY this mask and not 0: the consent broker and the app spawn path mint
+/// `AgentTask` with `object_id = 0x1F` (the five bounded tools, bits 0..4), and
+/// syscall 166 scopes by exact match -- a grant naming `0x1F` does not satisfy
+/// a request for object 0. Asking for the domain the broker actually mints is
+/// what keeps the legitimate Agent Manager path working. An unscoped grant
+/// (`object_id = 0`, which the userspace Agent service holds) satisfies any
+/// requested object, so it passes this gate too.
+///
+/// WHY one domain object and not one object per tool: the broker grants the
+/// agent-task domain as a whole, and each tool's own syscall still checks the
+/// resource authority that tool needs (telephony, filesystem, audio) on its
+/// own. This gate is the outer limit, not the inner one.
+pub const TOOL_CAP_OBJECT: u64 = 0x1F;
+
+/// Whether the kernel confirmed that `sender` holds the agent-tool capability
+/// named by `cap_handle`.
+///
+/// `sender` MUST be the TaskId the IPC router delivered with the message, not a
+/// field of the request: the request is the caller's to write, the router's
+/// stamp is not. Allocation-free -- one syscall, no buffer, no heap.
+///
+/// Fails closed: a zero handle, a forged non-zero handle, a wrong capability
+/// type, insufficient rights, a different object scope, a revoked or
+/// stale-generation handle and a terminated sender are all refusals, as is any
+/// kernel answer this SDK does not recognise.
+pub fn authorize_tool_sender(sender: u64, cap_handle: u64) -> bool {
+    crate::appmcp_authorize(
+        sender,
+        cap_handle,
+        TOOL_CAP_TYPE,
+        TOOL_CAP_RIGHTS,
+        TOOL_CAP_OBJECT,
+    )
+    .is_ok()
+}
 
 /// Exactly 64-byte AppMCP Request structure.
 ///
@@ -442,5 +504,53 @@ mod tests {
             .with_pipe(7, 4096);
         assert_eq!(piped_resp.pipe_id, 7);
         assert_eq!(piped_resp.output_len, 4096);
+    }
+
+    /// The capability the receivers ask the kernel about, pinned to the kernel's
+    /// own encoding.
+    ///
+    /// WHY the other two spaces are named here: this repository has three
+    /// disjoint numeric spaces that all describe "may run agent tools", and
+    /// confusing them is a silent wrong-authority bug rather than a compile
+    /// error. In the kernel's capability space 15 is `ShmProducer`, so passing
+    /// the `SensitivePermission` number would verify shared-memory authority
+    /// and call it tool authority.
+    #[test]
+    fn tool_authority_names_the_kernel_agent_task_capability() {
+        assert_eq!(TOOL_CAP_TYPE, 33);
+        assert_eq!(TOOL_CAP_TYPE, crate::cap_type::AGENT_TASK);
+
+        assert_eq!(crate::SensitivePermission::AgentTask as u64, 15);
+        assert_ne!(TOOL_CAP_TYPE, crate::SensitivePermission::AgentTask as u64);
+        assert_ne!(TOOL_CAP_TYPE, crate::cap_type::SHM_PRODUCER);
+        assert_eq!(crate::cap_type::SHM_PRODUCER, 15);
+
+        // Rights::INVOKE in the kernel's encoding: the right to exercise the
+        // capability, not merely to read or write the object it names.
+        assert_eq!(TOOL_CAP_RIGHTS, 1 << 5);
+
+        // The object the consent broker and the app spawn path mint for the
+        // bounded tool domain (five tools, bits 0..4).
+        assert_eq!(TOOL_CAP_OBJECT, 0x1F);
+        assert_eq!(TOOL_CAP_OBJECT, 0b1_1111);
+    }
+
+    /// The premise of the defect this module's gate closes: the wire layer
+    /// carries whatever integer the caller wrote and grants nothing by it.
+    ///
+    /// A forged non-zero handle parses exactly as readily as a real one, so
+    /// `from_bytes` returning `Some` is not authorization and must never be
+    /// treated as one. Only `authorize_tool_sender` answers that question, and
+    /// it answers it by asking the kernel about the sender's own table.
+    #[test]
+    fn parsing_a_request_grants_no_authority() {
+        for forged in [0u64, 1, 0xDEAD_BEEF, 0x1234_5678_9ABC_DEF0, u64::MAX] {
+            let req = AppMcpRequest::new(forged, TOOL_ID_NOTES_CREATE, 7)
+                .with_payload(b"anything");
+            let parsed = AppMcpRequest::from_bytes(&req.to_bytes())
+                .expect("the wire layer parses a claim without judging it");
+            assert_eq!(parsed.cap_handle, forged);
+            assert_eq!(parsed.tool_id, TOOL_ID_NOTES_CREATE);
+        }
     }
 }

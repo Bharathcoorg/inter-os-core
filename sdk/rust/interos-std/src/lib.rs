@@ -273,6 +273,15 @@ pub enum SyscallNumber {
     FsReadAt = 164,
     /// Queries active and pending consent requests from the Permission Manager.
     ConsentQuery = 165,
+    /// Asks the kernel whether the SENDER of an IPC message genuinely holds the
+    /// capability a tool request claims, resolved by generation-counted handle
+    /// in the sender's own capability table.
+    ///
+    /// WHY the receiver cannot answer this itself: `cap_handle != 0` is a claim
+    /// any integer satisfies, and only the kernel can read another task's
+    /// table. The receiver supplies the `sender` TaskId the IPC router stamped
+    /// on the message, which the calling app cannot forge.
+    AppMcpAuthorize = 166,
 }
 
 // -----------------------------------------------------------------------------
@@ -2024,6 +2033,60 @@ pub fn capability_handle(cap_type: u64, object_id: u64) -> Result<u64, i64> {
     } else {
         Err(ret)
     }
+}
+
+/// Interprets the kernel's answer to an AppMcp authorization request.
+///
+/// WHY this is named separately from the call that produces it: the fail-closed
+/// rule is the whole security property of the gate, and a rule buried in a
+/// wrapper that ends in a `syscall` instruction cannot be exercised by a host
+/// test. Split here, every answer the kernel can give is testable.
+///
+/// WHY success is `ret == 0` and not the `ret >= 0` the neighbouring wrappers
+/// use: this call answers a yes/no question and has no count to return, so any
+/// non-zero answer -- including a positive code this SDK version does not know
+/// -- is a refusal. Treating an unknown code as a grant would fail open.
+pub fn appmcp_verdict(ret: i64) -> Result<(), i64> {
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Asks the kernel whether `sender_task_id` genuinely holds the capability a
+/// tool request claims (syscall 166).
+///
+/// `sender_task_id` must be the TaskId the IPC router stamped on the received
+/// message, never a value read out of the payload: the payload is the caller's
+/// to write, the router's stamp is not. `cap_handle` is the claim being tested
+/// and is resolved by generation in the SENDER's own capability table, so a
+/// forged slot, a stale generation, a revoked identity, a wrong type, missing
+/// rights, a different object scope and a spent or foreign delegated lease are
+/// all refused. `cap_type_raw` is a kernel [`cap_type`] value -- not a
+/// `SensitivePermission` number and not a manifest id, which are different
+/// numeric spaces. `object_id` 0 asks for an unscoped grant; any other value
+/// must name exactly the object being acted upon.
+///
+/// Any non-zero answer is a refusal; see [`appmcp_verdict`].
+pub fn appmcp_authorize(
+    sender_task_id: u64,
+    cap_handle: u64,
+    cap_type_raw: u64,
+    required_rights: u64,
+    object_id: u64,
+) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::AppMcpAuthorize,
+            sender_task_id,
+            cap_handle,
+            cap_type_raw,
+            required_rights,
+            object_id,
+        )
+    };
+    appmcp_verdict(ret)
 }
 
 /// Establishes a cryptographic secure IPC channel with a peer task.
@@ -4165,5 +4228,45 @@ mod abi_tests {
         assert_eq!(cap_type::AGENT_TASK, 33);
         assert_eq!(cap_type::VOICE_SERVICE, 34);
         assert_eq!(cap_type::AUDIO_CAPTURE, 35);
+    }
+
+    /// The receiver-side gate is only as real as the number it calls. A drift
+    /// here would send the authorization question to a different syscall, and
+    /// that syscall's answer would be read as a capability verdict.
+    #[test]
+    fn appmcp_authorize_is_syscall_166() {
+        assert_eq!(SyscallNumber::AppMcpAuthorize as u64, 166);
+        assert_eq!(SyscallNumber::ConsentQuery as u64, 165);
+    }
+
+    /// The bug this pins: the apps gated a tool request on `cap_handle != 0`,
+    /// so any non-zero integer authorized it. The fix asks the kernel instead,
+    /// and the kernel's answer must be read fail-closed.
+    ///
+    /// WHAT THIS EXERCISES: the interpreter every authorization answer passes
+    /// through, over the codes the kernel declares and over answers it does not.
+    /// WHAT IT CANNOT EXERCISE: the `syscall` instruction itself, which needs a
+    /// running kernel. The kernel's own `sys_appmcp_authorize` decides which of
+    /// these codes a given claim produces.
+    #[test]
+    fn only_a_zero_answer_is_a_grant() {
+        assert_eq!(appmcp_verdict(0), Ok(()));
+
+        // Every refusal the kernel declares for this call.
+        assert_eq!(appmcp_verdict(-1), Err(-1)); // PermissionDenied
+        assert_eq!(appmcp_verdict(-3), Err(-3)); // InvalidArguments
+
+        // Every other negative code, including ones this call never returns.
+        for code in -4096i64..0 {
+            assert_eq!(appmcp_verdict(code), Err(code), "negative {code} was read as a grant");
+        }
+
+        // A positive answer is not a count here. An unknown positive code must
+        // refuse, not succeed: `ret >= 0` would have granted it.
+        for code in 1i64..=4096 {
+            assert_eq!(appmcp_verdict(code), Err(code), "positive {code} was read as a grant");
+        }
+        assert_eq!(appmcp_verdict(i64::MAX), Err(i64::MAX));
+        assert_eq!(appmcp_verdict(i64::MIN), Err(i64::MIN));
     }
 }
