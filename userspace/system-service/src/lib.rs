@@ -449,13 +449,21 @@ pub fn run_ai() -> ! {
     let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut last_tick = 0u64;
 
-    // Probe storage for real physical GGUF model weights on startup
+    // Probe storage for real physical GGUF model weights on startup.
+    //
+    // WHY only the header probe runs here: a probe reads the file's first
+    // bytes, while an identity or tensor walk pulls the whole metadata through
+    // 512-byte positioned reads -- tens of thousands of syscalls for a
+    // model-sized file. Nothing model-sized may run before this service answers
+    // IPC, so the walks are left to the first request that needs them, and the
+    // identity claim is made there from the file's own `general.architecture`.
+    // A path in the candidate list is not a model identity: the install flow
+    // writes any offered file to the same local slot.
     let mut probed_models = gguf::probe_all_models();
-    if let Some((_hdr, path)) = probed_models.embedding {
-        let _ = std::log("[aid] verified physical EmbeddingGemma 2 weights in storage.");
-        init_resident_model_cache(path);
+    if probed_models.embedding.is_some() {
+        let _ = std::log("[aid] embedding weights file present; its declared identity is read from its metadata on first use.");
     } else {
-        let _ = std::log("[aid] physical EmbeddingGemma 2 weights absent; lexical baseline active.");
+        let _ = std::log("[aid] no embedding weights file found; lexical baseline active.");
     }
     if let Some((_hdr, path)) = probed_models.generative {
         if path.contains("lite") || path.contains("tiny") {
@@ -480,9 +488,6 @@ pub fn run_ai() -> ! {
         if MODEL_NAMESPACE_CHANGED.swap(false, core::sync::atomic::Ordering::Relaxed) {
             invalidate_resident_model_cache();
             probed_models = gguf::probe_all_models();
-            if let Some((_hdr, path)) = probed_models.embedding {
-                init_resident_model_cache(path);
-            }
             let _ = std::log("[aid] re-probed the model namespace after an install.");
         }
 
@@ -1900,6 +1905,38 @@ fn get_resident_model_cache(path: &str) -> Option<(weights::TensorTable, crate::
     None
 }
 
+/// Announces the identity the file's own metadata declares.
+///
+/// WHY the EmbeddingGemma claim is gated on `general.architecture`: the probe
+/// only reads a GGUF header, and the install slot is a candidate for both model
+/// families, so any file written there would otherwise be announced as
+/// EmbeddingGemma 2. The published artifact declares `gemma-embedding`;
+/// `gemma-embedding2` is the family's other spelling. A file declaring anything
+/// else is reported as what it says it is, and a file whose architecture the
+/// walk could not read is reported as unestablished.
+fn log_declared_model_identity(info: &gguf::GgufModelInfo) {
+    let mut buf = [0u8; 256];
+    let mut notice = Notice::new(&mut buf);
+    match info.architecture() {
+        Some(arch) if arch == "gemma-embedding" || arch == "gemma-embedding2" => {
+            notice.word(b"[aid] verified EmbeddingGemma 2 weights: the file declares general.architecture ");
+            notice.word(arch.as_bytes());
+            notice.word(b".");
+        }
+        Some(arch) => {
+            notice.word(b"[aid] model file declares general.architecture ");
+            notice.word(arch.as_bytes());
+            notice.word(b"; it is not EmbeddingGemma 2.");
+        }
+        None => {
+            notice.word(b"[aid] model file identity unestablished: no readable general.architecture declaration.");
+        }
+    }
+    if let Ok(text) = core::str::from_utf8(notice.finish()) {
+        let _ = std::log(text);
+    }
+}
+
 fn set_resident_model_cache(path: &str, table: &weights::TensorTable, info: &crate::gguf::GgufModelInfo) {
     let p_bytes = path.as_bytes();
     let len = p_bytes.len().min(128);
@@ -1910,6 +1947,7 @@ fn set_resident_model_cache(path: &str, table: &weights::TensorTable, info: &cra
         state.path[..len].copy_from_slice(&p_bytes[..len]);
         state.path_len = len;
     }
+    log_declared_model_identity(info);
 }
 
 struct ResidentTokenizerState {
@@ -1971,25 +2009,6 @@ pub fn invalidate_resident_model_cache() {
         state.info = None;
         state.path_len = 0;
     }
-}
-
-pub fn init_resident_model_cache(path: &str) {
-    if let Ok(fd) = std::fs_open(path, std::FS_READ) {
-        let table = {
-            let mut stream = GgufStream::buffered_from_file(fd);
-            weights::TensorTable::walk(&mut stream)
-        };
-        let info = {
-            let mut stream = GgufStream::buffered_from_file(fd);
-            gguf::read_model_info_stream(&mut stream)
-        };
-        let _ = std::fs_close(fd);
-        if let (Ok(table), Ok(info)) = (table, info) {
-            set_resident_model_cache(path, &table, &info);
-            let _ = std::log("[aid] cached resident GGUF tensor offsets and model metadata.");
-        }
-    }
-    let _ = get_or_build_resident_tokenizer(path);
 }
 
 /// Reads the installed file one block at a time and runs it over `tokens`.
@@ -2281,6 +2300,12 @@ fn gguf_error_word(error: &crate::gguf::GgufError) -> &'static [u8] {
     }
 }
 
+/// The engine's documented deterministic decode mode: `inference::sample_token`
+/// takes the argmax below 1e-4. This selects greedy decoding; it is not a
+/// sampling temperature, because neither the request ABI nor the metadata
+/// reader carries one, and a sampled value nobody supplied would be invented.
+const DETERMINISTIC_DECODE_TEMPERATURE: f32 = 0.0;
+
 /// Reads the installed generative model and runs token generation over the prompt.
 fn run_installed_generation(
     path: &str,
@@ -2340,41 +2365,84 @@ fn run_installed_generation(
     }
 
     let prompt_text = extract_prompt_text(payload);
-    let mut prompt_ids = [0u32; 128];
-    let num_ids = if !prompt_text.is_empty() {
-        if let Ok(tokenizer) = get_or_build_resident_tokenizer(path) {
-            match tokenizer.encode(prompt_text, &mut prompt_ids) {
-                Ok(n) => n,
-                Err(_) => {
-                    let count = prompt_text.len().min(prompt_ids.len());
-                    for i in 0..count {
-                        prompt_ids[i] = (prompt_text[i] as u32) % (config.vocab_size as u32);
-                    }
-                    count
-                }
-            }
-        } else {
-            let count = prompt_text.len().min(prompt_ids.len());
-            for i in 0..count {
-                prompt_ids[i] = (prompt_text[i] as u32) % (config.vocab_size as u32);
-            }
-            count
+    if prompt_text.is_empty() {
+        let _ = std::fs_close(fd);
+        reply_with_answer(
+            sender_task_id,
+            std::ai::STATUS_UNSUPPORTED,
+            b"Generation refused: this request carries no prompt text. An empty prompt is not a question, and no token was invented to stand in for one.",
+            tx_buf,
+        );
+        return true;
+    }
+
+    let tokenizer = match get_or_build_resident_tokenizer(path) {
+        Ok(tokenizer) => tokenizer,
+        Err(error) => {
+            let _ = std::fs_close(fd);
+            let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+            let mut notice = Notice::new(&mut scratch);
+            notice.word(b"Generation refused: the installed file yielded no vocabulary table -- ");
+            tokenizer_refusal_words(error, &mut notice);
+            notice.word(b" No ids were invented from the prompt's bytes.");
+            reply_with_answer(sender_task_id, std::ai::STATUS_UNSUPPORTED, notice.finish(), tx_buf);
+            return true;
         }
-    } else {
-        0
     };
 
-    let tokens = if num_ids > 0 {
-        &prompt_ids[..num_ids]
-    } else {
-        &[1u32]
+    // WHY the id buffer is the file's declared context and not a fixed guess:
+    // `encode` refuses a segmentation longer than the buffer with both counts,
+    // so a prompt the model cannot address is named rather than truncated.
+    let mut prompt_ids = alloc::vec::Vec::new();
+    if prompt_ids.try_reserve_exact(config.seq_len).is_err() {
+        let _ = std::fs_close(fd);
+        reply_with_answer(
+            sender_task_id,
+            std::ai::STATUS_UNAVAILABLE,
+            b"Generation unavailable: the device could not reserve an id buffer for the model's declared context length.",
+            tx_buf,
+        );
+        return true;
+    }
+    prompt_ids.resize(config.seq_len, 0u32);
+    let num_ids = match tokenizer.encode(prompt_text, &mut prompt_ids) {
+        Ok(n) => n,
+        Err(tokenizer::EncodeError::BeyondBuffer { needed, bound }) => {
+            let _ = std::fs_close(fd);
+            let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+            let mut notice = Notice::new(&mut scratch);
+            notice.word(b"Generation refused: this prompt segments into ");
+            notice.byte_count(needed as u64);
+            notice.word(b" token ids against the model's declared context of ");
+            notice.byte_count(bound as u64);
+            notice.word(b" positions. Nothing was truncated -- a cut-off prompt is a different question. Send a shorter prompt.");
+            reply_with_answer(sender_task_id, std::ai::STATUS_UNSUPPORTED, notice.finish(), tx_buf);
+            return true;
+        }
     };
+    let tokens = &prompt_ids[..num_ids];
 
-    let max_new_tokens = 32;
-    let temperature = 0.0f32;
+    // WHY the run length is computed from the file: the positions the model
+    // declares minus the prompt's own is the room it has for new tokens. A
+    // prompt that fills the context leaves none, and the reply says so instead
+    // of running past the cache the file sized.
+    let max_new_tokens = config.seq_len.saturating_sub(num_ids);
+    if max_new_tokens == 0 {
+        let _ = std::fs_close(fd);
+        let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+        let mut notice = Notice::new(&mut scratch);
+        notice.word(b"Generation unavailable: this prompt fills the model's declared context of ");
+        notice.byte_count(config.seq_len as u64);
+        notice.word(b" positions, leaving no room for a new token.");
+        reply_with_answer(sender_task_id, std::ai::STATUS_UNAVAILABLE, notice.finish(), tx_buf);
+        return true;
+    }
+    let temperature = DETERMINISTIC_DECODE_TEMPERATURE;
     let mut generated_bytes = alloc::vec::Vec::new();
-    let mut generated_ids = alloc::vec::Vec::new();
-    let mut decode_buf = [0u8; 32];
+    // WHY the reader's piece bound and not a narrower guess: `decode_token`
+    // cuts silently at the buffer's edge, and the reader refuses any piece
+    // wider than this bound, so it is the widest piece the file can declare.
+    let mut decode_buf = [0u8; tokenizer::MAX_PIECE_BYTES];
 
     let is_cancelled = || {
         if ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst) == session_id {
@@ -2432,7 +2500,6 @@ fn run_installed_generation(
         temperature,
         &is_cancelled,
         |token_id| {
-            generated_ids.push(token_id);
             if let Ok(tokenizer) = get_or_build_resident_tokenizer(path) {
                 let n = tokenizer.decode_token(token_id, &mut decode_buf);
                 if n > 0 {
@@ -2446,13 +2513,17 @@ fn run_installed_generation(
 
     match ran {
         Ok(count) if count > 0 => {
-            let _ = std::log("[aid] native transformer execution generated new tokens.");
-            let reply_data = if !generated_bytes.is_empty() {
-                generated_bytes.as_slice()
+            if generated_bytes.is_empty() {
+                let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+                let mut notice = Notice::new(&mut scratch);
+                notice.word(b"Generation unavailable: the model sampled ");
+                notice.number(count as u32);
+                notice.word(b" tokens, but decoding them through the file's own vocabulary produced no bytes. No answer was authored to stand in for them.");
+                reply_with_answer(sender_task_id, std::ai::STATUS_UNAVAILABLE, notice.finish(), tx_buf);
             } else {
-                b"Model generated tokens successfully from loaded weights."
-            };
-            reply_with_answer(sender_task_id, std::ai::STATUS_SUCCESS, reply_data, tx_buf);
+                let _ = std::log("[aid] native transformer execution generated new tokens.");
+                reply_with_answer(sender_task_id, std::ai::STATUS_SUCCESS, generated_bytes.as_slice(), tx_buf);
+            }
             true
         }
         Err(weights::LoadError::Graph(crate::inference::InferenceError::Cancelled)) => {
@@ -2737,14 +2808,13 @@ pub fn handle_ipc_inference_query(
 
     // 2. Generative token stream queries (Gemma 4 2B / on-device generative)
     //
-    // Platform Truth Contract & Architecture Boundary: Full generative autoregressive
-    // text generation (`inference::generate()`) requires resident weights (which exceed
-    // the 120 MiB process scratch ceiling for Gemma-class models >1.1 GiB) or an
-    // autoregressive streamed block reader. Real generative inference in the initial
-    // developer architecture is host-backed via development bridge; on-device generative
-    // queries without resident generative weights truthfully reply with STATUS_UNSUPPORTED
-    // or STATUS_UNAVAILABLE plus the structured model gap notice, refusing to fabricate
-    // synthetic prose.
+    // Platform Truth Contract & Architecture Boundary: generative queries run
+    // on-device. `run_installed_generation` reads the installed file's tensors
+    // block by block through `weights::run_generative_model` and answers with
+    // the bytes the file's own vocabulary decoded; there is no host bridge on
+    // this route. When the file cannot configure the engine, the arm replies
+    // STATUS_UNSUPPORTED or STATUS_UNAVAILABLE plus the structured model gap
+    // notice, refusing to fabricate synthetic prose.
     if msg_type == MSG_TYPE_GENERATE
         || msg_type == MSG_TYPE_GENERATE_ALT
         || (payload.len() >= 4 && (&payload[..4] == b"GENR" || &payload[..4] == b"GEN:"))
@@ -3053,8 +3123,16 @@ pub fn handle_ipc_inference_query(
         // for the wire descriptor `AiInferenceResponse.latency_micros` (1ms granularity).
         let latency_micros = end_tick.saturating_sub(start_tick).saturating_mul(1000);
 
+        // WHY zero hits is not a success: `output_dim` counts the matches this
+        // frame carries, and a retrieval that matched nothing must not read as
+        // one that found what the caller asked for.
+        let status = if found_count == 0 {
+            std::ai::STATUS_UNAVAILABLE
+        } else {
+            std::ai::STATUS_SUCCESS
+        };
         let resp_hdr = std::ai::AiInferenceResponse {
-            status: std::ai::STATUS_SUCCESS,
+            status,
             output_dim: found_count as u32,
             latency_micros,
             output_offset: core::mem::size_of::<std::ai::AiInferenceResponse>() as u64,
@@ -3111,7 +3189,7 @@ pub fn handle_ipc_inference_query(
         // or, when no channel was free, by mailbox.
         if !stream_answer(
             sender_task_id,
-            std::ai::STATUS_SUCCESS,
+            status,
             MSG_TYPE_SEARCH_CHUNK,
             &tx_buf[..cursor],
         ) && sender_task_id != 0
@@ -3685,7 +3763,36 @@ mod tests {
         let resp = unsafe {
             core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
         };
-        assert_eq!(resp.status, std::ai::STATUS_SUCCESS);
+        // The frame's status has to agree with the hits it carries: the old
+        // unconditional STATUS_SUCCESS let a zero-hit retrieval read as a find.
+        if resp.output_dim == 0 {
+            assert_eq!(resp.status, std::ai::STATUS_UNAVAILABLE);
+        } else {
+            assert_eq!(resp.status, std::ai::STATUS_SUCCESS);
+        }
+    }
+
+    #[test]
+    fn test_handle_ipc_search_zero_hits_reports_unavailable() {
+        let mut tx_buf = [0u8; 1024];
+        // An empty query matches nothing by the index's own rule, whatever
+        // documents the host namespace holds, so the zero-hit frame is certain.
+        handle_ipc_inference_query(
+            0,
+            MSG_TYPE_SEARCH,
+            b"SRCH",
+            &gguf::ProbedModels::empty(),
+            &mut tx_buf,
+        );
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp.output_dim, 0);
+        assert_eq!(
+            resp.status,
+            std::ai::STATUS_UNAVAILABLE,
+            "a retrieval that matched nothing answered as a success"
+        );
     }
 
     #[test]

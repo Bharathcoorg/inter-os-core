@@ -85,13 +85,20 @@ use alloc::vec::Vec;
 ///
 /// The published `embeddinggemma-300M-Q8_0.gguf` -- 24 blocks, 2048 positions,
 /// one key/value head 256 wide, 768-wide stream, 1152-wide feed-forward and
-/// 262,144 tokens -- computes 101,767,680 bytes under this formula: the KV cache
-/// is 2 x 24 x 2048 x 1 x 256 x 4 = 100,663,296 (96 MiB) and the rest is
-/// 11 x 768 + 3 x 1152 + 2048 + 262,144 = 276,096 floats = 1,104,384 bytes. It
-/// fits with 24 MiB to spare, and the tests
+/// 262,144 tokens -- computes 101,763,584 bytes of cache and scratch under this
+/// formula: the KV cache is 2 x 24 x 2048 x 1 x 256 x 4 = 100,663,296 (96 MiB)
+/// and the rest is 7 x 768 + 2 x 768 + 2 x 256 + 3 x 1152 + 2048 + 262,144 =
+/// 275,072 floats = 1,100,288 bytes -- seven stream-wide buffers, the query and
+/// attention output at the 768-wide head span, key and value at the 256-wide
+/// key/value projection, three feed-forward buffers, the scores and the logits.
+/// The run also holds one block's weights beside the scratch: the metadata walk
+/// stops at the vocabulary and `general.file_type` sits past it in this file, so
+/// `resident_weight_bytes` prices that hold at the F32 upper bound, 16,928,768
+/// bytes, and the budget measures 118,692,352 bytes in total. It fits with
+/// 7,136,768 bytes to spare, and the tests
 /// `test_model_config_accepts_the_published_embedding_model_by_its_budget` and
 /// `test_the_real_published_file_is_priced_and_allocated` hold the arithmetic to
-/// that number -- the second one against the 333 MB file's own bytes, so the
+/// those numbers -- the second one against the 333 MB file's own bytes, so the
 /// fixture's numbers are the file's and not whoever typed them in.
 ///
 /// It fits in memory, and on the development host it runs: the graph below is
@@ -185,6 +192,12 @@ pub enum InferenceError {
     CorruptedWeights,
     BufferTooSmall,
     ContextLengthExceeded,
+    /// A token id outside the vocabulary the file declared. Carries both numbers:
+    /// the id that was presented and the vocabulary size the file states.
+    /// WHY this refuses instead of wrapping: `% vocab_size` would map an id the
+    /// model never learned onto a row it does hold, and report that row's answer
+    /// as the presented token's -- a fabricated correspondence, not a computation.
+    TokenOutOfVocabulary(u32, usize),
     Cancelled,
     ModelUnavailable,
     /// A declaration in the model file the engine cannot be built from: the key
@@ -628,10 +641,178 @@ pub fn dequantize_q4_k(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceEr
     Ok(num_elements)
 }
 
+/// Weights per Q5_K super-block, and the bytes that super-block occupies:
+/// two halves, 12 packed scale/min bytes, 32 high-bit bytes and one nibble per
+/// weight. The layout is ggml's `block_q5_K`.
+const Q5_K_WEIGHTS: usize = 256;
+const Q5_K_BLOCK_BYTES: usize = 176;
+const _: () = assert!(Q5_K_BLOCK_BYTES == 2 * 2 + 12 + 32 + Q5_K_WEIGHTS / 2);
+
+/// Dequantizes Q5_K super-blocks (256 values per 176 bytes) into an f32 buffer.
+///
+/// The low four bits of each weight sit where Q4_K's sit -- within each
+/// 64-weight group, byte `i`'s low nibble is element `i` and its high nibble is
+/// element `i + 32` -- and the fifth bit comes from `qh`: bit `2*group` for the
+/// low-nibble half, bit `2*group + 1` for the high-nibble half, which is how
+/// ggml's `dequantize_row_q5_K` walks the mask (`u1 = 1, u2 = 2`, both shifted
+/// two per group). The scales and mins use the same 6-bit packing as Q4_K.
+///
+/// WHY this exists beside the five mapped readers: EmbeddingGemma 2 states
+/// `per_layer_model_proj.weight` as Q5_K (13). The loader's dtype gate still
+/// refuses that id by number until the mapped set is widened deliberately;
+/// this decoder is the layout half of that widening, proved against known
+/// vectors and the published file's own bytes, not a claim that the gate reads
+/// it today.
+pub fn dequantize_q5_k(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceError> {
+    let num_blocks = raw.len() / Q5_K_BLOCK_BYTES;
+    let num_elements = num_blocks
+        .checked_mul(Q5_K_WEIGHTS)
+        .ok_or(InferenceError::BufferTooSmall)?;
+    if out.len() < num_elements {
+        return Err(InferenceError::BufferTooSmall);
+    }
+    for b in 0..num_blocks {
+        let blk = &raw[b * Q5_K_BLOCK_BYTES..(b + 1) * Q5_K_BLOCK_BYTES];
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let dmin = f16_to_f32(u16::from_le_bytes([blk[2], blk[3]]));
+        let scales = &blk[4..16];
+        let qh = &blk[16..48];
+        let qs = &blk[48..176];
+        let out_base = b * Q5_K_WEIGHTS;
+        for k in 0..8 {
+            let (scale, min) = q4_k_scale_min(scales, k);
+            let group = k / 2;
+            let hi_half = k % 2;
+            let mask = if hi_half == 0 {
+                1u8 << (2 * group)
+            } else {
+                2u8 << (2 * group)
+            };
+            for i in 0..32 {
+                let byte = qs[group * 32 + i];
+                let low = if hi_half == 0 { byte & 0x0f } else { byte >> 4 };
+                let high = if qh[i] & mask != 0 { 16u8 } else { 0u8 };
+                let q = (low + high) as u32;
+                out[out_base + k * 32 + i] =
+                    d * (scale as f32) * (q as f32) - dmin * (min as f32);
+            }
+        }
+    }
+    Ok(num_elements)
+}
+
+/// Weights per Q6_K super-block, and the bytes that super-block occupies:
+/// one half, 128 low-nibble bytes, 64 high-bit bytes and 16 signed scales.
+/// The layout is ggml's `block_q6_K`.
+const Q6_K_WEIGHTS: usize = 256;
+const Q6_K_BLOCK_BYTES: usize = 210;
+const _: () = assert!(Q6_K_BLOCK_BYTES == 2 + 128 + 64 + 16);
+
+/// Dequantizes Q6_K super-blocks (256 values per 210 bytes) into an f32 buffer.
+///
+/// Each 128-weight half carries 64 low-nibble bytes, 32 high-bit bytes and 8
+/// signed 8-bit scales. For byte `l` (0..32) the four weights it packs are
+/// `l`, `l + 32`, `l + 64`, `l + 96`: the low nibbles of `ql[l]` and `ql[l+32]`
+/// and their high nibbles, each joined to two bits of `qh[l]` (bits 0-1, 2-3,
+/// 4-5, 6-7 respectively), minus 32, times the half's scale for that quarter
+/// (`scales[l/16 + 0/2/4/6]`) times the block's half `d`. This is ggml's
+/// `dequantize_row_q6_K` walk, and the order matters: a reader that followed
+/// the bytes in sequence would place every weight but the first 32 wrongly.
+///
+/// EmbeddingGemma 2 states `output.weight` as Q6_K (14); the same gate note as
+/// `dequantize_q5_k` applies -- the layout is proved here, the mapped set is
+/// widened deliberately and separately.
+pub fn dequantize_q6_k(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceError> {
+    let num_blocks = raw.len() / Q6_K_BLOCK_BYTES;
+    let num_elements = num_blocks
+        .checked_mul(Q6_K_WEIGHTS)
+        .ok_or(InferenceError::BufferTooSmall)?;
+    if out.len() < num_elements {
+        return Err(InferenceError::BufferTooSmall);
+    }
+    for b in 0..num_blocks {
+        let blk = &raw[b * Q6_K_BLOCK_BYTES..(b + 1) * Q6_K_BLOCK_BYTES];
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let ql = &blk[2..130];
+        let qh = &blk[130..194];
+        let sc = &blk[194..210];
+        let out_base = b * Q6_K_WEIGHTS;
+        for half in 0..2 {
+            let qlh = &ql[half * 64..half * 64 + 64];
+            let qhh = &qh[half * 32..half * 32 + 32];
+            let sch = &sc[half * 8..half * 8 + 8];
+            let base = out_base + half * 128;
+            for l in 0..32 {
+                let is = l / 16;
+                let q1 = ((qlh[l] & 0x0f) | ((qhh[l] & 3) << 4)) as i32 - 32;
+                let q2 = ((qlh[l + 32] & 0x0f) | (((qhh[l] >> 2) & 3) << 4)) as i32 - 32;
+                let q3 = ((qlh[l] >> 4) | (((qhh[l] >> 4) & 3) << 4)) as i32 - 32;
+                let q4 = ((qlh[l + 32] >> 4) | (((qhh[l] >> 6) & 3) << 4)) as i32 - 32;
+                out[base + l] = d * (sch[is] as i8 as f32) * (q1 as f32);
+                out[base + l + 32] = d * (sch[is + 2] as i8 as f32) * (q2 as f32);
+                out[base + l + 64] = d * (sch[is + 4] as i8 as f32) * (q3 as f32);
+                out[base + l + 96] = d * (sch[is + 6] as i8 as f32) * (q4 as f32);
+            }
+        }
+    }
+    Ok(num_elements)
+}
+
+/// Weights per TQ2_0 super-block, and the bytes that super-block occupies:
+/// one half and 64 bytes of two-bit ternary quants. The layout is ggml's
+/// `block_tq2_0`.
+const TQ2_0_WEIGHTS: usize = 256;
+const TQ2_0_BLOCK_BYTES: usize = 66;
+const _: () = assert!(TQ2_0_BLOCK_BYTES == 2 + TQ2_0_WEIGHTS / 4);
+
+/// Dequantizes TQ2_0 super-blocks (256 values per 66 bytes) into an f32 buffer.
+///
+/// Each byte packs four ternary weights, two bits each, valued -1, 0 or +1
+/// times the block's half `d` (the absolute maximum the quantiser saw). Within
+/// each 128-weight chunk, byte `m` (0..32) holds weight `m` in bits 0-1,
+/// `m + 32` in bits 2-3, `m + 64` in bits 4-5 and `m + 96` in bits 6-7 -- the
+/// order ggml's `dequantize_row_tq2_0` emits (bit plane outer, byte inner).
+/// The two-bit code 3 is not one the quantiser writes; decoded it is +2 times
+/// `d`, which is what the arithmetic says and not a value to invent a meaning
+/// for.
+///
+/// Gemma 4 E2B states 61 tensors as TQ2_0 (35), including `token_embd.weight`;
+/// the same gate note as `dequantize_q5_k` applies.
+pub fn dequantize_tq2_0(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceError> {
+    let num_blocks = raw.len() / TQ2_0_BLOCK_BYTES;
+    let num_elements = num_blocks
+        .checked_mul(TQ2_0_WEIGHTS)
+        .ok_or(InferenceError::BufferTooSmall)?;
+    if out.len() < num_elements {
+        return Err(InferenceError::BufferTooSmall);
+    }
+    for b in 0..num_blocks {
+        let blk = &raw[b * TQ2_0_BLOCK_BYTES..(b + 1) * TQ2_0_BLOCK_BYTES];
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let qs = &blk[2..66];
+        let out_base = b * TQ2_0_WEIGHTS;
+        for chunk in 0..2 {
+            for plane in 0..4 {
+                for m in 0..32 {
+                    let q = ((qs[chunk * 32 + m] >> (2 * plane)) & 3) as i32 - 1;
+                    out[out_base + chunk * 128 + plane * 32 + m] = d * (q as f32);
+                }
+            }
+        }
+    }
+    Ok(num_elements)
+}
+
 /// Computes General Matrix-Vector Multiplication: y = W * x.
 ///
 /// Handles on-the-fly dequantization directly from raw weight bytes, avoiding large
 /// temporary weight memory allocations.
+///
+/// WHY every stride product is checked: `rows`, `cols` and the block widths are
+/// the file's own numbers, and a declaration whose byte product overflows a
+/// `usize` would wrap into a small stride that passes the length check and then
+/// reads a neighbour's bytes as this matrix's rows. An uncountable product is
+/// refused as corrupt weights, never wrapped.
 pub fn gemv(
     w_bytes: &[u8],
     w_type: u32,
@@ -647,8 +828,11 @@ pub fn gemv(
     match w_type {
         // GGML_TYPE_F32
         0 => {
-            let row_stride_bytes = cols * 4;
-            if w_bytes.len() < rows * row_stride_bytes {
+            let row_stride_bytes = cols.checked_mul(4).ok_or(InferenceError::CorruptedWeights)?;
+            let needed = rows
+                .checked_mul(row_stride_bytes)
+                .ok_or(InferenceError::CorruptedWeights)?;
+            if w_bytes.len() < needed {
                 return Err(InferenceError::CorruptedWeights);
             }
             for i in 0..rows {
@@ -669,8 +853,11 @@ pub fn gemv(
         }
         // GGML_TYPE_F16
         1 => {
-            let row_stride_bytes = cols * 2;
-            if w_bytes.len() < rows * row_stride_bytes {
+            let row_stride_bytes = cols.checked_mul(2).ok_or(InferenceError::CorruptedWeights)?;
+            let needed = rows
+                .checked_mul(row_stride_bytes)
+                .ok_or(InferenceError::CorruptedWeights)?;
+            if w_bytes.len() < needed {
                 return Err(InferenceError::CorruptedWeights);
             }
             for i in 0..rows {
@@ -690,8 +877,13 @@ pub fn gemv(
                 return Err(InferenceError::CorruptedWeights);
             }
             let blocks_per_row = cols / 32;
-            let row_stride_bytes = blocks_per_row * 18;
-            if w_bytes.len() < rows * row_stride_bytes {
+            let row_stride_bytes = blocks_per_row
+                .checked_mul(18)
+                .ok_or(InferenceError::CorruptedWeights)?;
+            let needed = rows
+                .checked_mul(row_stride_bytes)
+                .ok_or(InferenceError::CorruptedWeights)?;
+            if w_bytes.len() < needed {
                 return Err(InferenceError::CorruptedWeights);
             }
             for i in 0..rows {
@@ -722,8 +914,13 @@ pub fn gemv(
                 return Err(InferenceError::CorruptedWeights);
             }
             let blocks_per_row = cols / 32;
-            let row_stride_bytes = blocks_per_row * 34;
-            if w_bytes.len() < rows * row_stride_bytes {
+            let row_stride_bytes = blocks_per_row
+                .checked_mul(34)
+                .ok_or(InferenceError::CorruptedWeights)?;
+            let needed = rows
+                .checked_mul(row_stride_bytes)
+                .ok_or(InferenceError::CorruptedWeights)?;
+            if w_bytes.len() < needed {
                 return Err(InferenceError::CorruptedWeights);
             }
             for i in 0..rows {
@@ -750,8 +947,13 @@ pub fn gemv(
                 return Err(InferenceError::CorruptedWeights);
             }
             let blocks_per_row = cols / Q4_K_WEIGHTS;
-            let row_stride_bytes = blocks_per_row * Q4_K_BLOCK_BYTES;
-            if w_bytes.len() < rows * row_stride_bytes {
+            let row_stride_bytes = blocks_per_row
+                .checked_mul(Q4_K_BLOCK_BYTES)
+                .ok_or(InferenceError::CorruptedWeights)?;
+            let needed = rows
+                .checked_mul(row_stride_bytes)
+                .ok_or(InferenceError::CorruptedWeights)?;
+            if w_bytes.len() < needed {
                 return Err(InferenceError::CorruptedWeights);
             }
             for i in 0..rows {
@@ -1179,15 +1381,73 @@ pub struct ModelConfig {
     /// file's graph, not a default the engine preferred.
     ///
     /// WHAT IT DOES NOT CLAIM: a window the file states globally is applied
-    /// globally. The published file declares no `attention.layer_types` list, so
-    /// nothing in its bytes distinguishes a sliding layer from a full one, and
-    /// the engine does not invent that distinction. `rope.freq_base_swa`, which
-    /// the same file does state, stays unread for the same reason: taking it
-    /// would need the per-layer list the file never gave.
+    /// globally. The published `embeddinggemma-300M-Q8_0.gguf` declares no
+    /// `attention.sliding_window_pattern`, so nothing in its bytes distinguishes
+    /// a sliding layer from a full one and every layer of it attends this one
+    /// window. A file that does declare the pattern -- EmbeddingGemma 2 and
+    /// Gemma 4 E2B both do -- has each layer attend its own span through
+    /// `layer_attention_span_start`, and `rope.freq_base_swa` is honoured for
+    /// exactly those layers the pattern marks sliding.
     pub sliding_window: Option<usize>,
     pub rms_norm_eps: f32,
     pub rope_theta: f32,
     pub activation: ActivationType,
+    /// `<arch>.attention.head_count_kv` per layer, exactly as the file declared
+    /// it. EmbeddingGemma 2 states 24 values (1 at every sixth layer, 2 elsewhere);
+    /// a scalar declaration is held as one element and an absent key as none, in
+    /// which case `layer_kv_heads` answers the uniform `num_kv_heads`.
+    pub kv_heads_per_layer: crate::gguf::PerLayerCounts,
+    /// `<arch>.feed_forward_length` per layer. Gemma 4 E2B states 35 values
+    /// (6144 for layers 0..14, 12288 for layers 15..34); each layer's feed-forward
+    /// runs at its own width, and the scratch is cut for the widest of them.
+    pub ffn_per_layer: crate::gguf::PerLayerCounts,
+    /// `<arch>.attention.sliding_window_pattern`, one flag per layer. A true flag
+    /// is a sliding-window layer; a false one attends the whole cached prefix.
+    pub sliding_window_pattern: crate::gguf::PerLayerFlags,
+    /// `<arch>.attention.key_length_swa`: one head's width in the sliding layers,
+    /// when the file states it separately from `key_length`. EmbeddingGemma 2 and
+    /// Gemma 4 E2B both run 256-wide heads in their sliding layers and 512-wide
+    /// heads in their full-attention ones, from the same residual stream.
+    pub head_dim_swa: Option<usize>,
+    /// `<arch>.rope.freq_base_swa`, the rotation base the sliding layers state.
+    pub rope_theta_swa: Option<f32>,
+    /// The context the file declared, before the byte budget cut the cache depth.
+    /// `seq_len` is what the device holds; this is what the file asked for, and
+    /// the two together are the clamp the service reports rather than hides.
+    pub declared_seq_len: usize,
+    /// `<arch>.embedding_length_per_layer_input`: the width of the per-layer
+    /// input the file declares. The block graph this engine walks has no gate
+    /// for it, so a file that states one is reported as an incomplete graph by
+    /// `unwalkable_graph_declaration` rather than run without it.
+    pub per_layer_input: Option<usize>,
+    /// Whether the file's family ships the per-layer input as its own
+    /// vocabulary-sized table (`per_layer_token_embd.weight`). The Gemma 4
+    /// family does -- the published E2B file's descriptor list states it at
+    /// (8960, 262144) -- while EmbeddingGemma 2 projects the shared token table
+    /// instead and ships no such tensor. `parameter_count` adds the table only
+    /// for the families whose tensor lists were measured to carry one.
+    pub per_layer_input_table: bool,
+    /// `<arch>.attention.shared_kv_layers`: how many layers share one key/value
+    /// projection. This engine caches per layer and has no sharing graph, so a
+    /// nonzero declaration is named as unimplemented, never silently unshared.
+    pub shared_kv_layers: Option<u32>,
+    /// `<arch>.embedding_length_out`: the width of the embedding output head,
+    /// when the file states one separately from the residual stream.
+    pub embedding_length_out: Option<usize>,
+    /// `<arch>.attention.causal`. A false declaration is bidirectional attention,
+    /// which this engine's causal span does not walk.
+    pub attention_causal: Option<bool>,
+    /// `<arch>.pooling_type`, carried for the report; the pooling comment in
+    /// `extract_embedding` says what reads it and what does not.
+    pub pooling_type: Option<u32>,
+    /// `<arch>.final_logit_softcapping`. This engine's logits are unbounded; a
+    /// file that states a cap is named as an incomplete graph, not run uncapped.
+    pub final_logit_softcapping: Option<f32>,
+    /// `general.file_type` as the walk reached it. The metadata walk stops at the
+    /// vocabulary and this key sits past it in every published file measured, so
+    /// this is usually `None` and the weight pricing below falls back to the F32
+    /// upper bound rather than guessing a quantisation the file never stated here.
+    pub declared_file_type: Option<u32>,
 }
 
 /// Run length for a file that states no `<arch>.context_length`.
@@ -1226,11 +1486,171 @@ impl ModelConfig {
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
             activation: ActivationType::SwiGLU,
+            kv_heads_per_layer: crate::gguf::PerLayerCounts::empty(),
+            ffn_per_layer: crate::gguf::PerLayerCounts::empty(),
+            sliding_window_pattern: crate::gguf::PerLayerFlags::empty(),
+            head_dim_swa: None,
+            rope_theta_swa: None,
+            declared_seq_len: 64,
+            per_layer_input: None,
+            per_layer_input_table: false,
+            shared_kv_layers: None,
+            embedding_length_out: None,
+            attention_causal: None,
+            pooling_type: None,
+            final_logit_softcapping: None,
+            declared_file_type: None,
         }
     }
 
-    /// Bytes the KV cache needs: K and V, one row of `head_dim` floats per
-    /// (layer, position, key/value head).
+    /// How many layers can carry a geometry of their own. The per-layer arrays
+    /// hold at most `MAX_PER_LAYER_GEOMETRY` elements, so every layer past them
+    /// runs the uniform declaration; pricing loops over this many layers and
+    /// multiplies the uniform shape by the rest, which keeps a file declaring
+    /// four billion blocks from turning a price into a four-billion-step loop.
+    fn detailed_layers(&self) -> usize {
+        if self.num_layers < crate::gguf::MAX_PER_LAYER_GEOMETRY {
+            self.num_layers
+        } else {
+            crate::gguf::MAX_PER_LAYER_GEOMETRY
+        }
+    }
+
+    /// Whether the file's own pattern marks layer `layer` a sliding-window one.
+    ///
+    /// A file that declared no pattern answers `false` for every layer: the
+    /// uniform window in `sliding_window`, if any, is then the only span rule.
+    pub fn layer_is_sliding(&self, layer: usize) -> bool {
+        if self.sliding_window_pattern.len == 0 || layer >= self.sliding_window_pattern.len {
+            return false;
+        }
+        self.sliding_window_pattern.values[layer]
+    }
+
+    /// One head's width in layer `layer`: `head_dim_swa` where the pattern marks
+    /// the layer sliding, `head_dim` everywhere else.
+    ///
+    /// WHY this is per layer and not one number: EmbeddingGemma 2's tensor
+    /// descriptors state `blk.0.attn_q.weight` as (512, 1024) -- four heads of
+    /// 256 -- and `blk.5.attn_q.weight` as (512, 2048) -- four heads of 512 --
+    /// from the same 512-wide residual stream. One head width for all layers
+    /// would read one of those two tensors out of bounds.
+    pub fn layer_head_dim(&self, layer: usize) -> usize {
+        match self.head_dim_swa {
+            Some(swa) if self.layer_is_sliding(layer) => swa,
+            _ => self.head_dim,
+        }
+    }
+
+    /// The key/value head count layer `layer` declared, or the uniform
+    /// `num_kv_heads` when the file stated no per-layer value for it.
+    pub fn layer_kv_heads(&self, layer: usize) -> usize {
+        if layer < self.kv_heads_per_layer.len {
+            self.kv_heads_per_layer.values[layer] as usize
+        } else {
+            self.num_kv_heads
+        }
+    }
+
+    /// The feed-forward width layer `layer` declared, or the uniform
+    /// `intermediate_dim` when the file stated no per-layer value for it.
+    pub fn layer_ffn_dim(&self, layer: usize) -> usize {
+        if layer < self.ffn_per_layer.len {
+            self.ffn_per_layer.values[layer] as usize
+        } else {
+            self.intermediate_dim
+        }
+    }
+
+    /// The rotation base layer `layer` stated: `rope_theta_swa` for the layers
+    /// the pattern marks sliding, `rope_theta` for every other layer.
+    pub fn layer_rope_theta(&self, layer: usize) -> f32 {
+        match self.rope_theta_swa {
+            Some(theta) if self.layer_is_sliding(layer) => theta,
+            _ => self.rope_theta,
+        }
+    }
+
+    /// The widest query span any layer projects: `num_heads x` that layer's head
+    /// width. The scratch's query and attention-output buffers are cut for this,
+    /// which is what lets a 512-wide residual stream carry 2048-wide attention.
+    pub fn max_heads_span(&self) -> usize {
+        let mut widest = 0usize;
+        let mut layer = 0usize;
+        while layer < self.detailed_layers() {
+            let span = self.num_heads.saturating_mul(self.layer_head_dim(layer));
+            if span > widest {
+                widest = span;
+            }
+            layer += 1;
+        }
+        if self.num_layers > self.detailed_layers() {
+            let uniform = self.num_heads.saturating_mul(self.head_dim);
+            if uniform > widest {
+                widest = uniform;
+            }
+        }
+        widest
+    }
+
+    /// The widest key/value projection any layer runs: that layer's head count
+    /// times its head width. The scratch's key and value buffers are cut for it.
+    pub fn max_kv_width(&self) -> usize {
+        let mut widest = 0usize;
+        let mut layer = 0usize;
+        while layer < self.detailed_layers() {
+            let width = self
+                .layer_kv_heads(layer)
+                .saturating_mul(self.layer_head_dim(layer));
+            if width > widest {
+                widest = width;
+            }
+            layer += 1;
+        }
+        if self.num_layers > self.detailed_layers() {
+            let uniform = self.num_kv_heads.saturating_mul(self.head_dim);
+            if uniform > widest {
+                widest = uniform;
+            }
+        }
+        widest
+    }
+
+    /// The widest feed-forward any layer declared.
+    pub fn max_ffn_dim(&self) -> usize {
+        let mut widest = 0usize;
+        let mut layer = 0usize;
+        while layer < self.detailed_layers() {
+            let width = self.layer_ffn_dim(layer);
+            if width > widest {
+                widest = width;
+            }
+            layer += 1;
+        }
+        if self.num_layers > self.detailed_layers() && self.intermediate_dim > widest {
+            widest = self.intermediate_dim;
+        }
+        widest
+    }
+
+    /// First cached position a query at `pos` in layer `layer` may attend over:
+    /// the full prefix for a layer the file's pattern marks full-attention, the
+    /// declared window for every other layer.
+    ///
+    /// WHY the pattern overrides the window instead of narrowing it: a file
+    /// that declares `sliding_window` 1024 beside a pattern with false flags is
+    /// stating that the false-flag layers attend everything cached. Applying the
+    /// window to them would be the engine shortening a span the file declared
+    /// long, which changes the answer the model gives.
+    pub fn layer_attention_span_start(&self, layer: usize, pos: usize) -> usize {
+        if self.sliding_window_pattern.len > 0 && !self.layer_is_sliding(layer) {
+            return 0;
+        }
+        self.attention_span_start(pos)
+    }
+
+    /// Bytes the KV cache needs: K and V, one row of that layer's head width per
+    /// (layer, position, key/value head), summed over the layers' own geometry.
     ///
     /// WHY it saturates instead of failing: a shape whose product overflows a
     /// `usize` needs more memory than the device can count, and the refusal that
@@ -1239,12 +1659,25 @@ impl ModelConfig {
     /// person can act on, and the arithmetic is exact for anything a real file
     /// declares (every dimension arrives as a `u32`).
     pub fn kv_cache_bytes(&self) -> usize {
+        let mut floats_per_position = 0usize;
+        let mut layer = 0usize;
+        while layer < self.detailed_layers() {
+            floats_per_position = floats_per_position.saturating_add(
+                self.layer_kv_heads(layer)
+                    .saturating_mul(self.layer_head_dim(layer)),
+            );
+            layer += 1;
+        }
+        if self.num_layers > self.detailed_layers() {
+            let tail = self.num_layers - self.detailed_layers();
+            floats_per_position = floats_per_position.saturating_add(
+                tail.saturating_mul(self.num_kv_heads.saturating_mul(self.head_dim)),
+            );
+        }
         [
             2,
-            self.num_layers,
             self.seq_len,
-            self.num_kv_heads,
-            self.head_dim,
+            floats_per_position,
             FLOAT_BYTES,
         ]
         .iter()
@@ -1260,33 +1693,98 @@ impl ModelConfig {
         self.kv_cache_bytes().saturating_add(Scratch::bytes_for(self))
     }
 
-    /// Computes the total parameter count across all attention, feed-forward,
-    /// normalization, and embedding tensors for this model configuration.
+    /// Every parameter the file's declared geometry names: each layer's own
+    /// attention projections at that layer's head width and key/value head
+    /// count, its own feed-forward width, its norms, the token table, the final
+    /// norm, and the per-layer input tensors when the file declares that input.
+    ///
+    /// WHY per layer and not one uniform shape: Gemma 4 E2B declares 35 layers
+    /// whose feed-forward widths are 6144 for the first fifteen and 12288 for
+    /// the rest, and a separate vocabulary-sized `per_layer_token_embd` table of
+    /// 8960 x 262144 elements. Counting one uniform layer and no table reported
+    /// roughly 1.8 billion parameters for a file whose own size label says 4.6B
+    /// -- a 2.6x understatement of what the device is being asked to hold.
     pub fn parameter_count(&self) -> usize {
-        let q_params = (self.num_heads.saturating_mul(self.head_dim)).saturating_mul(self.hidden_dim);
-        let k_params = (self.num_kv_heads.saturating_mul(self.head_dim)).saturating_mul(self.hidden_dim);
-        let v_params = (self.num_kv_heads.saturating_mul(self.head_dim)).saturating_mul(self.hidden_dim);
-        let out_params = self.hidden_dim.saturating_mul(self.num_heads.saturating_mul(self.head_dim));
-        let ffn_params = self.intermediate_dim.saturating_mul(self.hidden_dim).saturating_mul(3);
-        let layer_norm_params = self.hidden_dim.saturating_mul(4);
-        let per_layer_params = q_params
-            .saturating_add(k_params)
-            .saturating_add(v_params)
-            .saturating_add(out_params)
-            .saturating_add(ffn_params)
-            .saturating_add(layer_norm_params);
+        let layer_params = |head_dim: usize, kv_heads: usize, ffn: usize| -> usize {
+            let span = self.num_heads.saturating_mul(head_dim);
+            let kv_width = kv_heads.saturating_mul(head_dim);
+            let q_params = span.saturating_mul(self.hidden_dim);
+            let k_params = kv_width.saturating_mul(self.hidden_dim);
+            let out_params = self.hidden_dim.saturating_mul(span);
+            let ffn_params = ffn.saturating_mul(self.hidden_dim).saturating_mul(3);
+            // Four stream-width norms plus the query and key head norms, which
+            // are one head wide, not one stream wide.
+            let norm_params = self
+                .hidden_dim
+                .saturating_mul(4)
+                .saturating_add(head_dim.saturating_mul(2));
+            let mut params = q_params
+                .saturating_add(k_params)
+                .saturating_add(k_params)
+                .saturating_add(out_params)
+                .saturating_add(ffn_params)
+                .saturating_add(norm_params);
+            if let Some(width) = self.per_layer_input {
+                // The per-layer input gate and projection the block ships
+                // beside its attention (`inp_gate`, `proj`), the post norm and
+                // the scalar output scale: two hidden x width matrices, one
+                // width-wide norm and one scalar, per layer.
+                params = params
+                    .saturating_add(self.hidden_dim.saturating_mul(width).saturating_mul(2))
+                    .saturating_add(width)
+                    .saturating_add(1);
+            }
+            params
+        };
+        let mut total = 0usize;
+        let mut layer = 0usize;
+        while layer < self.detailed_layers() {
+            total = total.saturating_add(layer_params(
+                self.layer_head_dim(layer),
+                self.layer_kv_heads(layer),
+                self.layer_ffn_dim(layer),
+            ));
+            layer += 1;
+        }
+        if self.num_layers > self.detailed_layers() {
+            let tail = self.num_layers - self.detailed_layers();
+            total = total.saturating_add(
+                tail.saturating_mul(layer_params(
+                    self.head_dim,
+                    self.num_kv_heads,
+                    self.intermediate_dim,
+                )),
+            );
+        }
 
         let embed_params = self.vocab_size.saturating_mul(self.hidden_dim);
-        let final_norm_params = self.hidden_dim;
-
-        per_layer_params
-            .saturating_mul(self.num_layers)
+        total = total
             .saturating_add(embed_params)
-            .saturating_add(final_norm_params)
+            .saturating_add(self.hidden_dim);
+
+        if let Some(width) = self.per_layer_input {
+            let rows = self.num_layers.saturating_mul(width);
+            // `per_layer_model_proj` projects the stream into the per-layer
+            // input width, one row per layer-input element.
+            total = total.saturating_add(self.hidden_dim.saturating_mul(rows));
+            if self.per_layer_input_table {
+                total = total.saturating_add(self.vocab_size.saturating_mul(rows));
+            }
+        }
+        total
     }
 
     /// Prices the weight bytes required to store this model configuration in memory
     /// for a given quantisation dtype (e.g. Q4_K = 12, Q8_0 = 8, F16 = 1, F32 = 0).
+    ///
+    /// The ids 13, 14, 15, 16, 17, 18 and 35 are priced here because the
+    /// published files' descriptor lists and `general.file_type` declarations
+    /// state them; pricing a layout is not decoding it, and the readers
+    /// (`gemv`, `embedding_row_into`, `quantised_row_bytes`) still refuse every
+    /// id they have no decoder for, by its number. The GGML dtype and llama
+    /// file_type id spaces disagree on some numbers (7, 13, 14, 15, 16, 17);
+    /// where they do, the wider layout is priced, so the estimate is an upper
+    /// bound and never under the bytes the file holds.
     pub fn weight_bytes(&self, dtype: u32) -> Result<usize, InferenceError> {
         let params = self.parameter_count();
         match dtype {
@@ -1294,9 +1792,163 @@ impl ModelConfig {
             1 => Ok(params.saturating_mul(2)),            // F16: 2 bytes/weight
             2 => Ok((params.saturating_mul(18)) / 32),    // Q4_0: 4.5 bits/weight
             7 | 8 => Ok((params.saturating_mul(34)) / 32), // Q8_0: 8.5 bits/weight (7 in GGUF file_type, 8 in GGML type)
-            12 => Ok((params.saturating_mul(144)) / 256), // Q4_K: 4.5 bits/weight
+            12 | 15 => Ok((params.saturating_mul(144)) / 256), // Q4_K: 4.5 bits/weight (15 is file_type Q4_K_M)
+            13 | 16 | 17 => Ok((params.saturating_mul(176)) / 256), // Q5_K: 5.5 bits/weight (16/17 its file_type spellings)
+            14 | 18 => Ok((params.saturating_mul(210)) / 256), // Q6_K: 6.5625 bits/weight (18 its file_type spelling)
+            35 => Ok((params.saturating_mul(66)) / 256),  // TQ2_0: 2.0625 bits/weight
             other => Err(InferenceError::UnsupportedQuantization(other)),
         }
+    }
+
+    /// Bytes one row of `cols` elements occupies in `dtype`, for pricing only.
+    ///
+    /// WHY this is separate from `quantised_row_bytes`: that function sizes the
+    /// rows the loader actually reads and refuses every dtype it cannot decode.
+    /// This one prices the rows a file's descriptor list states, including the
+    /// layouts the readers do not decode yet, so a budget can name what a file
+    /// would need without claiming the engine can read it. Overflow refuses;
+    /// nothing here wraps.
+    fn priced_row_bytes(dtype: u32, cols: usize) -> Result<usize, InferenceError> {
+        let blocks = |group: usize| -> usize { cols.div_ceil(group) };
+        let bytes = match dtype {
+            0 => cols.checked_mul(4),
+            1 => cols.checked_mul(2),
+            2 => blocks(32).checked_mul(18),
+            8 => blocks(32).checked_mul(34),
+            12 => blocks(256).checked_mul(144),
+            13 => blocks(256).checked_mul(176),
+            14 => blocks(256).checked_mul(210),
+            35 => blocks(256).checked_mul(66),
+            _ => return Err(InferenceError::UnsupportedQuantization(dtype)),
+        };
+        bytes.ok_or(InferenceError::BufferTooSmall)
+    }
+
+    /// The dtype the weight pricing uses: the file's own declaration when the
+    /// walk reached it, else F32 -- the widest layout any tensor can have, so a
+    /// file whose `general.file_type` sits past the vocabulary (every published
+    /// file measured puts it there) is priced at an upper bound, never at a
+    /// quantisation the engine guessed.
+    fn pricing_dtype(&self) -> u32 {
+        match self.declared_file_type {
+            Some(ft) => ft,
+            None => 0,
+        }
+    }
+
+    /// Bytes in the largest single weight buffer a run maps.
+    ///
+    /// The block matrices are priced at the widest per-layer geometry, because
+    /// the loader holds one block at a time and that block can be any layer's.
+    /// `token_embd` is row-streamed, so it prices as one row, not the table.
+    /// `per_layer_token_embd`, where the family ships one, is row-streamed the
+    /// same way: E2B's table is 1,321,205,760 bytes whole but 5,040 bytes a row
+    /// at its declared Q4_0, and pricing it whole would refuse a file for memory
+    /// the loader never asks for. `per_layer_model_proj` and the output head are
+    /// mapped whole by the loader, so they price whole.
+    pub fn largest_weight_buffer_bytes(&self) -> Result<usize, InferenceError> {
+        let dtype = self.pricing_dtype();
+        let hidden = self.hidden_dim;
+        let span = self.max_heads_span();
+        let kv_width = self.max_kv_width();
+        let ffn = self.max_ffn_dim();
+        let mut largest = 0usize;
+        let mut consider = |bytes: Result<usize, InferenceError>| -> Result<(), InferenceError> {
+            let bytes = bytes?;
+            if bytes > largest {
+                largest = bytes;
+            }
+            Ok(())
+        };
+        // One block's matrices: Q and O at the widest query span, K and V at
+        // the widest key/value projection, the feed-forward pair and down
+        // projection at the widest feed-forward width.
+        consider(Self::priced_row_bytes(dtype, span.saturating_mul(hidden)))?;
+        consider(Self::priced_row_bytes(dtype, kv_width.saturating_mul(hidden)))?;
+        consider(Self::priced_row_bytes(dtype, ffn.saturating_mul(hidden)))?;
+        consider(Self::priced_row_bytes(dtype, hidden.saturating_mul(ffn)))?;
+        // The token table, one row.
+        consider(Self::priced_row_bytes(dtype, hidden))?;
+        if let Some(width) = self.per_layer_input {
+            let rows = self.num_layers.saturating_mul(width);
+            if self.per_layer_input_table {
+                consider(Self::priced_row_bytes(dtype, rows))?;
+            }
+            consider(Self::priced_row_bytes(dtype, hidden.saturating_mul(rows)))?;
+            consider(Self::priced_row_bytes(dtype, hidden.saturating_mul(width)))?;
+        }
+        if let Some(out_width) = self.embedding_length_out {
+            consider(Self::priced_row_bytes(dtype, hidden.saturating_mul(out_width)))?;
+        } else if self.pooling_type.is_none() {
+            // A generative file's output head is row-streamed by
+            // `load_output_head_row`: one row of hidden elements, one buffer.
+            consider(Self::priced_row_bytes(dtype, hidden))?;
+        }
+        Ok(largest)
+    }
+
+    /// Total weight bytes resident at the run's peak: one block's matrices and
+    /// norms at the widest per-layer geometry, one streamed embedding row, the
+    /// final norm, and the per-layer projection and output head where the file
+    /// declares them.
+    ///
+    /// WHAT THIS DOES NOT PRICE: the pooling head's two matrices. Their widths
+    /// (`dense_2_feat_out` and friends) sit past the vocabulary in the metadata
+    /// walk, so this config never holds them; the loader bounds that slot with
+    /// its own ceiling and shape checks in `weights.rs` instead.
+    pub fn resident_weight_bytes(&self) -> Result<usize, InferenceError> {
+        let dtype = self.pricing_dtype();
+        let hidden = self.hidden_dim;
+        let span = self.max_heads_span();
+        let kv_width = self.max_kv_width();
+        let ffn = self.max_ffn_dim();
+        let mut total = 0usize;
+        let mut add = |bytes: Result<usize, InferenceError>| -> Result<(), InferenceError> {
+            total = total.saturating_add(bytes?);
+            Ok(())
+        };
+        add(Self::priced_row_bytes(dtype, span.saturating_mul(hidden)))?;
+        add(Self::priced_row_bytes(dtype, kv_width.saturating_mul(hidden)))?;
+        add(Self::priced_row_bytes(dtype, kv_width.saturating_mul(hidden)))?;
+        add(Self::priced_row_bytes(dtype, hidden.saturating_mul(span)))?;
+        add(Self::priced_row_bytes(dtype, ffn.saturating_mul(hidden)))?;
+        add(Self::priced_row_bytes(dtype, ffn.saturating_mul(hidden)))?;
+        add(Self::priced_row_bytes(dtype, hidden.saturating_mul(ffn)))?;
+        // The block's norms: four stream-wide, two head-wide at the widest head.
+        add(Self::priced_row_bytes(0, hidden.saturating_mul(4)))?;
+        add(Self::priced_row_bytes(0, self.max_head_dim().saturating_mul(2)))?;
+        // One streamed token row and the final norm.
+        add(Self::priced_row_bytes(dtype, hidden))?;
+        add(Self::priced_row_bytes(0, hidden))?;
+        if let Some(width) = self.per_layer_input {
+            let rows = self.num_layers.saturating_mul(width);
+            if self.per_layer_input_table {
+                add(Self::priced_row_bytes(dtype, rows))?;
+            }
+            add(Self::priced_row_bytes(dtype, hidden.saturating_mul(rows)))?;
+            add(Self::priced_row_bytes(dtype, hidden.saturating_mul(width)))?;
+            add(Self::priced_row_bytes(dtype, hidden.saturating_mul(width)))?;
+            add(Self::priced_row_bytes(0, width))?;
+            add(Self::priced_row_bytes(0, 1))?;
+        }
+        if let Some(out_width) = self.embedding_length_out {
+            add(Self::priced_row_bytes(dtype, hidden.saturating_mul(out_width)))?;
+        } else if self.pooling_type.is_none() {
+            // One streamed output head row.
+            add(Self::priced_row_bytes(dtype, hidden))?;
+        }
+        Ok(total)
+    }
+
+    /// The widest one head runs in any layer.
+    pub fn max_head_dim(&self) -> usize {
+        let mut widest = self.head_dim;
+        if let Some(swa) = self.head_dim_swa {
+            if swa > widest {
+                widest = swa;
+            }
+        }
+        widest
     }
 
     /// Checks whether the model's weight footprint and scratch working set fit
@@ -1312,7 +1964,6 @@ impl ModelConfig {
         budget: usize,
     ) -> Result<(), InferenceError> {
         self.check_attention_shape()?;
-        self.check_scratch_budget()?;
         if let Some(ft) = file_type {
             let weights = self.weight_bytes(ft)?;
             let total_working_set = weights.saturating_add(self.scratch_bytes());
@@ -1320,6 +1971,7 @@ impl ModelConfig {
                 return Err(InferenceError::ScratchTooLarge(total_working_set, budget));
             }
         }
+        self.check_scratch_budget()?;
         Ok(())
     }
 
@@ -1330,18 +1982,30 @@ impl ModelConfig {
     /// kernel for exactly one mapping per allocation. So a shape can fit the
     /// device in total and still be unservable because one of its tensors is too
     /// big to map, and only this number says so.
-    pub fn largest_single_buffer_bytes(&self) -> usize {
+    ///
+    /// The weight buffers are in this comparison too: the loader maps one block
+    /// matrix, the per-layer projection or the output head as a single `Vec`, so
+    /// a weight tensor over the ceiling is as unservable as a cache tensor over
+    /// it. A weight layout the pricing cannot name refuses by its dtype number
+    /// instead of being left out of the comparison.
+    pub fn largest_single_buffer_bytes(&self) -> Result<usize, InferenceError> {
         // `kv_cache_bytes` prices both tensors; `KvCache` holds them as two.
         let cache_tensor = self.kv_cache_bytes() / 2;
         let logits = self.vocab_size.saturating_mul(FLOAT_BYTES);
-        let feed_forward = self.intermediate_dim.saturating_mul(FLOAT_BYTES);
+        let feed_forward = self.max_ffn_dim().saturating_mul(FLOAT_BYTES);
         let stream = self.hidden_dim.saturating_mul(FLOAT_BYTES);
+        let query_span = self.max_heads_span().saturating_mul(FLOAT_BYTES);
+        let kv_span = self.max_kv_width().saturating_mul(FLOAT_BYTES);
         let scores = self.seq_len.saturating_mul(FLOAT_BYTES);
-        cache_tensor
+        let weights = self.largest_weight_buffer_bytes()?;
+        Ok(cache_tensor
             .max(logits)
             .max(feed_forward)
             .max(stream)
+            .max(query_span)
+            .max(kv_span)
             .max(scores)
+            .max(weights))
     }
 
     /// First cached position one query at `pos` may attend over, exclusive of
@@ -1389,12 +2053,17 @@ impl ModelConfig {
     /// WHY it is separate from `check_scratch_budget`: that one reads the guest's
     /// telemetry, which a test build cannot author, so in a test it always gets
     /// the 120 MiB floor -- and at the floor the mapping check below can never
-    /// fire. `scratch_bytes` is `kv_cache_bytes` plus every `Scratch` buffer, and
-    /// `largest_single_buffer_bytes` is the biggest of those same allocations, so
-    /// the total is at least twice it: a buffer over the 128 MiB ceiling already
-    /// puts the total past 256 MiB. Taking the budget as a parameter is what lets
-    /// a test hold the ceiling to the shape it exists for: one that clears the
-    /// total and still cannot be mapped.
+    /// fire on a cache tensor, because a cache tensor over the 128 MiB ceiling
+    /// already puts the cache alone past 256 MiB. Taking the budget as a
+    /// parameter is what lets a test hold the ceiling to the shape it exists
+    /// for: one that clears the total and still cannot be mapped.
+    ///
+    /// WHY the weights are in the total: the run holds one block's matrices, a
+    /// streamed embedding row and the heads beside the scratch, and a budget
+    /// that priced only the activations would admit a run whose weights push it
+    /// past the device. `resident_weight_bytes` prices that hold at its peak;
+    /// `largest_single_buffer_bytes` prices the biggest single mapping, weight
+    /// buffers included.
     ///
     /// WHY the total is compared first: it is the budget, and the number the
     /// person can act on when the device is simply too small. The mapping ceiling
@@ -1404,7 +2073,7 @@ impl ModelConfig {
         if needed > budget {
             return Err(InferenceError::ScratchTooLarge(needed, budget));
         }
-        let largest = self.largest_single_buffer_bytes();
+        let largest = self.largest_single_buffer_bytes()?;
         if largest > LARGEST_SINGLE_BUFFER_BYTES {
             return Err(InferenceError::ScratchTooLarge(
                 largest,
@@ -1416,16 +2085,31 @@ impl ModelConfig {
 
     /// The head geometry this build's attention kernel can actually walk.
     ///
-    /// WHY it is not part of the budget: a file declaring two key/value heads fits
-    /// in memory -- the cache prices them -- but the kernel below caches and
-    /// attends to head 0 alone, so a second head would be read as the first and
-    /// reported as the model's. That is a graph gap, not a byte gap.
+    /// WHY it is not part of the budget: a key/value head count that does not
+    /// divide the query head count is a malformed declaration, not a big one --
+    /// no byte budget can make 5 key/value heads tile 8 query heads. That is a
+    /// graph gap, and it is refused by the key that states it.
     ///
-    /// WHY this is not a refusal of grouped-query attention: it refuses more than
-    /// one key/value HEAD. The published file is grouped-query -- three query heads
-    /// over one key/value head, 256 wide -- so head 0 is the only head the file
-    /// holds, and `run_block` folds each query head onto it, which is what the
-    /// architecture means and what this build runs.
+    /// WHY this is not a refusal of grouped-query attention: the kernel walks
+    /// every key/value head the file declares. `run_block` folds each group of
+    /// `num_heads / num_kv_heads` query heads onto its own key/value head, which
+    /// is what grouped-query attention means, and the cache holds one row per
+    /// key/value head, not one row for head 0 alone. The published
+    /// `embeddinggemma-300M-Q8_0.gguf` is grouped-query -- three query heads over
+    /// one key/value head, 256 wide -- and EmbeddingGemma 2 declares two
+    /// key/value heads in twenty of its layers and one in the other four; both
+    /// geometries are walked as stated.
+    ///
+    /// WHY the query span is no longer compared against the residual width:
+    /// `head_dim` is the file's own `key_length`, independent of
+    /// `embedding_length / head_count`. EmbeddingGemma 2 projects four heads of
+    /// 512 from a 512-wide stream -- a 2048-wide query span, four times the
+    /// stream -- and its tensor descriptors state exactly that. The old
+    /// `heads_span > hidden_dim` refusal called that malformed; it is the
+    /// architecture. What is refused here instead is real: a span whose product
+    /// overflows a `usize`, and a span whose query buffer would exceed what one
+    /// mapping can carry. The byte budget prices the span-wide buffers in
+    /// `check_scratch_against`.
     pub fn check_attention_shape(&self) -> Result<(), InferenceError> {
         if self.num_kv_heads == 0
             || (self.num_kv_heads > 1
@@ -1439,18 +2123,232 @@ impl ModelConfig {
                 1,
             ));
         }
-        let heads_span = self
-            .num_heads
-            .checked_mul(self.head_dim)
-            .unwrap_or(usize::MAX);
-        if heads_span > self.hidden_dim {
+        // Every layer's own key/value count has to tile the query heads too: a
+        // per-layer array can state a count the scalar reduction never shows.
+        // Only the declared elements can differ from the scalar; the layers
+        // past them run the uniform count the predicate above already checked.
+        let mut layer = 0usize;
+        while layer < self.num_layers && layer < self.kv_heads_per_layer.len {
+            let kv = self.layer_kv_heads(layer);
+            if kv == 0 || kv > self.num_heads || self.num_heads % kv != 0 {
+                return Err(InferenceError::ModelDeclaration(
+                    "<arch>.attention.head_count_kv",
+                    u32::try_from(kv).ok(),
+                    self.num_heads,
+                ));
+            }
+            layer += 1;
+        }
+        let heads_span = match self.num_heads.checked_mul(self.head_dim) {
+            Some(span) => span,
+            None => {
+                return Err(InferenceError::ModelDeclaration(
+                    "<arch>.attention.head_count x key_length",
+                    None,
+                    self.hidden_dim,
+                ));
+            }
+        };
+        // The widest span any layer projects, including the sliding layers'
+        // own head width; the query and attention-output buffers are cut for it.
+        // Layers past the per-layer arrays run the uniform span above.
+        let mut widest_span = heads_span;
+        let mut layer = 0usize;
+        while layer < self.detailed_layers() {
+            let span = match self.num_heads.checked_mul(self.layer_head_dim(layer)) {
+                Some(span) => span,
+                None => {
+                    return Err(InferenceError::ModelDeclaration(
+                        "<arch>.attention.head_count x key_length",
+                        None,
+                        self.hidden_dim,
+                    ));
+                }
+            };
+            if span > widest_span {
+                widest_span = span;
+            }
+            layer += 1;
+        }
+        let span_bytes = match widest_span.checked_mul(FLOAT_BYTES) {
+            Some(bytes) => bytes,
+            None => {
+                return Err(InferenceError::ModelDeclaration(
+                    "<arch>.attention.head_count x key_length",
+                    None,
+                    self.hidden_dim,
+                ));
+            }
+        };
+        if span_bytes > LARGEST_SINGLE_BUFFER_BYTES {
             return Err(InferenceError::ModelDeclaration(
                 "<arch>.attention.head_count x key_length",
-                u32::try_from(heads_span).ok(),
+                u32::try_from(widest_span).ok(),
+                LARGEST_SINGLE_BUFFER_BYTES / FLOAT_BYTES,
+            ));
+        }
+        if self.pooling_type.is_none()
+            && self.embedding_length_out.is_none()
+            && widest_span > self.hidden_dim
+        {
+            return Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.head_count x key_length",
+                u32::try_from(widest_span).ok(),
                 self.hidden_dim,
             ));
         }
         Ok(())
+    }
+
+    /// The widest value a per-layer array declares, or `None` when the file
+    /// named no array. A loop and not an iterator fold so the answer is the
+    /// file's own widest declaration, computed the same way on every target.
+    fn widest_declared(counts: &crate::gguf::PerLayerCounts) -> Option<u32> {
+        let mut widest: Option<u32> = None;
+        let mut index = 0usize;
+        while index < counts.len {
+            let value = counts.values[index];
+            match widest {
+                Some(w) if w >= value => {}
+                _ => widest = Some(value),
+            }
+            index += 1;
+        }
+        widest
+    }
+
+    /// Refuses a per-layer array whose length is neither the block count nor the
+    /// one-element form a scalar takes: a file stating 24 feed-forward widths for
+    /// 35 layers has not described its own graph, and guessing the missing layers
+    /// would be inventing declarations.
+    ///
+    /// WHY `len == 1` is accepted: `gguf.rs` holds a scalar declaration as a
+    /// one-element array, so a file stating one width for every layer arrives
+    /// here at length 1, not 0. Refusing that rejected the published
+    /// `embeddinggemma-300M-Q8_0.gguf` and the deterministic tiny fixture, both
+    /// of which state a scalar. `layer_ffn_dim` and `layer_kv_heads` answer the
+    /// uniform declaration for every layer past the declared elements, so the
+    /// one-element form already describes the whole graph.
+    fn per_layer_len_matches(
+        key: &'static str,
+        len: usize,
+        num_layers: usize,
+    ) -> Result<(), InferenceError> {
+        if len != 0 && len != 1 && len != num_layers {
+            return Err(InferenceError::ModelDeclaration(
+                key,
+                u32::try_from(len).ok(),
+                num_layers,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Cuts the cache depth to what the byte budget holds, and records the cut.
+    ///
+    /// WHY a clamp and not a refusal here: `context_length` is what the model
+    /// was trained to address, not what this device can hold. EmbeddingGemma 2
+    /// declares 262144 positions, which prices a 48 GiB cache on a device whose
+    /// whole run budget is 120 MiB; refusing the file outright would report a
+    /// model the device can run at a shorter depth as unrunnable. The clamp
+    /// keeps every dimension the file declared -- widths, heads, layers -- and
+    /// shortens only the sequence, which is the one dimension a run can answer
+    /// less of without changing the graph. `declared_seq_len` keeps the file's
+    /// own number beside the built one so the service reports the cut instead
+    /// of presenting the shorter cache as the model's context.
+    ///
+    /// WHY it lives outside `from_gguf`: the clamp is the one place a declared
+    /// number is cut to a bound, and it is cut against computed bytes, never
+    /// against a compile-time ceiling. A file whose geometry cannot hold even
+    /// one position is refused with the bytes it would need.
+    pub fn clamp_seq_len_to_budget(&mut self, budget: usize) -> Result<(), InferenceError> {
+        let declared = self.seq_len;
+        self.seq_len = 1;
+        let base = self
+            .scratch_bytes()
+            .saturating_add(self.resident_weight_bytes()?);
+        // At one position the cache prices exactly one position's rows; the
+        // scores buffer adds one float per position on top.
+        let per_position = self.kv_cache_bytes().saturating_add(FLOAT_BYTES);
+        if base > budget {
+            return Err(InferenceError::ScratchTooLarge(base, budget));
+        }
+        let mut affordable = if per_position == 0 {
+            declared
+        } else {
+            1 + (budget - base) / per_position
+        };
+        // The per-mapping ceiling bounds the cache tensor and the scores too.
+        let cache_per_position = self.kv_cache_bytes();
+        if cache_per_position > 0 {
+            let ceiling_depth = (LARGEST_SINGLE_BUFFER_BYTES / cache_per_position) * 2;
+            if ceiling_depth < affordable {
+                affordable = ceiling_depth;
+            }
+        }
+        let scores_ceiling = LARGEST_SINGLE_BUFFER_BYTES / FLOAT_BYTES;
+        if scores_ceiling < affordable {
+            affordable = scores_ceiling;
+        }
+        if affordable > declared {
+            affordable = declared;
+        }
+        if affordable == 0 {
+            return Err(InferenceError::ScratchTooLarge(base, budget));
+        }
+        self.seq_len = affordable;
+        Ok(())
+    }
+
+    /// The first declaration this engine's block graph cannot walk, named by
+    /// the key that states it, or `None` when the graph is one this build runs.
+    ///
+    /// WHY this is separate from `from_gguf`: the geometry a file declares can
+    /// be priced and allocated even where the graph has a gap, and the tests
+    /// that hold the pricing to the file's bytes need to build that config.
+    /// The service paths call this before they run, and report the gap rather
+    /// than walking a graph the file did not describe:
+    ///
+    /// - `shared_kv_layers` nonzero: layers share one key/value projection and
+    ///   this engine caches per layer; running them unshared would attend keys
+    ///   the file never projected.
+    /// - `embedding_length_per_layer_input`: the block ships an input gate,
+    ///   projection, post norm and output scale beside its attention, and this
+    ///   engine's thirteen-tensor block does not walk them.
+    /// - `embedding_length_out` different from the stream width: the embedding
+    ///   head projects to a width `extract_embedding` does not produce.
+    /// - `attention.causal` false: bidirectional attention, which the causal
+    ///   span here does not walk.
+    /// - `final_logit_softcapping`: a cap this engine's logits do not apply.
+    pub fn unwalkable_graph_declaration(&self) -> Option<(&'static str, Option<u32>, usize)> {
+        if let Some(shared) = self.shared_kv_layers {
+            if shared > 0 {
+                return Some(("<arch>.attention.shared_kv_layers", Some(shared), 0));
+            }
+        }
+        if let Some(width) = self.per_layer_input {
+            return Some((
+                "<arch>.embedding_length_per_layer_input",
+                u32::try_from(width).ok(),
+                0,
+            ));
+        }
+        if let Some(out_width) = self.embedding_length_out {
+            if out_width != self.hidden_dim {
+                return Some((
+                    "<arch>.embedding_length_out",
+                    u32::try_from(out_width).ok(),
+                    self.hidden_dim,
+                ));
+            }
+        }
+        if self.attention_causal == Some(false) {
+            return Some(("<arch>.attention.causal", Some(0), 1));
+        }
+        if let Some(cap) = self.final_logit_softcapping {
+            return Some(("<arch>.final_logit_softcapping", Some(cap as u32), 0));
+        }
+        None
     }
 
     /// Builds the engine's parameters from what the model file declares about
@@ -1485,11 +2383,36 @@ impl ModelConfig {
         }
 
         let hidden_dim = fits("<arch>.embedding_length", info.hidden_dim)?;
-        let intermediate_dim = fits("<arch>.feed_forward_length", info.intermediate_dim)?;
         let num_layers = fits("<arch>.block_count", info.num_layers)?;
         let head_dim = fits("<arch>.attention.key_length", info.head_dim)?;
         let num_heads = fits("<arch>.attention.head_count", info.num_heads)?;
         let vocab_size = fits("tokenizer.ggml.tokens", info.vocab_size)?;
+
+        // The per-layer arrays are the file's geometry where it states one. A
+        // scalar reduction is only set when every element agrees, so a file
+        // like Gemma 4 E2B -- 6144-wide feed-forwards for fifteen layers and
+        // 12288-wide for twenty -- arrives with no scalar and the array whole;
+        // the uniform bound the scratch is cut for is the widest declaration.
+        Self::per_layer_len_matches(
+            "<arch>.feed_forward_length",
+            info.ffn_per_layer.len,
+            num_layers,
+        )?;
+        Self::per_layer_len_matches(
+            "<arch>.attention.head_count_kv",
+            info.kv_heads_per_layer.len,
+            num_layers,
+        )?;
+        Self::per_layer_len_matches(
+            "<arch>.attention.sliding_window_pattern",
+            info.sliding_window_pattern.len,
+            num_layers,
+        )?;
+        let ffn_declared = match info.intermediate_dim {
+            Some(stated) => Some(stated),
+            None => Self::widest_declared(&info.ffn_per_layer),
+        };
+        let intermediate_dim = fits("<arch>.feed_forward_length", ffn_declared)?;
 
         // The depth the cache is cut to. `context_length` is what the file calls
         // the sequence it addresses, and it is read before the metadata walk
@@ -1504,9 +2427,15 @@ impl ModelConfig {
         };
 
         // A file that states no count is the format's own multi-head case: one KV
-        // head per query head. The cache prices either answer; the kernel walks
-        // the declared count, which `check_attention_shape` validates.
-        let num_kv_heads = match info.num_kv_heads {
+        // head per query head. A per-layer array with no lossless scalar is the
+        // file's own declaration, and its widest element is the uniform bound.
+        // The cache prices either answer; the kernel walks the declared count,
+        // which `check_attention_shape` validates.
+        let kv_declared = match info.num_kv_heads {
+            Some(kv) => Some(kv),
+            None => Self::widest_declared(&info.kv_heads_per_layer),
+        };
+        let num_kv_heads = match kv_declared {
             Some(kv) if kv > 0 => usize::try_from(kv).unwrap_or(usize::MAX),
             _ => num_heads,
         };
@@ -1523,10 +2452,83 @@ impl ModelConfig {
             _ => None,
         };
 
+        // The sliding layers' own head width, where the file states one. It is
+        // only assignable with the pattern that says which layers are sliding;
+        // a width without a pattern is a declaration the engine cannot place.
+        let head_dim_swa = match info.head_dim_swa {
+            Some(stated) if stated > 0 => Some(stated as usize),
+            _ => None,
+        };
+        if head_dim_swa.is_some() && info.sliding_window_pattern.len == 0 {
+            return Err(InferenceError::ModelDeclaration(
+                "<arch>.attention.key_length_swa",
+                info.head_dim_swa,
+                0,
+            ));
+        }
+
+        // This kernel rotates every element of a head and caches one value row
+        // per key row. A file whose value width differs from its key width, or
+        // whose rotary span is narrower than its head, declares a graph this
+        // build does not walk; it is refused by the key that states it rather
+        // than run at the wrong width.
+        if let Some(value) = info.value_length {
+            if value as usize != head_dim {
+                return Err(InferenceError::ModelDeclaration(
+                    "<arch>.attention.value_length",
+                    Some(value),
+                    head_dim,
+                ));
+            }
+        }
+        if let (Some(value_swa), Some(head_swa)) = (info.value_length_swa, head_dim_swa) {
+            if value_swa as usize != head_swa {
+                return Err(InferenceError::ModelDeclaration(
+                    "<arch>.attention.value_length_swa",
+                    Some(value_swa),
+                    head_swa,
+                ));
+            }
+        }
+        if let Some(rotary) = info.rope_dimension_count {
+            if rotary as usize != head_dim {
+                return Err(InferenceError::ModelDeclaration(
+                    "<arch>.rope.dimension_count",
+                    Some(rotary),
+                    head_dim,
+                ));
+            }
+        }
+        if let Some(rotary_swa) = info.rope_dimension_count_swa {
+            match head_dim_swa {
+                Some(head_swa) if rotary_swa as usize == head_swa => {}
+                _ => {
+                    return Err(InferenceError::ModelDeclaration(
+                        "<arch>.rope.dimension_count_swa",
+                        Some(rotary_swa),
+                        head_dim,
+                    ));
+                }
+            }
+        }
+
         let activation = match info.architecture() {
             Some(arch) if arch.starts_with("gemma") => ActivationType::GeGLU,
             _ => ActivationType::SwiGLU,
         };
+
+        // The per-layer input table is a separate vocabulary-sized tensor in
+        // the Gemma 4 family's published descriptor list; EmbeddingGemma 2
+        // projects the shared token table instead and ships no such tensor.
+        let per_layer_input = match info.embedding_length_per_layer_input {
+            Some(width) if width > 0 => Some(width as usize),
+            _ => None,
+        };
+        let per_layer_input_table = per_layer_input.is_some()
+            && match info.architecture() {
+                Some(arch) => arch == "gemma4",
+                None => false,
+            };
 
         let config = Self {
             hidden_dim,
@@ -1541,6 +2543,20 @@ impl ModelConfig {
             rms_norm_eps: info.rms_norm_eps.unwrap_or(1e-6),
             rope_theta: info.rope_theta.unwrap_or(10000.0),
             activation,
+            kv_heads_per_layer: info.kv_heads_per_layer,
+            ffn_per_layer: info.ffn_per_layer,
+            sliding_window_pattern: info.sliding_window_pattern,
+            head_dim_swa,
+            rope_theta_swa: info.rope_theta_swa,
+            declared_seq_len: seq_len,
+            per_layer_input,
+            per_layer_input_table,
+            shared_kv_layers: info.shared_kv_layers,
+            embedding_length_out: info.embedding_length_out.map(|w| w as usize),
+            attention_causal: info.attention_causal,
+            pooling_type: info.pooling_type,
+            final_logit_softcapping: info.final_logit_softcapping,
+            declared_file_type: info.file_type,
         };
 
         // Checked in the order the graph is built: the head geometry first, since
@@ -1552,19 +2568,29 @@ impl ModelConfig {
     }
 }
 
-/// How many `hidden_dim`-wide streams one run holds, and how many
-/// `intermediate_dim`-wide ones: the feed-forward's gate, up and product.
+/// How many buffers of each width class one run holds.
 ///
-/// The hidden streams are `x`, `residual`, `x_norm`, `q`, `k`, `v_vec`,
-/// `attn_out`, `attn_proj`, `ffn_out`, `hidden` and `pooled`; the eleven is the
-/// pooling head's accumulator, which is why it is a stream and not a slice of
-/// `hidden` (mean pooling sums every position's vector before normalising).
+/// The seven `hidden_dim`-wide streams are `x`, `residual`, `x_norm`,
+/// `attn_proj`, `ffn_out`, `hidden` and `pooled`; `pooled` is the pooling head's
+/// accumulator, which is why it is a stream and not a slice of `hidden` (mean
+/// pooling sums every position's vector before normalising).
+///
+/// The two head-span buffers are `q` and `attn_out`, cut for the widest
+/// `num_heads x head_dim` any layer projects -- which is not the stream width:
+/// EmbeddingGemma 2 projects a 2048-wide query span from a 512-wide stream, and
+/// a query buffer cut at the stream width is what the old engine wrote past.
+/// The two key/value-span buffers are `k` and `v_vec`, cut for the widest
+/// `num_kv_heads x head_dim`. The three `intermediate_dim`-wide ones are the
+/// feed-forward's gate, up and product, cut for the widest feed-forward any
+/// layer declared.
 ///
 /// WHY these are counted here and not written twice: `Scratch::bytes_for` prices
 /// the run from them and `Scratch::new` allocates them, and the two agreeing is
 /// what makes `ModelConfig::scratch_bytes` a promise instead of a comment. The
 /// test `scratch_pricing_matches_the_allocation` holds them to each other.
-const HIDDEN_STREAM_BUFFERS: usize = 11;
+const HIDDEN_STREAM_BUFFERS: usize = 7;
+const HEAD_SPAN_BUFFERS: usize = 2;
+const KV_SPAN_BUFFERS: usize = 2;
 const INTERMEDIATE_BUFFERS: usize = 3;
 
 /// Everything one forward run needs that a 256 KiB user stack cannot hold.
@@ -1585,7 +2611,10 @@ pub struct Scratch {
     pub x: Vec<f32>,
     pub residual: Vec<f32>,
     pub x_norm: Vec<f32>,
-    /// The attention projections, each `num_heads` slices of `head_dim` wide.
+    /// The attention projections. `q` and `attn_out` hold `num_heads` slices of
+    /// the layer's head width -- the widest span any layer projects, which can
+    /// be several times the residual width. `k` and `v_vec` hold the key/value
+    /// heads' slices, and `attn_proj` is back at the stream width.
     pub q: Vec<f32>,
     pub k: Vec<f32>,
     pub v_vec: Vec<f32>,
@@ -1608,14 +2637,18 @@ pub struct Scratch {
 }
 
 impl Scratch {
-    /// Bytes the non-cache part of a run costs: the streams, the scores and the
-    /// logits, plus every allocation's own overhead of one block header.
+    /// Bytes the non-cache part of a run costs: the streams, the head and
+    /// key/value spans, the feed-forward, the scores and the logits.
     pub fn bytes_for(config: &ModelConfig) -> usize {
         let streams = HIDDEN_STREAM_BUFFERS.saturating_mul(config.hidden_dim);
-        let feed_forward = INTERMEDIATE_BUFFERS.saturating_mul(config.intermediate_dim);
+        let head_span = HEAD_SPAN_BUFFERS.saturating_mul(config.max_heads_span());
+        let kv_span = KV_SPAN_BUFFERS.saturating_mul(config.max_kv_width());
+        let feed_forward = INTERMEDIATE_BUFFERS.saturating_mul(config.max_ffn_dim());
         let scores = config.seq_len;
         let logits = config.vocab_size;
         streams
+            .saturating_add(head_span)
+            .saturating_add(kv_span)
             .saturating_add(feed_forward)
             .saturating_add(scores)
             .saturating_add(logits)
@@ -1632,15 +2665,17 @@ impl Scratch {
     /// failure is reported.
     pub fn new(config: &ModelConfig) -> Result<Self, InferenceError> {
         let h = config.hidden_dim;
-        let i = config.intermediate_dim;
+        let span = config.max_heads_span();
+        let kv = config.max_kv_width();
+        let i = config.max_ffn_dim();
         Ok(Self {
             x: zeros(h)?,
             residual: zeros(h)?,
             x_norm: zeros(h)?,
-            q: zeros(h)?,
-            k: zeros(h)?,
-            v_vec: zeros(h)?,
-            attn_out: zeros(h)?,
+            q: zeros(span)?,
+            k: zeros(kv)?,
+            v_vec: zeros(kv)?,
+            attn_out: zeros(span)?,
             attn_proj: zeros(h)?,
             gate: zeros(i)?,
             up: zeros(i)?,
@@ -1684,18 +2719,20 @@ impl Scratch {
     }
 
     /// Refuses a scratch that was not cut for this shape, rather than letting a
-    /// step write past the buffers it was handed.
+    /// step write past the buffers it was handed. Each width class is checked
+    /// against the width the run actually writes: the stream buffers at the
+    /// residual width, the query and attention output at the widest head span,
+    /// key and value at the widest key/value projection, and the feed-forward
+    /// at the widest declared intermediate width.
     fn fits(&self, config: &ModelConfig) -> Result<(), InferenceError> {
         let h = config.hidden_dim;
-        let i = config.intermediate_dim;
+        let span = config.max_heads_span();
+        let kv = config.max_kv_width();
+        let i = config.max_ffn_dim();
         let streams = [
             &self.x,
             &self.residual,
             &self.x_norm,
-            &self.q,
-            &self.k,
-            &self.v_vec,
-            &self.attn_out,
             &self.attn_proj,
             &self.ffn_out,
             &self.hidden,
@@ -1704,16 +2741,10 @@ impl Scratch {
         if streams.iter().any(|b| b.len() < h) {
             return Err(InferenceError::BufferTooSmall);
         }
-        if [
-            &self.gate,
-            &self.up,
-            &self.ffn_hidden,
-            &self.logits,
-            &self.scores,
-        ]
-        .iter()
-        .any(|b| b.is_empty())
-        {
+        if self.q.len() < span || self.attn_out.len() < span {
+            return Err(InferenceError::BufferTooSmall);
+        }
+        if self.k.len() < kv || self.v_vec.len() < kv {
             return Err(InferenceError::BufferTooSmall);
         }
         if self.gate.len() < i || self.up.len() < i || self.ffn_hidden.len() < i {
@@ -1790,25 +2821,34 @@ impl<'a> LayerWeights<'a> {
             && (self.attn_k_norm.is_empty() || self.attn_k_norm.len() == head_dim)
     }
 
-    /// Whether the block's Q, K and V matrices hold at least the rows the declared
-    /// head geometry needs, counted in the quantisation this block states.
+    /// Whether the block's Q, K, V and O matrices hold at least the rows and
+    /// columns the declared head geometry needs, counted in the quantisation
+    /// this block states.
     ///
     /// WHY counted per quantisation and not per element: a Q8_0 row of 768 weights
     /// is 816 bytes, not 768, and a width check written against the element count
     /// would let `gemv` read a neighbour's blocks as this tensor's tail.
-    fn projections_hold(&self, kv_dim: usize, hidden_dim: usize) -> bool {
-        // Every one of these four matrices consumes the normalised stream, so a row
-        // of each is `hidden_dim` weights wide; what differs is how many rows the
-        // head geometry asks for, which is `kv_dim` for K and V and the whole stream
-        // for Q and O.
-        let Some(row_bytes) = quantised_row_bytes(self.weight_type, hidden_dim) else {
+    ///
+    /// WHY the span is an argument and not the stream width: Q projects the
+    /// stream into `head_count x key_length` rows, and O projects that span back
+    /// into the stream -- its rows are `hidden_dim` wide but each row is `span`
+    /// weights long. A file with decoupled heads (EmbeddingGemma 2's 2048-wide
+    /// span from a 512-wide stream) holds an O tensor four times the stream
+    /// width, and checking it at the stream width would pass a truncated tensor.
+    fn projections_hold(&self, span: usize, kv_dim: usize, hidden_dim: usize) -> bool {
+        let Some(stream_row_bytes) = quantised_row_bytes(self.weight_type, hidden_dim) else {
             return false;
         };
-        let holds = |bytes: &[u8], rows: usize| bytes.len() >= rows.saturating_mul(row_bytes);
-        holds(self.attn_q, hidden_dim)
-            && holds(self.attn_k, kv_dim)
-            && holds(self.attn_v, kv_dim)
-            && holds(self.attn_o, hidden_dim)
+        let Some(span_row_bytes) = quantised_row_bytes(self.weight_type, span) else {
+            return false;
+        };
+        let holds = |bytes: &[u8], rows: usize, row_bytes: usize| {
+            bytes.len() >= rows.saturating_mul(row_bytes)
+        };
+        holds(self.attn_q, span, stream_row_bytes)
+            && holds(self.attn_k, kv_dim, stream_row_bytes)
+            && holds(self.attn_v, kv_dim, stream_row_bytes)
+            && holds(self.attn_o, hidden_dim, span_row_bytes)
     }
 }
 
@@ -1863,10 +2903,13 @@ pub struct ModelWeights<'a> {
 /// KV cache for attention mechanisms, cut from the service's memory capability.
 ///
 /// The rows are `[layer][position][kv head][dimension]` in two flat buffers, and
-/// both are allocated to the depth, width and block count the file declared. This
-/// is the shape that could not live on the stack: the published
-/// `embeddinggemma-300M-Q8_0.gguf` -- 24 blocks, 2048 positions, one key/value
-/// head 256 wide -- is 100,663,296 bytes here, against a 262,144-byte user stack.
+/// both are allocated to the depth, width and block count the file declared --
+/// each layer at its own key/value head count and head width, because a file
+/// like EmbeddingGemma 2 declares 256-wide heads in its sliding layers and
+/// 512-wide heads in its full-attention ones. This is the shape that could not
+/// live on the stack: the published `embeddinggemma-300M-Q8_0.gguf` -- 24 blocks,
+/// 2048 positions, one key/value head 256 wide -- is 100,663,296 bytes here,
+/// against a 262,144-byte user stack.
 ///
 /// WHY the shape is recorded instead of inferred from `k.len()`: a step has to be
 /// able to tell "position 2049 of this sequence" from "a cache built for a
@@ -1878,20 +2921,48 @@ pub struct KvCache {
     /// not wrapped around into row 0.
     pub seq_len: usize,
     pub num_layers: usize,
+    /// The widest key/value head count any layer declared; each layer's own
+    /// count is answered by the geometry the cache was cut from.
     pub num_kv_heads: usize,
+    /// The widest one-head width the file declared (`key_length`); the sliding
+    /// layers' own width is answered by the same geometry.
     pub head_dim: usize,
     /// Positions written so far.
     pub len: usize,
+    /// The declaration the rows were cut from, kept whole so every row address
+    /// is answered by the file's own per-layer geometry and not by a uniform
+    /// shape the file never stated.
+    geom: ModelConfig,
+    /// Float offset of each of the first `MAX_PER_LAYER_GEOMETRY` layers inside
+    /// one tensor: the prefix sum of the layers' own row counts, so a row
+    /// address is two additions rather than a walk over every earlier layer.
+    layer_base: [usize; crate::gguf::MAX_PER_LAYER_GEOMETRY + 1],
+    /// Floats one uniform layer holds, for the layers past the per-layer arrays.
+    uniform_layer_floats: usize,
 }
 
 impl KvCache {
     /// Allocates the cache the model's own declaration describes.
     pub fn new(config: &ModelConfig) -> Result<Self, InferenceError> {
-        let rows = config
-            .num_layers
-            .saturating_mul(config.seq_len)
-            .saturating_mul(config.num_kv_heads);
-        let floats = rows.saturating_mul(config.head_dim);
+        // `kv_cache_bytes` prices both tensors at the layers' own geometry;
+        // each tensor holds half of that, and the pricing is the allocation.
+        let floats = (config.kv_cache_bytes() / 2) / FLOAT_BYTES;
+        let mut layer_base = [0usize; crate::gguf::MAX_PER_LAYER_GEOMETRY + 1];
+        let mut acc = 0usize;
+        let mut layer = 0usize;
+        while layer < crate::gguf::MAX_PER_LAYER_GEOMETRY {
+            layer_base[layer] = acc;
+            if layer < config.num_layers {
+                acc = acc.saturating_add(
+                    config
+                        .seq_len
+                        .saturating_mul(config.layer_kv_heads(layer))
+                        .saturating_mul(config.layer_head_dim(layer)),
+                );
+            }
+            layer += 1;
+        }
+        layer_base[crate::gguf::MAX_PER_LAYER_GEOMETRY] = acc;
         Ok(Self {
             k: zeros(floats)?,
             v: zeros(floats)?,
@@ -1900,6 +2971,12 @@ impl KvCache {
             num_kv_heads: config.num_kv_heads,
             head_dim: config.head_dim,
             len: 0,
+            geom: *config,
+            layer_base,
+            uniform_layer_floats: config
+                .seq_len
+                .saturating_mul(config.num_kv_heads)
+                .saturating_mul(config.head_dim),
         })
     }
 
@@ -1908,35 +2985,57 @@ impl KvCache {
         (self.k.len().saturating_add(self.v.len())).saturating_mul(FLOAT_BYTES)
     }
 
+    /// One head's row width in `layer`, as the file declared it.
+    pub fn layer_head_dim(&self, layer: usize) -> usize {
+        self.geom.layer_head_dim(layer)
+    }
+
+    /// The key/value head count `layer` declared.
+    pub fn layer_kv_heads(&self, layer: usize) -> usize {
+        self.geom.layer_kv_heads(layer)
+    }
+
     /// First float of one (layer, position, head) row, or `None` when the row is
-    /// not in this cache.
+    /// not in this cache. The layer's own head count and head width bound the
+    /// address, so a head the layer never declared has no row to write.
     pub fn row_start(&self, layer: usize, position: usize, head: usize) -> Option<usize> {
-        if layer >= self.num_layers || position >= self.seq_len || head >= self.num_kv_heads {
+        if layer >= self.num_layers || position >= self.seq_len {
             return None;
         }
-        let per_layer = self.seq_len.saturating_mul(self.num_kv_heads).saturating_mul(self.head_dim);
-        layer
-            .checked_mul(per_layer)?
-            .checked_add(position.checked_mul(self.num_kv_heads.saturating_mul(self.head_dim))?)?
-            .checked_add(head.checked_mul(self.head_dim)?)
+        let kv_heads = self.geom.layer_kv_heads(layer);
+        let head_dim = self.geom.layer_head_dim(layer);
+        if head >= kv_heads {
+            return None;
+        }
+        let base = if layer < crate::gguf::MAX_PER_LAYER_GEOMETRY {
+            self.layer_base[layer]
+        } else {
+            self.layer_base[crate::gguf::MAX_PER_LAYER_GEOMETRY].checked_add(
+                (layer - crate::gguf::MAX_PER_LAYER_GEOMETRY)
+                    .checked_mul(self.uniform_layer_floats)?,
+            )?
+        };
+        base.checked_add(position.checked_mul(kv_heads.saturating_mul(head_dim))?)?
+            .checked_add(head.checked_mul(head_dim)?)
     }
 
     /// The cached key row at (layer, position, head), or `None` when the cache
     /// was not cut with that address in it.
     ///
-    /// WHY the caller names the head: this build's kernel walks one key/value
-    /// head, so it passes 0 and `ModelConfig::check_attention_shape` is what keeps
-    /// that honest. The addressing already carries a head index, which is the
-    /// memory side of grouped-query attention being representable -- the kernel
-    /// that reads more than one row is the separate task.
+    /// WHY the caller names the head: the kernel walks every key/value head the
+    /// layer declared, folding each group of query heads onto its own key/value
+    /// head, which is what grouped-query attention means. The row is that
+    /// layer's head width, not a uniform width the file never stated.
     pub fn k_row(&self, layer: usize, position: usize, head: usize) -> Option<&[f32]> {
         let start = self.row_start(layer, position, head)?;
-        self.k.get(start..start.checked_add(self.head_dim)?)
+        self.k
+            .get(start..start.checked_add(self.geom.layer_head_dim(layer))?)
     }
 
     pub fn v_row(&self, layer: usize, position: usize, head: usize) -> Option<&[f32]> {
         let start = self.row_start(layer, position, head)?;
-        self.v.get(start..start.checked_add(self.head_dim)?)
+        self.v
+            .get(start..start.checked_add(self.geom.layer_head_dim(layer))?)
     }
 
     /// Writes one position's K and V rows for one key/value head.
@@ -1948,17 +3047,18 @@ impl KvCache {
         key: &[f32],
         value: &[f32],
     ) -> Result<(), InferenceError> {
-        // The row the cache holds is exactly the head the file declared; a head
-        // wider than the row would be truncated, and a truncated key is a
+        // The row the cache holds is exactly the head the layer declared; a
+        // head wider than the row would be truncated, and a truncated key is a
         // different model's key.
-        if key.len() != self.head_dim || value.len() != self.head_dim {
+        let head_dim = self.geom.layer_head_dim(layer);
+        if key.len() != head_dim || value.len() != head_dim {
             return Err(InferenceError::BufferTooSmall);
         }
         let start = self
             .row_start(layer, position, head)
             .ok_or(InferenceError::ContextLengthExceeded)?;
         let end = start
-            .checked_add(self.head_dim)
+            .checked_add(head_dim)
             .ok_or(InferenceError::ContextLengthExceeded)?;
         self.k
             .get_mut(start..end)
@@ -2259,27 +3359,42 @@ pub fn run_block(
     kv_cache: &mut KvCache,
     scratch: &mut Scratch,
 ) -> Result<(), InferenceError> {
+    // This layer's own geometry, as the file declared it: the sliding layers
+    // of EmbeddingGemma 2 and Gemma 4 E2B run narrower heads than their
+    // full-attention layers, and each layer's feed-forward is its own width.
+    // `config.num_kv_heads` carries the widest key/value declaration; the layer
+    // walks the count its own element of the array states.
     let h_dim = config.hidden_dim;
-    let inter_dim = config.intermediate_dim;
-    let kv_dim = kv_projection_width(config);
-    let hd = config.head_dim;
+    let inter_dim = config.layer_ffn_dim(block);
+    let hd = config.layer_head_dim(block);
+    let kv_heads = config.layer_kv_heads(block);
+    let kv_dim = kv_heads.saturating_mul(hd);
+    let span = config.num_heads.saturating_mul(hd);
+    let rope_theta = config.layer_rope_theta(block);
 
     if pos >= kv_cache.seq_len {
         return Err(InferenceError::ContextLengthExceeded);
     }
-    // The scratch is `hidden_dim` wide everywhere, which bounds the key/value side
-    // only while `num_kv_heads x head_dim` does not exceed the stream. It cannot:
-    // `check_attention_shape` refuses kv heads beyond the query heads and heads
-    // that do not tile the stream, and `from_gguf` refuses kv > query. Checked here
-    // too because a hand-built config reaches this function as well.
+    // The buffers are cut for the widest geometry any layer declared; this
+    // layer's own span, key/value width and feed-forward have to fit inside
+    // them. Checked here because a hand-built config reaches this function as
+    // well, and a scratch cut for a different shape is refused, not written
+    // past. `check_attention_shape` refuses the geometry itself.
     config.check_attention_shape()?;
-    if kv_dim > h_dim || kv_dim > scratch.k.len() || kv_dim > scratch.v_vec.len() {
+    if span > scratch.q.len()
+        || span > scratch.attn_out.len()
+        || kv_dim > scratch.k.len()
+        || kv_dim > scratch.v_vec.len()
+        || inter_dim > scratch.gate.len()
+        || inter_dim > scratch.up.len()
+        || inter_dim > scratch.ffn_hidden.len()
+    {
         return Err(InferenceError::BufferTooSmall);
     }
     if !lw.norms_hold(h_dim) || !lw.head_norms_hold(hd) {
         return Err(InferenceError::CorruptedWeights);
     }
-    if !lw.projections_hold(kv_dim, h_dim) {
+    if !lw.projections_hold(span, kv_dim, h_dim) {
         return Err(InferenceError::CorruptedWeights);
     }
 
@@ -2308,9 +3423,11 @@ pub fn run_block(
     x_norm[..h_dim].copy_from_slice(&x[..h_dim]);
     rms_norm(&mut x_norm[..h_dim], lw.attn_norm, config.rms_norm_eps);
 
-    // 2. Q, K, V projections. Q spans the whole stream (every query head laid end
-    // to end); K and V span only the rows the declared key/value heads take.
-    gemv(lw.attn_q, lw.weight_type, &x_norm[..h_dim], &mut q[..h_dim], h_dim, h_dim)?;
+    // 2. Q, K, V projections. Q spans every query head laid end to end -- the
+    // file's `head_count x key_length`, which is not the stream width when the
+    // heads are decoupled from it; K and V span only the rows this layer's
+    // declared key/value heads take.
+    gemv(lw.attn_q, lw.weight_type, &x_norm[..h_dim], &mut q[..span], span, h_dim)?;
     gemv(lw.attn_k, lw.weight_type, &x_norm[..h_dim], &mut k[..kv_dim], kv_dim, h_dim)?;
     gemv(lw.attn_v, lw.weight_type, &x_norm[..h_dim], &mut v_vec[..kv_dim], kv_dim, h_dim)?;
 
@@ -2324,49 +3441,54 @@ pub fn run_block(
         }
     }
     if !lw.attn_k_norm.is_empty() {
-        for head in 0..config.num_kv_heads {
+        for head in 0..kv_heads {
             let at = head * hd;
             rms_norm(&mut k[at..at + hd], lw.attn_k_norm, config.rms_norm_eps);
         }
     }
 
     // 4. RoPE, per query head and per key head. The two counts differ exactly when
-    // the file declares grouped-query attention.
+    // the file declares grouped-query attention, and the base is the one this
+    // layer stated -- the sliding layers' `rope.freq_base_swa` where the file's
+    // pattern marks them sliding.
     for head in 0..config.num_heads {
         let at = head * hd;
-        apply_rope(&mut q[at..at + hd], pos, hd, config.rope_theta);
+        apply_rope(&mut q[at..at + hd], pos, hd, rope_theta);
     }
-    for head in 0..config.num_kv_heads {
+    for head in 0..kv_heads {
         let at = head * hd;
-        apply_rope(&mut k[at..at + hd], pos, hd, config.rope_theta);
+        apply_rope(&mut k[at..at + hd], pos, hd, rope_theta);
     }
 
     // 5. Cache the key/value heads the model declared. `KvCache::write`
-    // refuses a slice that is not exactly `head_dim` long, so the row is the whole
-    // declared head: nothing is dropped and nothing is zero-padded to reach it.
-    for kv_head in 0..config.num_kv_heads {
+    // refuses a slice that is not exactly this layer's head width, so the row is
+    // the whole declared head: nothing is dropped and nothing is zero-padded to
+    // reach it.
+    for kv_head in 0..kv_heads {
         let at = kv_head * hd;
         kv_cache.write(block, pos, kv_head, &k[at..at + hd], &v_vec[at..at + hd])?;
     }
 
     // 6. Attention scores and softmax, then the weighted sum of values.
     //
-    // The span is the one the file declared: `attention.sliding_window` positions
-    // ending at `pos`, or the whole cached prefix when the file stated no window.
-    // Softmax normalises over exactly that span, so a position the window excludes
-    // contributes no weight at all -- it is not scored and dropped afterwards, it
-    // is never scored. This is why the published file's 512 against its own 2048
-    // `context_length` is a graph difference and not a rounding one: past
-    // position 511 the old span handed probability mass to keys the model says
-    // this query does not see.
+    // The span is the one this layer declared: the whole cached prefix where
+    // the file's `sliding_window_pattern` marks the layer full-attention, and
+    // `attention.sliding_window` positions ending at `pos` everywhere else (or
+    // the whole prefix when the file stated no window). Softmax normalises over
+    // exactly that span, so a position the window excludes contributes no weight
+    // at all -- it is not scored and dropped afterwards, it is never scored.
+    // This is why the published file's 512 against its own 2048 `context_length`
+    // is a graph difference and not a rounding one: past position 511 the old
+    // span handed probability mass to keys the model says this query does not
+    // see.
     let scale_att = 1.0f32 / f32_sqrt(hd as f32);
-    let span_start = config.attention_span_start(pos);
+    let span_start = config.layer_attention_span_start(block, pos);
     let span_end = pos + 1;
     debug_assert!(span_start < span_end, "the window never excludes the query itself");
-    for value in attn_out[..h_dim].iter_mut() {
+    for value in attn_out[..span].iter_mut() {
         *value = 0.0f32;
     }
-    let group_size = config.num_heads / config.num_kv_heads.max(1);
+    let group_size = config.num_heads / kv_heads.max(1);
     for head in 0..config.num_heads {
         let kv_head = head / group_size;
         let h_base = head * hd;
@@ -2392,8 +3514,10 @@ pub fn run_block(
         }
     }
 
-    // 7. Output projection, post-attention norm, residual add.
-    gemv(lw.attn_o, lw.weight_type, &attn_out[..h_dim], &mut attn_proj[..h_dim], h_dim, h_dim)?;
+    // 7. Output projection, post-attention norm, residual add. The projection
+    // consumes the whole query span -- `head_count x key_length` weights per
+    // row, which is the width `attn_out` holds -- and returns the stream width.
+    gemv(lw.attn_o, lw.weight_type, &attn_out[..span], &mut attn_proj[..h_dim], h_dim, span)?;
     rms_norm(&mut attn_proj[..h_dim], lw.post_attn_norm, config.rms_norm_eps);
     for i in 0..h_dim {
         x[i] = residual[i] + attn_proj[i];
@@ -2482,6 +3606,15 @@ pub fn forward_step(
     // one row read from the file, tagged with the token it was read for. A step
     // given a row for a different token is refused rather than answered with it,
     // because the answer would then be one token's embedding reported as another's.
+    // WHY the id is refused before either embedding form is read: a token outside
+    // the declared vocabulary has no row in this model. Wrapping it into range
+    // would answer with a different token's embedding reported as this one's.
+    if token_id as usize >= config.vocab_size {
+        return Err(InferenceError::TokenOutOfVocabulary(
+            token_id,
+            config.vocab_size,
+        ));
+    }
     let embd_scale = f32_sqrt(h_dim as f32);
     match model.token_embd {
         TokenEmbedding::Row { bytes, dtype, token } => {
@@ -2491,7 +3624,7 @@ pub fn forward_step(
             embedding_row_into(bytes, dtype, embd_scale, &mut scratch.x[..h_dim])?;
         }
         TokenEmbedding::Table { bytes, rows, dtype } => {
-            let embd_idx = (token_id as usize) % config.vocab_size;
+            let embd_idx = token_id as usize;
             if embd_idx >= rows {
                 // The row the file does not hold is not invented here. A stand-in
                 // built from the token id would let an answer be reported as the
@@ -2599,11 +3732,16 @@ pub fn generate(
 
     // 1. Pre-fill prompt tokens.
     //
-    // A prompt longer than the sequence the file declared is cut to it rather than
-    // run past the cache: `config.seq_len` comes from `context_length`, so the tail
-    // the model could not have attended to is dropped by the model's own limit and
-    // not by one invented here.
-    let prefill_len = prompt_tokens.len().min(config.seq_len);
+    // WHY an over-length prompt is refused rather than cut: dropping the tail
+    // silently would report an answer to the whole prompt while the model only
+    // ever saw a prefix of it. `config.seq_len` is the context the budget clamp
+    // actually built (`clamp_seq_len_to_budget`), so this refusal names the real
+    // limit the device paid for, and the caller can shorten the prompt or ask for
+    // a bigger budget instead of receiving a quietly partial answer.
+    if prompt_tokens.len() > config.seq_len {
+        return Err(InferenceError::ContextLengthExceeded);
+    }
+    let prefill_len = prompt_tokens.len();
     for pos in 0..prefill_len {
         if is_cancelled() {
             return Err(InferenceError::Cancelled);
@@ -3913,6 +5051,7 @@ pub mod tests {
         info.sliding_window = Some(512);
         info.rms_norm_eps = Some(1e-6);
         info.rope_theta = Some(1_000_000.0);
+        info.pooling_type = Some(1);
         info
     }
 
@@ -3929,7 +5068,7 @@ pub mod tests {
         huge.context_length = Some(8192);
         assert_eq!(
             ModelConfig::from_gguf(&huge),
-            Err(InferenceError::ScratchTooLarge(437_421_056, SCRATCH_BYTE_BUDGET))
+            Err(InferenceError::ScratchTooLarge(437_402_624, SCRATCH_BYTE_BUDGET))
         );
 
         // The same file at the shortest context anything of this family ships with
@@ -3940,7 +5079,7 @@ pub mod tests {
         small.num_kv_heads = Some(1);
         small.context_length = Some(512);
         let accepted = ModelConfig::from_gguf(&small).expect("28 MiB of cache is under budget");
-        assert_eq!(accepted.scratch_bytes(), 28_445_696);
+        assert_eq!(accepted.scratch_bytes(), 28_427_264);
         assert_eq!(accepted.check_scratch_budget(), Ok(()));
 
         // Refusing on bytes is not the same as refusing on a dimension, and the
@@ -3984,7 +5123,7 @@ pub mod tests {
             ModelConfig::from_gguf(&huge),
             Err(InferenceError::ScratchTooLarge(needed, SCRATCH_BYTE_BUDGET))
         );
-        assert_eq!(needed, 437_421_056);
+        assert_eq!(needed, 437_402_624);
     }
 
     /// The refused shape, priced directly from its declared dimensions.
@@ -4002,6 +5141,7 @@ pub mod tests {
             rms_norm_eps: 1e-6,
             rope_theta: 1_000_000.0,
             activation: ActivationType::SwiGLU,
+            ..ModelConfig::default_test_config()
         }
     }
 
@@ -4020,7 +5160,7 @@ pub mod tests {
         // The window is not a pricing input: the 512 the file states beside its own
         // 2048-position context costs exactly the bytes the context costs, so this
         // change neither raised a bound nor asked the device for more RAM.
-        assert_eq!(published.scratch_bytes(), 101_767_680);
+        assert_eq!(published.scratch_bytes(), 101_763_584);
         assert_eq!(published.check_scratch_budget(), Ok(()));
 
         // A file that states no window gets no limit, not the engine's own guess.
@@ -4225,7 +5365,7 @@ pub mod tests {
         // 2 x 24 x 2048 x 1 x 256 x 4: 96 MiB, which is 100 times the stack it
         // used to have to live on.
         assert_eq!(config.kv_cache_bytes(), 100_663_296);
-        assert_eq!(config.scratch_bytes(), 101_767_680);
+        assert_eq!(config.scratch_bytes(), 101_763_584);
         assert_eq!(config.check_scratch_budget(), Ok(()));
         assert!(config.scratch_bytes() < SCRATCH_BYTE_BUDGET);
     }
@@ -4360,7 +5500,7 @@ pub mod tests {
         let config = ModelConfig::from_gguf(&info)
             .unwrap_or_else(|error| panic!("the real file at {path} was refused: {error:?}"));
         assert_eq!(config.kv_cache_bytes(), 100_663_296);
-        assert_eq!(config.scratch_bytes(), 101_767_680);
+        assert_eq!(config.scratch_bytes(), 101_763_584);
         assert_eq!(config.check_scratch_budget(), Ok(()));
         // The window the file states beside its own 2048-position context now
         // reaches the graph. Taken from the file's bytes, not from the fixture:
@@ -4418,7 +5558,7 @@ pub mod tests {
         );
         assert_eq!(
             longer.check_scratch_budget(),
-            Err(InferenceError::ScratchTooLarge(403_782_144, SCRATCH_BYTE_BUDGET)),
+            Err(InferenceError::ScratchTooLarge(403_778_048, SCRATCH_BYTE_BUDGET)),
             "the real file at 8192 positions has to be refused by the bytes it names"
         );
     }
@@ -4464,7 +5604,8 @@ pub mod tests {
             "one cache tensor is {tensor} bytes, over the {LARGEST_SINGLE_BUFFER_BYTES} byte ceiling"
         );
         assert_eq!(
-            wide.largest_single_buffer_bytes(),
+            wide.largest_single_buffer_bytes()
+                .expect("this shape's buffers are all priceable"),
             tensor,
             "the cache tensor is this shape's biggest single allocation"
         );
@@ -4632,6 +5773,7 @@ pub mod tests {
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
             activation: ActivationType::SwiGLU,
+            ..ModelConfig::default_test_config()
         };
 
         // 1. Weight bytes priced from model configuration
@@ -4763,6 +5905,7 @@ pub mod tests {
             rms_norm_eps: 1e-6,
             rope_theta: 10000.0,
             activation: ActivationType::SwiGLU,
+            ..ModelConfig::default_test_config()
         };
         assert_eq!(gqa_config.check_attention_shape(), Ok(()));
 

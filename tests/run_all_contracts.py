@@ -91,6 +91,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_framebuffer_verification.py": 14,
     "tests/test_gallery_truth_contract.py": 18,
     "tests/test_hal_boundary_contract.py": 4,
+    "tests/test_harness_truthfulness.py": 10,
     "tests/test_heap_bench.py": 16,
     "tests/test_idle_console_quiet_contract.py": 5,
     "tests/test_image_format_truth_contract.py": 4,
@@ -367,18 +368,35 @@ def has_verifiable_assertions(path: str) -> bool:
         return False
 
 
-def ensure_declared_fixtures():
-    """Ensure declared header fixtures are present for contract validation."""
-    gguf_path = os.path.join("target", "verify", "models", "embeddinggemma-300M-Q8_0.gguf")
-    if not os.path.exists(gguf_path):
-        os.makedirs(os.path.dirname(gguf_path), exist_ok=True)
-        import struct
-        with open(gguf_path, "wb") as f:
-            f.write(struct.pack("<4sIQQ", b"GGUF", 3, 316, 41))
+def report_model_fixtures():
+    """Reports the model artifacts the contracts read; never creates them.
+
+    WHY this only reports: this function used to write a 24-byte GGUF stub at
+    the published weights' own path when the real file was absent, and the
+    inference graph contract's header check then passed against that stub --
+    the harness manufacturing the evidence it exists to verify. The synthetic
+    parser fixtures under target/verify/models (gemma-tiny-f32.gguf and
+    siblings) are legitimate deterministic test inputs; the published weights
+    are a prerequisite, not a fixture. When they are absent, model-dependent
+    gates must report the absence, never a synthesized pass.
+    """
+    models_dir = os.path.join("target", "verify", "models")
+    real_path = os.path.join(models_dir, "embeddinggemma-300M-Q8_0.gguf")
+    if os.path.isfile(real_path):
+        print(f"Model artifacts: real weights present at {real_path} "
+              f"({os.path.getsize(real_path)} bytes)")
+    else:
+        print(f"Model artifacts: UNAVAILABLE - {real_path} is not on this host. "
+              "The harness does not synthesize a substitute; model-dependent "
+              "contracts report the missing file themselves.")
+    synthetic = sorted(glob.glob(os.path.join(models_dir, "gemma-*.gguf")))
+    if synthetic:
+        print("Model artifacts: synthetic parser-test fixtures (not real weights): "
+              + ", ".join(os.path.basename(p) for p in synthetic))
 
 
 def run_contracts(target_files=None):
-    ensure_declared_fixtures()
+    report_model_fixtures()
     all_test_files = sorted(
         normalize_path(p) for p in glob.glob("tests/**/test_*.py", recursive=True)
         if not os.path.basename(p).startswith("test_tmp_")
@@ -538,12 +556,18 @@ def run_contracts(target_files=None):
                 failures.append(p)
                 file_reports[p] = (False, f"FAILED: 0 test cases executed ({stats['skipped']} skipped)")
             else:
-                framework_cases_passed += stats["passed"]
                 detail = f"Ran {stats['passed']} cases"
                 if stats["skipped"]:
                     detail += f" + {stats['skipped']} skipped"
                 file_reports[p] = (True, detail)
 
+        # WHY passed is summed over every suite, not only the green ones: the
+        # RUNNER INTEGRITY line below promises that everything collected appears
+        # in its buckets. Counting only green suites' passes made the arithmetic
+        # fail to close on any red run -- the passing cases of a failing suite
+        # vanished from the record, which reads as cases lost rather than as a
+        # failing suite. The verdict is unchanged: a failing suite still fails.
+        framework_cases_passed = sum(s["passed"] for s in pt_results.values())
         framework_cases_failed = sum(s["failed"] for s in pt_results.values())
         framework_cases_errored = sum(s["errored"] for s in pt_results.values())
         framework_cases_skipped = sum(s["skipped"] for s in pt_results.values())

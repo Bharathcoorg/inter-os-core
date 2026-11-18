@@ -2704,6 +2704,26 @@ def ids_named(paragraph: str, ids: list) -> list:
     return [dtype for dtype in ids if re.search(rf"\b{dtype}\b", paragraph)]
 
 
+# The decode refusal promise, as it reads once the `///` prefixes are stripped and
+# the lines joined.
+#
+# WHY a phrase and not the bare word "number": the same doc block also explains
+# that *sizing* a payload refuses an unmapped dtype "by number at the read". That
+# sentence is about placing a tensor, not decoding one, and it sits in the same
+# contiguous `///` block the claim opens -- so a bare-word check is satisfied by
+# it even when the decode refusal is deleted. The gate would then pass without
+# the promise it exists to protect, and its own mutation block could no longer
+# observe the fault it injects.
+DECODE_REFUSAL = re.compile(r"naming the tensor and the number\b")
+
+# The same promise in the raw file, where a doc re-wrap puts a newline and a
+# `///` prefix between the words. Sabotage has to match the file as written, not
+# as the paragraph joins it, or a re-wrap silently disarms the mutation block.
+DECODE_REFUSAL_RAW = re.compile(
+    r"naming the tensor(?:[ \t]*\r?\n[ \t]*///[ \t]*|[ \t]+)and the number\."
+)
+
+
 def test_the_reader_names_the_quantisations_the_engine_maps():
     """`weights.rs` claims eight quantisations; the engine sizes a row for five.
 
@@ -2731,8 +2751,9 @@ def test_the_reader_names_the_quantisations_the_engine_maps():
     )
     # And it has to say what happens to a dtype it has not mapped: refused by its
     # number, never read as a neighbour's layout.
-    assert "number" in paragraph, (
-        "the claim no longer says an unmapped dtype is refused by its number"
+    assert DECODE_REFUSAL.search(paragraph), (
+        "the claim no longer promises to refuse an unmapped dtype by naming the "
+        "tensor and the number"
     )
 
 
@@ -2786,20 +2807,19 @@ def test_the_quantisation_claim_gate_can_fail():
 
     # 4. The refusal sentence dropped, so the paragraph implies a guess instead
     # of a refusal.
-    unrefused = weights.replace(
-        "naming the tensor and the number.", "naming the tensor.", 1
-    )
+    unrefused = DECODE_REFUSAL_RAW.sub("naming the tensor.", weights, count=1)
     assert unrefused != weights, "the refusal sentence moved; this fixture is stale"
     _, paragraph = quantisation_claim(unrefused)
-    assert "number" not in paragraph, (
-        "the gate would pass a claim that no longer says an unmapped dtype is refused"
+    assert not DECODE_REFUSAL.search(paragraph), (
+        "the gate would pass a claim whose decode refusal was deleted, because "
+        'the sizing prose in the same block still says "number"'
     )
 
     # None of those faults are in the service as it stands.
     claimed, paragraph = quantisation_claim(weights)
     assert claimed == len(ids) == 5 and ids == [0, 1, 2, 8, 12]
     assert ids_named(paragraph, ids) == ids
-    assert "number" in paragraph
+    assert DECODE_REFUSAL.search(paragraph)
 
 
 def mutate_function(source: str, signature: str, old: str, new: str) -> str:
@@ -3520,6 +3540,320 @@ def test_the_derived_budget_contract_can_fail():
     assert _budget_defects(tokenizer, unpriced_scratch), (
         "a run priced against the floor rather than the guest's free RAM passed"
     )
+
+
+# ---------------------------------------------------------------------------
+# The installed-file generation run: the slice the dispatch-arm gates never saw.
+#
+# WHY a second slice: `generative_arm` stops at the dispatch arm, while the run
+# that opens the installed file, encodes the prompt and reports the model's
+# tokens lives in `run_installed_generation` -- outside every detector above.
+# The defects that lived there (an authored reply under STATUS_SUCCESS, ids
+# synthesized from byte values modulo the vocabulary, an empty prompt run as
+# EOS, authored decode parameters) are pinned here by the same kind of reading
+# the dispatch arm gets, located by function name so it survives edits.
+
+
+def installed_generation_body(source: str) -> str:
+    return tolerant_body(source, "fn run_installed_generation(")
+
+
+def _installed_generation_faults(lib: str) -> list:
+    """Every way the installed-file run can go back to answering with invention."""
+    faults = []
+    body = installed_generation_body(lib)
+    if not body:
+        return ["run_installed_generation is gone: the installed-file run has no body to read"]
+    code = without_comments(body)
+
+    for fabricated in FABRICATED:
+        if fabricated in code:
+            faults.append(f"the installed-file run builds {fabricated!r}")
+
+    # A success reply may carry only the bytes the file's own vocabulary
+    # decoded. An authored sentence -- inline, or bound to a variable first --
+    # is the defect this reads for: `count > 0` proves tokens were sampled,
+    # not that any were decoded.
+    for call in re.findall(r"reply_with_answer\((?:[^()]|\([^()]*\))*\)", code):
+        if "STATUS_SUCCESS" in call and "generated_bytes.as_slice()" not in call:
+            faults.append(
+                f"a success reply carries something other than the decoded model bytes: {call}"
+            )
+    if re.search(r'generated_bytes(?:\s*=\s*[^;]*b"|\.extend_from_slice\(b")', code):
+        faults.append("authored bytes are placed into the model's answer buffer")
+    if "STATUS_UNAVAILABLE" not in code:
+        faults.append("the run has no unavailable answer for tokens that decoded to nothing")
+
+    if re.search(r"%\s*\(?\s*config\.vocab_size", code):
+        faults.append("prompt ids are synthesized from byte values modulo the vocabulary size")
+    if "tokenizer_refusal_words(error" not in code:
+        faults.append("the tokenizer failure no longer answers with the refusal that names the error")
+
+    if "&[1u32]" in code:
+        faults.append("an empty prompt is run as the EOS token")
+    if "prompt_text.is_empty()" not in code:
+        faults.append("the run no longer refuses an empty prompt")
+
+    flat_code = flat(code)
+    if "let max_new_tokens = 32;" in flat_code:
+        faults.append("the run length is authored instead of taken from the file's declared context")
+    if "config.seq_len" not in code:
+        faults.append("the run no longer reads the model's declared context bound")
+    if "[0u32; 128]" in code:
+        faults.append("the prompt buffer is a magic width instead of the declared bound")
+    if "generated_ids" in code:
+        faults.append("the dead id allocation is back")
+    if "[0u8; 32]" in code:
+        faults.append("the decode buffer is a magic width that silently cuts a piece")
+    if "tokenizer::MAX_PIECE_BYTES" not in code:
+        faults.append("the decode buffer is not sized from the reader's own piece bound")
+    return faults
+
+
+def test_the_installed_file_run_answers_only_what_the_model_decoded():
+    """The run that opens the installed file is under the same truth contract.
+
+    It used to answer STATUS_SUCCESS with an authored sentence when decoding
+    produced no bytes, to synthesize prompt ids from byte values when the
+    tokenizer failed or was absent, and to run an empty prompt as the EOS
+    token. Each of those is a reply the model never gave.
+    """
+    faults = _installed_generation_faults(lib_source())
+    assert not faults, faults
+
+
+def test_the_installed_file_run_contract_can_fail():
+    """Each defect put back into a copy of the source has to be seen."""
+    lib = lib_source()
+    assert not _installed_generation_faults(lib)
+    sig = "fn run_installed_generation("
+    success_call = (
+        "reply_with_answer(sender_task_id, std::ai::STATUS_SUCCESS, "
+        "generated_bytes.as_slice(), tx_buf);"
+    )
+
+    # D2: the authored fallback returns, bound to a variable first.
+    authored = mutate_function(
+        lib,
+        sig,
+        success_call,
+        'let reply_data = if !generated_bytes.is_empty() { generated_bytes.as_slice() } '
+        'else { b"Model generated tokens successfully from loaded weights." };\n'
+        "            reply_with_answer(sender_task_id, std::ai::STATUS_SUCCESS, reply_data, tx_buf);",
+    )
+    assert any("success reply" in f for f in _installed_generation_faults(authored)), (
+        "an authored fallback under STATUS_SUCCESS passed"
+    )
+
+    # D2 again, with the literal inline in the call.
+    inline = mutate_function(
+        lib,
+        sig,
+        success_call,
+        'reply_with_answer(sender_task_id, std::ai::STATUS_SUCCESS, '
+        'b"Model generated tokens successfully from loaded weights.", tx_buf);',
+    )
+    assert any("success reply" in f for f in _installed_generation_faults(inline))
+
+    # D3: byte values modulo the vocabulary size come back as prompt ids.
+    synth = mutate_function(
+        lib,
+        sig,
+        "let tokens = &prompt_ids[..num_ids];",
+        "let _guess = (prompt_text[0] as u32) % (config.vocab_size as u32);\n"
+        "    let tokens = &prompt_ids[..num_ids];",
+    )
+    assert any("synthesized" in f for f in _installed_generation_faults(synth)), (
+        "id synthesis from byte values passed"
+    )
+
+    # D5: the empty prompt becomes EOS again.
+    eos = mutate_function(
+        lib,
+        sig,
+        "let tokens = &prompt_ids[..num_ids];",
+        "let tokens = if num_ids > 0 { &prompt_ids[..num_ids] } else { &[1u32] };",
+    )
+    assert any("EOS" in f for f in _installed_generation_faults(eos))
+    unguarded = mutate_function(lib, sig, "if prompt_text.is_empty() {", "if false {")
+    assert any("empty prompt" in f for f in _installed_generation_faults(unguarded))
+
+    # D42: the authored run length and the magic buffers come back.
+    authored_len = mutate_function(
+        lib,
+        sig,
+        "let max_new_tokens = config.seq_len.saturating_sub(num_ids);",
+        "let max_new_tokens = 32;",
+    )
+    assert any("run length is authored" in f for f in _installed_generation_faults(authored_len))
+    magic_buf = mutate_function(
+        lib,
+        sig,
+        "let mut decode_buf = [0u8; tokenizer::MAX_PIECE_BYTES];",
+        "let mut decode_buf = [0u8; 32];",
+    )
+    assert any("decode buffer" in f for f in _installed_generation_faults(magic_buf))
+
+
+# ---------------------------------------------------------------------------
+# The boot path: no identity claim without the file's own architecture, and no
+# model-sized walk before the service answers IPC.
+
+
+def _boot_identity_faults(lib: str) -> list:
+    faults = []
+    run_ai = tolerant_body(lib, "pub fn run_ai")
+    if not run_ai:
+        return ["run_ai is gone: the boot path has no body to read"]
+    if "verified physical EmbeddingGemma 2" in run_ai:
+        faults.append(
+            "the boot path claims EmbeddingGemma 2 from a header probe that reads no architecture"
+        )
+    for walk in (
+        "init_resident_model_cache",
+        "TensorTable::walk",
+        "read_model_info_stream",
+        "get_or_build_resident_tokenizer",
+    ):
+        if walk in run_ai:
+            faults.append(f"a model-sized walk ({walk}) runs before the service answers IPC")
+
+    claim = tolerant_body(lib, "fn log_declared_model_identity")
+    if not claim:
+        faults.append("no gated identity claim exists")
+    else:
+        if "info.architecture()" not in claim:
+            faults.append("the identity claim does not read the file's own architecture")
+        if '"gemma-embedding"' not in claim:
+            faults.append("the claim is not gated on the embedding family's declared architecture")
+        if "unestablished" not in claim:
+            faults.append("a file with no readable architecture is not reported as unestablished")
+    cache = tolerant_body(lib, "fn set_resident_model_cache")
+    if "log_declared_model_identity(info)" not in cache:
+        faults.append("the identity claim is not made where the metadata walk's record is cached")
+
+    # The walks the boot path gave up must still happen on the request path.
+    for runner in ("fn run_installed_embedding(", "fn run_installed_generation("):
+        body = tolerant_body(lib, runner)
+        if "get_resident_model_cache(path)" not in body or (
+            "set_resident_model_cache(path, &table, &info)" not in body
+        ):
+            faults.append(f"{runner} no longer builds the cache lazily on a miss")
+    return faults
+
+
+def test_the_embedding_identity_claim_is_gated_and_the_boot_path_walks_nothing():
+    """A path in the candidate list is not a model identity.
+
+    The install slot is a candidate for both model families, so any file the
+    install flow writes there used to be announced as verified EmbeddingGemma 2
+    from a probe that reads only magic, version and counts. The claim now comes
+    from the file's own `general.architecture`, read by the metadata walk on the
+    first request that needs it -- and no model-sized walk runs before the
+    serve loop answers IPC.
+    """
+    faults = _boot_identity_faults(lib_source())
+    assert not faults, faults
+
+
+def test_the_boot_identity_contract_can_fail():
+    lib = lib_source()
+    assert not _boot_identity_faults(lib)
+
+    # D4: the unconditional claim returns to the boot path.
+    claimed = mutate_function(
+        lib,
+        "pub fn run_ai",
+        'let _ = std::log("[aid] embedding weights file present; its declared identity is read from its metadata on first use.");',
+        'let _ = std::log("[aid] verified physical EmbeddingGemma 2 weights in storage.");',
+    )
+    assert any("claims EmbeddingGemma 2" in f for f in _boot_identity_faults(claimed)), (
+        "an unconditional identity claim on the boot path passed"
+    )
+
+    # D27: the eager walk returns before the serve loop.
+    walked = mutate_function(
+        lib,
+        "pub fn run_ai",
+        "let mut probed_models = gguf::probe_all_models();",
+        "let mut probed_models = gguf::probe_all_models();\n"
+        "    if let Some((_hdr, path)) = probed_models.embedding { init_resident_model_cache(path); }",
+    )
+    assert any("model-sized walk" in f for f in _boot_identity_faults(walked)), (
+        "a model-sized walk before the serve loop passed"
+    )
+
+    # The gate itself removed: a file declaring another architecture is
+    # announced as EmbeddingGemma 2 anyway.
+    ungated = mutate_function(
+        lib,
+        "fn log_declared_model_identity",
+        'Some(arch) if arch == "gemma-embedding" || arch == "gemma-embedding2" => {',
+        "Some(arch) => {",
+    )
+    assert any("gated" in f for f in _boot_identity_faults(ungated))
+
+
+# ---------------------------------------------------------------------------
+# The search frame: a retrieval that matched nothing is not a success.
+
+
+def _zero_hit_faults(lib: str) -> list:
+    faults = []
+    start = lib.index(GENERATIVE_END)
+    arm = lib[start : start + lib[start:].index("// 4. Embedding inference query")]
+    flat_arm = flat(without_comments(arm))
+    if (
+        "let status = if found_count == 0 { std::ai::STATUS_UNAVAILABLE } "
+        "else { std::ai::STATUS_SUCCESS };" not in flat_arm
+    ):
+        faults.append("the search frame no longer derives its status from the hit count")
+    if "status: std::ai::STATUS_SUCCESS" in flat_arm:
+        faults.append("the search header hardcodes success beside a hit count that can be zero")
+    if "stream_answer( sender_task_id, status, MSG_TYPE_SEARCH_CHUNK," not in flat_arm:
+        faults.append("the streamed search frame does not carry the hit-derived status")
+    return faults
+
+
+def test_a_search_that_matched_nothing_is_not_a_success():
+    """`output_dim` counts matches; zero of them is not a retrieval that found
+    what the caller asked for. Both delivery routes -- the streamed frame and
+    the inline mailbox fallback -- carry the same hit-derived status."""
+    faults = _zero_hit_faults(lib_source())
+    assert not faults, faults
+
+
+def test_the_zero_hit_search_contract_can_fail():
+    lib = lib_source()
+    assert not _zero_hit_faults(lib)
+    always = mutate_function(
+        lib,
+        "pub fn handle_ipc_inference_query(",
+        "let status = if found_count == 0 {",
+        "let status = if false {",
+    )
+    assert any("hit count" in f for f in _zero_hit_faults(always)), (
+        "a zero-hit retrieval answering as a success passed"
+    )
+
+
+def test_the_generative_route_comment_describes_the_on_device_run():
+    """The owner rejected the host bridge; the comment may not still claim it.
+
+    The route runs `run_installed_generation` on the device, and a comment
+    saying otherwise describes an architecture the code does not have.
+    """
+    lib = lib_source()
+    arm = generative_arm(lib)
+    assert "host-backed" not in arm, "the comment still claims the rejected host bridge"
+    assert "run_installed_generation" in arm
+    restored = mutate_function(
+        lib,
+        "pub fn handle_ipc_inference_query(",
+        "there is no host bridge on\n    // this route.",
+        "it is host-backed via development bridge on\n    // this route.",
+    )
+    assert "host-backed" in generative_arm(restored)
 
 
 def load_tests(loader, standard_tests, pattern):

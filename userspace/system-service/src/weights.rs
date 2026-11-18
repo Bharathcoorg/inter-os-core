@@ -78,15 +78,22 @@ pub const MAX_NAME_BYTES: usize = crate::gguf::MAX_TENSOR_NAME_LEN;
 /// The five quantisations `gemv` and `embedding_row_into` know the byte layout of:
 /// dtype ids 0 (F32), 1 (F16), 2 (Q4_0), 8 (Q8_0) and 12 (Q4_K).
 ///
-/// WHY a list and not a table in this module: the engine's arithmetic is the
-/// authority, and a loader that carried its own size table could disagree with it
-/// about a block's width without either one saying so. The sizes are asked for
-/// through `quantised_row_bytes`, which returns `None` for anything else, and `None`
-/// becomes `LoadError::UnsupportedDtype` naming the tensor and the number. A dtype
-/// outside those five -- Q4_1, Q5_K and Q6_K are the ones the GGML format names and
-/// this engine has no row layout for -- is refused outright rather than read with a
-/// neighbour's scale bytes, so the count above is what this build can read and not
-/// what the format has room for.
+/// WHY the decode layouts are a list and not a table: the engine's arithmetic is
+/// the authority for reading a row, and a loader that carried its own decode table
+/// could disagree with it about a block's width without either one saying so. The
+/// row sizes are asked for through `quantised_row_bytes`, which returns `None` for
+/// anything else, and `None` becomes `LoadError::UnsupportedDtype` naming the tensor
+/// and the number. A dtype outside those five -- Q4_1, Q5_K and Q6_K are the ones
+/// the GGML format names and this engine has no row layout for -- is refused outright
+/// rather than read with a neighbour's scale bytes, so the count above is what this
+/// build can decode and not what the format has room for.
+///
+/// Placing a tensor is a different question from decoding one. The descriptor walk
+/// needs each payload's byte length to round the data section and bound the read,
+/// and that length is the GGML block geometry the format itself defines, carried by
+/// `descriptor_byte_len` below for every dtype the format numbers so a heterogeneous
+/// file's table can be walked at all. Sizing is not decoding: a dtype the engine has
+/// no row layout for is still refused by number at the read, never dequantised.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LoadError {
     /// The reader's own failure, kept whole: a truncated descriptor table and a
@@ -138,6 +145,12 @@ pub enum LoadError {
     /// The descriptor's own dimensions do not describe the tensor the graph needs
     /// (a row width that is not a whole number of quantisation blocks, or a table
     /// with no rows). Carries the tensor's suffix and the two numbers read.
+    ///
+    /// The same refusal carries the two pre-read bounds `read_raw_tensor` enforces:
+    /// a payload wider than one mapping may hold (`stated` = declared bytes,
+    /// `wanted` = `LARGEST_SINGLE_BUFFER_BYTES`), and a payload whose declared span
+    /// runs past the file's extent (`stated` = position + byte_len, `wanted` = the
+    /// extent). Both are refused by their exact numbers before a byte is allocated.
     BadShape(&'static str, u64, u64),
     /// The arithmetic a tensor's size needed did not fit a `usize`.
     Arithmetic,
@@ -153,6 +166,64 @@ impl From<InferenceError> for LoadError {
     fn from(error: InferenceError) -> Self {
         Self::Graph(error)
     }
+}
+
+/// The GGML block geometry the format defines: `(elements per block, bytes per
+/// block)` for every dtype id the format numbers.
+///
+/// WHY this lives here and covers more than the engine decodes: the descriptor walk
+/// has to size a payload to place it and bound its read, and a published file may
+/// quantise tensors the engine has no row layout for (EmbeddingGemma 2 states Q5_K
+/// and Q6_K; Gemma 4 E2B states TQ2_0). Sizing those from the format's own block
+/// geometry lets the table be walked and the unsupported ones refused by number at
+/// the read, instead of the walk dying on the first descriptor it cannot size. This
+/// is placement arithmetic only -- it never dequantises a row, and `None` for an id
+/// the format does not number is a refusal, not a guess.
+fn ggml_block_geometry(dtype: u32) -> Option<(u64, u64)> {
+    match dtype {
+        0 => Some((1, 4)),    // F32
+        1 => Some((1, 2)),    // F16
+        30 => Some((1, 2)),   // BF16
+        2 => Some((32, 18)),  // Q4_0
+        3 => Some((32, 20)),  // Q4_1
+        6 => Some((32, 22)),  // Q5_0
+        7 => Some((32, 24)),  // Q5_1
+        8 => Some((32, 34)),  // Q8_0
+        9 => Some((32, 36)),  // Q8_1
+        10 => Some((256, 84)),  // Q2_K
+        11 => Some((256, 110)), // Q3_K
+        12 => Some((256, 144)), // Q4_K
+        13 => Some((256, 176)), // Q5_K
+        14 => Some((256, 210)), // Q6_K
+        15 => Some((256, 292)), // Q8_K
+        35 => Some((256, 66)),  // TQ2_0
+        _ => None,
+    }
+}
+
+/// The payload byte length a descriptor states, from the GGML block geometry.
+///
+/// Checked arithmetic throughout: a dimension product or block count that does not
+/// fit a `u64` is `Arithmetic`, a row that is not a whole number of blocks is
+/// `BadShape`, and a dtype the format does not number is `UnsupportedDtype` by its
+/// number. The walk uses this for placement; reading a row still goes through the
+/// engine's `quantised_row_bytes`, which maps fewer ids and refuses the rest.
+fn descriptor_byte_len(dtype: u32, dims: &[u64; 4], n_dims: u32) -> Result<u64, LoadError> {
+    if n_dims == 0 || n_dims > 4 {
+        return Err(LoadError::BadShape("n_dims", n_dims as u64, 4));
+    }
+    let mut elements: u64 = 1;
+    for d in 0..n_dims as usize {
+        elements = elements.checked_mul(dims[d]).ok_or(LoadError::Arithmetic)?;
+    }
+    let (per_block, bytes_per_block) =
+        ggml_block_geometry(dtype).ok_or(LoadError::UnsupportedDtype("descriptor", dtype))?;
+    if elements % per_block != 0 {
+        return Err(LoadError::BadShape("block_elements", elements, per_block));
+    }
+    (elements / per_block)
+        .checked_mul(bytes_per_block)
+        .ok_or(LoadError::Arithmetic)
 }
 
 /// Where bytes come from, at a position, without moving a cursor.
@@ -173,6 +244,18 @@ pub trait PositionRead {
     /// not. A short read is a failure, not a partial success: a block's tail left
     /// unread is a block the graph would run with the previous block's bytes.
     fn read_at(&mut self, position: u64, into: &mut [u8]) -> Result<(), LoadError>;
+
+    /// The file's total byte extent, when the source can state it without a read.
+    ///
+    /// WHY a provided method defaulting to `None`: the device's descriptor holds an
+    /// fd and the positioned-read syscall, not a stat seam, so it cannot name the
+    /// file's length here; the host sources can. `read_raw_tensor` uses this to
+    /// refuse a descriptor whose declared span runs past the end of the file before
+    /// allocating, and falls back to the per-mapping ceiling and the data-section
+    /// floor when the extent is unknown -- the read itself still refuses a short file.
+    fn extent(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// The largest single positioned read the platform will answer.
@@ -419,7 +502,7 @@ impl TensorTable {
                 return Err(LoadError::BadShape("name", name_len as u64, MAX_NAME_BYTES as u64));
             }
             let byte_len =
-                crate::gguf::tensor_byte_size(described.tensor_type, &described.dimensions, described.n_dimensions)?;
+                descriptor_byte_len(described.tensor_type, &described.dimensions, described.n_dimensions)?;
             let cols = described.dimensions[0];
             let rows = if described.n_dimensions > 1 {
                 described.dimensions[1]
@@ -432,7 +515,7 @@ impl TensorTable {
                 cols,
                 rows,
                 n_dims: described.n_dimensions,
-                byte_len: byte_len as u64,
+                byte_len,
                 stated_offset: described.offset,
                 position: 0,
             });
@@ -586,6 +669,10 @@ fn block_tensor_name<'b>(
 pub const TENSOR_TOKEN_EMBD: &str = "token_embd.weight";
 pub const TENSOR_OUTPUT_NORM: &str = "output_norm.weight";
 pub const TENSOR_OUTPUT_HEAD: &str = "output.weight";
+/// Gemma 4 E2B's per-layer input embedding table, `[layers x per_layer_input, vocab]`.
+/// Read one row at a time by `load_per_layer_token_embd_row`; the whole tensor is
+/// 1,321,205,760 bytes on the published file, over the per-mapping ceiling.
+pub const TENSOR_PER_LAYER_TOKEN_EMBD: &str = "per_layer_token_embd.weight";
 /// The published embedding model's pooling head, read and applied between the
 /// mean pool and the L2 step by `run_streamed_embedding`.
 pub const TENSOR_DENSE_2: &str = "dense_2.weight";
@@ -750,6 +837,12 @@ pub struct WeightReader<S: PositionRead> {
     bytes_read: u64,
     tensors_read: usize,
     peak_slot_bytes: usize,
+    /// The per-layer geometry the file declared, when the caller has handed it over.
+    /// `None` keeps the loader reading each block at its descriptors' own sizes (the
+    /// predecessor's uniform path); `Some` makes `load_block` validate every block
+    /// against the layer's OWN declared ffn width, key/value head counts and sliding
+    /// flag, and refuse a shared-key/value layer the engine's cache cannot honour.
+    geometry: Option<crate::gguf::GgufModelInfo>,
 }
 
 impl<S: PositionRead> WeightReader<S> {
@@ -769,7 +862,20 @@ impl<S: PositionRead> WeightReader<S> {
             bytes_read: 0,
             tensors_read: 0,
             peak_slot_bytes: 0,
+            geometry: None,
         }
+    }
+
+    /// Hands the loader the file's own per-layer declaration so each block is walked
+    /// with its OWN geometry rather than one averaged or first-layer number.
+    ///
+    /// WHY this is separate from `new`: the descriptor table is walked without parsing
+    /// the metadata's geometry (only `general.alignment` is needed to place a tensor),
+    /// and the caller that already read `GgufModelInfo` for the engine config is the
+    /// one that holds the per-layer arrays. A loader that re-parsed them here would
+    /// walk the vocabulary a second time.
+    pub fn set_layer_geometry(&mut self, info: &crate::gguf::GgufModelInfo) {
+        self.geometry = Some(*info);
     }
 
     pub fn table(&self) -> &TensorTable {
@@ -832,6 +938,15 @@ impl<S: PositionRead> WeightReader<S> {
     pub fn load_block(&mut self, index: usize) -> Result<BlockRead, LoadError> {
         self.slot.release();
         let before = self.tensors_read;
+
+        // When the caller handed over the file's per-layer declaration, this block is
+        // checked against its OWN geometry before a byte is read: a shared-key/value
+        // layer the cache cannot honour is refused as NOT IMPLEMENTED, and a matrix
+        // whose shape disagrees with the layer's declared ffn width or head geometry
+        // is refused by the two numbers rather than read at a neighbour's width.
+        if let Some(info) = self.geometry {
+            self.validate_block_geometry(index, &info)?;
+        }
 
         for suffix in BLOCK_NORMS {
             let name = block_tensor_name(index, suffix, &mut [0u8; MAX_NAME_BYTES])
@@ -929,6 +1044,171 @@ impl<S: PositionRead> WeightReader<S> {
         self.slot.weights()
     }
 
+    /// Checks one block's descriptors against the layer's OWN declared geometry.
+    ///
+    /// Reads no payload: every number comes from the descriptor table and the
+    /// per-layer arrays the file stated. A heterogeneous file (Gemma 4 E2B's ffn
+    /// 6144 for layers 0..14 and 12288 for 15..34; EmbeddingGemma 2's key/value head
+    /// counts and sliding pattern) is walked layer by layer at the widths that layer
+    /// declared, and a disagreement is refused by the two numbers rather than read at
+    /// a neighbour's width. A shared-key/value layer -- one the file declares without
+    /// its own `attn_k`/`attn_v` while `shared_kv_layers` is non-zero -- is refused as
+    /// NOT IMPLEMENTED: the engine's `KvCache` holds one key/value row per (layer,
+    /// position, head) and has no path for a layer that reads another layer's cache.
+    fn validate_block_geometry(
+        &self,
+        index: usize,
+        info: &crate::gguf::GgufModelInfo,
+    ) -> Result<(), LoadError> {
+        let hidden = info
+            .hidden_dim
+            .ok_or(LoadError::TensorAbsent("embedding_length", None))? as u64;
+        let heads = info
+            .num_heads
+            .ok_or(LoadError::TensorAbsent("attention.head_count", None))? as u64;
+
+        let get = |suffix: &'static str| -> Result<TensorRef, LoadError> {
+            let mut buf = [0u8; MAX_NAME_BYTES];
+            let name = block_tensor_name(index, suffix, &mut buf)
+                .ok_or(LoadError::BadShape(suffix, 0, MAX_NAME_BYTES as u64))?;
+            self.table
+                .locate(name)
+                .ok_or(LoadError::TensorAbsent(suffix, Some(index)))
+        };
+
+        // Shared key/value: the file declares shared layers and this layer states no
+        // K/V of its own, so it consumes another layer's cache -- a path this engine
+        // does not have. Refused by the count the file stated and the layer index.
+        let shared = info.shared_kv_layers.unwrap_or(0);
+        let mut kbuf = [0u8; MAX_NAME_BYTES];
+        let kname = block_tensor_name(index, "attn_k.weight", &mut kbuf)
+            .ok_or(LoadError::BadShape("attn_k.weight", 0, MAX_NAME_BYTES as u64))?;
+        if shared > 0 && self.table.find(kname).is_none() {
+            return Err(InferenceError::ModelDeclaration(
+                "shared_kv_layers",
+                Some(shared),
+                index,
+            )
+            .into());
+        }
+
+        let ffn = info.ffn_per_layer.as_slice();
+        let ffn_width = if index < ffn.len() {
+            ffn[index] as u64
+        } else {
+            info.intermediate_dim
+                .ok_or(LoadError::TensorAbsent("feed_forward_length", None))? as u64
+        };
+        let kv = info.kv_heads_per_layer.as_slice();
+        let kv_heads = if index < kv.len() {
+            kv[index] as u64
+        } else {
+            info.num_kv_heads.unwrap_or(heads as u32) as u64
+        };
+        let pattern = info.sliding_window_pattern.as_slice();
+        let swa = index < pattern.len() && pattern[index];
+        let key_len = if swa {
+            info.head_dim_swa.or(info.head_dim)
+        } else {
+            info.head_dim
+        }
+        .ok_or(LoadError::TensorAbsent("attention.key_length", None))? as u64;
+        let val_len = if swa {
+            info.value_length_swa.or(info.value_length)
+        } else {
+            info.value_length
+        }
+        .or(info.head_dim)
+        .ok_or(LoadError::TensorAbsent("attention.value_length", None))? as u64;
+
+        let q_span = heads.checked_mul(key_len).ok_or(LoadError::Arithmetic)?;
+        let k_span = kv_heads.checked_mul(key_len).ok_or(LoadError::Arithmetic)?;
+        let v_span = kv_heads.checked_mul(val_len).ok_or(LoadError::Arithmetic)?;
+        let o_span = heads.checked_mul(val_len).ok_or(LoadError::Arithmetic)?;
+
+        // (suffix, declared cols, expected cols, declared rows, expected rows)
+        let q = get("attn_q.weight")?;
+        let k = get("attn_k.weight")?;
+        let v = get("attn_v.weight")?;
+        let o = get("attn_output.weight")?;
+        let gate = get("ffn_gate.weight")?;
+        let up = get("ffn_up.weight")?;
+        let down = get("ffn_down.weight")?;
+        for (suffix, handle, cols, rows) in [
+            ("attn_q.weight", q, hidden, q_span),
+            ("attn_k.weight", k, hidden, k_span),
+            ("attn_v.weight", v, hidden, v_span),
+            ("attn_output.weight", o, o_span, hidden),
+            ("ffn_gate.weight", gate, hidden, ffn_width),
+            ("ffn_up.weight", up, hidden, ffn_width),
+            ("ffn_down.weight", down, ffn_width, hidden),
+        ] {
+            if handle.cols != cols {
+                return Err(LoadError::BadShape(suffix, handle.cols, cols));
+            }
+            if handle.rows != rows {
+                return Err(LoadError::BadShape(suffix, handle.rows, rows));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the file ships the per-layer input embedding table Gemma 4 E2B states.
+    pub fn has_per_layer_token_embd(&self) -> bool {
+        self.table
+            .find(TENSOR_PER_LAYER_TOKEN_EMBD.as_bytes())
+            .is_some()
+    }
+
+    /// Fills ONE row of `per_layer_token_embd.weight`, never the whole tensor.
+    ///
+    /// WHY a row is the only legal read: E2B states this table as `[8960, 262144]`
+    /// Q4_0 -- 1,321,205,760 bytes, 9.84x the per-mapping ceiling. Mapping it whole is
+    /// refused by `read_raw_tensor`'s bound; the per-layer input mechanism consumes one
+    /// token's row of `row_len` elements (8960 = 35 layers x 256), which is 5,040 bytes
+    /// of Q4_0. `row_len` is the contiguous dimension the descriptor states, and a
+    /// disagreement is refused by the two numbers rather than read at a guessed width.
+    pub fn load_per_layer_token_embd_row(
+        &mut self,
+        token: u32,
+        row_len: usize,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(u32, u64), LoadError> {
+        let entry = self
+            .table
+            .locate(TENSOR_PER_LAYER_TOKEN_EMBD.as_bytes())
+            .ok_or(LoadError::TensorAbsent(TENSOR_PER_LAYER_TOKEN_EMBD, None))?;
+        let row_bytes = quantised_row_bytes(entry.dtype, row_len)
+            .ok_or(LoadError::UnsupportedDtype(TENSOR_PER_LAYER_TOKEN_EMBD, entry.dtype))?;
+        if (token as u64) >= entry.rows {
+            return Err(LoadError::BadShape(
+                TENSOR_PER_LAYER_TOKEN_EMBD,
+                token as u64,
+                entry.rows,
+            ));
+        }
+        if entry.cols as usize != row_len {
+            return Err(LoadError::BadShape(
+                TENSOR_PER_LAYER_TOKEN_EMBD,
+                entry.cols,
+                row_len as u64,
+            ));
+        }
+        let start = entry
+            .position
+            .checked_add(token as u64 * row_bytes as u64)
+            .ok_or(LoadError::Arithmetic)?;
+        buffer.clear();
+        buffer
+            .try_reserve_exact(row_bytes)
+            .map_err(|_| LoadError::Arithmetic)?;
+        buffer.resize(row_bytes, 0u8);
+        self.source.read_at(start, buffer)?;
+        self.bytes_read += row_bytes as u64;
+        self.tensors_read += 1;
+        Ok((entry.dtype, row_bytes as u64))
+    }
+
     /// Reads `output_norm.weight`, the final norm the graph applies after the blocks.
     pub fn load_final_norm(&mut self, hidden_dim: usize) -> Result<Vec<f32>, LoadError> {
         let handle = self
@@ -960,6 +1240,50 @@ impl<S: PositionRead> WeightReader<S> {
             .ok_or(LoadError::TensorAbsent(TENSOR_OUTPUT_HEAD, None))?;
         let raw = self.read_raw_tensor(TENSOR_OUTPUT_HEAD, handle)?;
         Ok((raw, handle.dtype))
+    }
+
+    /// Fills one row of `output.weight`, in the dtype its descriptor declares.
+    ///
+    /// WHY a row and not the tensor: the streamed generative path computes logits
+    /// one vocabulary row at a time so the head is never held whole -- a published
+    /// head is `[hidden, vocab]` and mapping it would defeat the streaming the block
+    /// loop already keeps. The row index is bounded by the descriptor's own rows, so
+    /// a logit is never read from a row the file does not hold.
+    pub fn load_output_head_row(
+        &mut self,
+        row_index: u32,
+        hidden_dim: usize,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(u32, u64), LoadError> {
+        let entry = self
+            .table
+            .locate(TENSOR_OUTPUT_HEAD.as_bytes())
+            .ok_or(LoadError::TensorAbsent(TENSOR_OUTPUT_HEAD, None))?;
+        let row_bytes = quantised_row_bytes(entry.dtype, hidden_dim)
+            .ok_or(LoadError::UnsupportedDtype(TENSOR_OUTPUT_HEAD, entry.dtype))?;
+        if (row_index as u64) >= entry.rows {
+            return Err(LoadError::BadShape(TENSOR_OUTPUT_HEAD, row_index as u64, entry.rows));
+        }
+        if entry.cols as usize != hidden_dim {
+            return Err(LoadError::BadShape(
+                TENSOR_OUTPUT_HEAD,
+                entry.cols,
+                hidden_dim as u64,
+            ));
+        }
+        let start = entry
+            .position
+            .checked_add(row_index as u64 * row_bytes as u64)
+            .ok_or(LoadError::Arithmetic)?;
+        buffer.clear();
+        buffer
+            .try_reserve_exact(row_bytes)
+            .map_err(|_| LoadError::Arithmetic)?;
+        buffer.resize(row_bytes, 0u8);
+        self.source.read_at(start, buffer)?;
+        self.bytes_read += row_bytes as u64;
+        self.tensors_read += 1;
+        Ok((entry.dtype, row_bytes as u64))
     }
 
     /// Reads the full `token_embd.weight` table into an owned buffer.
@@ -1151,7 +1475,29 @@ impl<S: PositionRead> WeightReader<S> {
         suffix: &'static str,
         entry: TensorRef,
     ) -> Result<Vec<u8>, LoadError> {
-        let _ = suffix;
+        // The declared payload is bounded before a byte is allocated or read. One
+        // mapping may hold at most `LARGEST_SINGLE_BUFFER_BYTES`; a descriptor that
+        // states more is refused by the two numbers, not mapped and then failed.
+        let ceiling = crate::inference::LARGEST_SINGLE_BUFFER_BYTES as u64;
+        if entry.byte_len > ceiling {
+            return Err(LoadError::BadShape(suffix, entry.byte_len, ceiling));
+        }
+        // The payload has to sit inside the data section the table resolved, and
+        // inside the file when the source can state its extent. A descriptor pointing
+        // before the data section or past the end of the file is a corrupt install,
+        // refused by its position and span before the read.
+        if entry.position < self.table.data_start {
+            return Err(LoadError::BadShape(suffix, entry.position, self.table.data_start));
+        }
+        let end = entry
+            .position
+            .checked_add(entry.byte_len)
+            .ok_or(LoadError::Arithmetic)?;
+        if let Some(extent) = self.source.extent() {
+            if end > extent {
+                return Err(LoadError::BadShape(suffix, end, extent));
+            }
+        }
         let wanted = entry.byte_len as usize;
         let mut buffer: Vec<u8> = Vec::new();
         buffer
@@ -1174,6 +1520,10 @@ impl<S: PositionRead> WeightReader<S> {
             // rather than read as floats: the engine applies norms elementwise and has
             // no dequantised view of one.
             return Err(LoadError::UnsupportedDtype(suffix, entry.dtype));
+        }
+        let ceiling = crate::inference::LARGEST_SINGLE_BUFFER_BYTES as u64;
+        if entry.byte_len > ceiling {
+            return Err(LoadError::BadShape(suffix, entry.byte_len, ceiling));
         }
         let count = entry.rows as usize;
         let wanted = count
@@ -1392,12 +1742,22 @@ fn bytes_read_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-/// Runs autoregressive generative inference on the installed model weights.
+/// Runs autoregressive generative inference on the installed model weights,
+/// streaming every tensor from the file.
 ///
-/// Strictly `#![no_std]`. Reads weights from `reader`, initializes scratch and KV cache
-/// bounded by the model's budget, executes the prompt pre-fill, and then executes the
-/// autoregressive token generation loop, invoking `on_token` for each generated token
-/// until EOS or `max_new_tokens` is reached.
+/// Strictly `#![no_std]`. The peak this run holds is one block slot, one embedding
+/// row and one output-head row -- never the whole embedding table and never all
+/// blocks at once. The prompt pre-fill and each generated step read the block they
+/// run, run it, and release it before the next; the logits are projected one
+/// vocabulary row at a time. `on_token` is invoked for each generated token until
+/// EOS, `max_new_tokens`, the declared sequence length, or cancellation.
+///
+/// WHY this no longer builds a resident `ModelWeights`: holding the table and every
+/// block to hand `inference::generate` one borrowed model is the defect that defeated
+/// streaming on the production path -- a 2 GB file's weights mapped at once. The
+/// graph here is the same `run_block` the embedding path runs, stepped in the same
+/// order `forward_step` uses, so the answer is the model's and the memory is one
+/// block's.
 pub fn run_generative_model<S: PositionRead>(
     reader: &mut WeightReader<S>,
     config: &ModelConfig,
@@ -1410,45 +1770,123 @@ pub fn run_generative_model<S: PositionRead>(
     if !reader.has_output_head() {
         return Err(InferenceError::ModelDeclaration("output.weight", None, 0).into());
     }
+    if prompt_tokens.is_empty() {
+        return Ok(0);
+    }
     config.check_scratch_budget()?;
 
-    let final_norm = reader.load_final_norm(config.hidden_dim)?;
-    let (output_weight, output_dtype) = reader.load_output_head()?;
-    let (embd_bytes, embd_dtype) =
-        reader.load_embedding_table(config.vocab_size, config.hidden_dim)?;
+    let h_dim = config.hidden_dim;
+    let final_norm = reader.load_final_norm(h_dim)?;
+    let head = reader
+        .table()
+        .locate(TENSOR_OUTPUT_HEAD.as_bytes())
+        .ok_or(LoadError::TensorAbsent(TENSOR_OUTPUT_HEAD, None))?;
+    // The head's row layout is checked once, before the loop, so a dtype the engine
+    // cannot read is refused by number before a single logit row is asked for.
+    quantised_row_bytes(head.dtype, h_dim)
+        .ok_or(LoadError::UnsupportedDtype(TENSOR_OUTPUT_HEAD, head.dtype))?;
+    let mut scratch = Scratch::new(config)?;
+    let mut kv_cache = KvCache::new(config)?;
+    let mut row: Vec<u8> = Vec::new();
+    let scale = f32_sqrt(h_dim as f32);
 
-    let blocks = reader.load_all_blocks(config.num_layers)?;
-    let mut layer_views = Vec::new();
-    layer_views
-        .try_reserve_exact(config.num_layers)
-        .map_err(|_| LoadError::Arithmetic)?;
-    for slot in &blocks {
-        layer_views.push(Some(slot.weights()));
+    // Pre-fill: each prompt position steps the whole graph, reading and releasing
+    // one block at a time. A prompt longer than the declared sequence is cut to it
+    // by the model's own limit, exactly as `inference::generate` cuts it.
+    let prefill_len = prompt_tokens.len().min(config.seq_len);
+    for pos in 0..prefill_len {
+        if is_cancelled() {
+            return Err(InferenceError::Cancelled.into());
+        }
+        streamed_step(
+            reader, config, prompt_tokens[pos], pos, &mut scratch, &mut kv_cache,
+            &final_norm, &mut row, scale,
+        )?;
     }
 
-    let model = crate::inference::ModelWeights {
-        token_embd: crate::inference::TokenEmbedding::Table {
-            bytes: &embd_bytes,
-            rows: config.vocab_size,
-            dtype: embd_dtype,
-        },
-        layers: &layer_views,
-        final_norm: &final_norm,
-        output_weight: Some(&output_weight),
-        output_weight_type: output_dtype,
-    };
+    let mut next_token = inference::sample_token(&scratch.logits[..config.vocab_size], temperature);
+    let mut generated_count = 0usize;
+    let mut cur_pos = prefill_len;
+    while generated_count < max_new_tokens && cur_pos < config.seq_len {
+        if is_cancelled() {
+            return Err(InferenceError::Cancelled.into());
+        }
+        let keep_going = on_token(next_token);
+        generated_count += 1;
+        if !keep_going || next_token == crate::tokenizer::TOKEN_EOS {
+            break;
+        }
+        streamed_step(
+            reader, config, next_token, cur_pos, &mut scratch, &mut kv_cache,
+            &final_norm, &mut row, scale,
+        )?;
+        cur_pos += 1;
+        next_token = inference::sample_token(&scratch.logits[..config.vocab_size], temperature);
+    }
+    Ok(generated_count)
+}
 
-    let generated = crate::inference::generate(
-        prompt_tokens,
-        &model,
-        config,
-        max_new_tokens,
-        temperature,
-        is_cancelled,
-        &mut on_token,
-    )?;
+/// One forward step over streamed weights: embedding row, every block read-run-
+/// released, final norm, then logits projected one output-head row at a time.
+///
+/// The order and arithmetic mirror `inference::forward_step` so a streamed run and
+/// the resident engine compute the same token; the difference is only where the
+/// bytes live -- one row and one block at a time instead of a whole mapped model.
+fn streamed_step<S: PositionRead>(
+    reader: &mut WeightReader<S>,
+    config: &ModelConfig,
+    token: u32,
+    pos: usize,
+    scratch: &mut Scratch,
+    kv_cache: &mut KvCache,
+    final_norm: &[f32],
+    row: &mut Vec<u8>,
+    scale: f32,
+) -> Result<(), LoadError> {
+    let h_dim = config.hidden_dim;
+    if pos >= kv_cache.seq_len {
+        return Err(InferenceError::ContextLengthExceeded.into());
+    }
+    config.check_attention_shape()?;
+    if kv_cache.head_dim != config.head_dim
+        || kv_cache.num_kv_heads != config.num_kv_heads
+        || kv_cache.num_layers < config.num_layers
+        || kv_cache.seq_len < config.seq_len
+    {
+        return Err(InferenceError::BufferTooSmall.into());
+    }
+    if final_norm.len() < h_dim {
+        return Err(InferenceError::CorruptedWeights.into());
+    }
 
-    Ok(generated)
+    let (dtype, row_bytes) = reader.load_embedding_row(token, h_dim, row)?;
+    embedding_row_into(&row[..row_bytes as usize], dtype, scale, &mut scratch.x[..h_dim])?;
+
+    for block in 0..config.num_layers {
+        reader.load_block(block)?;
+        let lw = reader.block();
+        run_block(block, &lw, pos, config, kv_cache, scratch)?;
+    }
+
+    inference::rms_norm(&mut scratch.x[..h_dim], final_norm, config.rms_norm_eps);
+    scratch.hidden[..h_dim].copy_from_slice(&scratch.x[..h_dim]);
+
+    // Logits one vocabulary row at a time: the head is never held whole. Each row is
+    // read at its own position and projected against the normalised stream, so the
+    // peak is one row of `output.weight` rather than the full `[hidden, vocab]`.
+    for r in 0..config.vocab_size {
+        let (head_dtype, head_rb) = reader.load_output_head_row(r as u32, h_dim, row)?;
+        inference::gemv(
+            &row[..head_rb as usize],
+            head_dtype,
+            &scratch.x[..h_dim],
+            &mut scratch.logits[r..r + 1],
+            1,
+            h_dim,
+        )?;
+    }
+    kv_cache.len = pos + 1;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1536,6 +1974,10 @@ pub mod tests {
 
     #[cfg(test)]
     impl PositionRead for HostFileSource {
+        fn extent(&self) -> Option<u64> {
+            self.file.metadata().ok().map(|m| m.len())
+        }
+
         fn read_at(&mut self, position: u64, into: &mut [u8]) -> Result<(), LoadError> {
             use rust_std::io::{Read, Seek, SeekFrom};
             self.file
@@ -2989,6 +3431,10 @@ pub mod tests {
     }
 
     impl PositionRead for BoundedFileSource {
+        fn extent(&self) -> Option<u64> {
+            self.file.metadata().ok().map(|m| m.len())
+        }
+
         fn read_at(&mut self, position: u64, into: &mut [u8]) -> Result<(), LoadError> {
             use rust_std::io::{Read, Seek, SeekFrom};
             let mut requests = 0usize;

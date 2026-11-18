@@ -1,4 +1,4 @@
 InterOS v1.3 (x86_64 SMP)
 Pure Rust Microkernel
-dm-verity Merkle Tree: VERIFIED
+dm-verity Merkle Tree: NOT IMPLEMENTED (block primitive self-tested on a synthetic block only)
 Ring 0 / Ring 3 Privilege Separation: ENFORCED

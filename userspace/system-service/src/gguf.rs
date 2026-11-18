@@ -22,9 +22,17 @@ pub const PATH_GENERATIVE_MODEL_DATA: &str = "/data/models/gemma4-2b.gguf";
 /// Fallback system path for Gemma 4 2B generative weights in `/system/models`.
 pub const PATH_GENERATIVE_MODEL_SYSTEM: &str = "/system/models/gemma4-2b.gguf";
 
-/// Canonical on-device path for Gemma 4 Mobile Lite (1.1 GB mixed quantization) weights in `/data/models`.
+/// On-device path a file named `gemma4-mobile-lite.gguf` may occupy in `/data/models`.
+///
+/// Platform truth: "Gemma 4 Mobile Lite" is NOT a published model variant, and no
+/// 1.1 GB mixed-quantization artifact of that name exists. The genuine generative
+/// artifact this platform targets is `gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf`
+/// (2,186,186,784 bytes, GGUF v3, architecture `gemma4`, QAT-mobile finetune).
+/// The 521,536-byte file provisioned at this path on the development disk is a
+/// SYNTHETIC test fixture and must never be reported as a real Gemma 4.
 pub const PATH_GEMMA4_MOBILE_LITE_DATA: &str = "/data/models/gemma4-mobile-lite.gguf";
-/// Fallback system path for Gemma 4 Mobile Lite in `/system/models`.
+/// Fallback system path for the same name in `/system/models`; the same truth
+/// applies -- a file here is whatever its own header declares, not a "Mobile Lite".
 pub const PATH_GEMMA4_MOBILE_LITE_SYSTEM: &str = "/system/models/gemma4-mobile-lite.gguf";
 
 /// Canonical on-device path for Whisper Tiny.en speech recognition model in `/data/models`.
@@ -76,9 +84,28 @@ pub const DEFAULT_ALIGNMENT: u64 = 32;
 /// The widest placement the format allows, past which a declared alignment is a
 /// corrupt number rather than an unusual one.
 pub const MAX_TENSOR_ALIGNMENT: u64 = 1 << 20;
-/// Longest metadata key the configuration reader will name. A longer key is
-/// not one of the keys it recognises, so it costs nothing to step over it.
-pub const MAX_METADATA_KEY_LEN: usize = 48;
+/// Longest metadata key the configuration reader will name.
+///
+/// WHY 64 and not 48: the published EmbeddingGemma 2 file declares three real
+/// geometry keys at exactly 49 bytes --
+/// `gemma-embedding2.attention.layer_norm_rms_epsilon`,
+/// `gemma-embedding2.embedding_length_per_layer_input` and
+/// `gemma-embedding2.attention.sliding_window_pattern`. A 48-byte window stepped
+/// over them silently, which left the normalization epsilon unread and the
+/// reader inventing a model by omission. Widening the window so a legitimate
+/// key is read is not weakening a bound: a key still longer than this is not
+/// one the reader recognises, it is stepped over, and `pairs_walked` against
+/// the header's `kv_pair_count` keeps that skip accountable.
+pub const MAX_METADATA_KEY_LEN: usize = 64;
+/// How many per-layer geometry values the reader will hold for one key.
+///
+/// WHY a bound and a refusal instead of a cut: the real files declare per-layer
+/// arrays -- Gemma 4 E2B states 35 feed-forward widths and 35 sliding-window
+/// flags, EmbeddingGemma 2 states 24 key/value head counts and 24 flags. 64
+/// covers every layer count published today with room to spare, and an array
+/// wider than this is refused whole rather than truncated into a prefix the
+/// file never claimed was the whole geometry.
+pub const MAX_PER_LAYER_GEOMETRY: usize = 64;
 /// Architecture names are short, and the engine only ever reports this one
 /// back to the user, so it is held in a fixed window.
 pub const MAX_ARCH_NAME_LEN: usize = 32;
@@ -885,6 +912,80 @@ pub fn skip_all_kv_pairs_stream(stream: &mut GgufStream, kv_count: u64) -> Resul
     Ok(())
 }
 
+/// Per-layer counts the file declared as an ARRAY, held whole in fixed storage.
+///
+/// WHY the array is carried and not collapsed: a per-layer array is not one
+/// number. The published Gemma 4 E2B file states `feed_forward_length` as 35
+/// INT32 values -- 6144 for layers 0..14 and 12288 for layers 15..34 -- and
+/// EmbeddingGemma 2 states `head_count_kv` as 24 values with 1 at every sixth
+/// layer and 2 elsewhere. Naming either file's geometry by its first element
+/// would be the platform inventing a declaration the file never made. The
+/// scalar beside this record is only ever set by `uniform`, which answers
+/// `Some` exactly when every element is equal -- a lossless reduction -- and
+/// `None` otherwise, leaving the per-layer values as the file's own statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerLayerCounts {
+    pub values: [u32; MAX_PER_LAYER_GEOMETRY],
+    /// How many elements the file declared and the reader holds. `0` means the
+    /// file named no array for this key.
+    pub len: usize,
+}
+
+impl PerLayerCounts {
+    pub const fn empty() -> Self {
+        Self {
+            values: [0u32; MAX_PER_LAYER_GEOMETRY],
+            len: 0,
+        }
+    }
+
+    /// The elements the file declared, and no more.
+    pub fn as_slice(&self) -> &[u32] {
+        &self.values[..self.len]
+    }
+
+    /// The one number every element agrees on, when they all agree.
+    ///
+    /// A scalar declaration is held as a one-element array, so this answers
+    /// `Some(value)` for it too -- the same number `read_count` always returned.
+    pub fn uniform(&self) -> Option<u32> {
+        if self.len == 0 {
+            return None;
+        }
+        let first = self.values[0];
+        if self.as_slice().iter().all(|&v| v == first) {
+            Some(first)
+        } else {
+            None
+        }
+    }
+}
+
+/// Per-layer boolean flags the file declared as an ARRAY of GGUF type 7.
+///
+/// `attention.sliding_window_pattern` is one flag per layer: which layers run
+/// the narrow sliding window and which run full attention. Carried whole for
+/// the same reason as `PerLayerCounts` -- the pattern is the file's geometry,
+/// and a single averaged or first-layer flag would not be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerLayerFlags {
+    pub values: [bool; MAX_PER_LAYER_GEOMETRY],
+    pub len: usize,
+}
+
+impl PerLayerFlags {
+    pub const fn empty() -> Self {
+        Self {
+            values: [false; MAX_PER_LAYER_GEOMETRY],
+            len: 0,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[bool] {
+        &self.values[..self.len]
+    }
+}
+
 /// What a model file declares about its own architecture.
 ///
 /// Every field is `Option`: a file that does not name a parameter is reported as
@@ -929,14 +1030,33 @@ pub struct GgufModelInfo {
     pub pairs_walked: u64,
     /// `<arch>.embedding_length` -- the width every residual stream has.
     pub hidden_dim: Option<u32>,
-    /// `<arch>.feed_forward_length`
+    /// `<arch>.feed_forward_length` -- the scalar reduction of the file's
+    /// declaration, set only when it is lossless.
+    ///
+    /// The published Gemma 4 E2B file declares this key as an ARRAY of 35 INT32
+    /// values that are NOT all equal (6144 for layers 0..14, 12288 for layers
+    /// 15..34). For such a file this stays `None` -- no single number is the
+    /// file's declaration -- and `ffn_per_layer` carries every value the file
+    /// stated. A scalar declaration, or an array whose elements all agree, sets
+    /// this to that one number.
     pub intermediate_dim: Option<u32>,
     /// `<arch>.block_count`
     pub num_layers: Option<u32>,
     /// `<arch>.attention.head_count`
     pub num_heads: Option<u32>,
-    /// `<arch>.attention.head_count_kv`
+    /// `<arch>.attention.head_count_kv` -- the scalar reduction, set only when
+    /// lossless, exactly as `intermediate_dim`. EmbeddingGemma 2 declares 24
+    /// per-layer values (1 at every sixth layer, 2 elsewhere), so for that file
+    /// this is `None` and `kv_heads_per_layer` is the declaration.
     pub num_kv_heads: Option<u32>,
+    /// `<arch>.attention.head_count_kv` per layer, as the file declared it.
+    /// A scalar declaration is held as one element. `len == 0` means the file
+    /// named no value for this key in the metadata the walk reached.
+    pub kv_heads_per_layer: PerLayerCounts,
+    /// `<arch>.feed_forward_length` per layer, as the file declared it.
+    pub ffn_per_layer: PerLayerCounts,
+    /// `<arch>.attention.sliding_window_pattern` -- one flag per layer.
+    pub sliding_window_pattern: PerLayerFlags,
     /// One head's width: `<arch>.attention.key_length`, which is the name the
     /// published Gemma and Mistral files use, or `<arch>.attention.head_length`
     /// where a writer spells the same number that way.
@@ -970,6 +1090,37 @@ pub struct GgufModelInfo {
     pub rms_norm_eps: Option<f32>,
     /// `<arch>.rope.freq_base`
     pub rope_theta: Option<f32>,
+    /// `<arch>.attention.key_length_swa` -- one head's width in the
+    /// sliding-window layers, when the file declares it separately.
+    pub head_dim_swa: Option<u32>,
+    /// `<arch>.attention.value_length`
+    pub value_length: Option<u32>,
+    /// `<arch>.attention.value_length_swa`
+    pub value_length_swa: Option<u32>,
+    /// `<arch>.rope.dimension_count`
+    pub rope_dimension_count: Option<u32>,
+    /// `<arch>.rope.dimension_count_swa`
+    pub rope_dimension_count_swa: Option<u32>,
+    /// `<arch>.rope.freq_base_swa`
+    pub rope_theta_swa: Option<f32>,
+    /// `<arch>.attention.shared_kv_layers`
+    pub shared_kv_layers: Option<u32>,
+    /// `<arch>.embedding_length_per_layer_input`
+    pub embedding_length_per_layer_input: Option<u32>,
+    /// `<arch>.embedding_length_out`
+    pub embedding_length_out: Option<u32>,
+    /// `<arch>.final_logit_softcapping`
+    pub final_logit_softcapping: Option<f32>,
+    /// `<arch>.attention.causal`
+    pub attention_causal: Option<bool>,
+    /// `<arch>.pooling_type`
+    pub pooling_type: Option<u32>,
+    /// `general.sampling.top_k`
+    pub sampling_top_k: Option<u32>,
+    /// `general.sampling.top_p`
+    pub sampling_top_p: Option<f32>,
+    /// `general.sampling.temp`
+    pub sampling_temp: Option<f32>,
 }
 
 impl GgufModelInfo {
@@ -991,12 +1142,30 @@ impl GgufModelInfo {
             num_layers: None,
             num_heads: None,
             num_kv_heads: None,
+            kv_heads_per_layer: PerLayerCounts::empty(),
+            ffn_per_layer: PerLayerCounts::empty(),
+            sliding_window_pattern: PerLayerFlags::empty(),
             head_dim: None,
             context_length: None,
             sliding_window: None,
             vocab_size: None,
             rms_norm_eps: None,
             rope_theta: None,
+            head_dim_swa: None,
+            value_length: None,
+            value_length_swa: None,
+            rope_dimension_count: None,
+            rope_dimension_count_swa: None,
+            rope_theta_swa: None,
+            shared_kv_layers: None,
+            embedding_length_per_layer_input: None,
+            embedding_length_out: None,
+            final_logit_softcapping: None,
+            attention_causal: None,
+            pooling_type: None,
+            sampling_top_k: None,
+            sampling_top_p: None,
+            sampling_temp: None,
         }
     }
 
@@ -1058,7 +1227,16 @@ impl GgufModelInfo {
         if self.hidden_dim.is_none() {
             return Some("<arch>.embedding_length");
         }
-        if self.intermediate_dim.is_none() {
+        // WHY the per-layer array satisfies this key: the published Gemma 4 E2B
+        // file declares `feed_forward_length` as 35 per-layer values that are not
+        // all equal, so no lossless scalar reduction exists and
+        // `intermediate_dim` stays `None`. The key IS declared -- the reader
+        // holds every value in `ffn_per_layer` -- and calling it missing would
+        // refuse a complete file for a number the reader chose not to invent.
+        // The set of keys this function can name is unchanged; only a carried
+        // declaration now counts as declared. The engine must consume the
+        // per-layer array when the scalar is `None`.
+        if self.intermediate_dim.is_none() && self.ffn_per_layer.len == 0 {
             return Some("<arch>.feed_forward_length");
         }
         if self.num_layers.is_none() {
@@ -1092,8 +1270,9 @@ fn metadata_field(key: &[u8]) -> &[u8] {
     }
 }
 
-/// Reads one metadata value as a count, whatever width the file declared it in.
-fn read_count(stream: &mut GgufStream, val_type: u32) -> Result<u32, GgufError> {
+/// Reads one scalar metadata value as a count, whatever integer width the file
+/// declared it in.
+fn read_scalar_count(stream: &mut GgufStream, val_type: u32) -> Result<u32, GgufError> {
     let wide = match val_type {
         0 | 1 | 7 => {
             let mut b = [0u8; 1];
@@ -1114,6 +1293,98 @@ fn read_count(stream: &mut GgufStream, val_type: u32) -> Result<u32, GgufError> 
         _ => return Err(GgufError::InvalidMetadata),
     };
     u32::try_from(wide).map_err(|_| GgufError::InvalidMetadata)
+}
+
+/// Reads a count the file declared as a scalar OR as an ARRAY of counts into
+/// bounded per-layer storage.
+///
+/// WHY the array form is read and not refused: the published files declare real
+/// geometry as arrays -- Gemma 4 E2B's `feed_forward_length` is 35 INT32 values,
+/// EmbeddingGemma 2's `head_count_kv` is 24 -- while the skipper has always
+/// stepped over arrays correctly. A reader that could skip what it could not
+/// read was dropping the file's own geometry on the floor.
+///
+/// Semantics: a scalar is held as a one-element array. An array is held whole,
+/// element for element, up to `MAX_PER_LAYER_GEOMETRY`; an array wider than that
+/// bound, an empty array, or an array of non-count elements (strings, floats,
+/// nested arrays) is refused with `InvalidMetadata` rather than truncated or
+/// silently skipped. No reduction happens here -- `PerLayerCounts::uniform` is
+/// the only place a single number is derived, and only when it is lossless.
+fn read_count_values(
+    stream: &mut GgufStream,
+    val_type: u32,
+    out: &mut PerLayerCounts,
+) -> Result<(), GgufError> {
+    out.len = 0;
+    if val_type != 9 {
+        out.values[0] = read_scalar_count(stream, val_type)?;
+        out.len = 1;
+        return Ok(());
+    }
+    let elem_type = stream.read_u32()?;
+    let stated = stream.read_u64()?;
+    let count = usize::try_from(stated).map_err(|_| GgufError::InvalidMetadata)?;
+    if count == 0 || count > MAX_PER_LAYER_GEOMETRY {
+        return Err(GgufError::InvalidMetadata);
+    }
+    for slot in out.values[..count].iter_mut() {
+        *slot = read_scalar_count(stream, elem_type)?;
+    }
+    out.len = count;
+    Ok(())
+}
+
+/// Reads a flag the file declared as GGUF type 7 OR as an ARRAY of type 7 into
+/// bounded per-layer storage, with the same refuse-don't-truncate rule as
+/// `read_count_values`. Every element must be a declared boolean: a byte that
+/// is neither 0 nor 1 is not a flag, and the file gets said so.
+fn read_flag_values(
+    stream: &mut GgufStream,
+    val_type: u32,
+    out: &mut PerLayerFlags,
+) -> Result<(), GgufError> {
+    out.len = 0;
+    if val_type != 9 {
+        out.values[0] = read_bool(stream, val_type)?;
+        out.len = 1;
+        return Ok(());
+    }
+    let elem_type = stream.read_u32()?;
+    let stated = stream.read_u64()?;
+    let count = usize::try_from(stated).map_err(|_| GgufError::InvalidMetadata)?;
+    if count == 0 || count > MAX_PER_LAYER_GEOMETRY {
+        return Err(GgufError::InvalidMetadata);
+    }
+    if elem_type != 7 {
+        return Err(GgufError::InvalidMetadata);
+    }
+    for slot in out.values[..count].iter_mut() {
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte)?;
+        *slot = match byte[0] {
+            0 => false,
+            1 => true,
+            _ => return Err(GgufError::InvalidMetadata),
+        };
+    }
+    out.len = count;
+    Ok(())
+}
+
+/// Reads one metadata value as a count, whatever width the file declared it in
+/// -- including an ARRAY of counts, when every element agrees.
+///
+/// WHY an array can answer a scalar question: a file that declares a count as a
+/// one-element array, or as an array whose elements are all the same number,
+/// has stated that number losslessly. An array whose elements differ has NOT
+/// stated one number, so this refuses it (`InvalidMetadata`) rather than
+/// picking an element and pretending the file said it. Geometry keys that are
+/// genuinely per-layer (`feed_forward_length`, `head_count_kv`) do not route
+/// through here -- the walk carries their arrays whole via `read_count_values`.
+fn read_count(stream: &mut GgufStream, val_type: u32) -> Result<u32, GgufError> {
+    let mut values = PerLayerCounts::empty();
+    read_count_values(stream, val_type, &mut values)?;
+    values.uniform().ok_or(GgufError::InvalidMetadata)
 }
 
 /// Reads one metadata value as a float, whether the file declared f32 or f64.
@@ -1205,6 +1476,12 @@ pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, 
             info.file_type = Some(read_count(stream, val_type)?);
         } else if key == b"general.quantization_version" {
             info.quantization_version = Some(read_count(stream, val_type)?);
+        } else if key == b"general.sampling.top_k" {
+            info.sampling_top_k = Some(read_count(stream, val_type)?);
+        } else if key == b"general.sampling.top_p" {
+            info.sampling_top_p = Some(read_epsilon(stream, val_type)?);
+        } else if key == b"general.sampling.temp" {
+            info.sampling_temp = Some(read_epsilon(stream, val_type)?);
         } else if key == b"tokenizer.ggml.tokens" {
             let elem_type = stream.read_u32()?;
             let elem_count = stream.read_u64()?;
@@ -1228,20 +1505,56 @@ pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, 
             match metadata_field(key) {
                 b"embedding_length" => info.hidden_dim = Some(read_count(stream, val_type)?),
                 b"feed_forward_length" => {
-                    info.intermediate_dim = Some(read_count(stream, val_type)?)
+                    // The file may state one width or one width per layer. The
+                    // array is carried whole; the scalar is set only when every
+                    // element agrees, which is the only lossless reduction.
+                    read_count_values(stream, val_type, &mut info.ffn_per_layer)?;
+                    info.intermediate_dim = info.ffn_per_layer.uniform();
                 }
                 b"block_count" => info.num_layers = Some(read_count(stream, val_type)?),
                 b"head_count" => info.num_heads = Some(read_count(stream, val_type)?),
-                b"head_count_kv" => info.num_kv_heads = Some(read_count(stream, val_type)?),
+                b"head_count_kv" => {
+                    read_count_values(stream, val_type, &mut info.kv_heads_per_layer)?;
+                    info.num_kv_heads = info.kv_heads_per_layer.uniform();
+                }
                 b"key_length" | b"head_length" => {
                     info.head_dim = Some(read_count(stream, val_type)?)
                 }
                 b"context_length" => info.context_length = Some(read_count(stream, val_type)?),
                 b"sliding_window" => info.sliding_window = Some(read_count(stream, val_type)?),
+                b"sliding_window_pattern" => {
+                    read_flag_values(stream, val_type, &mut info.sliding_window_pattern)?
+                }
                 b"layer_norm_rms_epsilon" => {
                     info.rms_norm_eps = Some(read_epsilon(stream, val_type)?)
                 }
                 b"freq_base" => info.rope_theta = Some(read_epsilon(stream, val_type)?),
+                b"freq_base_swa" => info.rope_theta_swa = Some(read_epsilon(stream, val_type)?),
+                b"key_length_swa" => info.head_dim_swa = Some(read_count(stream, val_type)?),
+                b"value_length" => info.value_length = Some(read_count(stream, val_type)?),
+                b"value_length_swa" => {
+                    info.value_length_swa = Some(read_count(stream, val_type)?)
+                }
+                b"dimension_count" => {
+                    info.rope_dimension_count = Some(read_count(stream, val_type)?)
+                }
+                b"dimension_count_swa" => {
+                    info.rope_dimension_count_swa = Some(read_count(stream, val_type)?)
+                }
+                b"shared_kv_layers" => {
+                    info.shared_kv_layers = Some(read_count(stream, val_type)?)
+                }
+                b"embedding_length_per_layer_input" => {
+                    info.embedding_length_per_layer_input = Some(read_count(stream, val_type)?)
+                }
+                b"embedding_length_out" => {
+                    info.embedding_length_out = Some(read_count(stream, val_type)?)
+                }
+                b"final_logit_softcapping" => {
+                    info.final_logit_softcapping = Some(read_epsilon(stream, val_type)?)
+                }
+                b"causal" => info.attention_causal = Some(read_bool(stream, val_type)?),
+                b"pooling_type" => info.pooling_type = Some(read_count(stream, val_type)?),
                 _ => skip_metadata_value_stream(stream, val_type)?,
             }
         }
@@ -2148,15 +2461,56 @@ pub const MODEL_CANDIDATE_PATHS: &[&str] = &[
     "/data/models/model.gguf",
 ];
 
+/// Joins a model directory and one listed file name into the full file path.
+///
+/// WHY this is its own function: the probe below used to answer a directory
+/// listing's discovery with the DIRECTORY's name (`/data/models`) where the
+/// caller was promised the path of the file whose header parsed -- a path that
+/// opens a directory, not the model. Building the path here, apart from any
+/// syscall, is what lets a host test prove the answer is the file's own path.
+/// `None` when the joined path does not fit `out`; nothing is written then.
+fn join_model_path(dir: &str, name: &[u8], out: &mut [u8]) -> Option<usize> {
+    let dir_bytes = dir.as_bytes();
+    let total = dir_bytes.len() + 1 + name.len();
+    if total > out.len() {
+        return None;
+    }
+    out[..dir_bytes.len()].copy_from_slice(dir_bytes);
+    out[dir_bytes.len()] = b'/';
+    out[dir_bytes.len() + 1..total].copy_from_slice(name);
+    Some(total)
+}
+
+/// Copies a probed file's path into the caller's window, whole or not at all.
+///
+/// A path wider than the window is `BufferTooShort`, never a truncated prefix:
+/// half a path is not a file the caller can open, and reporting one would be
+/// the same invention as reporting the directory.
+fn hold_probed_path(path: &[u8], out: &mut [u8]) -> Result<usize, GgufError> {
+    if path.len() > out.len() {
+        return Err(GgufError::BufferTooShort);
+    }
+    out[..path.len()].copy_from_slice(path);
+    Ok(path.len())
+}
+
 /// Probes standard model directories (`/system/models/` and `/data/models/`)
-/// for valid GGUF model headers.
+/// for valid GGUF model headers, and reports the FILE whose header parsed.
+///
+/// The full path of the discovered file is written into `path_out` and its
+/// length returned beside the header. WHY the signature carries a window: a
+/// file found by directory listing has a name no `&'static str` can hold, and
+/// the previous shape answered with the directory itself -- a path that names
+/// no model. A window the caller owns reports the real path with no allocation.
 ///
 /// Respects the Platform Truth Contract: returns `Err(GgufError::NoModelsFound)`
-/// if physical model files are absent.
-pub fn probe_gguf_header() -> Result<(GgufHeader, &'static str), GgufError> {
+/// if physical model files are absent, and `Err(GgufError::BufferTooShort)` if
+/// a discovered file's path does not fit the caller's window.
+pub fn probe_gguf_header(path_out: &mut [u8]) -> Result<(GgufHeader, usize), GgufError> {
     for &path in MODEL_CANDIDATE_PATHS {
         if let Ok(hdr) = read_gguf_header(path) {
-            return Ok((hdr, path));
+            let len = hold_probed_path(path.as_bytes(), path_out)?;
+            return Ok((hdr, len));
         }
     }
 
@@ -2173,16 +2527,14 @@ pub fn probe_gguf_header() -> Result<(GgufHeader, &'static str), GgufError> {
                 let name = &line[..end];
                 if name.len() >= 5 && name.ends_with(b".gguf") {
                     let mut path_buf = [0u8; 128];
-                    let dir_bytes = dir.as_bytes();
-                    let total_len = dir_bytes.len() + 1 + name.len();
-                    if total_len < path_buf.len() {
-                        path_buf[..dir_bytes.len()].copy_from_slice(dir_bytes);
-                        path_buf[dir_bytes.len()] = b'/';
-                        path_buf[dir_bytes.len() + 1..total_len].copy_from_slice(name);
-                        if let Ok(path_str) = core::str::from_utf8(&path_buf[..total_len]) {
-                            if let Ok(hdr) = read_gguf_header(path_str) {
-                                return Ok((hdr, dir));
-                            }
+                    let Some(total_len) = join_model_path(dir, name, &mut path_buf) else {
+                        continue;
+                    };
+                    if let Ok(path_str) = core::str::from_utf8(&path_buf[..total_len]) {
+                        if let Ok(hdr) = read_gguf_header(path_str) {
+                            // The file's own path, not the directory it sits in.
+                            let len = hold_probed_path(&path_buf[..total_len], path_out)?;
+                            return Ok((hdr, len));
                         }
                     }
                 }
@@ -3659,5 +4011,623 @@ pub(crate) mod tests {
             pulls < unbuffered_syscalls_floor / 20,
             "the ranged-read path ({pulls} pulls) must be over 20x fewer syscalls than the bare path ({unbuffered_syscalls_floor} syscalls)"
         );
+    }
+
+    /// A `sliding_window_pattern`-shaped bool array: element type 7, the count,
+    /// then one byte per flag.
+    fn put_bool_array(buf: &mut [u8], off: &mut usize, key: &[u8], values: &[bool]) {
+        put_key(buf, off, key);
+        put_u32_at(buf, off, 9);
+        put_u32_at(buf, off, 7);
+        put_u64_at(buf, off, values.len() as u64);
+        for value in values {
+            buf[*off] = u8::from(*value);
+            *off += 1;
+        }
+    }
+
+    /// An INT32 scalar (GGUF type 5), the width `general.sampling.top_k` is
+    /// declared in by the published Gemma 4 E2B file.
+    fn put_i32_count(buf: &mut [u8], off: &mut usize, key: &[u8], value: i32) {
+        put_key(buf, off, key);
+        put_u32_at(buf, off, 5);
+        put_u32_at(buf, off, value.cast_unsigned());
+    }
+
+    /// The published Gemma 4 E2B shape: `feed_forward_length` is an ARRAY of
+    /// INT32 whose elements are NOT all equal (measured from
+    /// `gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf`: 6144 for layers 0..14, 12288 for
+    /// layers 15..34). No single number is that declaration, so the scalar must
+    /// stay `None`, the array must be carried whole, and the key must count as
+    /// declared -- the file stated it, the reader holds it.
+    #[test]
+    fn test_per_layer_ffn_array_is_carried_and_no_scalar_is_invented() {
+        let mut buf = [0u8; 1024];
+        let mut off = begin_file(&mut buf, 9);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma4");
+        put_count(&mut buf, &mut off, b"gemma4.embedding_length", 1536);
+        put_i32_array(
+            &mut buf,
+            &mut off,
+            b"gemma4.feed_forward_length",
+            &[6144, 6144, 12288, 12288],
+        );
+        put_count(&mut buf, &mut off, b"gemma4.block_count", 4);
+        put_count(&mut buf, &mut off, b"gemma4.attention.head_count", 8);
+        put_count(&mut buf, &mut off, b"gemma4.attention.head_count_kv", 1);
+        put_count(&mut buf, &mut off, b"gemma4.attention.key_length", 512);
+        put_bool_array(
+            &mut buf,
+            &mut off,
+            b"gemma4.attention.sliding_window_pattern",
+            &[true, true, false, true],
+        );
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 262_144, &[]);
+
+        let info = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]))
+            .expect("a file that declares its feed-forward widths per layer is complete");
+        assert_eq!(info.architecture(), Some("gemma4"));
+        assert_eq!(
+            info.intermediate_dim, None,
+            "a non-uniform per-layer array is not one number; naming 6144 would invent the other layers"
+        );
+        assert_eq!(info.ffn_per_layer.as_slice(), &[6144, 6144, 12288, 12288]);
+        assert_eq!(info.num_kv_heads, Some(1));
+        assert_eq!(info.kv_heads_per_layer.as_slice(), &[1]);
+        assert_eq!(
+            info.sliding_window_pattern.as_slice(),
+            &[true, true, false, true]
+        );
+        assert_eq!(
+            info.missing_key(),
+            None,
+            "feed_forward_length IS declared -- as the array the reader now carries"
+        );
+    }
+
+    /// An array whose elements all agree HAS stated one number losslessly, and
+    /// the scalar reduction is exactly that number -- with the array still held.
+    #[test]
+    fn test_uniform_per_layer_array_reduces_losslessly_to_the_scalar() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_file(&mut buf, 7);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
+        put_count(&mut buf, &mut off, b"gemma2.embedding_length", 64);
+        put_i32_array(
+            &mut buf,
+            &mut off,
+            b"gemma2.feed_forward_length",
+            &[128, 128, 128],
+        );
+        put_count(&mut buf, &mut off, b"gemma2.block_count", 3);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.key_length", 32);
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 290, &[]);
+
+        let info = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]))
+            .expect("a uniform array states one width");
+        assert_eq!(info.intermediate_dim, Some(128));
+        assert_eq!(info.ffn_per_layer.as_slice(), &[128, 128, 128]);
+        assert_eq!(info.missing_key(), None);
+    }
+
+    /// The published EmbeddingGemma 2 shape: `head_count_kv` is an ARRAY of 24
+    /// INT32 with 1 at every sixth layer and 2 elsewhere (measured from
+    /// `embeddinggemma-2-UD-Q4_K_XL.gguf`). The scalar stays `None`; the array
+    /// is the declaration. `head_count_kv` is not a required key, so the file
+    /// still configures.
+    #[test]
+    fn test_per_layer_kv_heads_array_is_carried_when_layers_differ() {
+        let mut buf = [0u8; 1024];
+        let mut off = begin_file(&mut buf, 8);
+        put_string(
+            &mut buf,
+            &mut off,
+            b"general.architecture",
+            b"gemma-embedding2",
+        );
+        put_count(&mut buf, &mut off, b"gemma-embedding2.embedding_length", 512);
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding2.feed_forward_length",
+            2048,
+        );
+        put_count(&mut buf, &mut off, b"gemma-embedding2.block_count", 4);
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding2.attention.head_count",
+            4,
+        );
+        put_i32_array(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding2.attention.head_count_kv",
+            &[2, 2, 1, 2],
+        );
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding2.attention.key_length",
+            512,
+        );
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 262_144, &[]);
+
+        let info = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]))
+            .expect("per-layer key/value heads are a declaration, not a missing key");
+        assert_eq!(info.num_kv_heads, None);
+        assert_eq!(info.kv_heads_per_layer.as_slice(), &[2, 2, 1, 2]);
+        assert_eq!(info.intermediate_dim, Some(2048));
+        assert_eq!(info.ffn_per_layer.as_slice(), &[2048]);
+        assert_eq!(info.missing_key(), None);
+    }
+
+    /// The three 49-byte keys the published EmbeddingGemma 2 file declares were
+    /// stepped over silently by a 48-byte window -- the epsilon among them, so
+    /// the model would have run with a normalization number the file never
+    /// gave. At 64 bytes they are read, and their lengths are pinned here so
+    /// the reason for the widened window stays measurable.
+    #[test]
+    fn test_geometry_keys_at_49_bytes_are_read_not_skipped() {
+        const EPS_KEY: &[u8] = b"gemma-embedding2.attention.layer_norm_rms_epsilon";
+        const PER_LAYER_KEY: &[u8] = b"gemma-embedding2.embedding_length_per_layer_input";
+        const PATTERN_KEY: &[u8] = b"gemma-embedding2.attention.sliding_window_pattern";
+        assert_eq!(EPS_KEY.len(), 49);
+        assert_eq!(PER_LAYER_KEY.len(), 49);
+        assert_eq!(PATTERN_KEY.len(), 49);
+        assert!(EPS_KEY.len() > 48, "the old window dropped this key");
+
+        let mut buf = [0u8; 1024];
+        let mut off = begin_file(&mut buf, 10);
+        put_string(
+            &mut buf,
+            &mut off,
+            b"general.architecture",
+            b"gemma-embedding2",
+        );
+        put_count(&mut buf, &mut off, b"gemma-embedding2.embedding_length", 512);
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding2.feed_forward_length",
+            2048,
+        );
+        put_count(&mut buf, &mut off, b"gemma-embedding2.block_count", 2);
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding2.attention.head_count",
+            4,
+        );
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding2.attention.key_length",
+            512,
+        );
+        put_float(&mut buf, &mut off, EPS_KEY, 1e-6);
+        put_count(&mut buf, &mut off, PER_LAYER_KEY, 512);
+        put_bool_array(&mut buf, &mut off, PATTERN_KEY, &[true, false]);
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 262_144, &[]);
+
+        let info = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]))
+            .expect("the published key shape configures");
+        assert_eq!(
+            info.rms_norm_eps,
+            Some(1e-6),
+            "the 49-byte epsilon key was skipped by the 48-byte window"
+        );
+        assert_eq!(info.embedding_length_per_layer_input, Some(512));
+        assert_eq!(info.sliding_window_pattern.as_slice(), &[true, false]);
+        assert_eq!(info.missing_key(), None);
+    }
+
+    /// A key still past the widened bound is stepped over -- and the pair is
+    /// counted, so the skip is accountable against the header's own count.
+    #[test]
+    fn test_a_key_past_the_widened_bound_is_skipped_and_counted() {
+        let mut long_key = [b'x'; MAX_METADATA_KEY_LEN + 1];
+        long_key[..7].copy_from_slice(b"gemma2.");
+        let mut buf = [0u8; 1024];
+        let mut off = begin_file(&mut buf, 8);
+        put_count(&mut buf, &mut off, &long_key, 7);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
+        put_count(&mut buf, &mut off, b"gemma2.embedding_length", 64);
+        put_count(&mut buf, &mut off, b"gemma2.feed_forward_length", 128);
+        put_count(&mut buf, &mut off, b"gemma2.block_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.key_length", 32);
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 290, &[]);
+
+        let info = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]))
+            .expect("the keys after an over-long one are still reached");
+        assert_eq!(info.hidden_dim, Some(64));
+        assert_eq!(info.intermediate_dim, Some(128));
+        assert_eq!(info.kv_pair_count, Some(8));
+        assert_eq!(
+            info.pairs_walked, 8,
+            "the skipped pair must be counted, not vanished"
+        );
+    }
+
+    /// An array wider than the per-layer bound is refused whole, never cut to
+    /// the first 64 elements and presented as the file's geometry.
+    #[test]
+    fn test_an_array_wider_than_the_per_layer_bound_is_refused_not_truncated() {
+        let wide = [9u32; MAX_PER_LAYER_GEOMETRY + 1];
+        let wide_i32: host_std::vec::Vec<i32> = wide.iter().map(|&v| v as i32).collect();
+        let mut buf = [0u8; 2048];
+        let mut off = begin_file(&mut buf, 3);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma4");
+        put_count(&mut buf, &mut off, b"gemma4.embedding_length", 64);
+        put_i32_array(&mut buf, &mut off, b"gemma4.feed_forward_length", &wide_i32);
+
+        let result = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]));
+        assert_eq!(
+            result,
+            Err(GgufError::InvalidMetadata),
+            "65 per-layer values must be refused, not truncated to 64"
+        );
+    }
+
+    /// A scalar key fed a non-uniform array has not been given one number, and
+    /// `read_count` refuses rather than picking an element.
+    #[test]
+    fn test_a_non_uniform_array_cannot_answer_a_scalar_key() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_file(&mut buf, 2);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
+        put_i32_array(&mut buf, &mut off, b"gemma2.embedding_length", &[64, 65]);
+
+        let result = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]));
+        assert_eq!(result, Err(GgufError::InvalidMetadata));
+    }
+
+    /// A flag array element that is neither 0 nor 1 is not a declared boolean.
+    #[test]
+    fn test_flag_array_refuses_a_byte_that_is_not_a_flag() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_file(&mut buf, 2);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
+        put_key(&mut buf, &mut off, b"gemma2.attention.sliding_window_pattern");
+        put_u32_at(&mut buf, &mut off, 9);
+        put_u32_at(&mut buf, &mut off, 7);
+        put_u64_at(&mut buf, &mut off, 2);
+        buf[off] = 1;
+        buf[off + 1] = 2; // not a flag
+        off += 2;
+
+        let result = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]));
+        assert_eq!(result, Err(GgufError::InvalidMetadata));
+    }
+
+    /// Every optional geometry and sampling key the two published files declare
+    /// is read and reported with the value the file stated -- and none of them
+    /// joins `missing_key`.
+    #[test]
+    fn test_optional_geometry_and_sampling_keys_are_read_as_declared() {
+        let mut buf = [0u8; 2048];
+        let mut off = begin_file(&mut buf, 22);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma4");
+        put_count(&mut buf, &mut off, b"gemma4.embedding_length", 1536);
+        put_count(&mut buf, &mut off, b"gemma4.feed_forward_length", 6144);
+        put_count(&mut buf, &mut off, b"gemma4.block_count", 35);
+        put_count(&mut buf, &mut off, b"gemma4.attention.head_count", 8);
+        put_count(&mut buf, &mut off, b"gemma4.attention.key_length", 512);
+        put_count(&mut buf, &mut off, b"gemma4.attention.key_length_swa", 256);
+        put_count(&mut buf, &mut off, b"gemma4.attention.value_length", 512);
+        put_count(&mut buf, &mut off, b"gemma4.attention.value_length_swa", 256);
+        put_count(&mut buf, &mut off, b"gemma4.rope.dimension_count", 512);
+        put_count(&mut buf, &mut off, b"gemma4.rope.dimension_count_swa", 256);
+        put_float(&mut buf, &mut off, b"gemma4.rope.freq_base_swa", 10_000.0);
+        put_count(&mut buf, &mut off, b"gemma4.attention.shared_kv_layers", 20);
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma4.embedding_length_per_layer_input",
+            256,
+        );
+        put_count(&mut buf, &mut off, b"gemma4.embedding_length_out", 768);
+        put_float(&mut buf, &mut off, b"gemma4.final_logit_softcapping", 30.0);
+        put_bool(&mut buf, &mut off, b"gemma4.attention.causal", false);
+        put_count(&mut buf, &mut off, b"gemma4.pooling_type", 1);
+        put_i32_count(&mut buf, &mut off, b"general.sampling.top_k", 64);
+        put_float(&mut buf, &mut off, b"general.sampling.top_p", 0.95);
+        put_float(&mut buf, &mut off, b"general.sampling.temp", 1.0);
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 262_144, &[]);
+
+        let info = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]))
+            .expect("the optional keys configure nothing away");
+        assert_eq!(info.head_dim_swa, Some(256));
+        assert_eq!(info.value_length, Some(512));
+        assert_eq!(info.value_length_swa, Some(256));
+        assert_eq!(info.rope_dimension_count, Some(512));
+        assert_eq!(info.rope_dimension_count_swa, Some(256));
+        assert_eq!(info.rope_theta_swa, Some(10_000.0));
+        assert_eq!(info.shared_kv_layers, Some(20));
+        assert_eq!(info.embedding_length_per_layer_input, Some(256));
+        assert_eq!(info.embedding_length_out, Some(768));
+        assert_eq!(info.final_logit_softcapping, Some(30.0));
+        assert_eq!(info.attention_causal, Some(false));
+        assert_eq!(info.pooling_type, Some(1));
+        assert_eq!(info.sampling_top_k, Some(64));
+        assert_eq!(info.sampling_top_p, Some(0.95));
+        assert_eq!(info.sampling_temp, Some(1.0));
+        assert_eq!(info.missing_key(), None);
+    }
+
+    /// A file that names none of the new keys reports them as unnamed -- no
+    /// field is filled with a compiled-in default and presented as the file's.
+    #[test]
+    fn test_absent_optional_fields_stay_none() {
+        let mut buf = [0u8; 512];
+        let mut off = begin_file(&mut buf, 7);
+        put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
+        put_count(&mut buf, &mut off, b"gemma2.embedding_length", 64);
+        put_count(&mut buf, &mut off, b"gemma2.feed_forward_length", 128);
+        put_count(&mut buf, &mut off, b"gemma2.block_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.head_count", 2);
+        put_count(&mut buf, &mut off, b"gemma2.attention.key_length", 32);
+        put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 290, &[]);
+
+        let info = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]))
+            .expect("the minimal file still configures");
+        assert_eq!(info.kv_heads_per_layer.len, 0);
+        assert_eq!(info.sliding_window_pattern.len, 0);
+        // The scalar feed-forward declaration is held as a one-element array.
+        assert_eq!(info.ffn_per_layer.as_slice(), &[128]);
+        assert_eq!(info.head_dim_swa, None);
+        assert_eq!(info.value_length, None);
+        assert_eq!(info.value_length_swa, None);
+        assert_eq!(info.rope_dimension_count, None);
+        assert_eq!(info.rope_dimension_count_swa, None);
+        assert_eq!(info.rope_theta_swa, None);
+        assert_eq!(info.shared_kv_layers, None);
+        assert_eq!(info.embedding_length_per_layer_input, None);
+        assert_eq!(info.embedding_length_out, None);
+        assert_eq!(info.final_logit_softcapping, None);
+        assert_eq!(info.attention_causal, None);
+        assert_eq!(info.pooling_type, None);
+        assert_eq!(info.sampling_top_k, None);
+        assert_eq!(info.sampling_top_p, None);
+        assert_eq!(info.sampling_temp, None);
+    }
+
+    /// D45: the probe's path helpers name the FILE, not the directory it sits
+    /// in, and refuse a window too small rather than reporting a prefix.
+    #[test]
+    fn test_the_probe_path_helpers_name_the_file_not_the_directory() {
+        let mut joined = [0u8; 128];
+        let len = join_model_path("/data/models", b"gemma.gguf", &mut joined)
+            .expect("the joined path fits");
+        assert_eq!(&joined[..len], b"/data/models/gemma.gguf");
+        assert_ne!(
+            &joined[..len],
+            b"/data/models",
+            "the probe used to answer with the directory where the file's path was promised"
+        );
+
+        let mut held = [0u8; 128];
+        let held_len = hold_probed_path(&joined[..len], &mut held).expect("the path fits");
+        assert_eq!(&held[..held_len], b"/data/models/gemma.gguf");
+
+        let mut tiny = [0u8; 4];
+        assert_eq!(
+            hold_probed_path(b"/data/models/gemma.gguf", &mut tiny),
+            Err(GgufError::BufferTooShort),
+            "half a path is not a file the caller can open"
+        );
+        assert_eq!(join_model_path("/data/models", &[b'x'; 200], &mut joined), None);
+    }
+
+    /// D7: the module's own comments must not invent a model. The "Mobile Lite"
+    /// variant at 1.1 GB was never published; the comments name the real E2B
+    /// file and label the small on-device file of that name as the synthetic
+    /// fixture it is.
+    #[test]
+    fn test_the_mobile_lite_comments_do_not_invent_a_model() {
+        let source = include_str!("gguf.rs");
+        // Built from fragments so this test's own source does not carry the
+        // fabricated claim it forbids.
+        let fabricated = host_std::format!(
+            "{} {}",
+            "Gemma 4 Mobile Lite",
+            "(1.1 GB mixed quantization)"
+        );
+        assert!(
+            !source.contains(&fabricated),
+            "the comments fabricate a model variant that was never published"
+        );
+        assert!(
+            source.contains("gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf"),
+            "the comments must name the genuine generative artifact"
+        );
+        assert!(
+            source.contains("SYNTHETIC test fixture"),
+            "the small on-device file of that name must be labelled synthetic"
+        );
+    }
+
+    /// Reads a window of a REAL artifact and asserts the geometry this reader
+    /// now claims to read, against the values measured independently from the
+    /// file's own header bytes (`target/verify/target_artifact_identity.json`).
+    ///
+    /// WHY it is gated on an environment variable: the artifacts are 175 MB and
+    /// 2.2 GB and are not in the repository, so the host path arrives in
+    /// `INTEROS_REAL_GGUF_PATH`. Without it (and without the default file) the
+    /// test panics with an explicit NOT VERIFIED message, which is the honest
+    /// alternative to a green test that opened nothing.
+    ///
+    /// WHAT THE WINDOW REACHES: 64 KiB covers every geometry key and the
+    /// vocabulary's own 12-byte header in both files (the geometry sits before
+    /// offset 2,200; the tokens array header starts at ~2,133 in EG2 and ~1,420
+    /// in E2B). It does NOT reach the 262,144 token strings, the 514,906 merges,
+    /// the chat template, or any tensor -- the walk stops at the vocabulary by
+    /// design, and `walk_stopped_early` says so.
+    #[test]
+    fn test_real_artifact_geometry_is_read_from_the_files_own_bytes() {
+        use host_std::io::Read;
+
+        let path = host_std::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
+            let candidate = "../../target/verify/models/embeddinggemma-2-UD-Q4_K_XL.gguf";
+            if host_std::path::Path::new(candidate).exists() {
+                Some(host_std::string::String::from(candidate))
+            } else {
+                None
+            }
+        }).unwrap_or_else(|| {
+            panic!(
+                "NOT VERIFIED against a real model file: INTEROS_REAL_GGUF_PATH is unset and \
+                 the default artifact is absent. Run once per artifact with \
+                 INTEROS_REAL_GGUF_PATH=target/verify/models/embeddinggemma-2-UD-Q4_K_XL.gguf \
+                 and INTEROS_REAL_GGUF_PATH=target/verify/models/gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf"
+            )
+        });
+
+        const WINDOW: usize = 64 * 1024;
+        let mut bytes = host_std::vec![0u8; WINDOW];
+        let mut file = host_std::fs::File::open(&path)
+            .unwrap_or_else(|error| panic!("the real file at {path} could not be opened: {error}"));
+        let mut filled = 0usize;
+        while filled < WINDOW {
+            match file.read(&mut bytes[filled..]) {
+                Ok(0) => break,
+                Ok(got) => filled += got,
+                Err(error) => panic!("the real file at {path} could not be read: {error}"),
+            }
+        }
+        let head = &bytes[..filled];
+        assert!(
+            filled >= 4096,
+            "the window read only {filled} bytes; the geometry needs more of the file"
+        );
+
+        let mut stream = GgufStream::from_slice(head);
+        let info = read_model_info_stream(&mut stream)
+            .unwrap_or_else(|error| panic!("the real file at {path} did not parse: {error:?}"));
+
+        // Both artifacts declare their geometry before the vocabulary, so the
+        // walk configured from this window and stopped at the tokens header.
+        assert_eq!(info.vocab_size, Some(262_144));
+        assert_eq!(info.missing_key(), None, "the real file is complete");
+        assert!(
+            info.walk_stopped_early(),
+            "the walk must report that it stopped before every pair was reached"
+        );
+        assert!(stream.position() <= filled);
+        assert_eq!(info.tokenizer_model(), Some("gemma4"));
+
+        match info.architecture() {
+            Some("gemma-embedding2") => {
+                host_std::println!(
+                    "REAL FILE {path}: EmbeddingGemma 2 geometry read from a {filled}-byte window \
+                     (vocabulary elements, merges and chat template NOT reached)"
+                );
+                assert_eq!(info.kv_pair_count, Some(52));
+                assert_eq!(info.tensor_count, Some(413));
+                assert_eq!(info.name(), Some("Embeddinggemma 2"));
+                assert_eq!(info.hidden_dim, Some(512));
+                assert_eq!(info.intermediate_dim, Some(2048));
+                assert_eq!(info.ffn_per_layer.as_slice(), &[2048]);
+                assert_eq!(info.num_layers, Some(24));
+                assert_eq!(info.num_heads, Some(4));
+                assert_eq!(info.head_dim, Some(512));
+                assert_eq!(info.context_length, Some(262_144));
+                assert_eq!(info.sliding_window, Some(1024));
+                // D18: the 49-byte epsilon key was skipped by the 48-byte cap.
+                assert_eq!(
+                    info.rms_norm_eps,
+                    Some(9.999999974752427e-07),
+                    "layer_norm_rms_epsilon is the file's own f32, not a default"
+                );
+                assert_eq!(info.embedding_length_per_layer_input, Some(512));
+                assert_eq!(info.embedding_length_out, Some(768));
+                // D17: head_count_kv is an ARRAY of 24 INT32, non-uniform.
+                assert_eq!(info.num_kv_heads, None);
+                assert_eq!(
+                    info.kv_heads_per_layer.as_slice(),
+                    &[2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 1]
+                );
+                assert_eq!(
+                    info.sliding_window_pattern.as_slice(),
+                    &[
+                        true, true, true, true, true, false, true, true, true, true, true,
+                        false, true, true, true, true, true, false, true, true, true, true,
+                        true, false,
+                    ]
+                );
+                assert_eq!(info.head_dim_swa, Some(256));
+                assert_eq!(info.value_length, Some(512));
+                assert_eq!(info.value_length_swa, Some(256));
+                assert_eq!(info.rope_dimension_count, Some(512));
+                assert_eq!(info.rope_dimension_count_swa, Some(256));
+                assert_eq!(info.rope_theta, Some(1_000_000.0));
+                assert_eq!(info.rope_theta_swa, Some(10_000.0));
+                assert_eq!(info.shared_kv_layers, Some(0));
+                assert_eq!(info.attention_causal, Some(false));
+                assert_eq!(info.pooling_type, Some(1));
+                // EG2 declares no generative sampling or softcap keys.
+                assert_eq!(info.final_logit_softcapping, None);
+                assert_eq!(info.sampling_top_k, None);
+                assert_eq!(info.sampling_top_p, None);
+                assert_eq!(info.sampling_temp, None);
+            }
+            Some("gemma4") => {
+                host_std::println!(
+                    "REAL FILE {path}: Gemma 4 E2B geometry read from a {filled}-byte window \
+                     (vocabulary elements, merges and chat template NOT reached)"
+                );
+                assert_eq!(info.kv_pair_count, Some(47));
+                assert_eq!(info.tensor_count, Some(541));
+                assert_eq!(info.hidden_dim, Some(1536));
+                assert_eq!(info.num_layers, Some(35));
+                assert_eq!(info.num_heads, Some(8));
+                assert_eq!(info.num_kv_heads, Some(1));
+                assert_eq!(info.kv_heads_per_layer.as_slice(), &[1]);
+                assert_eq!(info.head_dim, Some(512));
+                assert_eq!(info.context_length, Some(131_072));
+                assert_eq!(info.sliding_window, Some(512));
+                assert_eq!(info.rms_norm_eps, Some(9.999999974752427e-07));
+                // D17: feed_forward_length is an ARRAY of 35 INT32 -- 6144 for
+                // layers 0..14, 12288 for layers 15..34. No scalar is invented.
+                assert_eq!(info.intermediate_dim, None);
+                let ffn = info.ffn_per_layer.as_slice();
+                assert_eq!(ffn.len(), 35);
+                assert!(ffn[..15].iter().all(|&v| v == 6144));
+                assert!(ffn[15..].iter().all(|&v| v == 12288));
+                assert_eq!(
+                    info.missing_key(),
+                    None,
+                    "feed_forward_length is declared as the per-layer array the reader carries"
+                );
+                let pattern = info.sliding_window_pattern.as_slice();
+                assert_eq!(pattern.len(), 35);
+                for (layer, &flag) in pattern.iter().enumerate() {
+                    assert_eq!(flag, layer % 5 != 4, "layer {layer} window flag");
+                }
+                assert_eq!(info.head_dim_swa, Some(256));
+                assert_eq!(info.value_length, Some(512));
+                assert_eq!(info.value_length_swa, Some(256));
+                assert_eq!(info.rope_dimension_count, Some(512));
+                assert_eq!(info.rope_dimension_count_swa, Some(256));
+                assert_eq!(info.rope_theta, Some(1_000_000.0));
+                assert_eq!(info.rope_theta_swa, Some(10_000.0));
+                assert_eq!(info.shared_kv_layers, Some(20));
+                assert_eq!(info.embedding_length_per_layer_input, Some(256));
+                assert_eq!(info.final_logit_softcapping, Some(30.0));
+                assert_eq!(info.sampling_top_k, Some(64));
+                assert_eq!(info.sampling_top_p, Some(0.95));
+                assert_eq!(info.sampling_temp, Some(1.0));
+                // E2B declares no embedding-output, causal or pooling keys.
+                assert_eq!(info.embedding_length_out, None);
+                assert_eq!(info.attention_causal, None);
+                assert_eq!(info.pooling_type, None);
+            }
+            other => panic!(
+                "NOT VERIFIED: {path} declares architecture {other:?}, which is neither \
+                 target artifact (gemma-embedding2 / gemma4)"
+            ),
+        }
     }
 }

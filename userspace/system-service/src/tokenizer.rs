@@ -42,6 +42,31 @@
 //! * ABSENT from this file: `tokenizer.ggml.merges`, `added_tokens`,
 //!   `byte_fallback`, `normalize`, `prepend_space`, `n_capture`, `chat_template`.
 //!
+//! # WHAT THE OTHER INSTALLED ARCHITECTURES DECLARE
+//!
+//! The paragraph above is the predecessor `gemma-embedding` file's own measurement.
+//! The `gemma-embedding2` (EmbeddingGemma 2) and `gemma4` files this service also
+//! loads declare a different tokenizer, measured against their own bytes by
+//! `target/verify/engine-b/probe_models.py`, not assumed from the predecessor:
+//!
+//! * `tokenizer.ggml.model` = `"gemma4"`, 262,144 tokens, and -- unlike the
+//!   predecessor -- a `tokenizer.ggml.merges` array of 514,906 entries (9,251,719
+//!   raw bytes), `tokenizer.ggml.scores` present, byte tokens `<0x00>`..`<0xFF>` at
+//!   ids 238..=493, longest piece 93 bytes.
+//! * `gemma-embedding2`: `eot_token_id` absent, `chat_template` 1,016 bytes,
+//!   `add_eos_token` true. `gemma4`: `eot_token_id` 106, `chat_template` 18,808
+//!   bytes, `add_eos_token` absent.
+//!
+//! For these files the merge array is READ WHOLE and resolved to ranked id triples
+//! (`VocabularyRead::merges`), charged against the same budget and refused with both
+//! numbers if it will not fit -- never silently skipped, never truncated to a prefix
+//! that is then called complete. `merge_count()`, `declared_merge_count()` and
+//! `merges_complete()` report what was held; `tokenizer_model()`, `pre_tokenizer()`,
+//! `chat_template_len()` and `eot_id()` report the rest. `encode_bpe` applies the
+//! held merges; `encode` stays the longest-match encoder below for every file. The
+//! chat template's bytes are reported by length and rendered by
+//! `gguf::GgufTokenizerInfo`, not held here.
+//!
 //! # WHAT `encode` GUARANTEES
 //!
 //! * Every id it emits is an id this file declared, and every id it emits for a
@@ -83,7 +108,10 @@
 //! * `tokenizer.ggml.pre` = `"default"` is read and reported, and no pre-tokenizer
 //!   stage is applied, because `merges`, `added_tokens` and `n_capture` are all
 //!   absent and a configurable pre-tokenizer cannot be built from data the file
-//!   does not carry. The scan is therefore a raw byte scan, and it says so.
+//!   does not carry. The scan is therefore a raw byte scan, and it says so. For the
+//!   `gemma4` files that DO carry merges, `encode_bpe` applies them, but still runs
+//!   no `pre` and no `normalize` stage, so it claims a round trip over the raw bytes
+//!   and not reference-runtime parity.
 //! * There is no piece cache. Segmentation is recomputed on every call.
 //! * `add_space_prefix` is false in this file, and is read, reported and NOT
 //!   applied: the rule below consumes a space that exists, which is the half of
@@ -135,6 +163,14 @@ pub const WORD_MARKER: &[u8] = b"\xe2\x96\x81";
 /// longest piece is 48 bytes, so 128 is loose enough for any real Gemma or GPT-2
 /// vocabulary and tight enough to be a bound.
 pub const MAX_PIECE_BYTES: usize = 128;
+
+/// Longest `tokenizer.ggml.model` / `tokenizer.ggml.pre` name the table will hold.
+///
+/// WHY a cap: both are short family names (`llama`, `gemma4`, `default`), and a
+/// length prefix followed by bytes the reader keeps is the same denial-of-service
+/// shape `MAX_PIECE_BYTES` exists for. A name past this bound is refused with both
+/// numbers rather than truncated into a different family.
+pub const MAX_MODEL_BYTES: usize = 32;
 
 /// The ceiling on how many bytes of heap the service will spend holding one file's
 /// vocabulary, and the budget a build runs under when the guest reports no free
@@ -362,6 +398,30 @@ pub struct FileTokenizer {
     types_declared: bool,
     /// What the build charged against `TOKENIZER_HEAP_BUDGET`.
     heap_bytes: usize,
+    /// `tokenizer.ggml.model`, copied bounded; empty when the file named none.
+    model: [u8; MAX_MODEL_BYTES],
+    model_len: usize,
+    /// `tokenizer.ggml.pre`, copied bounded; empty when the file named none.
+    pre: [u8; MAX_MODEL_BYTES],
+    pre_len: usize,
+    /// The file's BPE merges, resolved to ids and held in declared (rank) order:
+    /// `merges[rank]` is `(left_id, right_id, result_id)`. Empty for a file that
+    /// declares no merges, which is the predecessor's case.
+    merges: Vec<(u32, u32, u32)>,
+    /// Indices into `merges`, sorted by `(left_id, right_id)` so a pair's rank is a
+    /// binary search rather than a scan of half a million entries.
+    merge_index: Vec<u32>,
+    /// What `tokenizer.ggml.merges` declared, counted from its own header.
+    declared_merges: u32,
+    /// What the held merge tables charge, kept beside `heap_bytes` so the five-part
+    /// vocabulary breakdown the budget doc quotes stays the vocabulary's own.
+    merge_bytes: usize,
+    /// `tokenizer.chat_template`'s declared byte length; `0` when absent. The bytes
+    /// are stepped over, not held: a template is a prompt-formatting concern, not a
+    /// vocabulary one, and `gguf::GgufTokenizerInfo` is where it is rendered.
+    chat_template_len: u64,
+    /// `tokenizer.ggml.eot_token_id`, the end-of-turn id a chat file names.
+    eot_id: Option<u32>,
 }
 
 impl FileTokenizer {
@@ -471,6 +531,17 @@ impl FileTokenizer {
                 // gets none, and `has_byte_fallback` says so.
                 let flag = read.flag(stream, val_type, "tokenizer.ggml.byte_fallback")?;
                 read.byte_fallback_flag = Some(flag);
+            } else if key == b"tokenizer.ggml.model" {
+                read.bounded_name(stream, val_type, "tokenizer.ggml.model", true)?;
+            } else if key == b"tokenizer.ggml.pre" {
+                read.bounded_name(stream, val_type, "tokenizer.ggml.pre", false)?;
+            } else if key == b"tokenizer.ggml.eot_token_id" {
+                let id = read.scalar_id(stream, val_type, "tokenizer.ggml.eot_token_id")?;
+                read.eot_id = Some(id);
+            } else if key == b"tokenizer.chat_template" {
+                read.template_len(stream, val_type)?;
+            } else if key == b"tokenizer.ggml.merges" {
+                read.merges(stream, val_type)?;
             } else {
                 gguf::skip_metadata_value_stream(stream, val_type)
                     .map_err(|error| at("an unrecognised metadata value", error))?;
@@ -732,6 +803,152 @@ impl FileTokenizer {
         self.heap_bytes
     }
 
+    /// `tokenizer.ggml.model`, as the file named it, or `None` when it named none.
+    pub fn tokenizer_model(&self) -> Option<&str> {
+        if self.model_len == 0 {
+            return None;
+        }
+        core::str::from_utf8(&self.model[..self.model_len]).ok()
+    }
+
+    /// `tokenizer.ggml.pre`, as the file named it, or `None` when it named none.
+    pub fn pre_tokenizer(&self) -> Option<&str> {
+        if self.pre_len == 0 {
+            return None;
+        }
+        core::str::from_utf8(&self.pre[..self.pre_len]).ok()
+    }
+
+    /// How many BPE merges the table holds, resolved to ids and ranked.
+    pub fn merge_count(&self) -> usize {
+        self.merges.len()
+    }
+
+    /// How many merges `tokenizer.ggml.merges` declared.
+    pub fn declared_merge_count(&self) -> u32 {
+        self.declared_merges
+    }
+
+    /// Whether every declared merge was resolved and held. A file that declares
+    /// merges and holds fewer than it declared is NOT fully tokenized by `encode_bpe`,
+    /// and this is the accessor that says so rather than a silent prefix.
+    pub fn merges_complete(&self) -> bool {
+        self.merges.len() as u32 == self.declared_merges
+    }
+
+    /// What the held merge tables charge, beside `heap_bytes`'s vocabulary five parts.
+    pub fn merge_bytes(&self) -> usize {
+        self.merge_bytes
+    }
+
+    /// `tokenizer.chat_template`'s declared byte length; `0` when the file has none.
+    pub fn chat_template_len(&self) -> u64 {
+        self.chat_template_len
+    }
+
+    /// `tokenizer.ggml.eot_token_id`, the end-of-turn id a chat file names.
+    pub fn eot_id(&self) -> Option<u32> {
+        self.eot_id
+    }
+
+    /// Segments `text` by applying the file's own BPE merges, ranked.
+    ///
+    /// WHAT THIS IS AND IS NOT: it starts from the file's `<0xNN>` byte tokens (one
+    /// id per input byte) and repeatedly joins the adjacent pair whose merge has the
+    /// lowest rank, which is the BPE algorithm over the merge table this file
+    /// declared. It is NOT a reference-runtime parity claim: no `tokenizer.ggml.pre`
+    /// pre-tokenizer stage and no `normalize` stage runs, so the ids are this table's
+    /// BPE segmentation of the raw bytes, not the ids a SentencePiece or llama.cpp
+    /// runtime would give. What IS guaranteed is the round trip -- every merge joins
+    /// two pieces into the piece whose bytes are their concatenation, so
+    /// `decode_sequence(encode_bpe(t)) == t` for every input the byte tokens cover --
+    /// and that no merge is dropped: a file whose merges are not all held refuses
+    /// rather than segmenting with a prefix it would call complete.
+    ///
+    /// A file with no merges (the predecessor) has nothing to apply, and this returns
+    /// the byte-token segmentation unchanged; `encode` remains the longest-match
+    /// encoder for that file. The two-pass bound is `encode`'s: nothing is written
+    /// when the segmentation will not fit `out`.
+    pub fn encode_bpe(&self, text: &[u8], out: &mut [u32]) -> Result<usize, EncodeError> {
+        if !self.merges_complete() {
+            // Refusing here is the honest answer: a partial merge table would segment
+            // with a prefix and call it the file's tokenization. `encode` is the
+            // longest-match path that does not depend on merges at all.
+            return Err(EncodeError::BeyondBuffer {
+                needed: usize::MAX,
+                bound: out.len(),
+            });
+        }
+        let mut ids: Vec<u32> = Vec::with_capacity(text.len() + 1);
+        if self.writes_bos() {
+            ids.push(self.bos_id.expect("writes_bos checked the id"));
+        }
+        for &byte in text {
+            let id = self
+                .byte_id_of(byte)
+                .or(self.unk_id)
+                .ok_or(EncodeError::BeyondBuffer {
+                    needed: text.len() + 1,
+                    bound: out.len(),
+                })?;
+            ids.push(id);
+        }
+        if ids.len() > out.len() {
+            return Err(EncodeError::BeyondBuffer {
+                needed: ids.len(),
+                bound: out.len(),
+            });
+        }
+
+        // Repeatedly take the lowest-ranked applicable adjacent pair. The bos sits at
+        // index 0 and is never merged: scanning starts after it when it is present.
+        let start = usize::from(self.writes_bos());
+        loop {
+            let mut best_rank = usize::MAX;
+            let mut best_at = usize::MAX;
+            let mut best_result = 0u32;
+            let mut index = start;
+            while index + 1 < ids.len() {
+                if let Some((rank, result)) = self.merge_rank(ids[index], ids[index + 1]) {
+                    if rank < best_rank {
+                        best_rank = rank;
+                        best_at = index;
+                        best_result = result;
+                    }
+                }
+                index += 1;
+            }
+            if best_at == usize::MAX {
+                break;
+            }
+            ids[best_at] = best_result;
+            ids.remove(best_at + 1);
+        }
+
+        out[..ids.len()].copy_from_slice(&ids);
+        Ok(ids.len())
+    }
+
+    /// The rank and result id of the merge joining `left` then `right`, or `None`
+    /// when the file declares no such merge. A binary search over `merge_index`,
+    /// which is sorted by the pair, so the rank is the merge's own declared position.
+    fn merge_rank(&self, left: u32, right: u32) -> Option<(usize, u32)> {
+        let mut low = 0usize;
+        let mut high = self.merge_index.len();
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let merge = self.merges[self.merge_index[mid] as usize];
+            if (merge.0, merge.1) < (left, right) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let slot = *self.merge_index.get(low)?;
+        let merge = self.merges[slot as usize];
+        (merge.0 == left && merge.1 == right).then_some((slot as usize, merge.2))
+    }
+
     /// Whether `encode` opens with the file's bos id, from the file's own flag.
     fn writes_bos(&self) -> bool {
         matches!(self.add_bos_token, Some(true)) && self.bos_id.is_some()
@@ -819,6 +1036,24 @@ fn byte_token_value(name: &[u8]) -> Option<u8> {
     Some(high << 4 | low)
 }
 
+/// The id whose piece bytes are exactly `needle`, searched over `lookup` (every id
+/// sorted by piece bytes). `None` when the file declares no such piece, which for a
+/// merge means the merge names a token the vocabulary does not have.
+fn find_in_lookup(bytes: &[u8], starts: &[u32], lookup: &[u32], needle: &[u8]) -> Option<u32> {
+    let mut low = 0usize;
+    let mut high = lookup.len();
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if piece_bytes(bytes, starts, lookup[mid]).cmp(needle) == Ordering::Less {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    let id = *lookup.get(low)?;
+    (piece_bytes(bytes, starts, id) == needle).then_some(id)
+}
+
 fn hex_digit(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -863,6 +1098,14 @@ struct VocabularyRead {
     byte_fallback_flag: Option<bool>,
     scores_declared: bool,
     types_declared: bool,
+    model: [u8; MAX_MODEL_BYTES],
+    model_len: usize,
+    pre: [u8; MAX_MODEL_BYTES],
+    pre_len: usize,
+    merges: Vec<(u32, u32, u32)>,
+    declared_merges: u32,
+    chat_template_len: u64,
+    eot_id: Option<u32>,
 }
 
 impl VocabularyRead {
@@ -895,6 +1138,14 @@ impl VocabularyRead {
             byte_fallback_flag: None,
             scores_declared: false,
             types_declared: false,
+            model: [0u8; MAX_MODEL_BYTES],
+            model_len: 0,
+            pre: [0u8; MAX_MODEL_BYTES],
+            pre_len: 0,
+            merges: Vec::new(),
+            declared_merges: 0,
+            chat_template_len: 0,
+            eot_id: None,
         }
     }
 
@@ -1101,6 +1352,154 @@ impl VocabularyRead {
         }
     }
 
+    /// A bounded family name (`tokenizer.ggml.model` / `tokenizer.ggml.pre`),
+    /// copied whole or refused with both numbers -- never truncated into a
+    /// different family. `is_model` picks which field it lands in.
+    fn bounded_name(
+        &mut self,
+        stream: &mut GgufStream<'_>,
+        val_type: u32,
+        key: &'static str,
+        is_model: bool,
+    ) -> Result<(), TokenizerError> {
+        if val_type != 8 {
+            return Err(TokenizerError::BadArrayShape(key, val_type));
+        }
+        let len = stream.read_u64().map_err(|error| at(key, error))?;
+        let len = usize::try_from(len).map_err(|_| TokenizerError::ArithmeticOverflow)?;
+        if len > MAX_MODEL_BYTES {
+            // The id field is a sentinel: this refusal is about a name's length,
+            // not a piece's, and both numbers it carries are the ones that matter.
+            return Err(TokenizerError::PieceTooLong(0, len, MAX_MODEL_BYTES));
+        }
+        let mut buf = [0u8; MAX_MODEL_BYTES];
+        stream.read_exact(&mut buf[..len]).map_err(|error| at(key, error))?;
+        if is_model {
+            self.model = buf;
+            self.model_len = len;
+        } else {
+            self.pre = buf;
+            self.pre_len = len;
+        }
+        Ok(())
+    }
+
+    /// `tokenizer.chat_template`: its declared length is recorded and its bytes
+    /// stepped over. The template is a prompt-formatting concern rendered by
+    /// `gguf::GgufTokenizerInfo`, not a vocabulary the encoder matches against, so
+    /// holding eighteen kilobytes of it here would be paying for a fact spent
+    /// elsewhere. The length is reported so a caller knows it exists.
+    fn template_len(
+        &mut self,
+        stream: &mut GgufStream<'_>,
+        val_type: u32,
+    ) -> Result<(), TokenizerError> {
+        if val_type != 8 {
+            return Err(TokenizerError::BadArrayShape("tokenizer.chat_template", val_type));
+        }
+        let len = stream
+            .read_u64()
+            .map_err(|error| at("tokenizer.chat_template", error))?;
+        let skip = usize::try_from(len).map_err(|_| TokenizerError::ArithmeticOverflow)?;
+        stream.skip(skip).map_err(|error| at("tokenizer.chat_template", error))?;
+        self.chat_template_len = len;
+        Ok(())
+    }
+
+    /// `tokenizer.ggml.merges`: the BPE merge table, read whole and resolved to ids.
+    ///
+    /// WHY resolved here and not held as strings: a merge is two piece names and a
+    /// space, and holding half a million of them as bytes is nine megabytes the
+    /// encoder would still have to look up by name on every step. Resolving each to
+    /// `(left_id, right_id, result_id)` against the vocabulary as it passes turns
+    /// that into three integers a binary search can rank, and the strings are never
+    /// kept. The resolution needs the vocabulary already read, which is the order
+    /// these files declare; a file that puts merges first is refused rather than
+    /// guessed at.
+    ///
+    /// WHY the lookup is transient: sorting every id by its piece bytes costs four
+    /// bytes an entry the finished table does not keep, so its charge is handed back
+    /// the moment the last merge is resolved, exactly as `finish` hands back the
+    /// scores and the types.
+    fn merges(
+        &mut self,
+        stream: &mut GgufStream<'_>,
+        val_type: u32,
+    ) -> Result<(), TokenizerError> {
+        if val_type != 9 {
+            return Err(TokenizerError::BadArrayShape("tokenizer.ggml.merges", val_type));
+        }
+        let elem_type = stream
+            .read_u32()
+            .map_err(|error| at("tokenizer.ggml.merges", error))?;
+        if elem_type != 8 {
+            return Err(TokenizerError::BadArrayShape(
+                "tokenizer.ggml.merges element type",
+                elem_type,
+            ));
+        }
+        let count = self.count_of(stream, "tokenizer.ggml.merges")?;
+        self.declared_merges = count;
+        let vocab = self.vocab.ok_or(TokenizerError::Reader(GgufError::InvalidMetadata))?;
+
+        // Every id sorted by its piece bytes, so an exact-name lookup is a binary
+        // search. Built once for the whole merge array and dropped after it.
+        let mut lookup: Vec<u32> = (0..vocab).collect();
+        let lookup_charge = lookup.len() * core::mem::size_of::<u32>();
+        self.charge(lookup_charge)?;
+        lookup.sort_unstable_by(|a, b| {
+            piece_bytes(&self.bytes, &self.starts, *a)
+                .cmp(piece_bytes(&self.bytes, &self.starts, *b))
+                .then_with(|| a.cmp(b))
+        });
+
+        let result = (|| -> Result<(), TokenizerError> {
+            for _ in 0..count {
+                let len = stream
+                    .read_u64()
+                    .map_err(|error| at("tokenizer.ggml.merges", error))?;
+                let len = usize::try_from(len).map_err(|_| TokenizerError::ArithmeticOverflow)?;
+                if len > 2 * MAX_PIECE_BYTES + 1 {
+                    return Err(TokenizerError::PieceTooLong(0, len, 2 * MAX_PIECE_BYTES + 1));
+                }
+                let mut buf = [0u8; 2 * MAX_PIECE_BYTES + 1];
+                stream
+                    .read_exact(&mut buf[..len])
+                    .map_err(|error| at("tokenizer.ggml.merges", error))?;
+                let merge = &buf[..len];
+                let split = merge
+                    .iter()
+                    .position(|&byte| byte == b' ')
+                    .ok_or(TokenizerError::Reader(GgufError::InvalidMetadata))?;
+                let left = &merge[..split];
+                let right = &merge[split + 1..];
+                if left.is_empty() || right.is_empty() {
+                    return Err(TokenizerError::Reader(GgufError::InvalidMetadata));
+                }
+                let left_id = find_in_lookup(&self.bytes, &self.starts, &lookup, left)
+                    .ok_or(TokenizerError::Reader(GgufError::InvalidMetadata))?;
+                let right_id = find_in_lookup(&self.bytes, &self.starts, &lookup, right)
+                    .ok_or(TokenizerError::Reader(GgufError::InvalidMetadata))?;
+                let mut joined = [0u8; 2 * MAX_PIECE_BYTES];
+                joined[..left.len()].copy_from_slice(left);
+                joined[left.len()..left.len() + right.len()].copy_from_slice(right);
+                let result_id =
+                    find_in_lookup(&self.bytes, &self.starts, &lookup, &joined[..left.len() + right.len()])
+                        .ok_or(TokenizerError::Reader(GgufError::InvalidMetadata))?;
+                self.charge(3 * core::mem::size_of::<u32>())?;
+                self.merges.push((left_id, right_id, result_id));
+            }
+            Ok(())
+        })();
+
+        // Hand the lookup's charge back whether the walk succeeded or refused: it
+        // is scaffolding, and a refusal that left it charged would name a peak the
+        // table never held.
+        drop(lookup);
+        self.held = self.held.saturating_sub(lookup_charge);
+        result
+    }
+
     /// Turns what was read into the table, or refuses.
     ///
     /// WHY it destructures `self`: the sort below borrows `bytes` and `starts` for
@@ -1129,6 +1528,14 @@ impl VocabularyRead {
             byte_fallback_flag,
             scores_declared,
             types_declared,
+            model,
+            model_len,
+            pre,
+            pre_len,
+            merges,
+            declared_merges,
+            chat_template_len,
+            eot_id,
         } = self;
 
         let vocab = vocab.ok_or(TokenizerError::NoVocabulary)?;
@@ -1230,8 +1637,30 @@ impl VocabularyRead {
         drop(scores);
         drop(kinds);
 
+        // The merges were charged into the running total as they were resolved, so
+        // the walk's ceiling already covered the peak that held them. They ship in
+        // their own accounting beside the vocabulary's five parts, so hand their
+        // charge back out of `held` here: `heap_bytes()` stays the vocabulary
+        // breakdown the budget doc quotes, and `merge_bytes()` is the merge table's
+        // own. A file with no merges (the predecessor) subtracts nothing.
+        let merge_charge = merges.len() * 3 * core::mem::size_of::<u32>();
+        held = held.saturating_sub(merge_charge);
+        let mut merge_index: Vec<u32> = (0..merges.len() as u32).collect();
+        merge_index.sort_unstable_by(|a, b| {
+            let left = merges[*a as usize];
+            let right = merges[*b as usize];
+            (left.0, left.1).cmp(&(right.0, right.1)).then_with(|| a.cmp(b))
+        });
+        let merge_bytes = merge_charge + merge_index.len() * core::mem::size_of::<u32>();
+
         if held > budget {
             return Err(TokenizerError::VocabHeldTooLarge(held, budget));
+        }
+        if held.saturating_add(merge_bytes) > budget {
+            return Err(TokenizerError::VocabHeldTooLarge(
+                held.saturating_add(merge_bytes),
+                budget,
+            ));
         }
         // A vocabulary the encoder cannot match against is a vocabulary it cannot
         // encode with; that is the same gap as having no vocabulary at all.
@@ -1261,6 +1690,16 @@ impl VocabularyRead {
             scores_declared,
             types_declared,
             heap_bytes: held,
+            model,
+            model_len,
+            pre,
+            pre_len,
+            merges,
+            merge_index,
+            declared_merges,
+            merge_bytes,
+            chat_template_len,
+            eot_id,
         })
     }
 }
@@ -1520,6 +1959,23 @@ mod tests {
         let mut stream = GgufStream::from_slice(bytes);
         FileTokenizer::build_from_stream_under(&mut stream, budget)
     }
+
+    /// The architecture the opened file declares, read from its own bytes. Every
+    /// real-file case asserts THIS architecture's geometry rather than assuming the
+    /// predecessor's, and a file that names none is refused loudly instead of guessed.
+    fn architecture_of(buffer: &[u8]) -> host::string::String {
+        let bytes = gguf::find_metadata_string(buffer, b"general.architecture").unwrap_or_else(|| {
+            panic!("the opened file declares no general.architecture; refusing to assume one")
+        });
+        host::string::String::from_utf8(bytes.to_vec())
+            .unwrap_or_else(|error| panic!("general.architecture is not utf8: {error}"))
+    }
+
+    /// A prefix large enough to hold the whole metadata block of every installed
+    /// architecture: the predecessor's runs to ~7 MiB, `gemma-embedding2` and
+    /// `gemma4` to ~15.03 MiB, so sixteen holds all of them and the walk reads the
+    /// real vocabulary rather than a truncated one.
+    const REAL_WINDOW: usize = 16 * 1024 * 1024;
 
     /// Encodes and returns the ids, panicking with the refusal if the table said
     /// no -- every case below fits the buffer it is given.
@@ -1902,7 +2358,7 @@ mod tests {
             }
         }) {
             Some(path) => {
-                const WINDOW: usize = 12 * 1024 * 1024;
+                const WINDOW: usize = REAL_WINDOW;
                 let mut buffer: host::vec::Vec<u8> = host::vec![0u8; WINDOW];
                 let mut file = host::fs::File::open(&path)
                     .unwrap_or_else(|error| panic!("the real file at {path} could not be opened: {error}"));
@@ -1924,6 +2380,7 @@ mod tests {
                 let scores: Vec<f32> = core::iter::repeat(0.0).take(tokens.len()).collect();
                 let mut fixture = Fixture::new();
                 fixture
+                    .string(b"general.architecture", b"gemma-embedding")
                     .tokens(&tokens)
                     .ints(b"tokenizer.ggml.token_type", &kinds)
                     .floats(b"tokenizer.ggml.scores", &scores);
@@ -1934,41 +2391,78 @@ mod tests {
         let table = table_from(&buffer)
             .unwrap_or_else(|error| panic!("the real file at {path} gave no table: {error:?}"));
 
-        // What the charge counts for the table that ships: the four vectors that
-        // survive `finish`, plus the byte map that exists before any key is read.
-        let counted = table.heap_bytes();
-
-        // What the heap actually holds for those same four vectors.
-        let mapped = table.bytes.capacity() * core::mem::size_of::<u8>()
-            + table.starts.capacity() * core::mem::size_of::<u32>()
-            + table.matchable.capacity() * core::mem::size_of::<bool>()
-            + table.pool.capacity() * core::mem::size_of::<u32>();
-
-        // The two vectors `finish` drops are alive at the charge's peak, so the peak
-        // the budget has to cover is counted plus their four bytes an entry, and the
-        // heap at that peak is `mapped` plus their capacity -- which the same doubling
-        // bound puts under twice their counted size.
-        assert!(
-            table.declares_scores() && table.declares_token_types(),
-            "the installed file changed shape and this case's peak arithmetic with it"
-        );
-        let transient_counted = table.declared_vocab() as usize * core::mem::size_of::<f32>() * 2;
-        let peak_mapped = mapped + transient_counted * VOCAB_GROWTH_FACTOR;
-        let peak_counted = counted + transient_counted;
-
-        assert!(
-            peak_mapped <= peak_counted * VOCAB_GROWTH_FACTOR,
-            "the installed table peaks at {peak_mapped} bytes of heap for {peak_counted} counted, \
-             past the {VOCAB_GROWTH_FACTOR}x the derived budget divides free bytes by"
-        );
-        host::println!(
-            "REAL FILE GROWTH {path}: counted {counted}, mapped {mapped} (ratio {:.3}), peak \
-             counted {peak_counted}, peak mapped bound {peak_mapped} (ratio {:.3}), factor \
-             reserved {VOCAB_GROWTH_FACTOR}. Measured on the host allocator: the vectors' \
-             capacity, not the service heap's mapped pages.",
-            mapped as f64 / counted as f64,
-            peak_mapped as f64 / peak_counted as f64,
-        );
+        let arch = architecture_of(&buffer);
+        match arch.as_str() {
+            "gemma-embedding" | "declared_fixture" => {
+                // What the charge counts for the table that ships: the four vectors
+                // that survive `finish`, plus the byte map that exists before any key
+                // is read. The predecessor declares no merges, so the five parts are
+                // the whole charge.
+                let counted = table.heap_bytes();
+                let mapped = table.bytes.capacity() * core::mem::size_of::<u8>()
+                    + table.starts.capacity() * core::mem::size_of::<u32>()
+                    + table.matchable.capacity() * core::mem::size_of::<bool>()
+                    + table.pool.capacity() * core::mem::size_of::<u32>();
+                assert!(
+                    table.declares_scores() && table.declares_token_types(),
+                    "the installed file changed shape and this case's peak arithmetic with it"
+                );
+                assert_eq!(table.merge_count(), 0, "the predecessor declares no merges");
+                let transient_counted =
+                    table.declared_vocab() as usize * core::mem::size_of::<f32>() * 2;
+                let peak_mapped = mapped + transient_counted * VOCAB_GROWTH_FACTOR;
+                let peak_counted = counted + transient_counted;
+                assert!(
+                    peak_mapped <= peak_counted * VOCAB_GROWTH_FACTOR,
+                    "the installed table peaks at {peak_mapped} bytes of heap for {peak_counted} counted, \
+                     past the {VOCAB_GROWTH_FACTOR}x the derived budget divides free bytes by"
+                );
+                host::println!(
+                    "REAL FILE GROWTH {path} [{arch}]: counted {counted}, mapped {mapped} (ratio {:.3}), peak \
+                     counted {peak_counted}, peak mapped bound {peak_mapped} (ratio {:.3}), factor \
+                     reserved {VOCAB_GROWTH_FACTOR}. Measured on the host allocator: the vectors' \
+                     capacity, not the service heap's mapped pages.",
+                    mapped as f64 / counted as f64,
+                    peak_mapped as f64 / peak_counted as f64,
+                );
+            }
+            "gemma-embedding2" | "gemma4" => {
+                // These files carry a merge table, so the shipped charge is the
+                // vocabulary's five parts PLUS the merge tables, and the walk's peak
+                // also held the scores, the types and the transient resolution lookup.
+                assert!(table.declares_scores() && table.declares_token_types());
+                assert!(table.merges_complete(), "a prefix of the merges is not a full table");
+                assert_eq!(table.merge_count(), 514_906);
+                let counted = table.heap_bytes() + table.merge_bytes();
+                let mapped = table.bytes.capacity() * core::mem::size_of::<u8>()
+                    + table.starts.capacity() * core::mem::size_of::<u32>()
+                    + table.matchable.capacity() * core::mem::size_of::<bool>()
+                    + table.pool.capacity() * core::mem::size_of::<u32>()
+                    + table.merges.capacity() * 3 * core::mem::size_of::<u32>()
+                    + table.merge_index.capacity() * core::mem::size_of::<u32>();
+                // scores + types (four bytes an entry each) and the resolution lookup
+                // (four bytes an entry) are alive at the peak and dropped after it.
+                let transient_counted =
+                    table.declared_vocab() as usize * core::mem::size_of::<f32>() * 3;
+                let peak_mapped = mapped + transient_counted * VOCAB_GROWTH_FACTOR;
+                let peak_counted = counted + transient_counted;
+                assert!(
+                    peak_mapped <= peak_counted * VOCAB_GROWTH_FACTOR,
+                    "the {arch} table peaks at {peak_mapped} bytes of heap for {peak_counted} counted, \
+                     past the {VOCAB_GROWTH_FACTOR}x the derived budget divides free bytes by"
+                );
+                host::println!(
+                    "REAL FILE GROWTH {path} [{arch}]: vocab counted {}, merges counted {}, mapped {mapped}, \
+                     peak counted {peak_counted}, peak mapped bound {peak_mapped}, factor {VOCAB_GROWTH_FACTOR}.",
+                    table.heap_bytes(),
+                    table.merge_bytes(),
+                );
+            }
+            other => panic!(
+                "UNRECOGNISED architecture {other:?} in {path}: this case asserts a measured geometry \
+                 table per architecture and refuses to assume the predecessor's for an unknown one"
+            ),
+        }
     }
 
     /// The doc block above `TOKENIZER_HEAP_BUDGET`, whitespace-collapsed to one line.
