@@ -146,24 +146,43 @@ impl VirtioPciDevice {
                         VIRTIO_PCI_CAP_COMMON_CFG => {
                             let bar = ecam.read8(bus, dev, func, ptr as usize + 4);
                             let offset = ecam.read32(bus, dev, func, ptr as usize + 8) as u64;
-                            if let Some(base) = Self::map_bar(ecam, bus, dev, func, bar) {
-                                common_cfg = Some(base.wrapping_add(offset) as *mut u8);
+                            let length = ecam.read32(bus, dev, func, ptr as usize + 12) as u64;
+                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar) {
+                                let min_len = core::mem::size_of::<VirtioPciCommonCfg>() as u64;
+                                if length >= min_len && offset.checked_add(length).map(|end| end <= bar_size).unwrap_or(false) {
+                                    common_cfg = Some(base.wrapping_add(offset) as *mut u8);
+                                }
                             }
                         }
                         VIRTIO_PCI_CAP_NOTIFY_BAR => {
                             let bar = ecam.read8(bus, dev, func, ptr as usize + 4);
-                            notify_bar = Self::map_bar(ecam, bus, dev, func, bar);
-                            notify_mult = ecam.read32(bus, dev, func, ptr as usize + 8);
+                            let offset = ecam.read32(bus, dev, func, ptr as usize + 8) as u64;
+                            let length = ecam.read32(bus, dev, func, ptr as usize + 12) as u64;
+                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar) {
+                                if offset.checked_add(length).map(|end| end <= bar_size).unwrap_or(false) {
+                                    notify_bar = Some(base.wrapping_add(offset));
+                                    notify_mult = ecam.read32(bus, dev, func, ptr as usize + 16);
+                                }
+                            }
                         }
                         VIRTIO_PCI_CAP_ISR_BAR => {
                             let bar = ecam.read8(bus, dev, func, ptr as usize + 4);
-                            isr_bar = Self::map_bar(ecam, bus, dev, func, bar);
+                            let offset = ecam.read32(bus, dev, func, ptr as usize + 8) as u64;
+                            let length = ecam.read32(bus, dev, func, ptr as usize + 12) as u64;
+                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar) {
+                                if offset.checked_add(length).map(|end| end <= bar_size).unwrap_or(false) {
+                                    isr_bar = Some(base.wrapping_add(offset));
+                                }
+                            }
                         }
                         VIRTIO_PCI_CAP_DEVICE_CFG => {
                             let bar = ecam.read8(bus, dev, func, ptr as usize + 4);
                             let offset = ecam.read32(bus, dev, func, ptr as usize + 8) as u64;
-                            if let Some(base) = Self::map_bar(ecam, bus, dev, func, bar) {
-                                device_cfg = Some((base.wrapping_add(offset)) as *const u8);
+                            let length = ecam.read32(bus, dev, func, ptr as usize + 12) as u64;
+                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar) {
+                                if offset.checked_add(length).map(|end| end <= bar_size).unwrap_or(false) {
+                                    device_cfg = Some((base.wrapping_add(offset)) as *const u8);
+                                }
                             }
                         }
                         _ => {}
@@ -279,7 +298,7 @@ impl VirtioPciDevice {
         device: u8,
         function: u8,
         bar: u8,
-    ) -> Option<u64> {
+    ) -> Option<(u64, u64)> {
         let probe = ecam.probe_bar(bus, device, function, bar as usize);
         if !probe.is_memory || probe.size == 0 || probe.size > 1024 * 1024 * 1024 {
             return None;
@@ -306,7 +325,7 @@ impl VirtioPciDevice {
         ) {
             return None;
         }
-        Some(base)
+        Some((base, probe.size))
     }
 
     /// Number of queues the device implements.

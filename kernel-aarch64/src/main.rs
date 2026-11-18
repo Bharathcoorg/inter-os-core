@@ -288,8 +288,24 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     }) {
         Some(mut framebuffer) => {
             // Dynamically map physical scanout buffer into the kernel's virtual address space
-            let _ = framebuffer.map_into_kernel();
-            (framebuffer, true)
+            match framebuffer.map_into_kernel() {
+                Ok(_) => (framebuffer, true),
+                Err(err) => {
+                    kprintln!("[WARN] SimpleFB: mapping physical 0x{:08X} failed: {:?}; falling back to RAM buffer",
+                        framebuffer.base_paddr, err);
+                    let buf = alloc::vec![0u8; (FB_STRIDE * FB_HEIGHT) as usize].into_boxed_slice();
+                    let leaked_ptr = alloc::boxed::Box::leak(buf).as_mut_ptr() as usize;
+                    let fb = SimpleFramebuffer::new(
+                        0,
+                        leaked_ptr,
+                        FB_WIDTH,
+                        FB_HEIGHT,
+                        FB_STRIDE,
+                        SimpleFbFormat::Rgb565,
+                    );
+                    (fb, false)
+                }
+            }
         }
         None => {
             let buf = alloc::vec![0u8; (FB_STRIDE * FB_HEIGHT) as usize].into_boxed_slice();

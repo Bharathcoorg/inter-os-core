@@ -478,6 +478,8 @@ pub struct Surface {
     pub pixels: Vec<u32>,
 }
 
+pub const MAX_CLIENT_SURFACES: usize = 32;
+
 pub struct SurfaceManager {
     pub surfaces: Vec<Surface>,
     pub next_id: u32,
@@ -494,6 +496,9 @@ impl SurfaceManager {
     }
 
     pub fn create_surface(&mut self, owner_task: u32, width: u32, height: u32, z_order: u32) -> Result<u32, i64> {
+        if self.surfaces.len() >= MAX_CLIENT_SURFACES {
+            return Err(-28); // -ENOSPC: surface table full (M23)
+        }
         let width = width.min(1440);
         let height = height.min(2160);
         let pixels_count = (width as usize).saturating_mul(height as usize);
