@@ -52,6 +52,7 @@ path = [
   "**/*.theme",
   "**/*.txt",
   "**/*.pcap",
+  "**/*.sha256",
   "emulator/data/**",
 ]
 precedence = "aggregate"
