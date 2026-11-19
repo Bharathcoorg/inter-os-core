@@ -66,6 +66,12 @@ docs/audits/*
 *ROADMAP*.md
 *.audit.md
 
+# Machine learning model artifacts (multi-GB binaries; never commit to Git)
+models/
+*.gguf
+*.safetensors
+*.litertlm
+
 # Packaged guest apps are build artefacts, never sources: a .rapp committed here
 # resurrects an app whose source was removed, on every clone.
 packages/*.rapp

@@ -1,0 +1,168 @@
+{
+  "timestamp": "2026-11-19T18:19:35Z",
+  "repositories": [
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+      "commit_sha": "dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+      "local_dir": "models/downloads/gemma4-mobile-qat",
+      "files": [
+        "config.json",
+        "generation_config.json",
+        "chat_template.jinja",
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "processor_config.json",
+        "preprocessor_config.json",
+        "model.safetensors",
+        "README.md"
+      ]
+    },
+    {
+      "repo_id": "litert-community/gemma-4-E2B-it-litert-lm",
+      "commit_sha": "2d74ac41a33d7da82f39f7d5720a04c68514a103",
+      "local_dir": "models/downloads/gemma4-litert",
+      "files": [
+        "README.md",
+        "chat_template.jinja",
+        "gemma-4-E2B-it.litertlm"
+      ]
+    },
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-q4_0-gguf",
+      "commit_sha": "675cff42a74c774d6cb76f76d8eacb49b48c9b93",
+      "local_dir": "models/downloads/gemma4-official-gguf",
+      "files": [
+        "README.md",
+        "gemma-4-E2B_q4_0-it.gguf"
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+      "commit_sha": "dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+      "filename": "config.json",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-mobile-qat\\config.json",
+      "size_bytes": 6204,
+      "sha256": "cf6d7dc22738b5e6beb364bac833d78b869f5a6ffd57dfc96c6be3f2abc80424",
+      "download_seconds": 0.32
+    },
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+      "commit_sha": "dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+      "filename": "generation_config.json",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-mobile-qat\\generation_config.json",
+      "size_bytes": 209,
+      "sha256": "fb53f4c64e58896a63472e8eb304397db4a39453e1da0f5d57625ec5a8c1050e",
+      "download_seconds": 0.88
+    },
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+      "commit_sha": "dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+      "filename": "chat_template.jinja",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-mobile-qat\\chat_template.jinja",
+      "size_bytes": 18569,
+      "sha256": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+      "download_seconds": 0.7
+    },
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+      "commit_sha": "dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+      "filename": "tokenizer_config.json",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-mobile-qat\\tokenizer_config.json",
+      "size_bytes": 3082,
+      "sha256": "e1362ea24e613159d88c857b109c03d0f4e9e5134d3f6dbdc46a2a45caa8becf",
+      "download_seconds": 0.87
+    },
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+      "commit_sha": "dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+      "filename": "tokenizer.json",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-mobile-qat\\tokenizer.json",
+      "size_bytes": 32169626,
+      "sha256": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
+      "download_seconds": 6.55
+    },
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+      "commit_sha": "dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+      "filename": "processor_config.json",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-mobile-qat\\processor_config.json",
+      "size_bytes": 1689,
+      "sha256": "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+      "download_seconds": 1.24
+    },
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+      "commit_sha": "dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+      "filename": "preprocessor_config.json",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-mobile-qat\\preprocessor_config.json",
+      "size_bytes": 511,
+      "sha256": "ea2ae257e901064abdd98dceb19f2b0da06af600bed15e0f99f5c85c37ee9d78",
+      "download_seconds": 2.98
+    },
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+      "commit_sha": "dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+      "filename": "model.safetensors",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-mobile-qat\\model.safetensors",
+      "size_bytes": 2458111846,
+      "sha256": "efab429012b97ab986c4d4838a46ff3ad95d618b42ce514771ca40fadc76a9a4",
+      "download_seconds": 766.56
+    },
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+      "commit_sha": "dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+      "filename": "README.md",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-mobile-qat\\README.md",
+      "size_bytes": 29110,
+      "sha256": "813f472671242abbaf24417dda5f8e7b85e42ecf0a3d7cca83b017a8339c11cc",
+      "download_seconds": 1.5
+    },
+    {
+      "repo_id": "litert-community/gemma-4-E2B-it-litert-lm",
+      "commit_sha": "2d74ac41a33d7da82f39f7d5720a04c68514a103",
+      "filename": "README.md",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-litert\\README.md",
+      "size_bytes": 16916,
+      "sha256": "68e8081307d001052651a022dfe0e1058ccf624ce8169a902dc0fcb10e2bbb4e",
+      "download_seconds": 0.32
+    },
+    {
+      "repo_id": "litert-community/gemma-4-E2B-it-litert-lm",
+      "commit_sha": "2d74ac41a33d7da82f39f7d5720a04c68514a103",
+      "filename": "chat_template.jinja",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-litert\\chat_template.jinja",
+      "size_bytes": 11995,
+      "sha256": "02b3091acf53c0b722e3db0c7a1b4980363edcc2d85549dafa339ff5dbfff629",
+      "download_seconds": 0.43
+    },
+    {
+      "repo_id": "litert-community/gemma-4-E2B-it-litert-lm",
+      "commit_sha": "2d74ac41a33d7da82f39f7d5720a04c68514a103",
+      "filename": "gemma-4-E2B-it.litertlm",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-litert\\gemma-4-E2B-it.litertlm",
+      "size_bytes": 2588147712,
+      "sha256": "181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c",
+      "download_seconds": 749.33
+    },
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-q4_0-gguf",
+      "commit_sha": "675cff42a74c774d6cb76f76d8eacb49b48c9b93",
+      "filename": "README.md",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-official-gguf\\README.md",
+      "size_bytes": 29260,
+      "sha256": "942e93b96c2f7f2b5fdd8d5578f0f1215e4a354f12e202999b4fbc864bb02ef5",
+      "download_seconds": 0.34
+    },
+    {
+      "repo_id": "google/gemma-4-E2B-it-qat-q4_0-gguf",
+      "commit_sha": "675cff42a74c774d6cb76f76d8eacb49b48c9b93",
+      "filename": "gemma-4-E2B_q4_0-it.gguf",
+      "local_path": "C:\\Users\\bhara\\Desktop\\Interlayer\\QEMU\\inter-os-core\\models\\downloads\\gemma4-official-gguf\\gemma-4-E2B_q4_0-it.gguf",
+      "size_bytes": 3349516256,
+      "sha256": "fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634",
+      "download_seconds": 1624.28
+    }
+  ]
+}
