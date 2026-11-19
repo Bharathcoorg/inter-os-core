@@ -53,8 +53,32 @@ In strict compliance with repository safety directives:
 
 ---
 
-## 5. Next Steps
+## 5. Host Reference Numerical Inference Results
 
-1. Commit only the audit manifests, acquisition tooling, and documentation under `audit-evidence/gemma4-mobile-acquisition/` and `tools/download_official_gemma4.py`.
-2. Keep all model binary files quarantined in `models/downloads/`.
-3. Plan the Phase 2 implementation of the Q6_K dequantizer for InterOS Core's system service if on-device execution of the official GGUF artifact is desired.
+Using the official tool `tools/test_host_reference_gemma4.py`, genuine numerical execution was performed against `models/downloads/gemma4-mobile-qat` on the host CPU with deterministic decoding (`do_sample=False`).
+
+### Execution Summary
+- **Execution Engine:** Host-backed PyTorch 2.13.0+cpu & Transformers 5.18.0 (`Gemma4ForConditionalGeneration`).
+- **Prompt:** `"Explain capability security in one sentence."`
+- **Chat Template Tokens (16 tokens):**  
+  `[2, 105, 2364, 107, 155122, 20478, 5052, 528, 886, 13315, 236761, 106, 107, 105, 4368, 107]`  
+  (`bos`, `<start_of_turn>user\nExplain capability security in one sentence.<end_of_turn>\n<start_of_turn>model\n`)
+- **Generated Output Tokens (28 tokens):**  
+  `[224287, 5052, 563, 506, 5428, 529, 17096, 600, 1186, 19278, 5089, 653, 6585, 740, 2802, 532, 1161, 3530, 15858, 236764, 17534, 24284, 13719, 1262, 532, 5405, 236761, 106]`
+- **Decoded Text:**  
+  `"Capability security is the practice of ensuring that only authorized users or processes can access and use specific capabilities, thereby protecting sensitive data and resources."`
+- **End-of-Sequence:** Properly emitted token `106` (`<end_of_turn>`).
+- **Latency & Throughput:**
+  * Model weight loading: 5.87 seconds
+  * Generation runtime: 247.56 seconds (~0.11 tokens/sec on multi-core CPU)
+- **Labeling (Platform Truth Contract):** Explicitly documented as **host-backed reference inference**, establishing the mathematical and conversational authenticity of Google's official model weights before guest integration.
+
+---
+
+## 6. Next Steps
+
+1. Maintain binary model quarantine in `models/downloads/` (zero Git bloat).
+2. For on-device guest inference:
+   * Implement verified `Q6_K` dequantizer and tied embeddings in `userspace/system-service/src/inference.rs` and `weights.rs` with dedicated mathematical unit tests.
+   * Expand the arithmetic decode set to include `14` (Q6_K) once verified against contract tests.
+   * Provision the official GGUF onto a disposable QEMU test disk and execute guest inference.
