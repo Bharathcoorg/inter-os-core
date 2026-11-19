@@ -4528,6 +4528,7 @@ mod tests {
     /// keeps only the length in the inode.
     #[test]
     fn vfs_a_model_file_is_streamed_to_the_device_and_never_holds_its_bytes() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         const CHUNK_BYTES: usize = 256 * 1024;
         const CHUNKS: usize = 8;
         let mut vfs = Vfs::with_spill_store(memory_store());

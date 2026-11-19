@@ -55,7 +55,7 @@ Services do not receive unrestricted hardware authority by default:
 
 ### AI model deployment
 
-InterOS does not bind the OS to one model name. `aid` selects a userspace backend by a verified model manifest containing format, architecture, quantization, tokenizer, operations, hardware and resource requirements. Unknown combinations are rejected as unsupported; an installed model never makes an absent runtime appear available. This permits user-selected future models without granting model code ambient authority or teaching the kernel model formats.
+The format-neutral userspace backend and manifest contracts describe format, architecture, quantization, tokenizer, operations, hardware and resource requirements. They are not yet connected to `aid` model selection or installation; the current execution path still probes specific GGUF slots. A manifest digest alone establishes byte consistency, not publisher authenticity. User-selected models require a production registry, authenticated provenance and backend integration before they can be managed through this interface.
 
 The initial test set is:
 
@@ -65,9 +65,9 @@ The initial test set is:
 | Gemma 4 E2B | local generation | `.litertlm` | Container and provenance validation implemented; native Rust graph execution not implemented |
 | compatible GGUF models | generation or embedding, according to parsed tensor graph | `.gguf` | native Rust CPU backend present; model compatibility and QEMU execution must be verified per artifact |
 
-The two pinned LiteRT-LM packages occupy about 2.56 GiB together. On a fixed 6 GiB data image the installer must also preserve space for filesystem overhead, applications, indexes, updates and user data; it therefore checks the observed free-storage value instead of assuming the nominal image size. Model files are data, not part of the kernel or OS executable.
+The two pinned LiteRT-LM packages occupy about 2.56 GiB together. A fixed 6 GiB data image must also reserve space for filesystem overhead, applications, indexes, updates and user data. The ledger has a storage admission check, but the current model installer does not yet use it. Model files are data, not part of the kernel or OS executable.
 
-At run time, admission uses current free-RAM telemetry and a backend estimate split into weights, KV cache, activations, scratch, tokenizer, indexes, audio buffers and runtime overhead. A foreground reserve scales with detected RAM. Reservations are reclaimed on cancellation, session destruction, owner death and backend failure. The mechanism supports dynamic RAM configurations; it does not promise that a particular model fits every configuration.
+The current generation path checks free-RAM telemetry against an estimated working set and a foreground reserve. The separate ledger models resident and session reservations and reclamation, but is not yet authoritative long-lived `aid` state. Embedding admission and actual allocation accounting still need integration. Dynamic RAM does not guarantee that a particular model fits every configuration.
 
 Run `python tools/download_official_gemma4.py --verify-only --with-embedding` to verify both pinned LiteRT-LM packages by exact length and SHA-256. A normal download also writes a small `.modelmanifest` beside each artifact. `userspace/system-service/src/litertlm.rs` validates the official 32-byte envelope, FlatBuffer section inventory, 16 KiB alignment and payload bounds without allocation or an external FlatBuffers crate. That inspection is not inference. A pure-Rust LiteRT-LM backend still requires TFLite graph parsing, metadata and tokenizer parsing, supported operators, quantized kernels, dynamic tensor/KV-cache handling, scheduling and numerical conformance tests.
 
@@ -75,7 +75,7 @@ Run `python tools/download_official_gemma4.py --verify-only --with-embedding` to
 
 Launcher global search and authorized applications send the versioned AI IPC protocol to the service alias resolved to the registered `aid` task. The kernel verifies the peer and checks authority on every operation: inference requires `InferenceService`, retrieval additionally requires `SearchService` plus `ContentIndexRead`, and installation additionally requires `FileSystemWrite`. Revocation therefore affects the next request. The broker treats model output and indexed content as untrusted, uses bounded frames and buffers, and gives the model no shell, root, arbitrary VFS or hardware access.
 
-`aid` owns provider selection, model verification, memory admission, cancellation and streaming. Search uses the same retrieval service for the launcher and applications; when a neural embedding backend is unavailable, the response is explicitly labelled as the lexical baseline rather than as EmbeddingGemma output. Generative requests likewise return unavailable or unsupported instead of substituting a host process and calling it on-device inference.
+`aid` currently handles GGUF probing, generation, embedding requests, cancellation and replies. Its format-neutral provider selection and manifest verification are not yet wired into those paths. Search uses the retrieval service for launcher and authorized applications; the lexical baseline is labelled separately from neural output. End-to-end system-wide semantic retrieval has not been verified in the guest.
 
 ---
 

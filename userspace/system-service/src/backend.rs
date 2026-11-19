@@ -10,6 +10,7 @@
 //! resource requirements.  Neural arithmetic remains in the backend.
 
 use core::str;
+use interos_std as std;
 
 pub const MAX_SESSIONS: usize = 8;
 
@@ -560,13 +561,22 @@ impl BrokerLedger {
     ) -> Result<u64, AdmissionError> {
         let bytes = estimate.session_bytes().ok_or(AdmissionError::Arithmetic)?;
         self.reserve_ram(bytes)?;
-        let slot = self
-            .sessions
-            .iter_mut()
-            .find(|session| !session.active)
+        if self.sessions.iter().all(|session| session.active) {
+            return Err(AdmissionError::SessionCapacity);
+        }
+        // Never reuse an identifier while its previous session is live, even
+        // after the counter wraps.  A stale cancellation must not address a
+        // different owner's new session.
+        let mut id = self.next_session;
+        for _ in 0..=MAX_SESSIONS {
+            if !self.sessions.iter().any(|session| session.active && session.id == id) {
+                break;
+            }
+            id = id.wrapping_add(1).max(1);
+        }
+        self.next_session = id.wrapping_add(1).max(1);
+        let slot = self.sessions.iter_mut().find(|session| !session.active)
             .ok_or(AdmissionError::SessionCapacity)?;
-        let id = self.next_session;
-        self.next_session = self.next_session.wrapping_add(1).max(1);
         *slot = SessionRecord {
             id,
             owner,
@@ -690,6 +700,442 @@ pub fn native_generation_resources(
         // charged explicitly here rather than hidden in the weight estimate.
         runtime_overhead: 2 * 1024 * 1024,
     })
+}
+
+pub const MAX_LOADED_MODELS: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoadedModelRecord {
+    pub handle: u64,
+    pub id: [u8; 64],
+    pub id_len: usize,
+    pub source: [u8; 128],
+    pub source_len: usize,
+    pub architecture: [u8; 32],
+    pub architecture_len: usize,
+    pub capabilities: CapabilitySet,
+    pub resources: ResourceEstimate,
+    pub active: bool,
+}
+
+impl Default for LoadedModelRecord {
+    fn default() -> Self {
+        Self {
+            handle: 0,
+            id: [0u8; 64],
+            id_len: 0,
+            source: [0u8; 128],
+            source_len: 0,
+            architecture: [0u8; 32],
+            architecture_len: 0,
+            capabilities: CapabilitySet::default(),
+            resources: ResourceEstimate::ZERO,
+            active: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BackendSessionRecord {
+    pub id: u64,
+    pub model_handle: u64,
+    pub owner: u64,
+    pub active: bool,
+    pub cancelled: bool,
+}
+
+pub struct NativeGgufBackend {
+    pub models: [LoadedModelRecord; MAX_LOADED_MODELS],
+    pub sessions: [BackendSessionRecord; MAX_SESSIONS],
+    next_model_handle: u64,
+    next_session_id: u64,
+}
+
+impl NativeGgufBackend {
+    pub const fn new() -> Self {
+        Self {
+            models: [LoadedModelRecord {
+                handle: 0,
+                id: [0u8; 64],
+                id_len: 0,
+                source: [0u8; 128],
+                source_len: 0,
+                architecture: [0u8; 32],
+                architecture_len: 0,
+                capabilities: CapabilitySet(0),
+                resources: ResourceEstimate::ZERO,
+                active: false,
+            }; MAX_LOADED_MODELS],
+            sessions: [BackendSessionRecord {
+                id: 0,
+                model_handle: 0,
+                owner: 0,
+                active: false,
+                cancelled: false,
+            }; MAX_SESSIONS],
+            next_model_handle: 1,
+            next_session_id: 1,
+        }
+    }
+
+    pub fn active_model_count(&self) -> usize {
+        self.models.iter().filter(|m| m.active).count()
+    }
+
+    pub fn active_session_count(&self) -> usize {
+        self.sessions.iter().filter(|s| s.active).count()
+    }
+
+    pub fn is_session_active(&self, session: u64) -> bool {
+        self.sessions.iter().any(|s| s.active && s.id == session)
+    }
+
+    pub fn is_session_cancelled(&self, session: u64) -> bool {
+        self.sessions.iter().any(|s| s.active && s.id == session && s.cancelled)
+    }
+
+    pub fn reap_owner(&mut self, owner: u64) -> usize {
+        let mut reaped = 0;
+        for session in &mut self.sessions {
+            if session.active && session.owner == owner {
+                *session = BackendSessionRecord::default();
+                reaped += 1;
+            }
+        }
+        reaped
+    }
+}
+
+impl InferenceBackend for NativeGgufBackend {
+    fn backend_info(&self) -> BackendInfo {
+        NATIVE_GGUF_INFO
+    }
+
+    fn probe_model(&self, model: &ModelManifest<'_>) -> ModelProbe {
+        probe_backend(NATIVE_GGUF_INFO, model)
+    }
+
+    fn estimate_resources(
+        &self,
+        model: &ModelManifest<'_>,
+    ) -> Result<ResourceEstimate, BackendError> {
+        let probe = self.probe_model(model);
+        if let Err(failure) = probe.result {
+            return match failure {
+                ProbeFailure::BackendUnavailable => Err(BackendError::Unavailable),
+                _ => Err(BackendError::Unsupported),
+            };
+        }
+        if model.resources != ResourceEstimate::ZERO {
+            if model.resources.total().is_none() {
+                return Err(BackendError::InsufficientResources);
+            }
+            return Ok(model.resources);
+        }
+        if !model.source.is_empty() {
+            if let Ok(info) = crate::gguf::read_model_info(model.source) {
+                if let Ok(config) = crate::inference::ModelConfig::from_gguf(&info) {
+                    if let Ok(estimate) = native_generation_resources(&config) {
+                        return Ok(estimate);
+                    }
+                }
+            }
+        }
+        Err(BackendError::InvalidModel)
+    }
+
+    fn load_model(&mut self, model: &ModelManifest<'_>) -> Result<u64, BackendError> {
+        let probe = self.probe_model(model);
+        if let Err(failure) = probe.result {
+            return match failure {
+                ProbeFailure::BackendUnavailable => Err(BackendError::Unavailable),
+                _ => Err(BackendError::Unsupported),
+            };
+        }
+        let estimate = self.estimate_resources(model)?;
+
+        if self.models.iter().all(|m| m.active) {
+            return Err(BackendError::InsufficientResources);
+        }
+        let mut handle = self.next_model_handle;
+        for _ in 0..=MAX_LOADED_MODELS {
+            if !self.models.iter().any(|m| m.active && m.handle == handle) {
+                break;
+            }
+            handle = handle.wrapping_add(1).max(1);
+        }
+        self.next_model_handle = handle.wrapping_add(1).max(1);
+        let slot = self.models.iter_mut().find(|m| !m.active)
+            .ok_or(BackendError::InsufficientResources)?;
+
+        let mut id_buf = [0u8; 64];
+        let id_bytes = model.id.as_bytes();
+        let id_len = id_bytes.len().min(64);
+        id_buf[..id_len].copy_from_slice(&id_bytes[..id_len]);
+
+        let mut src_buf = [0u8; 128];
+        let src_bytes = model.source.as_bytes();
+        let src_len = src_bytes.len().min(128);
+        src_buf[..src_len].copy_from_slice(&src_bytes[..src_len]);
+
+        let mut arch_buf = [0u8; 32];
+        let arch_bytes = model.architecture.as_bytes();
+        let arch_len = arch_bytes.len().min(32);
+        arch_buf[..arch_len].copy_from_slice(&arch_bytes[..arch_len]);
+
+        *slot = LoadedModelRecord {
+            handle,
+            id: id_buf,
+            id_len,
+            source: src_buf,
+            source_len: src_len,
+            architecture: arch_buf,
+            architecture_len: arch_len,
+            capabilities: model.capabilities,
+            resources: estimate,
+            active: true,
+        };
+
+        Ok(handle)
+    }
+
+    fn create_session(&mut self, model_handle: u64, owner: u64) -> Result<u64, BackendError> {
+        if !self.models.iter().any(|m| m.active && m.handle == model_handle) {
+            return Err(BackendError::InvalidModel);
+        }
+        if self.sessions.iter().all(|s| s.active) {
+            return Err(BackendError::InsufficientResources);
+        }
+        let mut id = self.next_session_id;
+        for _ in 0..=MAX_SESSIONS {
+            if !self.sessions.iter().any(|s| s.active && s.id == id) {
+                break;
+            }
+            id = id.wrapping_add(1).max(1);
+        }
+        self.next_session_id = id.wrapping_add(1).max(1);
+        let slot = self.sessions.iter_mut().find(|s| !s.active)
+            .ok_or(BackendError::InsufficientResources)?;
+
+        *slot = BackendSessionRecord {
+            id,
+            model_handle,
+            owner,
+            active: true,
+            cancelled: false,
+        };
+
+        Ok(id)
+    }
+
+    fn generate(
+        &mut self,
+        session: u64,
+        input: &[u8],
+        on_chunk: &mut dyn FnMut(&[u8]) -> StreamControl,
+    ) -> Result<(), BackendError> {
+        let sess_idx = self.sessions.iter().position(|s| s.active && s.id == session)
+            .ok_or(BackendError::SessionNotFound)?;
+        if self.sessions[sess_idx].cancelled {
+            return Err(BackendError::Cancelled);
+        }
+        let model_handle = self.sessions[sess_idx].model_handle;
+        let model = self.models.iter().find(|m| m.active && m.handle == model_handle)
+            .ok_or(BackendError::InvalidModel)?;
+        if !model.capabilities.contains(CapabilitySet::TEXT_GENERATION) {
+            return Err(BackendError::Unsupported);
+        }
+        if input.is_empty() {
+            return Ok(());
+        }
+        let source_path = core::str::from_utf8(&model.source[..model.source_len])
+            .map_err(|_| BackendError::InvalidModel)?;
+
+        let fd = match std::fs_open(source_path, std::FS_READ) {
+            Ok(fd) => fd,
+            Err(_) => return Err(BackendError::Unavailable),
+        };
+        let source = crate::weights::ModelFileDescriptor { fd };
+        let (table, info) = match crate::get_resident_model_cache(source_path) {
+            Some(cached) => cached,
+            None => {
+                let mut stream = crate::gguf::GgufStream::buffered_from_file(fd);
+                let table = match crate::weights::TensorTable::walk(&mut stream) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        let _ = std::fs_close(fd);
+                        return Err(BackendError::InvalidModel);
+                    }
+                };
+                let mut stream = crate::gguf::GgufStream::buffered_from_file(fd);
+                let info = match crate::gguf::read_model_info_stream(&mut stream) {
+                    Ok(i) => i,
+                    Err(_) => {
+                        let _ = std::fs_close(fd);
+                        return Err(BackendError::InvalidModel);
+                    }
+                };
+                crate::set_resident_model_cache(source_path, &table, &info);
+                (table, info)
+            }
+        };
+        let config = match crate::inference::ModelConfig::from_gguf(&info) {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = std::fs_close(fd);
+                return Err(BackendError::InvalidModel);
+            }
+        };
+        let tokenizer = match crate::get_or_build_resident_tokenizer(source_path) {
+            Ok(t) => t,
+            Err(_) => {
+                let _ = std::fs_close(fd);
+                return Err(BackendError::InvalidModel);
+            }
+        };
+        let prompt_text = match core::str::from_utf8(input) {
+            Ok(t) => t,
+            Err(_) => {
+                let _ = std::fs_close(fd);
+                return Err(BackendError::InvalidModel);
+            }
+        };
+        let mut prompt_ids = alloc::vec::Vec::new();
+        if prompt_ids.try_reserve_exact(config.seq_len).is_err() {
+            let _ = std::fs_close(fd);
+            return Err(BackendError::InsufficientResources);
+        }
+        prompt_ids.resize(config.seq_len, 0u32);
+        let num_ids = match tokenizer.encode(prompt_text.as_bytes(), &mut prompt_ids) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = std::fs_close(fd);
+                return Err(BackendError::InvalidModel);
+            }
+        };
+        let tokens = &prompt_ids[..num_ids];
+        let max_new_tokens = config.seq_len.saturating_sub(num_ids);
+        let temperature = 0.0f32;
+        let mut decode_buf = [0u8; crate::tokenizer::MAX_PIECE_BYTES];
+        let mut reader = crate::weights::WeightReader::new(table, source);
+
+        let cancelled_flag = core::sync::atomic::AtomicBool::new(false);
+        let is_cancelled = || cancelled_flag.load(core::sync::atomic::Ordering::Relaxed);
+
+        let ran = crate::weights::run_generative_model(
+            &mut reader,
+            &config,
+            tokens,
+            max_new_tokens,
+            temperature,
+            &is_cancelled,
+            |token_id| {
+                if let Ok(tok) = crate::get_or_build_resident_tokenizer(source_path) {
+                    let n = tok.decode_token(token_id, &mut decode_buf);
+                    if n > 0 {
+                        match on_chunk(&decode_buf[..n]) {
+                            StreamControl::Continue => true,
+                            StreamControl::Cancel => {
+                                cancelled_flag.store(true, core::sync::atomic::Ordering::Relaxed);
+                                false
+                            }
+                        }
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            },
+        );
+        let _ = std::fs_close(fd);
+
+        match ran {
+            Ok(_) => {
+                if cancelled_flag.load(core::sync::atomic::Ordering::Relaxed) {
+                    self.sessions[sess_idx].cancelled = true;
+                    Err(BackendError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }
+            Err(crate::weights::LoadError::Graph(crate::inference::InferenceError::Cancelled)) => {
+                self.sessions[sess_idx].cancelled = true;
+                Err(BackendError::Cancelled)
+            }
+            Err(_) => Err(BackendError::Crashed),
+        }
+    }
+
+    fn embed(
+        &mut self,
+        session: u64,
+        input: &[u8],
+        output: &mut [f32],
+    ) -> Result<usize, BackendError> {
+        let sess_idx = self.sessions.iter().position(|s| s.active && s.id == session)
+            .ok_or(BackendError::SessionNotFound)?;
+        if self.sessions[sess_idx].cancelled {
+            return Err(BackendError::Cancelled);
+        }
+        let model_handle = self.sessions[sess_idx].model_handle;
+        let model = self.models.iter().find(|m| m.active && m.handle == model_handle)
+            .ok_or(BackendError::InvalidModel)?;
+        if !model.capabilities.contains(CapabilitySet::TEXT_EMBEDDING) {
+            return Err(BackendError::Unsupported);
+        }
+        let source_path = core::str::from_utf8(&model.source[..model.source_len])
+            .map_err(|_| BackendError::InvalidModel)?;
+
+        let token_ids: alloc::vec::Vec<u32>;
+        let tokens_slice: &[u32] = if input.len() >= 4 && input.len() % 4 == 0 {
+            unsafe {
+                core::slice::from_raw_parts(input.as_ptr() as *const u32, input.len() / 4)
+            }
+        } else {
+            let text = core::str::from_utf8(input).map_err(|_| BackendError::InvalidModel)?;
+            let tokenizer = crate::get_or_build_resident_tokenizer(source_path)
+                .map_err(|_| BackendError::InvalidModel)?;
+            let mut ids = alloc::vec::Vec::new();
+            ids.resize(512, 0u32);
+            let n = tokenizer.encode(text.as_bytes(), &mut ids).map_err(|_| BackendError::InvalidModel)?;
+            ids.truncate(n);
+            token_ids = ids;
+            &token_ids[..]
+        };
+
+        match crate::run_installed_embedding(source_path, tokens_slice, output) {
+            Ok(report) => Ok(report.hidden_dim),
+            Err(crate::FileEmbedError::Open) => Err(BackendError::Unavailable),
+            Err(_) => Err(BackendError::Crashed),
+        }
+    }
+
+    fn cancel(&mut self, session: u64) -> Result<(), BackendError> {
+        let rec = self.sessions.iter_mut().find(|s| s.active && s.id == session)
+            .ok_or(BackendError::SessionNotFound)?;
+        rec.cancelled = true;
+        Ok(())
+    }
+
+    fn destroy_session(&mut self, session: u64) -> Result<(), BackendError> {
+        let rec = self.sessions.iter_mut().find(|s| s.active && s.id == session)
+            .ok_or(BackendError::SessionNotFound)?;
+        *rec = BackendSessionRecord::default();
+        Ok(())
+    }
+
+    fn unload_model(&mut self, model_handle: u64) -> Result<(), BackendError> {
+        let rec = self.models.iter_mut().find(|m| m.active && m.handle == model_handle)
+            .ok_or(BackendError::InvalidModel)?;
+        *rec = LoadedModelRecord::default();
+        for s in &mut self.sessions {
+            if s.active && s.model_handle == model_handle {
+                *s = BackendSessionRecord::default();
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -874,6 +1320,17 @@ memory.runtime_overhead=12000000\n";
     }
 
     #[test]
+    fn wrapped_session_ids_do_not_alias_a_live_session() {
+        let mut broker = BrokerLedger::new(1024, 0, 0);
+        let first = broker.create_session(1, 1, ResourceEstimate::ZERO).unwrap();
+        assert_eq!(first, 1);
+        broker.next_session = u64::MAX;
+        assert_eq!(broker.create_session(2, 1, ResourceEstimate::ZERO), Ok(u64::MAX));
+        assert_eq!(broker.create_session(3, 1, ResourceEstimate::ZERO), Ok(2));
+        assert_eq!(broker.cancel(3, first), Err(AdmissionError::NotOwner));
+    }
+
+    #[test]
     fn foreground_reserve_scales_without_consuming_more_than_total_ram() {
         assert_eq!(foreground_ram_reserve(64 * 1024 * 1024), 64 * 1024 * 1024);
         assert_eq!(foreground_ram_reserve(512 * 1024 * 1024), 128 * 1024 * 1024);
@@ -881,5 +1338,138 @@ memory.runtime_overhead=12000000\n";
             foreground_ram_reserve(4 * 1024 * 1024 * 1024),
             1024 * 1024 * 1024
         );
+    }
+
+    #[test]
+    fn native_gguf_backend_lifecycle_and_session_reclamation() {
+        let parsed = parse_model_manifest(MANIFEST).expect("manifest");
+        let manifest = ModelManifest {
+            id: "org.interos.test-gguf",
+            format: ModelFormat::Gguf,
+            architecture: "gemma2",
+            quantization: Quantization::Q6K,
+            tokenizer: "embedded",
+            capabilities: CapabilitySet::TEXT_GENERATION.union(CapabilitySet::TEXT_EMBEDDING),
+            resources: ResourceEstimate {
+                model_weights: 100,
+                kv_cache: 200,
+                activations: 50,
+                scratch: 0,
+                tokenizer: 10,
+                embedding_indexes: 0,
+                audio_buffers: 0,
+                runtime_overhead: 40,
+            },
+            ..parsed
+        };
+
+        let mut backend = NativeGgufBackend::new();
+        assert_eq!(backend.backend_info().id, NATIVE_GGUF_INFO.id);
+        assert_eq!(backend.probe_model(&manifest).result, Ok(()));
+
+        let estimate = backend.estimate_resources(&manifest).expect("estimate");
+        assert_eq!(estimate.total(), Some(400));
+
+        let handle = backend.load_model(&manifest).expect("load model");
+        assert_eq!(backend.active_model_count(), 1);
+
+        // Session creation
+        let s1 = backend.create_session(handle, 10).expect("session 1");
+        let s2 = backend.create_session(handle, 20).expect("session 2");
+        assert_eq!(backend.active_session_count(), 2);
+        assert!(backend.is_session_active(s1));
+        assert!(backend.is_session_active(s2));
+
+        // Cancellation
+        assert!(!backend.is_session_cancelled(s1));
+        assert_eq!(backend.cancel(s1), Ok(()));
+        assert!(backend.is_session_cancelled(s1));
+        assert_eq!(backend.cancel(999), Err(BackendError::SessionNotFound));
+
+        // Generate on cancelled session returns Cancelled
+        let mut chunks = 0;
+        let gen_err = backend.generate(s1, b"hello", &mut |_| {
+            chunks += 1;
+            StreamControl::Continue
+        });
+        assert_eq!(gen_err, Err(BackendError::Cancelled));
+        assert_eq!(chunks, 0);
+
+        // Embed on cancelled session returns Cancelled
+        let mut emb_out = [0.0f32; 16];
+        assert_eq!(backend.embed(s1, b"test", &mut emb_out), Err(BackendError::Cancelled));
+
+        // Destroy session
+        assert_eq!(backend.destroy_session(s1), Ok(()));
+        assert_eq!(backend.active_session_count(), 1);
+        assert!(!backend.is_session_active(s1));
+
+        // Reap owner
+        let reaped = backend.reap_owner(20);
+        assert_eq!(reaped, 1);
+        assert_eq!(backend.active_session_count(), 0);
+
+        // Model unload reclaims remaining sessions if any
+        let s3 = backend.create_session(handle, 30).expect("session 3");
+        assert_eq!(backend.active_session_count(), 1);
+        assert_eq!(backend.unload_model(handle), Ok(()));
+        assert_eq!(backend.active_model_count(), 0);
+        assert_eq!(backend.active_session_count(), 0);
+        assert!(!backend.is_session_active(s3));
+        assert_eq!(backend.unload_model(handle), Err(BackendError::InvalidModel));
+    }
+
+    #[test]
+    fn native_gguf_backend_rejects_incompatible_manifest_and_exceeding_capacity() {
+        let parsed = parse_model_manifest(MANIFEST).expect("manifest");
+        let incompatible = ModelManifest {
+            format: ModelFormat::LiteRtLm,
+            ..parsed
+        };
+        let mut backend = NativeGgufBackend::new();
+        assert_eq!(backend.estimate_resources(&incompatible), Err(BackendError::Unsupported));
+        assert_eq!(backend.load_model(&incompatible), Err(BackendError::Unsupported));
+
+        // Exceed model capacity
+        let valid = ModelManifest {
+            format: ModelFormat::Gguf,
+            architecture: "gemma2",
+            quantization: Quantization::Q6K,
+            tokenizer: "embedded",
+            capabilities: CapabilitySet::TEXT_GENERATION,
+            resources: ResourceEstimate {
+                model_weights: 10,
+                kv_cache: 10,
+                activations: 10,
+                scratch: 0,
+                tokenizer: 10,
+                embedding_indexes: 0,
+                audio_buffers: 0,
+                runtime_overhead: 10,
+            },
+            ..parsed
+        };
+
+        let mut handles = [0u64; MAX_LOADED_MODELS];
+        for i in 0..MAX_LOADED_MODELS {
+            handles[i] = backend.load_model(&valid).expect("load model slot");
+        }
+        assert_eq!(backend.load_model(&valid), Err(BackendError::InsufficientResources));
+
+        // Exceed session capacity
+        let h0 = handles[0];
+        let mut sessions = [0u64; MAX_SESSIONS];
+        for i in 0..MAX_SESSIONS {
+            sessions[i] = backend.create_session(h0, (i + 1) as u64).expect("session slot");
+        }
+        assert_eq!(backend.create_session(h0, 100), Err(BackendError::InsufficientResources));
+
+        // Clean up
+        for s in sessions {
+            assert_eq!(backend.destroy_session(s), Ok(()));
+        }
+        for h in handles {
+            assert_eq!(backend.unload_model(h), Ok(()));
+        }
     }
 }

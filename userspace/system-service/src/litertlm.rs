@@ -148,12 +148,12 @@ pub fn inspect(header: &[u8], file_size: u64) -> Result<Inspection, Error> {
     let root = reader.follow_uoffset(0)?;
     // LiteRTLMMetaData.section_metadata is field 1.
     let section_metadata_field = reader
-        .table_field(root, 1)?
+        .table_field(root, 1, 4)?
         .ok_or(Error::MissingSectionMetadata)?;
     let section_metadata = reader.follow_uoffset(section_metadata_field)?;
     // SectionMetadata.objects is field 0.
     let objects_field = reader
-        .table_field(section_metadata, 0)?
+        .table_field(section_metadata, 0, 4)?
         .ok_or(Error::MissingSectionMetadata)?;
     let objects = reader.follow_uoffset(objects_field)?;
     let section_count = reader.u32(objects)? as usize;
@@ -196,14 +196,14 @@ pub fn inspect(header: &[u8], file_size: u64) -> Result<Inspection, Error> {
 fn read_section(reader: &FlatBuffer<'_>, object: usize) -> Result<Section, Error> {
     // SectionObject: items=0, begin_offset=1, end_offset=2, data_type=3.
     let begin = reader
-        .table_field(object, 1)?
+        .table_field(object, 1, 8)?
         .ok_or(Error::InvalidFlatBuffer)
         .and_then(|offset| reader.u64(offset))?;
     let end = reader
-        .table_field(object, 2)?
+        .table_field(object, 2, 8)?
         .ok_or(Error::InvalidFlatBuffer)
         .and_then(|offset| reader.u64(offset))?;
-    let data_type = match reader.table_field(object, 3)? {
+    let data_type = match reader.table_field(object, 3, 1)? {
         Some(offset) => SectionType::from_byte(reader.byte(offset)?)?,
         None => SectionType::None,
     };
@@ -287,7 +287,12 @@ impl<'a> FlatBuffer<'a> {
         Ok(target)
     }
 
-    fn table_field(&self, table: usize, field: usize) -> Result<Option<usize>, Error> {
+    fn table_field(
+        &self,
+        table: usize,
+        field: usize,
+        width: usize,
+    ) -> Result<Option<usize>, Error> {
         let backwards = self.i32(table)?;
         if backwards == 0 {
             return Err(Error::InvalidFlatBuffer);
@@ -303,7 +308,20 @@ impl<'a> FlatBuffer<'a> {
         }
         .ok_or(Error::InvalidFlatBuffer)?;
         let vtable_bytes = self.u16(vtable)? as usize;
-        if vtable_bytes < 4 {
+        let object_bytes =
+            self.u16(vtable.checked_add(2).ok_or(Error::InvalidFlatBuffer)?)? as usize;
+        if vtable_bytes < 4
+            || vtable_bytes % 2 != 0
+            || object_bytes < 4
+            || vtable
+                .checked_add(vtable_bytes)
+                .filter(|end| *end <= self.bytes.len())
+                .is_none()
+            || table
+                .checked_add(object_bytes)
+                .filter(|end| *end <= self.bytes.len())
+                .is_none()
+        {
             return Err(Error::InvalidFlatBuffer);
         }
         let entry = 4usize
@@ -316,6 +334,14 @@ impl<'a> FlatBuffer<'a> {
             self.u16(vtable.checked_add(entry).ok_or(Error::InvalidFlatBuffer)?)? as usize;
         if field_offset == 0 {
             return Ok(None);
+        }
+        if field_offset < 4
+            || field_offset
+                .checked_add(width)
+                .filter(|end| *end <= object_bytes)
+                .is_none()
+        {
+            return Err(Error::InvalidFlatBuffer);
         }
         let absolute = table
             .checked_add(field_offset)
@@ -422,6 +448,35 @@ mod tests {
         assert_eq!(
             inspect(&past_file, BLOCK_SIZE + 9),
             Err(Error::SectionRange)
+        );
+    }
+
+    #[test]
+    fn rejects_fields_outside_declared_flatbuffer_object() {
+        let mut bytes = one_section_container(BLOCK_SIZE, BLOCK_SIZE + 1);
+        // The section vtable declares an object only four bytes long, but its
+        // begin and end offsets point well beyond that object.
+        put_u16(&mut bytes, HEADER_BEGIN + 54, 4);
+        assert_eq!(
+            inspect(&bytes, BLOCK_SIZE + 1),
+            Err(Error::InvalidFlatBuffer)
+        );
+
+        let mut bytes = one_section_container(BLOCK_SIZE, BLOCK_SIZE + 1);
+        // End offset starts inside the object but its eight-byte scalar crosses
+        // the declared object boundary.
+        put_u16(&mut bytes, HEADER_BEGIN + 60, 28);
+        assert_eq!(
+            inspect(&bytes, BLOCK_SIZE + 1),
+            Err(Error::InvalidFlatBuffer)
+        );
+
+        let mut bytes = one_section_container(BLOCK_SIZE, BLOCK_SIZE + 1);
+        // A vtable cannot extend past the supplied metadata.
+        put_u16(&mut bytes, HEADER_BEGIN + 52, 200);
+        assert_eq!(
+            inspect(&bytes, BLOCK_SIZE + 1),
+            Err(Error::InvalidFlatBuffer)
         );
     }
 

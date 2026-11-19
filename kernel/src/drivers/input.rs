@@ -1119,6 +1119,9 @@ mod tests {
     /// real producer and asserts the reporter the kernel loop calls says so.
     #[test]
     fn a_lost_deferred_event_reaches_the_console_exactly_once() {
+        let _deferred_lock = DEFERRED_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _serialized = crate::interrupts::pending_scancode_tests::RING_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

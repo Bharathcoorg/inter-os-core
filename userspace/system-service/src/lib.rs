@@ -37,6 +37,7 @@ pub mod rag;
 pub mod tokenizer;
 pub mod weights;
 
+pub use backend::InferenceBackend;
 pub use embedding::{
     compute_embedding_768, compute_text_embedding_dim_f32, compute_text_embedding_f32,
     compute_text_embedding_q7, f32_sqrt, EMBEDDING_DIM, MATRYOSHKA_DIMS,
@@ -474,6 +475,17 @@ pub fn run_ai() -> ! {
     let ipc_slot = std::cap_lookup(std::cap_type::IPC_RECEIVE, 0).ok();
     let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut last_tick = 0u64;
+
+    // Authoritative BrokerLedger initialization from real system telemetry
+    if let Ok(telemetry) = std::memory_telemetry() {
+        let reserve = backend::foreground_ram_reserve(telemetry.total_bytes);
+        *BROKER_LEDGER.lock() = Some(backend::BrokerLedger::new(
+            telemetry.free_bytes,
+            0,
+            reserve,
+        ));
+        let _ = std::log("[aid] authoritative BrokerLedger initialized from system memory telemetry.");
+    }
 
     // Probe storage for real physical GGUF model weights on startup.
     //
@@ -1238,6 +1250,43 @@ impl<'a, T> Drop for TicketGuard<'a, T> {
     }
 }
 
+pub static BROKER_LEDGER: TicketSpinLock<Option<backend::BrokerLedger>> = TicketSpinLock::new(None);
+pub static NATIVE_GGUF_BACKEND: TicketSpinLock<backend::NativeGgufBackend> = TicketSpinLock::new(backend::NativeGgufBackend::new());
+
+pub fn with_broker_ledger<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut backend::BrokerLedger) -> R,
+{
+    let mut guard = BROKER_LEDGER.lock();
+    if guard.is_none() {
+        let (free_ram, total_ram) = match std::memory_telemetry() {
+            Ok(telem) => (telem.free_bytes, telem.total_bytes),
+            Err(_) => (1024 * 1024 * 1024, 1024 * 1024 * 1024),
+        };
+        let reserve = backend::foreground_ram_reserve(total_ram);
+        *guard = Some(backend::BrokerLedger::new(free_ram, 0, reserve));
+    }
+    f(guard.as_mut().unwrap())
+}
+
+pub fn reset_broker_ledger(ram: u64, storage: u64, reserve: u64) {
+    *BROKER_LEDGER.lock() = Some(backend::BrokerLedger::new(ram, storage, reserve));
+}
+
+pub fn reap_process(task_id: u64) {
+    with_broker_ledger(|ledger| {
+        let _ = ledger.reap_owner(task_id);
+    });
+    let mut backend = NATIVE_GGUF_BACKEND.lock();
+    let _ = backend.reap_owner(task_id);
+}
+
+pub fn reap_backend(backend_id: u32) {
+    with_broker_ledger(|ledger| {
+        let _ = ledger.reap_backend(backend_id);
+    });
+}
+
 /// Bounded circular ring buffer for deferred IPC messages.
 /// Enforces O(1) FIFO enqueue and dequeue with zero heap allocation.
 pub struct DeferredIpcQueue {
@@ -1860,26 +1909,26 @@ fn read_token_ids(input: &[u8]) -> Option<TokenIds> {
 
 /// What one file-backed embedding run measured, so the reply is a measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileEmbedReport {
+pub(crate) struct FileEmbedReport {
     /// Hidden dimension of the graph the file's own metadata configured.
-    hidden_dim: usize,
+    pub(crate) hidden_dim: usize,
     /// Positions stepped.
-    positions: usize,
+    pub(crate) positions: usize,
     /// Blocks run across every position.
-    blocks_run: usize,
+    pub(crate) blocks_run: usize,
     /// Tensor payloads read for the whole run.
-    tensors_read: usize,
+    pub(crate) tensors_read: usize,
     /// Bytes of the file the run read.
-    bytes_read: u64,
+    pub(crate) bytes_read: u64,
     /// Whether the file's `dense_2`/`dense_3` pooling head was applied. `false`
     /// means the vector is the pooled pre-head residual stream, which is not the
     /// published model's final embedding and must not be reported as one.
-    head_applied: bool,
+    pub(crate) head_applied: bool,
 }
 
 /// Why the installed file did not answer.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum FileEmbedError {
+pub(crate) enum FileEmbedError {
     /// The path the probe read is not openable now.
     Open,
     /// The engine could not be built from the file's own declaration.
@@ -1910,7 +1959,7 @@ static RESIDENT_EMBEDDING_CACHE: SyncResidentCache = SyncResidentCache {
     }),
 };
 
-fn get_resident_model_cache(path: &str) -> Option<(weights::TensorTable, crate::gguf::GgufModelInfo)> {
+pub(crate) fn get_resident_model_cache(path: &str) -> Option<(weights::TensorTable, crate::gguf::GgufModelInfo)> {
     let p_bytes = path.as_bytes();
     unsafe {
         let state = &*RESIDENT_EMBEDDING_CACHE.state.get();
@@ -1959,7 +2008,7 @@ fn log_declared_model_identity(info: &gguf::GgufModelInfo) {
     }
 }
 
-fn set_resident_model_cache(path: &str, table: &weights::TensorTable, info: &crate::gguf::GgufModelInfo) {
+pub(crate) fn set_resident_model_cache(path: &str, table: &weights::TensorTable, info: &crate::gguf::GgufModelInfo) {
     let p_bytes = path.as_bytes();
     let len = p_bytes.len().min(128);
     unsafe {
@@ -1992,7 +2041,7 @@ static RESIDENT_TOKENIZER_CACHE: SyncResidentTokenizerCache = SyncResidentTokeni
     }),
 };
 
-fn get_or_build_resident_tokenizer(
+pub(crate) fn get_or_build_resident_tokenizer(
     path: &str,
 ) -> Result<&'static tokenizer::FileTokenizer, tokenizer::TokenizerError> {
     let p_bytes = path.as_bytes();
@@ -2039,7 +2088,7 @@ pub fn invalidate_resident_model_cache() {
 /// called from nowhere but its own `#[cfg(test)]` block. Everything below is the
 /// loader's own code path, driven through `weights::ModelFileDescriptor` and the
 /// kernel `fs_read_at` the guest answers, not through the host's `File`.
-fn run_installed_embedding(
+pub(crate) fn run_installed_embedding(
     path: &str,
     tokens: &[u32],
     out: &mut [f32],
@@ -2383,7 +2432,7 @@ fn run_installed_generation(
     // Admission is based on memory available now, not total RAM and not a
     // model-name table. The native backend prices geometry parsed from this
     // file and leaves a scaled reserve for the foreground OS workload.
-    let telemetry = match std::memory_telemetry() {
+    let _telemetry = match std::memory_telemetry() {
         Ok(telemetry) => telemetry,
         Err(_) => {
             let _ = std::fs_close(fd);
@@ -2409,21 +2458,93 @@ fn run_installed_generation(
             return true;
         }
     };
-    let admission = backend::BrokerLedger::new(
-        telemetry.free_bytes,
-        0,
-        backend::foreground_ram_reserve(telemetry.total_bytes),
-    );
-    if admission.admit_operation(estimate).is_err() {
-        let _ = std::fs_close(fd);
-        reply_with_answer(
-            sender_task_id,
-            std::ai::STATUS_UNAVAILABLE,
-            b"Generation unavailable: the backend working set plus the foreground OS reserve exceeds RAM available now.",
-            tx_buf,
-        );
-        return true;
+    let ledger_session_res = with_broker_ledger(|ledger| {
+        ledger.create_session(sender_task_id, 1, estimate)
+    });
+    let ledger_session_id = match ledger_session_res {
+        Ok(id) => id,
+        Err(backend::AdmissionError::InsufficientRam) => {
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNAVAILABLE,
+                b"Generation unavailable: the backend working set plus the foreground OS reserve exceeds RAM available now.",
+                tx_buf,
+            );
+            return true;
+        }
+        Err(backend::AdmissionError::SessionCapacity) => {
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNAVAILABLE,
+                b"Generation unavailable: maximum active AI session capacity reached.",
+                tx_buf,
+            );
+            return true;
+        }
+        Err(_) => {
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNAVAILABLE,
+                b"Generation unavailable: resource admission rejected request.",
+                tx_buf,
+            );
+            return true;
+        }
+    };
+
+    let backend_session_id = {
+        let mut backend = NATIVE_GGUF_BACKEND.lock();
+        let model_handle = backend
+            .models
+            .iter()
+            .find(|m| m.active && &m.source[..m.source_len] == path.as_bytes())
+            .map(|m| m.handle)
+            .unwrap_or_else(|| {
+                let manifest = backend::ModelManifest {
+                    id: "org.interos.installed-generative",
+                    display_name: "Installed Generative Model",
+                    source: path,
+                    revision: "local",
+                    sha256: [0; 32],
+                    artifact_bytes: 0,
+                    format: backend::ModelFormat::Gguf,
+                    architecture: "gemma2",
+                    quantization: backend::Quantization::Q6K,
+                    tokenizer: "embedded",
+                    required_hardware: backend::HardwareBackend::Cpu,
+                    capabilities: backend::CapabilitySet::TEXT_GENERATION
+                        .union(backend::CapabilitySet::STREAMING_GENERATION),
+                    resources: estimate,
+                };
+                backend.load_model(&manifest).unwrap_or(1)
+            });
+        backend.create_session(model_handle, sender_task_id).ok()
+    };
+
+    struct SessionGuard {
+        owner: u64,
+        ledger_session_id: u64,
+        backend_session_id: Option<u64>,
     }
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            with_broker_ledger(|ledger| {
+                let _ = ledger.destroy_session(self.owner, self.ledger_session_id);
+            });
+            if let Some(bsid) = self.backend_session_id {
+                let mut backend = NATIVE_GGUF_BACKEND.lock();
+                let _ = backend.destroy_session(bsid);
+            }
+        }
+    }
+    let _session_guard = SessionGuard {
+        owner: sender_task_id,
+        ledger_session_id,
+        backend_session_id,
+    };
 
     let mut reader = weights::WeightReader::new(table, source);
     if !reader.has_output_head() {
@@ -2512,16 +2633,23 @@ fn run_installed_generation(
     let mut decode_buf = [0u8; tokenizer::MAX_PIECE_BYTES];
 
     let is_cancelled = || {
-        if ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst) == session_id {
+        if ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst) == session_id
+            || with_broker_ledger(|l| l.is_cancelled(ledger_session_id))
+        {
             return true;
         }
         let mut poll_buf = [0u8; 1024];
         while let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut poll_buf) {
-            if msg_type == std::ai::MSG_TYPE_CANCEL
-                || (len >= 4 && &poll_buf[..4] == b"CANC")
-            {
+            if msg_type == std::ai::MSG_TYPE_CANCEL {
                 if sender == sender_task_id || sender == 1 {
                     ACTIVE_SESSION_CANCELLED.store(session_id, core::sync::atomic::Ordering::SeqCst);
+                    with_broker_ledger(|ledger| {
+                        let _ = ledger.cancel(sender_task_id, ledger_session_id);
+                    });
+                    if let Some(bsid) = backend_session_id {
+                        let mut backend = NATIVE_GGUF_BACKEND.lock();
+                        let _ = backend.cancel(bsid);
+                    }
                     let _ = std::log("[aid] cancellation requested via IPC during generation");
                     let mut cancel_tx = [0u8; 1024];
                     emit_inference_response(
@@ -2542,7 +2670,6 @@ fn run_installed_generation(
                 }
             } else if msg_type == MSG_TYPE_GENERATE
                 || msg_type == MSG_TYPE_GENERATE_ALT
-                || (len >= 4 && (&poll_buf[..4] == b"GENR" || &poll_buf[..4] == b"GEN:"))
             {
                 let mut busy_tx = [0u8; 1024];
                 emit_inference_response(
@@ -2805,11 +2932,11 @@ pub fn handle_ipc_inference_query(
     // WHY the install is answered before anything is read as a prompt: the
     // request is four bytes long, and a reader that fell through to the query
     // paths would answer it with a model notice about an empty prompt.
-    if msg_type == MSG_TYPE_INSTALL || (payload.len() >= 4 && &payload[..4] == b"INSL") {
+    if msg_type == MSG_TYPE_INSTALL {
         install_model_file(sender_task_id, tx_buf);
         return;
     }
-    if msg_type == std::ai::MSG_TYPE_CANCEL || (payload.len() >= 4 && &payload[..4] == b"CANC") {
+    if msg_type == std::ai::MSG_TYPE_CANCEL {
         let active = ACTIVE_GENERATION_TASK.load(core::sync::atomic::Ordering::SeqCst);
         let active_sess = ACTIVE_SESSION_ID.load(core::sync::atomic::Ordering::SeqCst);
         if active == 0 || active_sess == 0 {
@@ -2821,6 +2948,13 @@ pub fn handle_ipc_inference_query(
             );
         } else if sender_task_id == active || sender_task_id == 1 {
             ACTIVE_SESSION_CANCELLED.store(active_sess, core::sync::atomic::Ordering::SeqCst);
+            with_broker_ledger(|ledger| {
+                let _ = ledger.cancel(sender_task_id, active_sess);
+            });
+            {
+                let mut backend = NATIVE_GGUF_BACKEND.lock();
+                let _ = backend.cancel(active_sess);
+            }
             emit_inference_response(
                 sender_task_id,
                 std::ai::STATUS_SUCCESS,
@@ -2838,7 +2972,7 @@ pub fn handle_ipc_inference_query(
         return;
     }
     // 1. GGUF model header info query
-    if msg_type == MSG_TYPE_GGUF || (payload.len() >= 4 && &payload[..4] == b"GGUF") {
+    if msg_type == MSG_TYPE_GGUF {
         let req_generative = payload.windows(5).any(|w| w.eq_ignore_ascii_case(b"gemma"))
             || payload.windows(4).any(|w| w.eq_ignore_ascii_case(b"genr"));
 
@@ -2884,7 +3018,6 @@ pub fn handle_ipc_inference_query(
     // notice, refusing to fabricate synthetic prose.
     if msg_type == MSG_TYPE_GENERATE
         || msg_type == MSG_TYPE_GENERATE_ALT
-        || (payload.len() >= 4 && (&payload[..4] == b"GENR" || &payload[..4] == b"GEN:"))
     {
         // A prompt the transport cut is refused here, before the task is registered
         // and before the model file is opened.
@@ -3124,9 +3257,7 @@ pub fn handle_ipc_inference_query(
     }
 
     // 3. Semantic Search / RAG document retrieval query
-    if msg_type == MSG_TYPE_SEARCH
-        || (payload.len() >= 4 && (&payload[..4] == b"SRCH" || &payload[..4] == b"RAGQ"))
-    {
+    if msg_type == MSG_TYPE_SEARCH {
         let mut target_dim = 256usize;
         let mut top_k = 4usize;
         let mut min_confidence = 10u8;
@@ -3263,6 +3394,13 @@ pub fn handle_ipc_inference_query(
         {
             let _ = std::ipc_send(sender_task_id, MSG_TYPE_SEARCH, &tx_buf[..cursor]);
         }
+        return;
+    }
+
+    // Only the authenticated message type selects an operation. Payload bytes
+    // cannot elevate an embedding request into a search or installation.
+    if msg_type != MSG_TYPE_EMBED {
+        emit_inference_response(sender_task_id, std::ai::STATUS_ERROR, b"Unsupported AI request type", tx_buf);
         return;
     }
 
@@ -3440,6 +3578,64 @@ pub fn handle_ipc_inference_query(
                     );
                     return;
                 }
+            };
+
+            let estimate = backend::ResourceEstimate {
+                model_weights: 0,
+                kv_cache: 1024 * 1024,
+                activations: 2 * 1024 * 1024,
+                scratch: 0,
+                tokenizer: 0,
+                embedding_indexes: 0,
+                audio_buffers: 0,
+                runtime_overhead: 1024 * 1024,
+            };
+            let embed_sess_res = with_broker_ledger(|ledger| {
+                ledger.create_session(sender_task_id, 1, estimate)
+            });
+            let embed_sess_id = match embed_sess_res {
+                Ok(sid) => sid,
+                Err(_) => {
+                    if strict_neural_required {
+                        let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+                        let mut notice = Notice::new(&mut scratch);
+                        notice.word(b"Embedding unavailable: the working set plus the foreground OS reserve exceeds RAM available now.");
+                        let status = std::ai::STATUS_UNAVAILABLE;
+                        let notice = notice.finish();
+                        emit_embed_notice(sender_task_id, status, notice, tx_buf);
+                        return;
+                    } else {
+                        let end_tick = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0)
+                            .ok()
+                            .and_then(|_| std::get_ticks().ok())
+                            .unwrap_or(start_tick);
+                        let latency_micros = end_tick.saturating_sub(start_tick).saturating_mul(1000);
+                        reply_lexical_baseline(
+                            sender_task_id,
+                            query_text,
+                            target_dim,
+                            latency_micros,
+                            tx_buf,
+                        );
+                        return;
+                    }
+                }
+            };
+
+            struct EmbedGuard {
+                owner: u64,
+                session_id: u64,
+            }
+            impl Drop for EmbedGuard {
+                fn drop(&mut self) {
+                    with_broker_ledger(|ledger| {
+                        let _ = ledger.destroy_session(self.owner, self.session_id);
+                    });
+                }
+            }
+            let _embed_guard = EmbedGuard {
+                owner: sender_task_id,
+                session_id: embed_sess_id,
             };
 
             let mut vector = [0.0f32; embedding::EMBEDDING_DIM];
@@ -3888,7 +4084,7 @@ mod tests {
         assert_eq!(payload, b"[Cancellation acknowledged]");
         assert_eq!(ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst), 50);
 
-        // 2. By ASCII "CANC" prefix in payload
+        // A payload prefix cannot select cancellation under another message type.
         tx_buf.fill(0);
         ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
         handle_ipc_inference_query(
@@ -3901,14 +4097,29 @@ mod tests {
         let resp2 = unsafe {
             core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
         };
-        assert_eq!(resp2.status, std::ai::STATUS_SUCCESS);
+        assert_eq!(resp2.status, std::ai::STATUS_ERROR);
         let payload2 = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp2.output_dim as usize];
-        assert_eq!(payload2, b"[Cancellation acknowledged]");
-        assert_eq!(ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst), 50);
+        assert_eq!(payload2, b"Unsupported AI request type");
+        assert_eq!(ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst), 0);
 
         ACTIVE_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
         ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::SeqCst);
         ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn payload_prefix_cannot_choose_install_or_search() {
+        let models = gguf::ProbedModels::empty();
+        for payload in [&b"INSL"[..], &b"SRCH"[..], &b"RAGQ"[..]] {
+            let mut response = [0u8; 1024];
+            handle_ipc_inference_query(0, 0, payload, &models, &mut response);
+            let header = unsafe {
+                core::ptr::read_unaligned(response.as_ptr() as *const std::ai::AiInferenceResponse)
+            };
+            assert_eq!(header.status, std::ai::STATUS_ERROR);
+            let start = core::mem::size_of::<std::ai::AiInferenceResponse>();
+            assert_eq!(&response[start..start + header.output_dim as usize], b"Unsupported AI request type");
+        }
     }
 
     #[test]
@@ -5900,6 +6111,118 @@ mod tests {
         });
         payload.extend_from_slice(input);
         payload
+    }
+
+    #[test]
+    fn test_authoritative_broker_ledger_reservation_and_reclamation() {
+        // Configure ledger: 100 MiB free, 0 storage, 20 MiB reserve => 80 MiB available for AI
+        reset_broker_ledger(100 * 1024 * 1024, 0, 20 * 1024 * 1024);
+
+        let estimate = backend::ResourceEstimate {
+            model_weights: 0,
+            kv_cache: 10 * 1024 * 1024,
+            activations: 10 * 1024 * 1024,
+            scratch: 5 * 1024 * 1024,
+            tokenizer: 0,
+            embedding_indexes: 0,
+            audio_buffers: 0,
+            runtime_overhead: 0,
+        }; // session_bytes = 25 MiB
+
+        // Create first session for task 10
+        let s1 = with_broker_ledger(|ledger| {
+            ledger.create_session(10, 1, estimate)
+        }).expect("session 1");
+
+        assert_eq!(with_broker_ledger(|ledger| ledger.reserved_bytes()), 25 * 1024 * 1024);
+        assert_eq!(with_broker_ledger(|ledger| ledger.active_sessions()), 1);
+
+        // Create second session for task 20
+        let _s2 = with_broker_ledger(|ledger| {
+            ledger.create_session(20, 1, estimate)
+        }).expect("session 2");
+
+        assert_eq!(with_broker_ledger(|ledger| ledger.reserved_bytes()), 50 * 1024 * 1024);
+        assert_eq!(with_broker_ledger(|ledger| ledger.active_sessions()), 2);
+
+        // Third session of 40 MiB would exceed remaining 30 MiB capacity (100 - 20 - 50 = 30)
+        let large_est = backend::ResourceEstimate {
+            kv_cache: 20 * 1024 * 1024,
+            activations: 20 * 1024 * 1024,
+            scratch: 0,
+            tokenizer: 0,
+            embedding_indexes: 0,
+            audio_buffers: 0,
+            runtime_overhead: 0,
+            model_weights: 0,
+        };
+        let rej = with_broker_ledger(|ledger| {
+            ledger.create_session(30, 1, large_est)
+        });
+        assert_eq!(rej, Err(backend::AdmissionError::InsufficientRam));
+        // No leak on rejection:
+        assert_eq!(with_broker_ledger(|ledger| ledger.reserved_bytes()), 50 * 1024 * 1024);
+
+        // Cancellation
+        with_broker_ledger(|ledger| {
+            assert_eq!(ledger.cancel(10, s1), Ok(()));
+            assert!(ledger.is_cancelled(s1));
+        });
+
+        // Destroying session 1 reclaims its 25 MiB
+        with_broker_ledger(|ledger| {
+            assert_eq!(ledger.destroy_session(10, s1), Ok(()));
+        });
+        assert_eq!(with_broker_ledger(|ledger| ledger.reserved_bytes()), 25 * 1024 * 1024);
+        assert_eq!(with_broker_ledger(|ledger| ledger.active_sessions()), 1);
+
+        // Process reaping for task 20 reclaims its session
+        reap_process(20);
+        assert_eq!(with_broker_ledger(|ledger| ledger.reserved_bytes()), 0);
+        assert_eq!(with_broker_ledger(|ledger| ledger.active_sessions()), 0);
+    }
+
+    #[test]
+    fn test_cancel_ipc_routes_through_broker_ledger_and_backend() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+        reset_broker_ledger(100 * 1024 * 1024, 0, 20 * 1024 * 1024);
+
+        let estimate = backend::ResourceEstimate {
+            kv_cache: 1024,
+            ..backend::ResourceEstimate::ZERO
+        };
+        let sess_id = with_broker_ledger(|ledger| {
+            ledger.create_session(42, 1, estimate)
+        }).expect("session");
+
+        ACTIVE_SESSION_ID.store(sess_id, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(42, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
+
+        let mut tx_buf = [0u8; 1024];
+        let empty_models = gguf::ProbedModels::empty();
+
+        handle_ipc_inference_query(
+            42,
+            MSG_TYPE_CANCEL,
+            b"",
+            &empty_models,
+            &mut tx_buf,
+        );
+
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp.status, std::ai::STATUS_SUCCESS);
+        assert!(with_broker_ledger(|ledger| ledger.is_cancelled(sess_id)));
+
+        // Clean up
+        with_broker_ledger(|ledger| {
+            let _ = ledger.destroy_session(42, sess_id);
+        });
+        ACTIVE_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
     }
 }
 

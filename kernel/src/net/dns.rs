@@ -393,8 +393,14 @@ impl DnsResolver {
 #[cfg(test)]
 mod resolver_tests {
  use super::*;
- #[test] fn resolver_query_cache(){let mut r=DnsResolver::new();let id=r.begin(b"example.com",0).unwrap();let mut q=[0u8;300];assert!(r.build_query(id,&mut q).unwrap()>DNS_HEADER_LEN);assert!(r.query(id).is_some());}
- #[test] fn resolver_expires(){let mut r=DnsResolver::new();let id=r.begin(b"example.com",0).unwrap();for n in 1..=4{r.poll_timeouts(DNS_RETRY_TICKS*n as u64);}assert!(r.query(id).is_none());}
+ #[test] fn resolver_query_cache(){
+  let _guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+  let mut r=DnsResolver::new();let id=r.begin(b"example.com",0).unwrap();let mut q=[0u8;300];assert!(r.build_query(id,&mut q).unwrap()>DNS_HEADER_LEN);assert!(r.query(id).is_some());
+ }
+ #[test] fn resolver_expires(){
+  let _guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+  let mut r=DnsResolver::new();let id=r.begin(b"example.com",0).unwrap();for n in 1..=4{r.poll_timeouts(DNS_RETRY_TICKS*n as u64);}assert!(r.query(id).is_none());
+ }
 }
 
 
@@ -404,6 +410,7 @@ mod lifecycle_tests {
 
     #[test]
     fn abort_releases_inflight_query() {
+        let _guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut r = DnsResolver::new();
         let id = r.begin(b"example.com", 0).unwrap();
         assert!(r.query(id).is_some());
@@ -441,6 +448,7 @@ mod lifecycle_tests {
     /// time -- which is what let an off-path attacker poison the queried name.
     #[test]
     fn query_ids_are_not_a_function_of_the_tick_counter() {
+        let _guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut a = DnsResolver::new();
         let mut b = DnsResolver::new();
         for tick in 0..8u64 {
@@ -470,6 +478,7 @@ mod lifecycle_tests {
     /// checks the refused query left no inflight state behind.
     #[test]
     fn begin_refuses_to_start_a_query_without_entropy() {
+        let _guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut r = DnsResolver::new();
         let _held = crate::crypto::TRNG.lock();
         assert_eq!(r.begin(b"blocked.example", 0), Err("DNS entropy unavailable"));
@@ -481,6 +490,7 @@ mod lifecycle_tests {
     /// resolver address, result cached.
     #[test]
     fn a_randomized_query_id_still_resolves_normally() {
+        let _guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut r = DnsResolver::new();
         let id = r.begin(b"ok.example", 0).unwrap();
         assert!(r.has_inflight());

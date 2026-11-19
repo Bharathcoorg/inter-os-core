@@ -293,24 +293,26 @@ def run_inference_acceptance_test():
         print("[ACCEPTANCE TEST] [OK] Real autoregressive transformer execution verified.")
 
         pipe_stream_ok = reader.wait_for(
-            "streamed 4 bytes via buffered pipe",
+            "bytes via buffered pipe",
             timeout=20.0,
             print_keywords=["SHM PIPE", "streamed", "CRC"],
         )
         assert pipe_stream_ok, "Guest failed to deliver generated tokens through the buffered pipe"
 
         pipe_consumed_ok = reader.wait_for(
-            "consumed 4 bytes from buffered pipe",
+            "bytes from buffered pipe",
             timeout=20.0,
             print_keywords=["SHM PIPE", "consumed"],
         )
         assert pipe_consumed_ok, "Agent Manager failed to consume generated tokens from the buffered pipe"
 
         logs = "\n".join(reader.captured_logs)
-        sent = re.findall(r"streamed 4 bytes via buffered pipe (\d+) \(Seq: (\d+), CRC: 0x[0-9A-F]{8}\)", logs)
-        received = re.findall(r"consumed 4 bytes from buffered pipe (\d+) \(Seq: (\d+)\)", logs)
-        assert sent and received and sent[-1] == received[-1], "Producer and consumer disagreed on pipe or sequence"
-        print(f"[ACCEPTANCE TEST] [OK] Producer and consumer reported pipe {sent[-1][0]}, sequence {sent[-1][1]}.")
+        sent = re.findall(r"streamed (\d+) bytes via buffered pipe (\d+) \(Seq: (\d+), CRC: (0x[0-9A-F]{8})\)", logs)
+        received = re.findall(r"consumed (\d+) bytes from buffered pipe (\d+) \(Seq: (\d+)\)", logs)
+        assert sent and received and sent[-1][0] == received[-1][0] and sent[-1][1] == received[-1][1] and sent[-1][2] == received[-1][2], (
+            f"Producer and consumer disagreed on length, pipe or sequence: sent={sent[-1]}, received={received[-1]}"
+        )
+        print(f"[ACCEPTANCE TEST] [OK] Producer and consumer reported pipe {sent[-1][1]}, sequence {sent[-1][2]}, bytes {sent[-1][0]}, CRC {sent[-1][3]}.")
 
         # Require Agent Manager to present updated frame rendering the response
         frame_presented = reader.wait_for(
@@ -390,19 +392,25 @@ def run_inference_acceptance_test():
         assert subseq_exec_ok, "aid failed to execute transformer on subsequent generation"
 
         subseq_pipe_ok = reader.wait_for(
-            "streamed 4 bytes via buffered pipe",
+            "bytes via buffered pipe",
             timeout=20.0,
             print_keywords=["SHM PIPE", "streamed", "CRC"],
         )
         assert subseq_pipe_ok, "Subsequent generation failed to stream tokens through the buffered pipe"
 
         subseq_consumed_ok = reader.wait_for(
-            "consumed 4 bytes from buffered pipe",
+            "bytes from buffered pipe",
             timeout=20.0,
             print_keywords=["SHM PIPE", "consumed"],
         )
         assert subseq_consumed_ok, "Agent Manager failed to consume subsequent tokens from the buffered pipe"
-        print("[ACCEPTANCE TEST] [OK] Subsequent generation consumed by Agent Manager.")
+        logs = "\n".join(reader.captured_logs)
+        subseq_sent = re.findall(r"streamed (\d+) bytes via buffered pipe (\d+) \(Seq: (\d+), CRC: (0x[0-9A-F]{8})\)", logs)
+        subseq_received = re.findall(r"consumed (\d+) bytes from buffered pipe (\d+) \(Seq: (\d+)\)", logs)
+        assert subseq_sent and subseq_received and subseq_sent[-1][0] == subseq_received[-1][0] and subseq_sent[-1][1] == subseq_received[-1][1] and subseq_sent[-1][2] == subseq_received[-1][2], (
+            f"Subsequent generation producer and consumer disagreed: sent={subseq_sent[-1]}, received={subseq_received[-1]}"
+        )
+        print(f"[ACCEPTANCE TEST] [OK] Subsequent generation consumed by Agent Manager (pipe {subseq_sent[-1][1]}, sequence {subseq_sent[-1][2]}, bytes {subseq_sent[-1][0]}).")
 
         if monitor_sock:
             ppm_subseq = os.path.join(workspace, "target", "test_inference_09b_subsequent.ppm")
