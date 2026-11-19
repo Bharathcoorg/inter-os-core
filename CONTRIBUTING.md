@@ -61,6 +61,15 @@ python tools/interos.py doctor
 
 ---
 
+## 🧹 Repository Hygiene & Deliverables Policy
+
+- **No internal agent reports or transcripts in commits**: Internal AI agent execution transcripts, temporary audit evidence, and generated Markdown reports are not public deliverables and must remain local.
+- **Maintain useful, contributor-facing documentation**: Documentation must be maintained, useful, non-duplicative, and relevant to contributors. Avoid generating Markdown reports for everyday engineering tasks.
+- **Clean repository root**: No temporary logs, compiler crash dumps, or scratch files in the repository root.
+- **Quarantine large binaries and sensitive state**: Model binaries (`.gguf`, `.safetensors`, `.litertlm`), disk images (`.img`), credentials, and private machine paths must never be committed to Git.
+
+---
+
 ## 🧪 Testing & Validation Workflow
 
 When external contributions open, all changes must pass local verification before submission:

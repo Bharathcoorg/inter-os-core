@@ -1,7 +1,0 @@
-﻿cargo :     Finished `dev` profile [optimized + debuginfo] target(s) in 0.19s
-At line:7 char:1
-+ cargo check --workspace > audit-evidence/phase-1-1/build-baseline.txt ...
-+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: (    Finished `d...get(s) in 0.19s:String) [], RemoteException
-    + FullyQualifiedErrorId : NativeCommandError
- 

@@ -1,1 +1,0 @@
-﻿Failed discovery commands: 'dir /s' and 'findstr' were executed using legacy command-line arguments in PowerShell, which causes a syntax error. Correct approach: use 'Get-ChildItem -Recurse -Filter'.

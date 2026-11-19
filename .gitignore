@@ -65,6 +65,8 @@ docs/audits/*
 *REPORT*.md
 *ROADMAP*.md
 *.audit.md
+audit-evidence/
+rustc-ice-*.txt
 
 # Machine learning model artifacts (multi-GB binaries; never commit to Git)
 models/
@@ -90,6 +92,8 @@ temp/
 *.tmp
 *.temp
 records/
+disposable-storage/
+emulator/data/vfs/data/storage/
 
 # Temporary screenshots & frame dumps
 *.png

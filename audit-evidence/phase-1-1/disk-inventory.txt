@@ -1,8 +1,0 @@
-﻿# Disk Inventory - Phase 1.1
-
-## Isolated Workspace and Storage
-- Disposable Storage Directory: `c:\Users\bhara\Desktop\Interlayer\QEMU\inter-os-core\disposable-storage`
-- Status: Initialized and Isolated.
-- Isolation Verification: This directory is located outside of `c:\Users\bhara\Desktop\Interlayer\QEMU\inter-os-core\emulator\data\vfs\data\storage\`, ensuring absolute separation from the master disk image (`inter-os-data-master.img`).
-- Usage Directive: All subsequent agents and tasks MUST use `c:\Users\bhara\Desktop\Interlayer\QEMU\inter-os-core\disposable-storage` for model provisioning and temporary workspace operations.
-- Security Note: Any attempt by an agent or task to write to `emulator/data/vfs/data/storage/` must be reported as a critical security violation.

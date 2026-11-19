@@ -1,9 +1,0 @@
-﻿ M kernel/src/resource/manager.rs
- M kernel/src/resource/mod.rs
-?? audit-evidence/
-?? capability_diff.txt
-?? emulator/data/vfs/data/storage/
-?? lib_diff.txt
-?? models/
-?? rustc-ice-2026-11-18T17_52_43-14612.txt
-?? test_results_debug.txt
