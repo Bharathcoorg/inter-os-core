@@ -2,22 +2,21 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
 
-"""Downloads official Gemma 4 E2B model artifacts from Hugging Face with integrity verification."""
+"""Fetch or verify the LiteRT-LM Gemma 4 E2B package and optional host references."""
 
+import argparse
 import os
 import sys
 import time
-import json
 import hashlib
-from huggingface_hub import hf_hub_download, HfApi
-
-LOG_PATH = "audit-evidence/gemma4-mobile-acquisition/download-log.txt"
-MANIFEST_PATH = "audit-evidence/gemma4-mobile-acquisition/download-manifest.json"
-CHECKSUMS_PATH = "audit-evidence/gemma4-mobile-acquisition/checksums.sha256"
 
 DOWNLOADS = [
     {
         "repo_id": "google/gemma-4-E2B-it-qat-mobile-transformers",
+        "role": "reference",
+        "revision": "dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+        "weights": "model.safetensors",
+        "sha256": "efab429012b97ab986c4d4838a46ff3ad95d618b42ce514771ca40fadc76a9a4",
         "local_dir": "models/downloads/gemma4-mobile-qat",
         "files": [
             "config.json",
@@ -33,6 +32,10 @@ DOWNLOADS = [
     },
     {
         "repo_id": "litert-community/gemma-4-E2B-it-litert-lm",
+        "revision": "2d74ac41a33d7da82f39f7d5720a04c68514a103",
+        "weights": "gemma-4-E2B-it.litertlm",
+        "sha256": "181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c",
+        "role": "generation",
         "local_dir": "models/downloads/gemma4-litert",
         "files": [
             "README.md",
@@ -42,18 +45,29 @@ DOWNLOADS = [
     },
     {
         "repo_id": "google/gemma-4-E2B-it-qat-q4_0-gguf",
+        "role": "reference",
+        "revision": "675cff42a74c774d6cb76f76d8eacb49b48c9b93",
+        "weights": "gemma-4-E2B_q4_0-it.gguf",
+        "sha256": "fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634",
         "local_dir": "models/downloads/gemma4-official-gguf",
         "files": [
             "README.md",
             "gemma-4-E2B_q4_0-it.gguf",
         ]
+    },
+    {
+        "repo_id": "litert-community/embeddinggemma-2-text-270m-litert-lm",
+        "revision": "9be6e8b90982095dc05c2bd162e4b954ee4dbac7",
+        "weights": "embeddinggemma-2-text-270m.litertlm",
+        "sha256": "2d079ee2f6f066b1f368e8d7c819f55214eaef1d0513b312321901f30ab286fb",
+        "local_dir": "models/downloads/embeddinggemma2-text",
+        "files": ["embeddinggemma-2-text-270m.litertlm"],
+        "role": "embedding",
     }
 ]
 
 def log(msg):
     print(msg, flush=True)
-    with open(LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
 
 def sha256_file(path):
     h = hashlib.sha256()
@@ -71,39 +85,96 @@ def verify_not_lfs_pointer(path):
                 return False
     return True
 
+
+def write_model_manifest(item, artifact_path, size, digest):
+    """Writes data consumed by the guest model registry, never a model binary."""
+    if item["role"] not in {"generation", "embedding"}:
+        return None
+    if item["role"] == "generation":
+        model_id = "org.interos.gemma4-e2b-it"
+        name = "Gemma 4 E2B IT"
+        architecture = "gemma4-e2b"
+        capabilities = "text-generation,streaming-generation,vision-input"
+    else:
+        model_id = "org.interos.embeddinggemma2-text-270m"
+        name = "EmbeddingGemma 2 Text 270M"
+        architecture = "embeddinggemma2"
+        capabilities = "text-embedding"
+    # Zero resource fields mean that the installed backend must derive the
+    # estimate by probing the container. They are not claims that a run needs
+    # no memory, and aid will not admit a zero estimate as executable state.
+    content = "\n".join([
+        f"id={model_id}",
+        f"name={name}",
+        f"source={item['repo_id']}",
+        f"revision={item['revision']}",
+        f"sha256={digest}",
+        f"artifact_bytes={size}",
+        "format=litert-lm",
+        f"architecture={architecture}",
+        "quantization=backend-defined",
+        "tokenizer=embedded",
+        "hardware=cpu",
+        f"capabilities={capabilities}",
+        "memory.model_weights=0",
+        "memory.kv_cache=0",
+        "memory.activations=0",
+        "memory.scratch=0",
+        "memory.tokenizer=0",
+        "memory.embedding_indexes=0",
+        "memory.audio_buffers=0",
+        "memory.runtime_overhead=0",
+        "",
+    ])
+    manifest_path = artifact_path + ".modelmanifest"
+    with open(manifest_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
+    return manifest_path
+
 def main():
-    os.makedirs("audit-evidence/gemma4-mobile-acquisition", exist_ok=True)
-    with open(LOG_PATH, "w", encoding="utf-8") as f:
-        f.write("=== Gemma 4 E2B Official Model Acquisition Log ===\n")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--include-reference", action="store_true",
+                        help="also select the host reference Transformers and GGUF artifacts")
+    parser.add_argument("--with-embedding", action="store_true",
+                        help="also select EmbeddingGemma 2 Text for retrieval tests")
+    parser.add_argument("--verify-only", action="store_true",
+                        help="check the selected local weights against pinned publisher SHA-256 values")
+    args = parser.parse_args()
+    roles = {"generation"}
+    if args.with_embedding:
+        roles.add("embedding")
+    if args.include_reference:
+        roles.add("reference")
+    selected = [item for item in DOWNLOADS if item["role"] in roles]
+    if args.verify_only:
+        for item in selected:
+            path = os.path.join(item["local_dir"], item["weights"])
+            if not os.path.isfile(path):
+                parser.exit(1, f"Missing model artifact: {path}\n")
+            digest = sha256_file(path)
+            if digest != item["sha256"]:
+                parser.exit(1, f"SHA-256 mismatch for {path}: {digest}\n")
+            print(f"Verified {path} ({os.path.getsize(path):,} bytes, SHA-256 {digest})", flush=True)
+        return
+
+    from huggingface_hub import hf_hub_download, HfApi
 
     api = HfApi()
-    manifest = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "repositories": [],
-        "artifacts": []
-    }
-    checksums = []
 
-    for item in DOWNLOADS:
+    for item in selected:
         repo_id = item["repo_id"]
         local_dir = item["local_dir"]
         os.makedirs(local_dir, exist_ok=True)
         log(f"\n==================================================")
         log(f"Fetching repo metadata: {repo_id}")
-        info = api.model_info(repo_id)
-        repo_entry = {
-            "repo_id": repo_id,
-            "commit_sha": info.sha,
-            "local_dir": local_dir,
-            "files": []
-        }
-
+        info = api.model_info(repo_id, revision=item["revision"])
         for filename in item["files"]:
             log(f"Downloading {repo_id}/{filename} -> {local_dir}...")
             t0 = time.time()
             local_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=filename,
+                revision=info.sha,
                 local_dir=local_dir,
                 force_download=False,
             )
@@ -118,29 +189,15 @@ def main():
             log(f"  Computing SHA-256 for {filename}...")
             digest = sha256_file(local_path)
             log(f"  SHA-256: {digest}")
+            if filename == item["weights"] and digest != item["sha256"]:
+                parser.exit(1, f"SHA-256 mismatch for {local_path}: expected {item['sha256']}\n")
 
-            artifact_info = {
-                "repo_id": repo_id,
-                "commit_sha": info.sha,
-                "filename": filename,
-                "local_path": os.path.abspath(local_path),
-                "size_bytes": size,
-                "sha256": digest,
-                "download_seconds": round(elapsed, 2)
-            }
-            manifest["artifacts"].append(artifact_info)
-            repo_entry["files"].append(filename)
-            checksums.append(f"{digest}  {os.path.relpath(local_path)}")
+            if filename == item["weights"]:
+                manifest_path = write_model_manifest(item, local_path, size, digest)
+                if manifest_path:
+                    log(f"  Runtime manifest: {manifest_path}")
 
-        manifest["repositories"].append(repo_entry)
-
-    with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
-
-    with open(CHECKSUMS_PATH, "w", encoding="utf-8") as f:
-        f.write("\n".join(checksums) + "\n")
-
-    log("\n[SUCCESS] All official artifacts acquired and verified successfully!")
+    log("\n[SUCCESS] Selected official artifacts acquired and verified successfully.")
 
 if __name__ == "__main__":
     main()

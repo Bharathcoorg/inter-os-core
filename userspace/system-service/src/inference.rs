@@ -112,17 +112,9 @@ use alloc::vec::Vec;
 /// not buffer, which is recorded on `weights::TensorTable::walk`.
 pub const SCRATCH_BYTE_BUDGET: usize = 120 * 1024 * 1024;
 
-/// Computes the dynamic scratch byte budget given available free physical RAM.
-///
-/// Allocates up to 75% of free physical RAM with a floor of `SCRATCH_BYTE_BUDGET` (120 MiB).
-/// When free memory is zero or unavailable, returns `SCRATCH_BYTE_BUDGET`.
+/// Caps scratch at 75% of the reported free RAM, including an observed zero.
 pub fn compute_dynamic_scratch_budget(free_bytes: u64) -> usize {
-    if free_bytes > 0 {
-        let dynamic = ((free_bytes as usize) / 4) * 3;
-        dynamic.max(SCRATCH_BYTE_BUDGET)
-    } else {
-        SCRATCH_BYTE_BUDGET
-    }
+    usize::try_from((free_bytes / 4) * 3).unwrap_or(usize::MAX)
 }
 
 /// Computes the dynamic scratch byte budget from physical memory telemetry.
@@ -702,7 +694,7 @@ pub fn dequantize_q5_k(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceEr
 }
 
 /// Weights per Q6_K super-block, and the bytes that super-block occupies:
-/// one half, 128 low-nibble bytes, 64 high-bit bytes and 16 signed scales.
+/// 128 low-nibble bytes, 64 high-bit bytes, 16 signed scales and one FP16 scale.
 /// The layout is ggml's `block_q6_K`.
 const Q6_K_WEIGHTS: usize = 256;
 const Q6_K_BLOCK_BYTES: usize = 210;
@@ -723,6 +715,9 @@ const _: () = assert!(Q6_K_BLOCK_BYTES == 2 + 128 + 64 + 16);
 /// `dequantize_q5_k` applies -- the layout is proved here, the mapped set is
 /// widened deliberately and separately.
 pub fn dequantize_q6_k(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceError> {
+    if raw.len() % Q6_K_BLOCK_BYTES != 0 {
+        return Err(InferenceError::CorruptedWeights);
+    }
     let num_blocks = raw.len() / Q6_K_BLOCK_BYTES;
     let num_elements = num_blocks
         .checked_mul(Q6_K_WEIGHTS)
@@ -732,10 +727,10 @@ pub fn dequantize_q6_k(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceEr
     }
     for b in 0..num_blocks {
         let blk = &raw[b * Q6_K_BLOCK_BYTES..(b + 1) * Q6_K_BLOCK_BYTES];
-        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
-        let ql = &blk[2..130];
-        let qh = &blk[130..194];
-        let sc = &blk[194..210];
+        let ql = &blk[..128];
+        let qh = &blk[128..192];
+        let sc = &blk[192..208];
+        let d = f16_to_f32(u16::from_le_bytes([blk[208], blk[209]]));
         let out_base = b * Q6_K_WEIGHTS;
         for half in 0..2 {
             let qlh = &ql[half * 64..half * 64 + 64];
@@ -759,7 +754,7 @@ pub fn dequantize_q6_k(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceEr
 }
 
 /// Weights per TQ2_0 super-block, and the bytes that super-block occupies:
-/// one half and 64 bytes of two-bit ternary quants. The layout is ggml's
+/// 64 bytes of two-bit ternary quants and one FP16 scale. The layout is ggml's
 /// `block_tq2_0`.
 const TQ2_0_WEIGHTS: usize = 256;
 const TQ2_0_BLOCK_BYTES: usize = 66;
@@ -779,6 +774,9 @@ const _: () = assert!(TQ2_0_BLOCK_BYTES == 2 + TQ2_0_WEIGHTS / 4);
 /// Gemma 4 E2B states 61 tensors as TQ2_0 (35), including `token_embd.weight`;
 /// the same gate note as `dequantize_q5_k` applies.
 pub fn dequantize_tq2_0(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceError> {
+    if raw.len() % TQ2_0_BLOCK_BYTES != 0 {
+        return Err(InferenceError::CorruptedWeights);
+    }
     let num_blocks = raw.len() / TQ2_0_BLOCK_BYTES;
     let num_elements = num_blocks
         .checked_mul(TQ2_0_WEIGHTS)
@@ -788,8 +786,8 @@ pub fn dequantize_tq2_0(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceE
     }
     for b in 0..num_blocks {
         let blk = &raw[b * TQ2_0_BLOCK_BYTES..(b + 1) * TQ2_0_BLOCK_BYTES];
-        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
-        let qs = &blk[2..66];
+        let qs = &blk[..64];
+        let d = f16_to_f32(u16::from_le_bytes([blk[64], blk[65]]));
         let out_base = b * TQ2_0_WEIGHTS;
         for chunk in 0..2 {
             for plane in 0..4 {
@@ -3915,6 +3913,48 @@ pub mod tests {
     }
 
     #[test]
+    fn q6_k_block_matches_ggml_reference() {
+        let mut raw = [0u8; Q6_K_BLOCK_BYTES];
+        let scales: [i8; 16] = [-8, 7, -6, 5, -4, 3, -2, 1, 2, -1, 4, -3, 6, -5, 8, -7];
+        for (dst, scale) in raw[192..208].iter_mut().zip(scales) {
+            *dst = scale as u8;
+        }
+        raw[208..].copy_from_slice(&0x3800u16.to_le_bytes());
+        let mut expected = [0.0f32; Q6_K_WEIGHTS];
+        for (i, weight) in expected.iter_mut().enumerate() {
+            let code = ((i * 11 + (i / 64) * 3) % 64) as u8;
+            let half = i / 128;
+            let quarter = (i % 128) / 32;
+            let lane = i % 32;
+            raw[half * 64 + (quarter % 2) * 32 + lane] |= (code & 15) << (4 * (quarter / 2));
+            raw[128 + half * 32 + lane] |= (code >> 4) << (2 * quarter);
+            *weight = 0.5 * scales[i / 16] as f32 * (code as f32 - 32.0);
+        }
+        let mut actual = [0.0f32; Q6_K_WEIGHTS];
+        assert_eq!(dequantize_q6_k(&raw, &mut actual), Ok(Q6_K_WEIGHTS));
+        assert_eq!(actual, expected);
+        assert_eq!(dequantize_q6_k(&raw[..209], &mut actual), Err(InferenceError::CorruptedWeights));
+        assert_eq!(dequantize_q6_k(&raw, &mut actual[..255]), Err(InferenceError::BufferTooSmall));
+    }
+
+    #[test]
+    fn tq2_0_block_matches_ggml_reference() {
+        let mut raw = [0u8; TQ2_0_BLOCK_BYTES];
+        raw[64..].copy_from_slice(&0x3e00u16.to_le_bytes());
+        let mut expected = [0.0f32; TQ2_0_WEIGHTS];
+        for (i, weight) in expected.iter_mut().enumerate() {
+            let code = ((i * 5 + i / 32) % 3) as u8;
+            raw[i / 128 * 32 + i % 32] |= code << (2 * ((i % 128) / 32));
+            *weight = 1.5 * (code as f32 - 1.0);
+        }
+        let mut actual = [0.0f32; TQ2_0_WEIGHTS];
+        assert_eq!(dequantize_tq2_0(&raw, &mut actual), Ok(TQ2_0_WEIGHTS));
+        assert_eq!(actual, expected);
+        assert_eq!(dequantize_tq2_0(&raw[..65], &mut actual), Err(InferenceError::CorruptedWeights));
+        assert_eq!(dequantize_tq2_0(&raw, &mut actual[..255]), Err(InferenceError::BufferTooSmall));
+    }
+
+    #[test]
     fn test_gemv_f32_and_q8() {
         let x = [1.0f32, 2.0f32];
         let mut w_f32 = [0u8; 16]; // 2x2 matrix: [[1.0, 2.0], [3.0, 4.0]]
@@ -5100,10 +5140,10 @@ pub mod tests {
         assert_eq!(dynamic_scratch_byte_budget(), SCRATCH_BYTE_BUDGET);
 
         // When free RAM is 0 or low, minimum budget floor of 120 MiB is enforced
-        assert_eq!(compute_dynamic_scratch_budget(0), SCRATCH_BYTE_BUDGET);
+        assert_eq!(compute_dynamic_scratch_budget(0), 0);
         assert_eq!(
             compute_dynamic_scratch_budget(100 * 1024 * 1024),
-            SCRATCH_BYTE_BUDGET
+            75 * 1024 * 1024
         );
 
         // When 1 GiB is free, 75% (768 MiB) is granted

@@ -29,6 +29,8 @@ static HEAP: interos_std::heap::InterOsHeap = interos_std::heap::InterOsHeap::ne
 use interos_std as std;
 
 pub mod embedding;
+pub mod backend;
+pub mod litertlm;
 pub mod gguf;
 pub mod inference;
 pub mod rag;
@@ -375,8 +377,11 @@ pub fn run_storage() -> ! {
         // directory, which is the one measurement that says whether the bytes
         // are on the device.
         if ipc_slot.is_some() {
-            while let Ok((_, msg_type, _)) = std::ipc::receive_any(&mut request) {
-                if msg_type == std::ai::MSG_TYPE_INSTALL {
+            while let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut request) {
+                if msg_type == std::ai::MSG_TYPE_INSTALL
+                    && &request[..len] == b"INSL"
+                    && std::service_peer_matches(std::ai::SERVICE_INFERENCE, sender)
+                {
                     let _ = install_local_model();
                 }
             }
@@ -486,12 +491,8 @@ pub fn run_ai() -> ! {
     } else {
         let _ = std::log("[aid] no embedding weights file found; lexical baseline active.");
     }
-    if let Some((_hdr, path)) = probed_models.generative {
-        if path.contains("lite") || path.contains("tiny") {
-            let _ = std::log("[aid] verified physical synthetic Gemma test fixture weights in storage.");
-        } else {
-            let _ = std::log("[aid] verified physical generative model weights in storage.");
-        }
+    if probed_models.generative.is_some() {
+        let _ = std::log("[aid] GGUF header found in a generative model slot; identity and execution are checked on request.");
     } else {
         let _ = std::log("[aid] physical generative model weights absent; generative queries will report unavailable honestly.");
     }
@@ -2378,6 +2379,51 @@ fn run_installed_generation(
             return false;
         }
     };
+
+    // Admission is based on memory available now, not total RAM and not a
+    // model-name table. The native backend prices geometry parsed from this
+    // file and leaves a scaled reserve for the foreground OS workload.
+    let telemetry = match std::memory_telemetry() {
+        Ok(telemetry) => telemetry,
+        Err(_) => {
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNAVAILABLE,
+                b"Generation unavailable: the platform did not provide a physical-memory reading for resource admission.",
+                tx_buf,
+            );
+            return true;
+        }
+    };
+    let estimate = match backend::native_generation_resources(&config) {
+        Ok(estimate) => estimate,
+        Err(_) => {
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNSUPPORTED,
+                b"Generation refused: the native Rust backend could not price this model's declared geometry.",
+                tx_buf,
+            );
+            return true;
+        }
+    };
+    let admission = backend::BrokerLedger::new(
+        telemetry.free_bytes,
+        0,
+        backend::foreground_ram_reserve(telemetry.total_bytes),
+    );
+    if admission.admit_operation(estimate).is_err() {
+        let _ = std::fs_close(fd);
+        reply_with_answer(
+            sender_task_id,
+            std::ai::STATUS_UNAVAILABLE,
+            b"Generation unavailable: the backend working set plus the foreground OS reserve exceeds RAM available now.",
+            tx_buf,
+        );
+        return true;
+    }
 
     let mut reader = weights::WeightReader::new(table, source);
     if !reader.has_output_head() {

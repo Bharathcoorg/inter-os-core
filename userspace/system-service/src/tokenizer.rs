@@ -246,12 +246,8 @@ pub const VOCAB_GROWTH_FACTOR: usize = 2;
 /// arrived would refuse every file on a device that is fine, so the authored ceiling
 /// stands, which is the same fallback `dynamic_scratch_byte_budget` takes.
 pub fn compute_dynamic_tokenizer_budget(free_bytes: u64) -> usize {
-    if free_bytes > 0 {
-        let spendable = (free_bytes / VOCAB_GROWTH_FACTOR as u64) as usize;
-        TOKENIZER_HEAP_BUDGET.min(spendable)
-    } else {
-        TOKENIZER_HEAP_BUDGET
-    }
+    let spendable = usize::try_from(free_bytes / VOCAB_GROWTH_FACTOR as u64).unwrap_or(usize::MAX);
+    TOKENIZER_HEAP_BUDGET.min(spendable)
 }
 
 /// The budget for the build starting now, read from the guest's own telemetry.
@@ -2253,11 +2249,7 @@ mod tests {
     fn test_the_budget_is_clamped_to_what_the_guest_reports_free() {
         // No reading: the authored ceiling is the only honest answer, and it is the
         // same fallback `inference::compute_dynamic_scratch_budget` takes.
-        assert_eq!(
-            compute_dynamic_tokenizer_budget(0),
-            TOKENIZER_HEAP_BUDGET,
-            "a telemetry that did not arrive was read as a device with no memory"
-        );
+        assert_eq!(compute_dynamic_tokenizer_budget(0), 0);
         assert_eq!(
             dynamic_tokenizer_heap_budget(),
             TOKENIZER_HEAP_BUDGET,

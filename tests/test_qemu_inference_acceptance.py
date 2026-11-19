@@ -5,7 +5,7 @@
 """
 End-to-End Native Local AI Inference Acceptance & Memory Safety Verification in QEMU.
 
-Validates the full vertical slice of native on-device AI in InterOS Core:
+Exercises the guest inference path with a synthetic model:
 1. Boots QEMU with provisioned model data disk (/data/models/gemma4-mobile-lite.gguf holding
    the synthetic Gemma test fixture: 128K parameters, F32, 2 transformer layers, 521,536 bytes).
 2. Verifies VFS block-device discovery and import of provisioned model.
@@ -25,6 +25,7 @@ import time
 import socket
 import subprocess
 import shutil
+import re
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -36,6 +37,11 @@ from tests.test_interactive_lifecycle import (
     SerialReader,
     qemu_x86_audio_args,
 )
+from tools.model_provisioning import sha256_file, verify_image
+
+
+MODEL_VFS_PATH = "/data/models/gemma4-mobile-lite.gguf"
+FIXTURE_BYTES = 521_536
 
 
 def run_inference_acceptance_test():
@@ -49,6 +55,19 @@ def run_inference_acceptance_test():
 
     assert os.path.exists(boot_img), f"Boot image missing: {boot_img}"
     assert os.path.exists(model_disk), f"Provisioned model disk missing: {model_disk}"
+    disk_report = verify_image(model_disk)
+    assert disk_report["ok"], f"Provisioned model disk invalid: {disk_report['problems']}"
+    record = next((record for record in disk_report["files"] if record["vfs_path"] == MODEL_VFS_PATH), None)
+    assert record is not None, f"Fixture missing on disk: {MODEL_VFS_PATH}"
+    assert record["read_back_bytes"] == FIXTURE_BYTES, (
+        f"Synthetic fixture must be {FIXTURE_BYTES:,} bytes, but the disk contains "
+        f"{record['read_back_bytes']:,} bytes ({record['payload_sha256_on_disk']})"
+    )
+    fixture = os.path.join(workspace, "target", "verify", "models", "gemma-tiny-f32.gguf")
+    assert os.path.isfile(fixture), f"Reference fixture missing: {fixture}"
+    assert sha256_file(fixture) == (record["payload_sha256_on_disk"], FIXTURE_BYTES), (
+        "Provisioned GGUF does not match the reference fixture"
+    )
 
     qemu_exe = find_qemu()
     assert os.path.exists(qemu_exe) or shutil.which(qemu_exe), f"QEMU binary not found: {qemu_exe}"
@@ -112,12 +131,12 @@ def run_inference_acceptance_test():
         print("[ACCEPTANCE TEST] [OK] VFS provisioned model imported successfully.")
 
         aid_weights_ok = reader.wait_for(
-            "[aid] verified physical synthetic Gemma test fixture weights in storage.",
+            "[aid] GGUF header found in a generative model slot",
             timeout=30.0,
             print_keywords=["aid", "synthetic", "storage", "weights"],
         )
-        assert aid_weights_ok, "aid failed to truthfully verify physical model fixture weights in storage"
-        print("[ACCEPTANCE TEST] [OK] aid verified physical synthetic Gemma test fixture weights.")
+        assert aid_weights_ok, "aid did not recognize the provisioned GGUF header"
+        print("[ACCEPTANCE TEST] [OK] aid recognized the provisioned GGUF header.")
 
         launcher_ready = reader.wait_for(
             "Step 5: Initial presentation complete",
@@ -273,36 +292,25 @@ def run_inference_acceptance_test():
         assert trans_exec_ok, "aid failed to execute real transformer blocks or generate tokens in guest"
         print("[ACCEPTANCE TEST] [OK] Real autoregressive transformer execution verified.")
 
-        # Require zero-copy DMA streaming of generated response
-        dma_stream_ok = reader.wait_for(
-            "streamed 4 bytes via Zero-Copy DMA Pipe",
+        pipe_stream_ok = reader.wait_for(
+            "streamed 4 bytes via buffered pipe",
             timeout=20.0,
-            print_keywords=["SHM PIPE", "streamed", "DMA", "CRC"],
+            print_keywords=["SHM PIPE", "streamed", "CRC"],
         )
-        assert dma_stream_ok, "Guest failed to deliver generated tokens through zero-copy DMA pipe"
-        print("[ACCEPTANCE TEST] [OK] Generated tokens delivered via Zero-Copy DMA Pipe.")
+        assert pipe_stream_ok, "Guest failed to deliver generated tokens through the buffered pipe"
 
-        # Require Agent Manager to consume the DMA stream
-        dma_consumed_ok = reader.wait_for(
-            "consumed 4 bytes from Zero-Copy DMA Pipe",
+        pipe_consumed_ok = reader.wait_for(
+            "consumed 4 bytes from buffered pipe",
             timeout=20.0,
-            print_keywords=["SHM PIPE", "consumed", "DMA"],
+            print_keywords=["SHM PIPE", "consumed"],
         )
-        assert dma_consumed_ok, "Agent Manager failed to consume generated tokens from Zero-Copy DMA Pipe"
-        print("[ACCEPTANCE TEST] [OK] Generated tokens consumed by Agent Manager from Zero-Copy DMA Pipe.")
+        assert pipe_consumed_ok, "Agent Manager failed to consume generated tokens from the buffered pipe"
 
-        # Verify exact shared-memory pipe bytes, sequence tracking, and CRC correctness
-        dma_stream_logs = [l for l in reader.captured_logs if "streamed 4 bytes via Zero-Copy DMA Pipe" in l]
-        assert len(dma_stream_logs) > 0, "No DMA stream record in serial output"
-        stream_log = dma_stream_logs[-1]
-        assert "CRC: 0x" in stream_log, f"DMA stream log missing CRC field: {stream_log}"
-        assert "Seq: " in stream_log, f"DMA stream log missing Seq field: {stream_log}"
-        print(f"[ACCEPTANCE TEST] [OK] Verified DMA pipe transfer integrity: {stream_log}")
-
-        dma_consumed_logs = [l for l in reader.captured_logs if "consumed 4 bytes from Zero-Copy DMA Pipe" in l]
-        assert len(dma_consumed_logs) > 0, "No DMA consumption record in serial output"
-        consumed_log = dma_consumed_logs[-1]
-        print(f"[ACCEPTANCE TEST] [OK] Verified DMA pipe consumer delivery: {consumed_log}")
+        logs = "\n".join(reader.captured_logs)
+        sent = re.findall(r"streamed 4 bytes via buffered pipe (\d+) \(Seq: (\d+), CRC: 0x[0-9A-F]{8}\)", logs)
+        received = re.findall(r"consumed 4 bytes from buffered pipe (\d+) \(Seq: (\d+)\)", logs)
+        assert sent and received and sent[-1] == received[-1], "Producer and consumer disagreed on pipe or sequence"
+        print(f"[ACCEPTANCE TEST] [OK] Producer and consumer reported pipe {sent[-1][0]}, sequence {sent[-1][1]}.")
 
         # Require Agent Manager to present updated frame rendering the response
         frame_presented = reader.wait_for(
@@ -381,20 +389,19 @@ def run_inference_acceptance_test():
         )
         assert subseq_exec_ok, "aid failed to execute transformer on subsequent generation"
 
-        subseq_dma_ok = reader.wait_for(
-            "streamed 4 bytes via Zero-Copy DMA Pipe",
+        subseq_pipe_ok = reader.wait_for(
+            "streamed 4 bytes via buffered pipe",
             timeout=20.0,
-            print_keywords=["SHM PIPE", "streamed", "DMA", "CRC"],
+            print_keywords=["SHM PIPE", "streamed", "CRC"],
         )
-        assert subseq_dma_ok, "Subsequent generation failed to stream tokens via DMA pipe"
-        print("[ACCEPTANCE TEST] [OK] Subsequent generation streamed via DMA pipe.")
+        assert subseq_pipe_ok, "Subsequent generation failed to stream tokens through the buffered pipe"
 
         subseq_consumed_ok = reader.wait_for(
-            "consumed 4 bytes from Zero-Copy DMA Pipe",
+            "consumed 4 bytes from buffered pipe",
             timeout=20.0,
-            print_keywords=["SHM PIPE", "consumed", "DMA"],
+            print_keywords=["SHM PIPE", "consumed"],
         )
-        assert subseq_consumed_ok, "Agent Manager failed to consume subsequent tokens from DMA Pipe"
+        assert subseq_consumed_ok, "Agent Manager failed to consume subsequent tokens from the buffered pipe"
         print("[ACCEPTANCE TEST] [OK] Subsequent generation consumed by Agent Manager.")
 
         if monitor_sock:

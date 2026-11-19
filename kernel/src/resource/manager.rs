@@ -114,7 +114,7 @@ impl ResourceManager {
     /// is permitted to start, based on current thermal and power constraints.
     pub fn admit_inference_task(&self, manifest: &ResourceManifest) -> bool {
         // If thermal throttling is active, only admit small inference models.
-        if self.thermal.throttling {
+        if self.thermal.present && self.thermal.throttling {
             let total_model_bytes = manifest.peak_scratch_bytes
                 .saturating_add(manifest.kv_cache_bytes)
                 .saturating_add(manifest.peak_activations_bytes);
@@ -124,7 +124,7 @@ impl ResourceManager {
         }
 
         // Low battery (< 15%) and not charging: pause high-memory inference.
-        if !self.battery.is_charging && self.battery.percent < 15 {
+        if self.battery.present && !self.battery.is_charging && self.battery.percent < 15 {
             let total_model_bytes = manifest.peak_scratch_bytes
                 .saturating_add(manifest.kv_cache_bytes)
                 .saturating_add(manifest.peak_activations_bytes);
@@ -142,12 +142,13 @@ impl ResourceManager {
         }
 
         // Thermal throttling pauses background network and lower tiers
-        if self.thermal.throttling && tier >= WorkloadTier::BackgroundNetwork {
+        if self.thermal.present && self.thermal.throttling && tier >= WorkloadTier::BackgroundNetwork {
             return false;
         }
 
         // Low battery (< 20% and not charging) pauses background network and lower tiers
-        if !self.battery.is_charging && self.battery.percent < 20 && tier >= WorkloadTier::BackgroundNetwork {
+        if self.battery.present && !self.battery.is_charging && self.battery.percent < 20
+            && tier >= WorkloadTier::BackgroundNetwork {
             return false;
         }
 
@@ -166,14 +167,12 @@ impl ResourceManager {
 
     /// Updates live battery status.
     pub fn update_battery(&mut self, percent: u8, is_charging: bool) {
-        self.battery.percent = percent.min(100);
-        self.battery.is_charging = is_charging;
+        self.set_battery_telemetry(percent, is_charging);
     }
 
     /// Updates live thermal status.
     pub fn update_thermal(&mut self, temp_celsius: u8) {
-        self.thermal.temp_celsius = temp_celsius;
-        self.thermal.throttling = temp_celsius >= 75;
+        self.set_thermal_telemetry(temp_celsius, temp_celsius >= 75);
     }
 
     /// Meters WASM instruction fuel against the per-frame execution limit.
@@ -262,7 +261,6 @@ mod tests {
     fn inference_admission_policy_thermal_and_power() {
         use crate::resource::ResourceManifest;
         let mut rm = ResourceManager::new();
-        rm.update_battery(85, false);
         
         let small_model = ResourceManifest {
             peak_scratch_bytes: 100 * 1024,
@@ -278,9 +276,18 @@ mod tests {
             ..Default::default()
         };
 
-        // Nominal: all admitted
+        // Absent readings must not be treated as a depleted battery.
+        assert!(!rm.battery.present);
+        assert!(!rm.thermal.present);
+        assert!(rm.is_tier_permitted(WorkloadTier::BackgroundNetwork));
         assert!(rm.admit_inference_task(&small_model));
         assert!(rm.admit_inference_task(&large_model));
+
+        rm.update_battery(0, false);
+        assert!(rm.battery.present);
+        assert!(!rm.is_tier_permitted(WorkloadTier::BackgroundNetwork));
+        assert!(!rm.admit_inference_task(&large_model));
+        rm.update_battery(85, false);
 
         // Thermal throttling: large model denied
         rm.update_thermal(80);
