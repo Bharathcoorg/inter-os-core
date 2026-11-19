@@ -836,6 +836,39 @@ fn registered_service_task(sid: crate::services::ServiceId) -> Option<TaskId> {
     crate::services::task_id(sid).filter(|task| task.0 != 0)
 }
 
+/// AI protocol types are reserved for exchanges with the registered `aid` task.
+/// Both requests and replies use these types, so either endpoint may be `aid`.
+fn inference_ipc_allowed(msg_type: u32, sender: TaskId, receiver: TaskId) -> bool {
+    match &msg_type.to_be_bytes() {
+        b"EMBD" | b"EMCK" | b"GGUF" | b"GENR" | b"GENE" | b"GENC" | b"SRCH"
+        | b"SRCK" | b"INSL" | b"INSC" | b"CANC" => {
+            registered_service_task(crate::services::ServiceId::Inference)
+                .is_some_and(|service| service == sender || service == receiver)
+        }
+        _ => true,
+    }
+}
+
+/// Authorizes operations multiplexed through the inference service.
+///
+/// The ordinary inference capability is checked by `sys_ipc_send`; this helper
+/// enforces the additional authority carried by retrieval and installation.
+fn authorize_inference_operation(
+    table: &crate::capability::CapabilityTable,
+    msg_type: u32,
+) -> bool {
+    match &msg_type.to_be_bytes() {
+        b"SRCH" => {
+            table.authorize_capability(
+                CapabilityType::SearchService,
+                Rights::READ | Rights::INVOKE,
+            ) && table.authorize_capability(CapabilityType::ContentIndexRead, Rights::READ)
+        }
+        b"INSL" => table.authorize_capability(CapabilityType::FileSystemWrite, Rights::WRITE),
+        _ => true,
+    }
+}
+
 /// Resolves a well-known service alias to the task the supervisor registered
 /// for it, leaving every other destination untouched.
 fn resolve_ipc_destination(dest: TaskId) -> TaskId {
@@ -889,6 +922,16 @@ pub fn sys_ipc_send(
             return SyscallResult::PermissionDenied;
         }
 
+        // `ai.inference` permits model execution. It is not authority to read
+        // the shared content index or to mutate the model namespace. Those
+        // operations travel to the same broker, so the message kind narrows
+        // the authority only after the destination has been proven to be aid.
+        // Each authorization happens on every send, making revocation effective
+        // before the next operation rather than at session creation alone.
+        if is_inference && !authorize_inference_operation(&current.cap_table, msg_type) {
+            return SyscallResult::PermissionDenied;
+        }
+
         // Access to search service requires explicit SearchService capability
         if is_search && !current.cap_table.holds_capability_type(CapabilityType::SearchService, Rights::READ)
             && !current.cap_table.holds_capability_type(CapabilityType::SearchService, Rights::INVOKE) {
@@ -907,7 +950,7 @@ pub fn sys_ipc_send(
         (current.id, valid)
     };
 
-    if !is_valid {
+    if !is_valid || !inference_ipc_allowed(msg_type, sender_id, target_dest) {
         return SyscallResult::PermissionDenied;
     }
 
@@ -945,9 +988,10 @@ pub fn sys_ipc_recv(_cap_slot: usize) -> Result<IpcMessage, SyscallResult> {
         return Err(SyscallResult::PermissionDenied);
     }
 
-    let mut router = IPC_ROUTER.lock();
-    match router.receive_direct(receiver_id) {
-        Ok(Some(msg)) => Ok(msg),
+    let received = IPC_ROUTER.lock().receive_direct(receiver_id);
+    match received {
+        Ok(Some(msg)) if inference_ipc_allowed(msg.msg_type, msg.sender, receiver_id) => Ok(msg),
+        Ok(Some(_)) => Err(SyscallResult::PermissionDenied),
         Ok(None) => Err(SyscallResult::MailboxEmpty),
         Err(IpcError::CapabilityDenied(_)) => Err(SyscallResult::PermissionDenied),
         Err(_) => Err(SyscallResult::PermissionDenied),
@@ -1262,7 +1306,7 @@ pub fn sys_fs_mkdir(cap_slot: usize, path: &str) -> Result<(), SyscallResult> {
 ///
 /// Requires the caller to hold a `StorageRawBlock` capability with `Rights::READ`.
 pub fn sys_block_read(
-    _cap_slot: usize,
+    cap_slot: usize,
     lba: u32,
     buf: &mut [u8; SECTOR_SIZE],
 ) -> SyscallResult {
@@ -1272,16 +1316,7 @@ pub fn sys_block_read(
         None => return SyscallResult::PermissionDenied,
     };
 
-    // WHY the capability is authorised by type and not by the slot the
-    // caller named: a slot is a position in this task's capability table,
-    // and the position depends on the order the kernel inserted the
-    // capabilities in. The launcher proved the point -- it passed slot 0
-    // while its FileSystemRead capability sat at slot 3, and the call was
-    // refused with nothing on screen to say why. Authorising by type
-    // enforces exactly the same rule without the caller knowing the
-    // layout, and it cannot drift when the policy gains or loses a
-    // capability.
-    if !current.cap_table.authorize_capability(CapabilityType::StorageRawBlock, Rights::READ) {
+    if current.cap_table.verify_object(cap_slot, CapabilityType::StorageRawBlock, Rights::READ, 0).is_err() {
         return SyscallResult::PermissionDenied;
     }
     drop(sched);
@@ -2882,17 +2917,8 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         }
         160 => {
-            // ConsentResolve: a1 = request_id, a2 = decision (1=Granted, 2=Denied, 3=GrantedOnce)
-            let sched = SCHEDULER.lock();
-            let current = match sched.current_task() {
-                Some(t) => t,
-                None => return SyscallResult::PermissionDenied as i64,
-            };
-            let authorized = current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::INVOKE)
-                || current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::WRITE)
-                || current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::WRITE);
-            drop(sched);
-            if !authorized {
+            // ConsentResolve is a device-wide Settings operation.
+            if require_system_control().is_err() {
                 return SyscallResult::PermissionDenied as i64;
             }
             match sys_consent_resolve(a1, a2 as u32) {
@@ -3367,12 +3393,25 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         },
         102 => {
-            if a2 == 0 || a3 < 12 {
+            if a2 == 0 || a3 < 12 || a1 > u8::MAX as u64 {
                 return SyscallResult::InvalidArguments as i64;
             }
             let mut out = [0u8; 12];
             match sys_service_query(a1 as u8, &mut out) {
-                Ok(n) => { if copy_to_user(a2, &out[..n]).is_err() { SyscallResult::InvalidArguments as i64 } else { n as i64 } }
+                Ok(n) => {
+                    // A nonzero optional peer is taken from IpcRecvMeta by the
+                    // caller. Older kernels leave this reserved byte clear.
+                    if a4 != 0 && crate::services::ServiceId::from_u8(a1 as u8)
+                        .and_then(registered_service_task) == Some(TaskId(a4))
+                    {
+                        out[11] = 1;
+                    }
+                    if copy_to_user(a2, &out[..n]).is_err() {
+                        SyscallResult::InvalidArguments as i64
+                    } else {
+                        n as i64
+                    }
+                }
                 Err(e) => e as i64,
             }
         },
@@ -4328,19 +4367,9 @@ pub fn sys_package_audit(pkg_id: &str) -> Result<u32, SyscallResult> {
 
 /// Installs a verified package onto persistent VFS storage.
 /// Requires the caller to hold a `FileSystemWrite` capability in `cap_slot`.
-/// Refuses to install a package that claims device-wide administration unless
-/// its publisher key is a platform publisher.
-///
-/// WHY this is separate and named: capability 18 is the one identifier that
-/// escalates a package out of its own domain, so the decision deserves its own
-/// testable unit rather than living inline in a function whose other steps need
-/// the global scheduler and the package registry to be set up.
-///
-/// Note the ordering this caller uses: it runs after `parse_rapp` has already
-/// verified the signature, so `publisher_key` is authenticated at this point and
-/// cannot have been chosen by the installer.
-fn authorize_capability_18_for_install(manifest: &RappManifest) -> Result<(), SyscallResult> {
-    if !manifest.capabilities.contains(&18) {
+/// The caller has already authenticated `publisher_key` through `parse_rapp`.
+pub(crate) fn authorize_manifest_for_install(manifest: &RappManifest) -> Result<(), SyscallResult> {
+    if !manifest.capabilities.iter().copied().any(crate::package::rapp::requires_platform_publisher) {
         return Ok(());
     }
     let reg = crate::package::REVOCATION_REGISTRY.lock();
@@ -4398,7 +4427,7 @@ pub fn sys_package_install(_cap_slot: usize, pkg_id: &str, user_consent: bool) -
         return Err(SyscallResult::IntegrityViolation);
     }
 
-    authorize_capability_18_for_install(&verified)?;
+    authorize_manifest_for_install(&verified)?;
 
     {
         let reg = crate::package::REVOCATION_REGISTRY.lock();
@@ -6476,9 +6505,8 @@ pub fn sys_dex_invoke_method(dex_data: &[u8], method_spec: &str) -> Result<u32, 
 
 
 /// Requests dynamic capability consent for a sensitive hardware or system resource.
-/// If auto_approve is set, or if pre-authorized, mints the corresponding capability token
-/// and inserts it into the calling task's CapabilityTable, returning the assigned slot index.
-/// Otherwise, enqueues an interactive consent prompt into the Desktop Shell and returns PermissionDenied.
+/// A verified executable with prior consent receives the capability slot.
+/// A new request records the executable identity for interactive approval.
 pub fn sys_cap_request_consent(
     perm_val: u32,
     app_name: &str,
@@ -6492,68 +6520,60 @@ pub fn sys_cap_request_consent(
 
     let mut sched = SCHEDULER.lock();
     let current_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
-    let current_identity = sched.get_task(current_id).and_then(|t| t.security_identity);
+    let identity = sched.get_task(current_id)
+        .and_then(|task| task.security_identity)
+        .ok_or(SyscallResult::PermissionDenied)?;
+    if identity.package_id.is_empty() || !identity.package_id.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+    }) {
+        return Err(SyscallResult::PermissionDenied);
+    }
     let current_ticks = crate::interrupts::get_system_ticks();
 
     // Verify application identity to prevent spoofing:
     // If caller has a verified security identity, ensure that caller-supplied app_name
     // does not claim an identity belonging to another first-party package.
-    if let Some(ref identity) = current_identity {
-        if let Some(claimed_pkg) = crate::package::first_party_package(app_name)
-            .or_else(|| crate::package::first_party_package_by_process_name(app_name))
-        {
-            if claimed_pkg.package_id != identity.package_id {
-                serial_println!(
-                    "[CONSENT SECURITY] Impersonation attempt rejected: Task {} (pkg={}) claimed '{}' (pkg={})",
-                    current_id.0,
-                    identity.package_id,
-                    app_name,
-                    claimed_pkg.package_id,
-                );
-                return Err(SyscallResult::PermissionDenied);
-            }
+    if let Some(claimed_pkg) = crate::package::first_party_package(app_name)
+        .or_else(|| crate::package::first_party_package_by_process_name(app_name))
+    {
+        if claimed_pkg.package_id != identity.package_id {
+            serial_println!(
+                "[CONSENT SECURITY] Impersonation attempt rejected: Task {} (pkg={}) claimed pkg={}",
+                current_id.0,
+                identity.package_id,
+                claimed_pkg.package_id,
+            );
+            return Err(SyscallResult::PermissionDenied);
         }
     }
 
-    let verified_name = if let Some(ref id) = current_identity {
-        if let Some(pkg) = crate::package::first_party_package(id.package_id) {
-            pkg.display_name
-        } else {
-            app_name
-        }
-    } else {
-        app_name
-    };
+    let verified_name = crate::package::first_party_package(identity.package_id)
+        .map_or(identity.package_id, |pkg| pkg.display_name);
 
     let mut pm = PERMISSION_MANAGER.lock();
-    let (req_id, decision) = pm.request_consent(current_id, current_identity, verified_name, perm, auto_approve, current_ticks);
-    drop(pm);
+    let (req_id, decision) = pm.request_consent(current_id, Some(identity), verified_name, perm, auto_approve, current_ticks);
 
     if decision == ConsentDecision::Granted {
         let target = sched.get_task_mut(current_id).ok_or(SyscallResult::TargetNotFound)?;
-        let cap = perm.to_capability(current_id);
-        let slot = match target.cap_table.insert(cap.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                target.cap_table.find_slot_object(cap.cap_type, cap.rights, cap.object_id).unwrap_or(0)
-            }
-        };
+        let slot = install_consent_capability(target, perm)?;
+        drop(pm);
         drop(sched);
 
         serial_println!(
             "[CONSENT] Task {} ({}) GRANTED permission '{}' -> Cap slot {}.",
             current_id.0,
-            app_name,
+            verified_name,
             perm.name(),
             slot,
         );
         Ok(slot)
     } else {
+        drop(pm);
         drop(sched);
         // Display interactive permission modal in Mobile Shell
         let modal = PermissionModal::new(
             req_id,
-            "App Permission Request",
+            verified_name,
             perm.name(),
             perm.description(),
             PHONE_X,
@@ -6565,11 +6585,24 @@ pub fn sys_cap_request_consent(
         serial_println!(
             "[CONSENT] Task {} ({}) requested '{}': PENDING user approval modal.",
             current_id.0,
-            app_name,
+            verified_name,
             perm.name(),
         );
         Err(SyscallResult::PermissionDenied)
     }
+}
+
+fn install_consent_capability(
+    task: &mut crate::task::TaskControlBlock,
+    permission: crate::capability::SensitivePermission,
+) -> Result<usize, SyscallResult> {
+    let cap = permission.to_capability(task.id);
+    if let Some(slot) = (0..task.cap_table.capacity()).find(|&slot| {
+        task.cap_table.raw_slot(slot).is_some_and(|existing| existing.id == cap.id)
+    }) {
+        return Ok(slot);
+    }
+    task.cap_table.insert(cap).map_err(|_| SyscallResult::ResourceExhausted)
 }
 
 /// Resolves an interactive user consent request and mints capabilities upon grant.
@@ -6579,52 +6612,37 @@ pub fn sys_consent_resolve(request_id: u64, decision_val: u32) -> Result<usize, 
     let decision = match decision_val {
         1 => ConsentDecision::Granted,
         2 => ConsentDecision::Denied,
-        3 => ConsentDecision::GrantedOnce,
+        // Sensitive actions do not yet have a common invocation boundary that
+        // can consume a one-time grant. Issuing one here would be permanent.
+        3 => return Err(SyscallResult::FeatureDisabled),
         _ => return Err(SyscallResult::InvalidArguments),
     };
 
+    let mut sched = SCHEDULER.lock();
     let mut pm = PERMISSION_MANAGER.lock();
+    let request = pm.pending_request(request_id).ok_or(SyscallResult::TargetNotFound)?;
+    let mut slot = 0;
+    if decision == ConsentDecision::Granted {
+        if let Some(target) = sched.get_task_mut(request.task_id).filter(|target| {
+            !matches!(target.state, crate::task::TaskState::Zombie | crate::task::TaskState::Terminated)
+        }) {
+            let same_executable = target.security_identity.is_some_and(|identity| {
+                identity.package_id == request.package_id && identity.code_digest == request.code_digest
+            });
+            if !same_executable {
+                return Err(SyscallResult::PermissionDenied);
+            }
+            slot = install_consent_capability(target, request.permission)?;
+        }
+        // Settings can approve a recorded executable after it exits. The grant
+        // is held by policy until that exact executable is launched again.
+    }
     let record = pm.resolve_consent(request_id, decision).ok_or(SyscallResult::TargetNotFound)?;
     drop(pm);
-
-    if decision == ConsentDecision::Granted || decision == ConsentDecision::GrantedOnce {
-        let mut sched = SCHEDULER.lock();
-        if let Some(target) = sched.get_task_mut(record.task_id) {
-            let cap = record.permission.to_capability(record.task_id);
-            let slot = match target.cap_table.insert(cap.clone()) {
-                Ok(s) => s,
-                Err(_) => {
-                    target.cap_table.find_slot_object(cap.cap_type, cap.rights, cap.object_id).unwrap_or(0)
-                }
-            };
-            drop(sched);
-
-            serial_println!(
-                "[CONSENT] Task {} ({}) GRANTED permission '{}' -> Cap slot {}.",
-                record.task_id.0,
-                record.app_name,
-                record.permission.name(),
-                slot,
-            );
-            Ok(slot)
-        } else {
-            drop(sched);
-            serial_println!(
-                "[CONSENT] App '{}' GRANTED permission '{}' by user.",
-                record.app_name,
-                record.permission.name(),
-            );
-            Ok(0)
-        }
-    } else {
-        serial_println!(
-            "[CONSENT] Task {} ({}) DENIED permission '{}'.",
-            record.task_id.0,
-            record.app_name,
-            record.permission.name(),
-        );
-        Ok(0)
-    }
+    drop(sched);
+    serial_println!("[CONSENT] Task {} ({}) {:?} permission '{}'.",
+        record.task_id.0, record.app_name, decision, record.permission.name());
+    Ok(slot)
 }
 
 /// Queries active and pending permission consent requests from the Permission Manager.
@@ -6769,10 +6787,10 @@ pub fn sys_share_sheet_dispatch(
     }
 }
 
-/// Creates or configures a Zero-Copy Shared Memory DMA Pipe.
+/// Creates a buffered IPC pipe between two tasks.
 pub fn sys_shm_pipe_create(
     pipe_id: u32,
-    capacity_pages: u32,
+    _capacity_pages: u32,
     peer_task: crate::task::TaskId,
 ) -> Result<u32, SyscallResult> {
     let sched = SCHEDULER.lock();
@@ -6803,16 +6821,15 @@ pub fn sys_shm_pipe_create(
         .map_err(|_| SyscallResult::DeviceError)?;
 
     serial_println!(
-        "[SHM PIPE] Task {} created Zero-Copy DMA SHM Pipe {} (Peer: Task {}, {} pages).",
+        "[SHM PIPE] Task {} created buffered pipe {} (Peer: Task {}).",
         current_id.0,
         pipe_id,
-        peer_task.0,
-        capacity_pages
+        peer_task.0
     );
     Ok(pipe_id)
 }
 
-/// Streams high-throughput data into a Zero-Copy DMA Shared Memory Pipe.
+/// Copies data into a buffered IPC pipe.
 pub fn sys_shm_pipe_transfer(
     pipe_id: u32,
     data: &[u8],
@@ -6845,7 +6862,7 @@ pub fn sys_shm_pipe_transfer(
 
     let crc = crate::ipc::shm_pipe::compute_crc32(data);
     serial_println!(
-        "[SHM PIPE] Task {} streamed {} bytes via Zero-Copy DMA Pipe {} (Seq: {}, CRC: {:#010X}).",
+        "[SHM PIPE] Task {} streamed {} bytes via buffered pipe {} (Seq: {}, CRC: {:#010X}).",
         current_id.0,
         data.len(),
         pipe_id,
@@ -6855,7 +6872,7 @@ pub fn sys_shm_pipe_transfer(
     Ok(seq)
 }
 
-/// Receives high-throughput zero-copy data from a Shared Memory Pipe.
+/// Copies data out of a buffered IPC pipe after checking its CRC.
 pub fn sys_shm_pipe_receive(
     pipe_id: u32,
     out_buf: &mut [u8],
@@ -6885,7 +6902,7 @@ pub fn sys_shm_pipe_receive(
         })?;
 
     serial_println!(
-        "[SHM PIPE] Task {} consumed {} bytes from Zero-Copy DMA Pipe {} (Seq: {}).",
+        "[SHM PIPE] Task {} consumed {} bytes from buffered pipe {} (Seq: {}).",
         current_id.0,
         read_len,
         pipe_id,
@@ -8789,41 +8806,34 @@ mod tests {
         );
     }
 
-    /// The install-time capability-18 gate: a package claiming device-wide
-    /// administration is refused unless its publisher is a platform publisher.
-    ///
-    /// Pinning assertion: a correctly signed package from an ordinary trusted
-    /// publisher is refused with `PermissionDenied`, and the same package signed
-    /// by a platform publisher is accepted. A package that does not claim 18 is
-    /// unaffected either way.
+    /// Cross-sandbox declarations require platform publisher trust at install.
     #[test]
-    fn install_refuses_capability_18_from_an_ordinary_publisher() {
+    fn install_refuses_platform_authorities_from_an_ordinary_publisher() {
         use crate::package::revocation::{REVOCATION_REGISTRY, is_system_publisher_identity};
         assert!(
             is_system_publisher_identity("org.interos.platform"),
             "the test must use a platform publisher identity"
         );
 
-        let (third_party, third_key) = crate::package::rapp::build_signed_test_package(
-            "com.example.admin",
-            &[1, 18],
-            b"\x7fELF_USER_BINARY_SAMPLE",
-            78,
-        );
-        REVOCATION_REGISTRY.lock().grant_trust_root(third_key, "com.example.vendor").unwrap();
+        for id in [11, 18, 22, 27] {
+            let (third_party, third_key) = crate::package::rapp::build_signed_test_package(
+                "com.example.admin",
+                &[1, id],
+                b"\x7fELF_USER_BINARY_SAMPLE",
+                78,
+            );
+            REVOCATION_REGISTRY.lock().grant_trust_root(third_key, "com.example.vendor").unwrap();
 
-        let manifest = crate::package::parse_rapp(&third_party)
-            .expect("an ordinary trusted publisher's signature must still verify");
-        assert_eq!(manifest.capabilities, alloc::vec![1, 18]);
-        assert_eq!(
-            authorize_capability_18_for_install(&manifest),
-            Err(SyscallResult::PermissionDenied),
-            "capability 18 from an ordinary trusted publisher must be refused at install"
-        );
+            let manifest = crate::package::parse_rapp(&third_party)
+                .expect("an ordinary trusted publisher's signature must still verify");
+            assert_eq!(manifest.capabilities, alloc::vec![1, id]);
+            assert_eq!(authorize_manifest_for_install(&manifest), Err(SyscallResult::PermissionDenied),
+                "capability {id} from an ordinary trusted publisher must be refused at install");
+        }
 
         let (platform, platform_key) = crate::package::rapp::build_signed_test_package(
             "org.interos.admin",
-            &[1, 18],
+            &[1, 11, 18, 22, 27],
             b"\x7fELF_USER_BINARY_SAMPLE",
             79,
         );
@@ -8831,9 +8841,9 @@ mod tests {
         let manifest = crate::package::parse_rapp(&platform)
             .expect("a platform publisher's signature must verify");
         assert_eq!(
-            authorize_capability_18_for_install(&manifest),
+            authorize_manifest_for_install(&manifest),
             Ok(()),
-            "capability 18 from a platform publisher must be accepted"
+            "platform authorities from a platform publisher must be accepted"
         );
 
         let (plain, plain_key) = crate::package::rapp::build_signed_test_package(
@@ -8845,9 +8855,9 @@ mod tests {
         REVOCATION_REGISTRY.lock().grant_trust_root(plain_key, "com.example.vendor").unwrap();
         let manifest = crate::package::parse_rapp(&plain).expect("a plain package must verify");
         assert_eq!(
-            authorize_capability_18_for_install(&manifest),
+            authorize_manifest_for_install(&manifest),
             Ok(()),
-            "a package that does not claim capability 18 must install normally"
+            "ordinary declarations remain installable"
         );
     }
 
@@ -10003,6 +10013,45 @@ fn test_inference_ipc_security_denial_without_capability() {
 
     assert!(table.holds_capability_type(CapabilityType::InferenceService, Rights::INVOKE));
     assert!(table.holds_capability_type(CapabilityType::InferenceService, Rights::READ));
+}
+
+#[test]
+fn inference_operations_require_and_recheck_narrow_capabilities() {
+    use crate::capability::{Capability, CapabilityId, CapabilityType, Rights};
+    let task = TaskId(9110);
+    let mut table = crate::capability::CapabilityTable::new_for_task(task, 8);
+
+    assert!(!authorize_inference_operation(&table, u32::from_be_bytes(*b"SRCH")));
+    assert!(!authorize_inference_operation(&table, u32::from_be_bytes(*b"INSL")));
+    assert!(authorize_inference_operation(&table, u32::from_be_bytes(*b"GENR")));
+
+    table.insert(Capability {
+        id: CapabilityId(9111),
+        cap_type: CapabilityType::SearchService,
+        rights: Rights::READ | Rights::INVOKE,
+        object_id: 0,
+    }).unwrap();
+    table.insert(Capability {
+        id: CapabilityId(9112),
+        cap_type: CapabilityType::ContentIndexRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).unwrap();
+    table.insert(Capability {
+        id: CapabilityId(9113),
+        cap_type: CapabilityType::FileSystemWrite,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).unwrap();
+
+    assert!(authorize_inference_operation(&table, u32::from_be_bytes(*b"SRCH")));
+    assert!(authorize_inference_operation(&table, u32::from_be_bytes(*b"INSL")));
+
+    assert!(table.revoke_by_id(CapabilityId(9112)));
+    assert!(
+        !authorize_inference_operation(&table, u32::from_be_bytes(*b"SRCH")),
+        "revocation must stop the next retrieval operation"
+    );
 }
 
 #[test]

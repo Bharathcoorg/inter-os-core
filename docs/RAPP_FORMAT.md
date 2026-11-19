@@ -212,7 +212,7 @@ it against this table.
    The trailing dot is part of the namespace, so `org.interos-evil` and
    `org.interosX` are not platform publishers.
 
-   **Current state of provisioning.** There is no firmware-anchored provisioning path and no userspace syscall that grants a publisher root, so the COM1 console is the only way a root reaches the store. That console is not an authenticated channel, which is why it may install an ordinary publisher but refuses a platform-authority identity. On a device with no installed platform root, **no publisher is a platform publisher and capability 18 cannot be granted**. This is deliberate fail-closed behaviour and it is the current state, not a pending detail: until an authenticated provisioning path is implemented, capability 18 must be treated as reserved rather than unavailable.
+   On x86_64, manifest capabilities 11 (raw block access), 18 (global system control), 22 (camera service control), and 27 (cross-task surface capture) require a platform publisher at installation and process launch. COM1 can install an ordinary publisher root. Installing a platform publisher root requires authenticated provisioning, which is unavailable on the current guest.
 4. **Installation & Storage**: `interos install <package>` transfers the signed bytes to the guest over QEMU COM1, verifies integrity and signatures inside the microkernel against the active trust store, and commits the package blob into persistent storage.
 5. **Execution**: The launcher or PID 1 spawns an isolated unprivileged child process (x86_64 Ring 3 / AArch64 EL0 / RISC-V U-Mode) with dedicated page tables (`W^X` enforced) and passes minted capability tokens.
 

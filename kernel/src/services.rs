@@ -351,6 +351,7 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
             });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::InferenceService, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SearchService, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::ContentIndexRead, rights: Rights::READ, object_id: 0 });
         }
         ServiceId::Display => policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FrameBufferDirect, rights: Rights::WRITE, object_id: 1 }),
         ServiceId::Storage => {
@@ -381,6 +382,7 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::InferenceService, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::MemoryHeap, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::AiResourceDiscovery, rights: Rights::READ | Rights::INVOKE, object_id: 0 });
             // WHY the inference service may claim a bulk channel: a model answer is
             // not 64 bytes, and 64 bytes is everything an IPC mailbox message
             // carries, so an answer sent by IPC alone arrives cut off and the

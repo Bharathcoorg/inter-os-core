@@ -393,7 +393,7 @@ impl PermissionManager {
             r.package_id == identity.package_id
                 && r.code_digest == identity.code_digest
                 && r.permission == permission
-                && (r.decision == ConsentDecision::Granted || r.decision == ConsentDecision::GrantedOnce)
+                && r.decision == ConsentDecision::Granted
         })
     }
 
@@ -408,10 +408,7 @@ impl PermissionManager {
         current_ticks: u64,
     ) -> (u64, ConsentDecision) {
         let _ = auto_approve;
-        if self.has_permission(task_id, permission)
-            || identity.as_ref().is_some_and(|id| self.has_identity_permission(id, permission))
-            || self.has_app_permission(app_name, permission)
-        {
+        if identity.as_ref().is_some_and(|id| self.has_identity_permission(id, permission)) {
             return (0, ConsentDecision::Granted);
         }
 
@@ -419,16 +416,12 @@ impl PermissionManager {
         let code_digest = identity.map(|id| id.code_digest).unwrap_or([0u8; 32]);
 
         for record in self.records.iter_mut() {
-            let identity_matches = if let Some(ref id) = identity {
-                record.package_id == id.package_id && record.code_digest == id.code_digest
-            } else {
-                app_names_match(&record.app_name, app_name)
-            };
-            if identity_matches
+            if record.task_id == task_id
+                && record.package_id == pkg_id_str
+                && record.code_digest == code_digest
                 && record.permission == permission
                 && record.decision == ConsentDecision::Pending
             {
-                record.task_id = task_id;
                 record.timestamp_ticks = current_ticks;
                 let req_id = record.request_id;
                 self.active_prompt = Some(record.clone());
@@ -453,6 +446,12 @@ impl PermissionManager {
         self.active_prompt = Some(record.clone());
         self.records.push(record);
         (request_id, ConsentDecision::Pending)
+    }
+
+    pub(crate) fn pending_request(&self, request_id: u64) -> Option<&PermissionRecord> {
+        self.records.iter().find(|record| {
+            record.request_id == request_id && record.decision == ConsentDecision::Pending
+        })
     }
 
     /// Resolves an active permission prompt with the user's interactive decision.
@@ -491,15 +490,6 @@ impl PermissionManager {
     pub fn has_permission(&self, task_id: TaskId, permission: SensitivePermission) -> bool {
         self.records.iter().any(|r| {
             r.task_id == task_id
-                && r.permission == permission
-                && (r.decision == ConsentDecision::Granted || r.decision == ConsentDecision::GrantedOnce)
-        })
-    }
-
-    /// Checks if an application identity already holds a granted permission.
-    pub fn has_app_permission(&self, app_name: &str, permission: SensitivePermission) -> bool {
-        self.records.iter().any(|r| {
-            app_names_match(&r.app_name, app_name)
                 && r.permission == permission
                 && (r.decision == ConsentDecision::Granted || r.decision == ConsentDecision::GrantedOnce)
         })
@@ -635,6 +625,30 @@ impl PermissionManager {
         }
         written
     }
+}
+
+#[test]
+fn consent_reuse_requires_the_same_verified_executable() {
+    let mut pm = PermissionManager::new();
+    let permission = SensitivePermission::AgentTask;
+    let original = crate::task::SecurityIdentity {
+        package_id: "org.interos.agentmanager",
+        code_digest: [1; 32],
+        is_system: false,
+    };
+    let replacement = crate::task::SecurityIdentity { code_digest: [2; 32], ..original };
+    let (request, _) = pm.request_consent(TaskId(8900), Some(original), "Agent Manager", permission, false, 0);
+    let (other_request, _) = pm.request_consent(TaskId(8901), Some(original), "Agent Manager", permission, false, 1);
+    assert_ne!(request, other_request);
+    assert_eq!(pm.pending_request(request).unwrap().task_id, TaskId(8900));
+    pm.resolve_consent(request, ConsentDecision::Granted).unwrap();
+    assert_eq!(pm.request_consent(TaskId(8902), Some(original), "Agent Manager", permission, false, 2).1, ConsentDecision::Granted);
+    assert_eq!(pm.request_consent(TaskId(8903), Some(replacement), "Agent Manager", permission, false, 3).1, ConsentDecision::Pending);
+    assert_eq!(pm.request_consent(TaskId(8904), None, "Agent Manager", permission, false, 4).1, ConsentDecision::Pending);
+    assert_eq!(pm.request_consent(TaskId(8900), Some(replacement), "Agent Manager", permission, false, 5).1, ConsentDecision::Pending);
+    let (once, _) = pm.request_consent(TaskId(8905), Some(replacement), "Agent Manager", permission, false, 6);
+    pm.resolve_consent(once, ConsentDecision::GrantedOnce).unwrap();
+    assert!(!pm.has_identity_permission(&replacement, permission));
 }
 
 fn write_u64_ascii(mut val: u64, buf: &mut [u8]) -> usize {

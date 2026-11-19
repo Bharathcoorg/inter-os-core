@@ -533,7 +533,7 @@ fn query_service_similarity(query: &[u8], entry: &Entry) -> Option<i16> {
 
     let mut rx_buf = [0u8; 64];
     let (sender, msg_type, rx_len) = interos_std::ipc::receive_any(&mut rx_buf).ok()?;
-    if sender != interos_std::ai::SERVICE_INFERENCE_TASK_ID {
+    if !interos_std::service_peer_matches(interos_std::ai::SERVICE_INFERENCE, sender) {
         return None;
     }
 

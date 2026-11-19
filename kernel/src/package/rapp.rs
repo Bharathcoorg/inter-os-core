@@ -28,6 +28,13 @@ pub const RAPP_MAX_INTENTS: usize = 64;
 /// The largest length of one intent's value.
 pub const RAPP_MAX_INTENT_VALUE_LEN: usize = 96;
 
+/// Manifest authorities that cross the ordinary publisher sandbox.
+pub(crate) const fn requires_platform_publisher(id: u16) -> bool {
+    // Raw storage bypasses the VFS. Global control, camera control and
+    // cross-task surface capture bypass their app-facing consent boundaries.
+    matches!(id, 11 | 18 | 22 | 27)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustState {
     Trusted,
@@ -619,11 +626,12 @@ mod tests {
         use crate::services::*;
 
         let all_ids: alloc::vec::Vec<u16> = (1..=24).collect();
-        // Negative test: Untrusted app requesting capability 18 must be strictly denied
-        assert!(
-            crate::task::user::capabilities_from_rapp(&[18], 0x1234).is_err(),
-            "Untrusted app requesting capability 18 must be strictly rejected"
-        );
+        for id in [11, 18, 22, 27] {
+            assert!(crate::task::user::capabilities_from_rapp(&[id], 0x1234).is_err(),
+                "ordinary publisher must not receive platform capability {id}");
+            assert!(crate::task::user::capabilities_from_rapp_with_trust(&[id], 0x1234, true).is_ok(),
+                "platform publisher must retain capability {id}");
+        }
 
         // System authority requesting capabilities succeeds
         let table = crate::task::user::capabilities_from_rapp_with_trust(&all_ids, 0x1234, true)

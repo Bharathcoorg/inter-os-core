@@ -3541,6 +3541,25 @@ pub fn service_query(service_id: u8, out: &mut [u8; 12]) -> Result<usize, i64> {
     }
 }
 
+/// Matches a kernel-stamped IPC sender against the currently registered service.
+pub fn service_peer_matches(service_id: u8, sender: u64) -> bool {
+    if sender == 0 {
+        return false;
+    }
+    let mut record = [0u8; 12];
+    let result = unsafe {
+        syscall5(
+            SyscallNumber::ServiceQuery,
+            service_id as u64,
+            record.as_mut_ptr() as u64,
+            record.len() as u64,
+            sender,
+            0,
+        )
+    };
+    result == record.len() as i64 && record[0] == service_id && record[11] == 1
+}
+
 /// Starts a declared system service. Only PID1/service-manager capability domains may invoke this.
 pub fn service_start(service_id: u8) -> Result<u64, i64> {
     let r = unsafe { syscall1(SyscallNumber::ServiceStart, service_id as u64) };

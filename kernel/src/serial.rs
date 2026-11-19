@@ -134,19 +134,12 @@ pub fn init() {
     *SERIAL1.lock() = Some(SerialPort(port));
 }
 
-/// Console lines captured for host tests.
-///
-/// WHY this exists: the guest's console is a UART, and a host test has none --
-/// `SERIAL1` stays `None`, so every `serial_println!` a test triggers is
-/// silently discarded and the test can only assert on internal state. Several
-/// serial verbs (`STUDIO_PKG_LIST`, `PROC_LIST`) answer *in the line itself*,
-/// and Device Studio parses exactly that text, so the only honest thing to
-/// assert about them is the bytes the guest put on the wire.
-///
-/// Behind `cfg(test)`: a guest build compiles this out entirely, so the hot
-/// print path is unchanged.
 #[cfg(test)]
-static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+std::thread_local! {
+    // The host has no UART. Keep its captured console output isolated so
+    // parallel tests cannot clear or inject lines into each other's replies.
+    static CAPTURED: core::cell::RefCell<Vec<String>> = const { core::cell::RefCell::new(Vec::new()) };
+}
 
 /// Lines retained by `CAPTURED`, oldest dropped first, so a whole test run
 /// cannot grow the buffer without bound.
@@ -157,13 +150,13 @@ const CAPTURE_MAX: usize = 4096;
 /// reply is under test.
 #[cfg(test)]
 pub fn capture_clear() {
-    CAPTURED.lock().clear();
+    CAPTURED.with(|sink| sink.borrow_mut().clear());
 }
 
 /// The lines the console has "emitted" since the last `capture_clear`, in order.
 #[cfg(test)]
 pub fn capture_lines() -> Vec<String> {
-    CAPTURED.lock().clone()
+    CAPTURED.with(|sink| sink.borrow().clone())
 }
 
 #[doc(hidden)]
@@ -188,19 +181,19 @@ pub fn _print(args: fmt::Arguments) {
 /// bounded `try_lock` is what actually prevents the deadlock, and a handler that
 /// cannot get the lock drops its line instead of spinning.
 pub fn _print_internal(args: fmt::Arguments) -> bool {
-    use core::fmt::Write;
+    #[cfg(test)]
+    CAPTURED.with(|sink| {
+        let line = alloc::format!("{}", args);
+        let mut sink = sink.borrow_mut();
+        if sink.len() >= CAPTURE_MAX {
+            sink.remove(0);
+        }
+        sink.push(line);
+    });
 
+    use core::fmt::Write;
     for _ in 0..10_000 {
         if let Some(mut guard) = SERIAL1.try_lock() {
-            #[cfg(test)]
-            {
-                let line = alloc::format!("{}", args);
-                let mut sink = CAPTURED.lock();
-                if sink.len() >= CAPTURE_MAX {
-                    sink.remove(0);
-                }
-                sink.push(line);
-            }
             if let Some(ref mut serial) = *guard {
                 let _ = serial.write_fmt(args);
             }
@@ -843,6 +836,10 @@ fn handle_rapp_command(s: &str) -> bool {
             Ok(_) => { serial_println!("[RAPP_HOST] REJECT package id mismatch"); return true; }
             Err(err) => { serial_println!("[RAPP_HOST] REJECT verification failed: {:?}", err); return true; }
         };
+        if crate::syscall::authorize_manifest_for_install(&verified).is_err() {
+            serial_println!("[RAPP_HOST] REJECT manifest requires a platform publisher");
+            return true;
+        }
         let previous_entry = {
             let registry = crate::package::PACKAGE_REGISTRY.lock();
             registry.entries().iter().find(|e| e.package_id == verified.package_id).cloned()

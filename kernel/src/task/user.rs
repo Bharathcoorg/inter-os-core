@@ -791,8 +791,8 @@ pub(crate) fn capabilities_from_rapp_with_trust(
 ) -> Result<CapabilityTable, &'static str> {
     let mut caps = CapabilityTable::new(ids.len().max(1));
     for (slot, id) in ids.iter().copied().enumerate() {
-        if id == 18 && !is_system_authority {
-            return Err("Capability 18 (SystemControl) requires system platform trust authority");
+        if crate::package::rapp::requires_platform_publisher(id) && !is_system_authority {
+            return Err("RAPP capability requires system platform trust authority");
         }
         let (cap_type, rights, object_id) = match id {
             1 => (CapabilityType::SerialOutput, Rights::WRITE, 0),
@@ -2369,9 +2369,14 @@ pub fn spawn_app_agent_manager(id_security: TaskId) -> TaskId {
         object_id: 0,
     }).ok();
 
-    // If the sovereign user already granted agent tool execution permission in Settings,
-    // install the AgentTask capability into the newly spawned process.
-    if crate::capability::permission::PERMISSION_MANAGER.lock().has_app_permission("app_agent_manager", crate::capability::permission::SensitivePermission::AgentTask) {
+    let identity = crate::task::SecurityIdentity {
+        package_id: "org.interos.agentmanager",
+        code_digest: crate::crypto::Sha256::digest(APP_AGENT_MANAGER_ELF),
+        is_system: false,
+    };
+    if crate::capability::permission::PERMISSION_MANAGER.lock().has_identity_permission(
+        &identity, crate::capability::permission::SensitivePermission::AgentTask,
+    ) {
         caps.insert(Capability {
             id: CapabilityId(2925),
             cap_type: CapabilityType::AgentTask,
