@@ -994,44 +994,6 @@ pub fn gemv(
             }
             Ok(())
         }
-        // GGML_TYPE_TQ2_0
-        35 => {
-            if cols % TQ2_0_WEIGHTS != 0 {
-                return Err(InferenceError::CorruptedWeights);
-            }
-            let blocks_per_row = cols / TQ2_0_WEIGHTS;
-            let row_stride_bytes = blocks_per_row
-                .checked_mul(TQ2_0_BLOCK_BYTES)
-                .ok_or(InferenceError::CorruptedWeights)?;
-            let needed = rows
-                .checked_mul(row_stride_bytes)
-                .ok_or(InferenceError::CorruptedWeights)?;
-            if w_bytes.len() < needed {
-                return Err(InferenceError::CorruptedWeights);
-            }
-            for i in 0..rows {
-                let row_slice = &w_bytes[i * row_stride_bytes..(i + 1) * row_stride_bytes];
-                let mut sum = 0.0f32;
-                for b in 0..blocks_per_row {
-                    let blk = &row_slice[b * TQ2_0_BLOCK_BYTES..(b + 1) * TQ2_0_BLOCK_BYTES];
-                    let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
-                    let qs = &blk[2..];
-                    let x_base = b * TQ2_0_WEIGHTS;
-                    let mut b_sum = 0.0f32;
-                    for chunk in 0..2 {
-                        for plane in 0..4 {
-                            for m in 0..32 {
-                                let q = ((qs[chunk * 32 + m] >> (2 * plane)) & 3) as i32 - 1;
-                                b_sum += (q as f32) * x[x_base + chunk * 128 + plane * 32 + m];
-                            }
-                        }
-                    }
-                    sum += d * b_sum;
-                }
-                out[i] = sum;
-            }
-            Ok(())
-        }
         _ => Err(InferenceError::UnsupportedQuantization(w_type)),
     }
 }
@@ -1833,7 +1795,7 @@ impl ModelConfig {
             12 | 15 => Ok((params.saturating_mul(144)) / 256), // Q4_K: 4.5 bits/weight (15 is file_type Q4_K_M)
             13 | 16 | 17 => Ok((params.saturating_mul(176)) / 256), // Q5_K: 5.5 bits/weight (16/17 its file_type spellings)
             14 | 18 => Ok((params.saturating_mul(210)) / 256), // Q6_K: 6.5625 bits/weight (18 its file_type spelling)
-            35 => Ok((params.saturating_mul(66)) / 256),  // TQ2_0: 2.0625 bits/weight
+            32 | 35 => Ok((params.saturating_mul(66)) / 256),  // TQ2_0 / IQ2_M: 2.0625 bits/weight
             other => Err(InferenceError::UnsupportedQuantization(other)),
         }
     }
@@ -1856,7 +1818,7 @@ impl ModelConfig {
             12 => blocks(256).checked_mul(144),
             13 => blocks(256).checked_mul(176),
             14 => blocks(256).checked_mul(210),
-            35 => blocks(256).checked_mul(66),
+            32 | 35 => blocks(256).checked_mul(66),
             _ => return Err(InferenceError::UnsupportedQuantization(dtype)),
         };
         bytes.ok_or(InferenceError::BufferTooSmall)
@@ -3165,7 +3127,6 @@ pub fn quantised_row_bytes(dtype: u32, width: usize) -> Option<usize> {
         2 => blocks(32, 18),
         8 => blocks(32, 34),
         12 => blocks(Q4_K_WEIGHTS, Q4_K_BLOCK_BYTES),
-        35 => blocks(256, 66),
         _ => None,
     }
 }
@@ -3210,16 +3171,14 @@ pub fn embedding_row_into(
             }
             Ok(())
         }
-        // GGML_TYPE_Q4_0 / Q8_0 / Q4_K / TQ2_0: dequantise the whole row, then scale it. The
-        // four helpers write exactly `raw.len() / block_bytes * block_weights`
+        // GGML_TYPE_Q4_0 / Q8_0 / Q4_K: dequantise the whole row, then scale it. The
+        // three helpers write exactly `raw.len() / block_bytes * block_weights`
         // floats, which is the row's declared width when the loader sized the buffer.
-        2 | 8 | 12 | 35 => {
+        2 | 8 | 12 => {
             let produced = match dtype {
                 2 => dequantize_q4_0(raw, out)?,
                 8 => dequantize_q8_0(raw, out)?,
-                12 => dequantize_q4_k(raw, out)?,
-                35 => dequantize_tq2_0(raw, out)?,
-                _ => unreachable!(),
+                _ => dequantize_q4_k(raw, out)?,
             };
             if produced != out.len() {
                 return Err(InferenceError::CorruptedWeights);
@@ -4739,17 +4698,17 @@ pub mod tests {
     /// WHY the whole range and not the five: `quantised_row_bytes` is the function
     /// the loader calls to size every tensor row it reads, and `gemv` and
     /// `embedding_row_into` are the two places the bytes are then interpreted. A
-    /// case that only checks the ids it expects to work cannot see a seventh arm
-    /// appear or a fifth disappear; a case that walks the id space and collects
+    /// case that only checks the ids it expects to work cannot see a sixth arm
+    /// appear or a fourth disappear; a case that walks the id space and collects
     /// what answers can see both, and it also sees the shape of the answer for
     /// everything outside the set -- refused by number, never read with a
     /// neighbour's block width.
     #[test]
-    fn the_engine_maps_exactly_six_dtype_ids_and_refuses_the_rest_by_number() {
-        // 0 F32, 1 F16, 2 Q4_0, 8 Q8_0, 12 Q4_K, 35 Q3_K_L. Q4_1 (3), Q5_K (13) and Q6_K (14)
+    fn the_engine_maps_exactly_five_dtype_ids_and_refuses_the_rest_by_number() {
+        // 0 F32, 1 F16, 2 Q4_0, 8 Q8_0, 12 Q4_K. Q4_1 (3), Q5_K (13) and Q6_K (14)
         // are the ids the GGML format names that no arithmetic in this service
         // reads, and the published file uses only 0 and 8.
-        let mapped = [0u32, 1, 2, 8, 12, 35];
+        let mapped = [0u32, 1, 2, 8, 12];
         let mut answered: Vec<u32> = Vec::new();
         for dtype in 0..=64u32 {
             if quantised_row_bytes(dtype, 768).is_some() {
