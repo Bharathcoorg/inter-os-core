@@ -932,6 +932,159 @@ pub fn kernel_gather_int4_scaled(
     Ok(())
 }
 
+/// Kernel: RMS Normalization matching `odml.rms_norm.impl`:
+/// y_i = (x_i / sqrt(mean(x^2) + eps)) * w_i
+pub fn kernel_rms_norm(x: &mut [f32], w: &[f32], eps: f32) -> Result<(), Error> {
+    if x.is_empty() || w.len() < x.len() || eps <= 0.0 {
+        return Err(Error::Truncated);
+    }
+    let dim = x.len();
+    let mut sum_sq = 0.0f32;
+    for &v in x.iter() {
+        sum_sq += v * v;
+    }
+    let mean_sq = sum_sq / (dim as f32);
+    let scale = 1.0f32 / crate::f32_sqrt(mean_sq + eps);
+    for i in 0..dim {
+        x[i] = x[i] * scale * w[i];
+    }
+    Ok(())
+}
+
+/// Kernel: GELU with approximate tanh matching TFLite GELU (`approximate=true`):
+/// GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+pub fn kernel_gelu(x: &mut [f32]) {
+    for val in x.iter_mut() {
+        *val = crate::inference::gelu_tanh(*val);
+    }
+}
+
+/// Kernel: Numerically stable in-place Softmax over a vector:
+/// softmax(x)_i = exp(x_i - max(x)) / sum(exp(x_j - max(x)))
+pub fn kernel_softmax(x: &mut [f32]) -> Result<(), Error> {
+    if x.is_empty() {
+        return Err(Error::Truncated);
+    }
+    let mut max_val = x[0];
+    for &v in &x[1..] {
+        if v > max_val {
+            max_val = v;
+        }
+    }
+    let mut sum = 0.0f32;
+    for v in x.iter_mut() {
+        *v = crate::inference::f32_exp(*v - max_val);
+        sum += *v;
+    }
+    if sum > 0.0 {
+        let inv_sum = 1.0f32 / sum;
+        for v in x.iter_mut() {
+            *v *= inv_sum;
+        }
+    }
+    Ok(())
+}
+
+/// Kernel: Matrix multiplication out = A * B^T
+/// A is [M, K], B is [N, K] (so B^T is [K, N]), out is [M, N]
+pub fn kernel_matmul_f32(
+    a: &[f32],
+    b: &[f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    out: &mut [f32],
+) -> Result<(), Error> {
+    if a.len() < m * k || b.len() < n * k || out.len() < m * n {
+        return Err(Error::Truncated);
+    }
+    for row in 0..m {
+        let a_row = &a[row * k..(row + 1) * k];
+        for col in 0..n {
+            let b_row = &b[col * k..(col + 1) * k];
+            let mut dot = 0.0f32;
+            for i in 0..k {
+                dot += a_row[i] * b_row[i];
+            }
+            out[row * n + col] = dot;
+        }
+    }
+    Ok(())
+}
+
+/// Kernel: INT4 quantized matrix multiplication out = A * W^T
+/// A is [M, K] in float32.
+/// W is [N, K/2] packed INT4 bytes (signed 4-bit nibbles -8..=7, 2 per byte).
+/// scales is [N] float32 scale factors (one per output channel/row of W).
+/// out is [M, N] in float32.
+pub fn kernel_matmul_int4_scaled(
+    a: &[f32],
+    w: &[u8],
+    scales: &[f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    out: &mut [f32],
+) -> Result<(), Error> {
+    if k % 2 != 0 {
+        return Err(Error::InvalidFlatBuffer);
+    }
+    let bytes_per_row = k / 2;
+    if a.len() < m * k || w.len() < n * bytes_per_row || scales.len() < n || out.len() < m * n {
+        return Err(Error::Truncated);
+    }
+    for row in 0..m {
+        let a_row = &a[row * k..(row + 1) * k];
+        for col in 0..n {
+            let scale = scales[col];
+            let w_row = &w[col * bytes_per_row..(col + 1) * bytes_per_row];
+            let mut acc = 0.0f32;
+            for (b_idx, &byte) in w_row.iter().enumerate() {
+                let lo = byte & 0x0f;
+                let hi = (byte >> 4) & 0x0f;
+                let lo_signed = if lo < 8 { lo as f32 } else { (lo as i8 - 16) as f32 };
+                let hi_signed = if hi < 8 { hi as f32 } else { (hi as i8 - 16) as f32 };
+                acc += a_row[b_idx * 2] * lo_signed + a_row[b_idx * 2 + 1] * hi_signed;
+            }
+            out[row * n + col] = acc * scale;
+        }
+    }
+    Ok(())
+}
+
+/// Kernel: Split-half Rotary Positional Embedding matching `odml.rope.impl`:
+/// Splits head vector of size `head_dim` into two equal halves of size `half_dim = head_dim / 2`.
+/// Computes theta_j = pos * base^(-2j / head_dim).
+/// out[j] = x[j] * cos(theta_j) - x[j + half_dim] * sin(theta_j)
+/// out[j + half_dim] = x[j] * sin(theta_j) + x[j + half_dim] * cos(theta_j)
+pub fn kernel_rope_split_half(
+    vec: &mut [f32],
+    head_dim: usize,
+    pos: usize,
+    base: f32,
+) -> Result<(), Error> {
+    if head_dim == 0 || head_dim % 2 != 0 || vec.len() < head_dim || base <= 0.0 {
+        return Err(Error::InvalidFlatBuffer);
+    }
+    let half_dim = head_dim / 2;
+    let num_heads = vec.len() / head_dim;
+    for h in 0..num_heads {
+        let head = &mut vec[h * head_dim..(h + 1) * head_dim];
+        for j in 0..half_dim {
+            let exponent = (2 * j) as f32 / (head_dim as f32);
+            let freq = 1.0f32 / crate::inference::f32_pow_approx(base, exponent);
+            let theta = (pos as f32) * freq;
+            let c = crate::inference::f32_cos(theta);
+            let s = crate::inference::f32_sin(theta);
+            let x1 = head[j];
+            let x2 = head[j + half_dim];
+            head[j] = x1 * c - x2 * s;
+            head[j + half_dim] = x1 * s + x2 * c;
+        }
+    }
+    Ok(())
+}
+
 /// Executes the exact Section 2 embedder graph:
 /// Clamps token_id within valid range [0, 262144), gathers 512 INT4 weights
 /// scaled by the per-token scale from Section 2 quantization parameters, and
@@ -1722,5 +1875,127 @@ mod tests {
         assert_eq!(tokenizer.piece_of(23391), b"hello");
         assert_eq!(tokenizer.piece_of(1344), b"rent");
         assert_eq!(tokenizer.piece_of(19971), b"\xe2\x96\x81receipt");
+    }
+
+    #[test]
+    fn test_kernel_rms_norm_numerical_precision_and_bounds() {
+        // Deterministic vector [1.0, 2.0, 3.0, 4.0] with identity weights
+        let mut x = [1.0f32, 2.0f32, 3.0f32, 4.0f32];
+        let w = [1.0f32, 1.0f32, 1.0f32, 1.0f32];
+        let eps = 1e-6f32;
+        kernel_rms_norm(&mut x, &w, eps).expect("rms_norm");
+
+        // Mean square = (1 + 4 + 9 + 16) / 4 = 7.5. Scale = 1 / sqrt(7.5) ~ 0.36514837
+        let expected_scale = 1.0f32 / crate::f32_sqrt(7.5f32 + eps);
+        assert!((x[0] - 1.0f32 * expected_scale).abs() < 1e-5);
+        assert!((x[1] - 2.0f32 * expected_scale).abs() < 1e-5);
+        assert!((x[2] - 3.0f32 * expected_scale).abs() < 1e-5);
+        assert!((x[3] - 4.0f32 * expected_scale).abs() < 1e-5);
+
+        // Sum of squares of normalized vector should equal dim = 4.0
+        let norm_sq = x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3];
+        assert!((norm_sq - 4.0f32).abs() < 1e-4);
+
+        // Malformed inputs:
+        let mut empty: [f32; 0] = [];
+        assert!(kernel_rms_norm(&mut empty, &w, eps).is_err());
+        let insufficient_w = [1.0f32];
+        assert!(kernel_rms_norm(&mut x, &insufficient_w, eps).is_err());
+        assert!(kernel_rms_norm(&mut x, &w, -1.0).is_err());
+    }
+
+    #[test]
+    fn test_kernel_gelu_numerical_tanh_accuracy() {
+        let mut vals = [0.0f32, 1.0f32, -1.0f32, 10.0f32, -10.0f32];
+        kernel_gelu(&mut vals);
+
+        // GELU(0) = 0
+        assert_eq!(vals[0], 0.0);
+        // GELU(1.0) ~ 0.841192
+        assert!((vals[1] - 0.841192).abs() < 1e-4, "GELU(1.0) = {}", vals[1]);
+        // GELU(-1.0) ~ -0.158808
+        assert!((vals[2] - (-0.158808)).abs() < 1e-4, "GELU(-1.0) = {}", vals[2]);
+        // Asymptotes:
+        assert!((vals[3] - 10.0).abs() < 1e-3);
+        assert_eq!(vals[4], 0.0);
+    }
+
+    #[test]
+    fn test_kernel_softmax_stability_and_sum_to_one() {
+        // Large values test numerical stability (no overflow to Inf or NaN)
+        let mut large = [1000.0f32, 1001.0f32, 1002.0f32];
+        kernel_softmax(&mut large).expect("softmax");
+        let sum_large: f32 = large.iter().sum();
+        assert!((sum_large - 1.0f32).abs() < 1e-5, "Softmax sum = {}", sum_large);
+        assert!(large[2] > large[1] && large[1] > large[0]);
+
+        // Uniform inputs
+        let mut uniform = [5.0f32, 5.0f32, 5.0f32, 5.0f32];
+        kernel_softmax(&mut uniform).expect("softmax");
+        for &p in &uniform {
+            assert!((p - 0.25f32).abs() < 1e-6);
+        }
+
+        let mut empty: [f32; 0] = [];
+        assert!(kernel_softmax(&mut empty).is_err());
+    }
+
+    #[test]
+    fn test_kernel_matmul_f32_deterministic_and_dimensions() {
+        // A is [2, 3], B is [2, 3] (so B^T is [3, 2]), out is [2, 2]
+        let a = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let b = [1.0f32, 0.0, -1.0, 2.0, 1.0, 0.0];
+        let mut out = [0.0f32; 4];
+        kernel_matmul_f32(&a, &b, 2, 3, 2, &mut out).expect("matmul");
+
+        // Expected out:
+        // [0, 0] = 1*1 + 2*0 + 3*(-1) = -2
+        // [0, 1] = 1*2 + 2*1 + 3*0 = 4
+        // [1, 0] = 4*1 + 5*0 + 6*(-1) = -2
+        // [1, 1] = 4*2 + 5*1 + 6*0 = 13
+        assert_eq!(out, [-2.0, 4.0, -2.0, 13.0]);
+
+        // Bounds error
+        let mut small_out = [0.0f32; 2];
+        assert!(kernel_matmul_f32(&a, &b, 2, 3, 2, &mut small_out).is_err());
+    }
+
+    #[test]
+    fn test_kernel_matmul_int4_scaled_signed_nibbles_and_scale() {
+        // M=1, K=4, N=2
+        // A = [1.0, -2.0, 3.0, -1.0]
+        let a = [1.0f32, -2.0, 3.0, -1.0];
+        // Row 0: byte 0 = 0xb3 (lo=3, hi=-5), byte 1 = 0x87 (lo=7, hi=-8)
+        // Row 1: byte 0 = 0x0f (lo=-1, hi=0), byte 1 = 0x70 (lo=0, hi=7)
+        let w = [0xb3u8, 0x87, 0x0f, 0x70];
+        let scales = [0.5f32, 0.25f32];
+        let mut out = [0.0f32; 2];
+
+        kernel_matmul_int4_scaled(&a, &w, &scales, 1, 4, 2, &mut out).expect("matmul_int4");
+
+        // Acc 0 = 1*3 + (-2)*(-5) + 3*7 + (-1)*(-8) = 3 + 10 + 21 + 8 = 42.0. Out = 42 * 0.5 = 21.0
+        // Acc 1 = 1*(-1) + (-2)*0 + 3*0 + (-1)*7 = -1 + 0 + 0 - 7 = -8.0. Out = -8 * 0.25 = -2.0
+        assert_eq!(out, [21.0, -2.0]);
+
+        // Odd K is refused
+        assert!(kernel_matmul_int4_scaled(&a, &w, &scales, 1, 3, 2, &mut out).is_err());
+    }
+
+    #[test]
+    fn test_kernel_rope_split_half_rotation_properties() {
+        // Head dim 4, 1 head, base 8000.0
+        let mut vec = [1.0f32, 2.0, 3.0, 4.0];
+        // Pos 0: theta = 0, so cos=1, sin=0 -> exact identity
+        kernel_rope_split_half(&mut vec, 4, 0, 8000.0).expect("rope");
+        assert_eq!(vec, [1.0, 2.0, 3.0, 4.0]);
+
+        // Pos 1: rotation must preserve vector L2 norm within software sin/cos precision
+        let norm_before = vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2] + vec[3] * vec[3];
+        kernel_rope_split_half(&mut vec, 4, 1, 8000.0).expect("rope");
+        let norm_after = vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2] + vec[3] * vec[3];
+        assert!((norm_before - norm_after).abs() < 1e-3, "Norm before {}, after {}", norm_before, norm_after);
+
+        // Odd head dim is refused
+        assert!(kernel_rope_split_half(&mut vec, 3, 1, 8000.0).is_err());
     }
 }
