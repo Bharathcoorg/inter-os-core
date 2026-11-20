@@ -838,38 +838,8 @@ pub mod log {
     }
 }
 
-/// Ergonomic IPC helper module matching application templates.
-pub mod ipc {
-    /// A copy of a dispatched input event the kernel also posts to the focused task.
-    pub const MSG_INPUT_EVENT: u32 = 0x494E_5054;
-
-    /// The notification that a window took focus, likewise posted into that task's mailbox.
-    pub const MSG_WINDOW_FOCUSED: u32 = 0x7001;
-
-    pub fn send(target_task_id: u64, msg_type: u32, payload: &[u8]) -> Result<(), i64> {
-        crate::ipc_send(target_task_id, msg_type, payload)
-    }
-
-    pub fn receive_any(out_buf: &mut [u8]) -> Result<(u64, u32, usize), i64> {
-        let mut sender = 0u64;
-        let mut msg_type = 0u32;
-        let ret = unsafe {
-            crate::syscall5(
-                crate::SyscallNumber::IpcRecvMeta,
-                0,
-                out_buf.as_mut_ptr() as u64,
-                out_buf.len() as u64,
-                &mut sender as *mut u64 as u64,
-                &mut msg_type as *mut u32 as u64,
-            )
-        };
-        if ret >= 0 {
-            Ok((sender, msg_type, ret as usize))
-        } else {
-            Err(ret)
-        }
-    }
-}
+/// Sovereign IPC Subsystem and High-Assurance Memory-Message Facilities.
+pub mod ipc;
 
 /// Creates and binds a UDP socket to a port.
 pub fn net_socket(port: u16) -> Result<u32, i64> {
