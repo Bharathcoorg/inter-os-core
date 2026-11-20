@@ -724,6 +724,299 @@ pub fn inspect_tflite_buffer<'a>(
     }
 }
 
+/// Extracts the byte offset and count of float32 scales for a quantized tensor in a subgraph.
+pub fn extract_tflite_tensor_quantization_scales_offset(
+    bytes: &[u8],
+    subgraph_index: usize,
+    tensor_index: usize,
+) -> Result<(usize, usize), Error> {
+    if bytes.len() < 8 {
+        return Err(Error::Truncated);
+    }
+    if &bytes[4..8] != TFLITE_FILE_IDENTIFIER {
+        return Err(Error::BadTfLiteIdentifier);
+    }
+    let reader = FlatBuffer::new(bytes);
+    let root = reader.follow_uoffset(0)?;
+    let subgraphs_vec = reader
+        .table_vector(root, 2)?
+        .ok_or(Error::InvalidFlatBuffer)?;
+    let sg = reader.vector_table(subgraphs_vec, subgraph_index)?;
+    let tensors_vec = reader
+        .table_vector(sg, 0)?
+        .ok_or(Error::InvalidFlatBuffer)?;
+    let tensor = reader.vector_table(tensors_vec, tensor_index)?;
+
+    // Field 4: quantization (QuantizationParameters)
+    let q_field = reader
+        .table_field(tensor, 4, 4)?
+        .ok_or(Error::InvalidFlatBuffer)?;
+    let q_tbl = reader.follow_uoffset(q_field)?;
+
+    // QuantizationParameters field 2: scale ([float])
+    let scale_field = reader
+        .table_field(q_tbl, 2, 4)?
+        .ok_or(Error::InvalidFlatBuffer)?;
+    let scale_vec = reader.follow_uoffset(scale_field)?;
+    let num_scales = reader.vector_len(scale_vec)?;
+
+    let offset = scale_vec
+        .checked_add(4)
+        .ok_or(Error::InvalidFlatBuffer)?;
+    let total_bytes = num_scales
+        .checked_mul(4)
+        .ok_or(Error::InvalidFlatBuffer)?;
+    if offset.checked_add(total_bytes).filter(|end| *end <= bytes.len()).is_none() {
+        return Err(Error::InvalidFlatBuffer);
+    }
+
+    Ok((offset, num_scales))
+}
+
+/// Kernel: Element-wise or broadcast `a >= b`.
+pub fn kernel_greater_equal(a: &[i32], b: &[i32], out: &mut [bool]) -> Result<(), Error> {
+    if out.len() < a.len() {
+        return Err(Error::Truncated);
+    }
+    if b.len() == 1 {
+        let val = b[0];
+        for (i, &x) in a.iter().enumerate() {
+            out[i] = x >= val;
+        }
+    } else if a.len() == b.len() {
+        for i in 0..a.len() {
+            out[i] = a[i] >= b[i];
+        }
+    } else {
+        return Err(Error::InvalidFlatBuffer);
+    }
+    Ok(())
+}
+
+/// Kernel: Element-wise or broadcast `a < b`.
+pub fn kernel_less(a: &[i32], b: &[i32], out: &mut [bool]) -> Result<(), Error> {
+    if out.len() < a.len() {
+        return Err(Error::Truncated);
+    }
+    if b.len() == 1 {
+        let val = b[0];
+        for (i, &x) in a.iter().enumerate() {
+            out[i] = x < val;
+        }
+    } else if a.len() == b.len() {
+        for i in 0..a.len() {
+            out[i] = a[i] < b[i];
+        }
+    } else {
+        return Err(Error::InvalidFlatBuffer);
+    }
+    Ok(())
+}
+
+/// Kernel: Element-wise logical AND `a && b`.
+pub fn kernel_logical_and(a: &[bool], b: &[bool], out: &mut [bool]) -> Result<(), Error> {
+    if a.len() != b.len() || out.len() < a.len() {
+        return Err(Error::Truncated);
+    }
+    for i in 0..a.len() {
+        out[i] = a[i] && b[i];
+    }
+    Ok(())
+}
+
+/// Kernel: Select V2 (`cond ? true_val : false_val`).
+pub fn kernel_select_v2<T: Copy>(
+    cond: &[bool],
+    true_val: &[T],
+    false_val: &[T],
+    out: &mut [T],
+) -> Result<(), Error> {
+    if cond.len() != true_val.len() || out.len() < cond.len() {
+        return Err(Error::Truncated);
+    }
+    if false_val.len() == 1 {
+        let fallback = false_val[0];
+        for i in 0..cond.len() {
+            out[i] = if cond[i] { true_val[i] } else { fallback };
+        }
+    } else if false_val.len() == true_val.len() {
+        for i in 0..cond.len() {
+            out[i] = if cond[i] { true_val[i] } else { false_val[i] };
+        }
+    } else {
+        return Err(Error::InvalidFlatBuffer);
+    }
+    Ok(())
+}
+
+/// Kernel: Reshape (contiguous tensor element transfer).
+pub fn kernel_reshape<T: Copy>(input: &[T], out: &mut [T]) -> Result<(), Error> {
+    if input.len() != out.len() {
+        return Err(Error::Truncated);
+    }
+    out.copy_from_slice(input);
+    Ok(())
+}
+
+/// Kernel: Gather bfloat16 weights converted to float32.
+pub fn kernel_gather_bfloat16_to_f32(
+    indices: &[i32],
+    weights: &[u16],
+    dim: usize,
+    out: &mut [f32],
+) -> Result<(), Error> {
+    if out.len() < indices.len() * dim {
+        return Err(Error::Truncated);
+    }
+    for (i, &idx) in indices.iter().enumerate() {
+        let idx_usize = usize::try_from(idx).map_err(|_| Error::SectionRange)?;
+        let start = idx_usize.checked_mul(dim).ok_or(Error::SectionRange)?;
+        let end = start.checked_add(dim).ok_or(Error::SectionRange)?;
+        if end > weights.len() {
+            return Err(Error::SectionRange);
+        }
+        let out_start = i * dim;
+        for (d, &bf) in weights[start..end].iter().enumerate() {
+            out[out_start + d] = f32::from_bits((bf as u32) << 16);
+        }
+    }
+    Ok(())
+}
+
+/// Kernel: In-place scalar multiplication on float32 slices.
+pub fn kernel_mul_scalar_f32(data: &mut [f32], scalar: f32) {
+    for x in data.iter_mut() {
+        *x *= scalar;
+    }
+}
+
+/// Kernel: Gather INT4 weights with per-token scale factors.
+///
+/// Unpacks two 4-bit signed 2's complement nibbles (-8..=7) per byte,
+/// multiplies each element by the token's scale factor, and writes to `out`.
+pub fn kernel_gather_int4_scaled(
+    indices: &[i32],
+    weights: &[u8],
+    scales: &[f32],
+    dim: usize,
+    out: &mut [f32],
+) -> Result<(), Error> {
+    if dim % 2 != 0 {
+        return Err(Error::InvalidFlatBuffer);
+    }
+    let bytes_per_token = dim / 2;
+    if out.len() < indices.len() * dim {
+        return Err(Error::Truncated);
+    }
+    for (i, &idx) in indices.iter().enumerate() {
+        let idx_usize = usize::try_from(idx).map_err(|_| Error::SectionRange)?;
+        if idx_usize >= scales.len() {
+            return Err(Error::SectionRange);
+        }
+        let scale = scales[idx_usize];
+        let start = idx_usize.checked_mul(bytes_per_token).ok_or(Error::SectionRange)?;
+        let end = start.checked_add(bytes_per_token).ok_or(Error::SectionRange)?;
+        if end > weights.len() {
+            return Err(Error::SectionRange);
+        }
+        let out_start = i * dim;
+        for (b_idx, &byte) in weights[start..end].iter().enumerate() {
+            let lo = byte & 0x0f;
+            let hi = (byte >> 4) & 0x0f;
+            let lo_signed = if lo < 8 { lo as f32 } else { (lo as i8 - 16) as f32 };
+            let hi_signed = if hi < 8 { hi as f32 } else { (hi as i8 - 16) as f32 };
+            out[out_start + b_idx * 2] = lo_signed * scale;
+            out[out_start + b_idx * 2 + 1] = hi_signed * scale;
+        }
+    }
+    Ok(())
+}
+
+/// Executes the exact Section 2 embedder graph:
+/// Clamps token_id within valid range [0, 262144), gathers 512 INT4 weights
+/// scaled by the per-token scale from Section 2 quantization parameters, and
+/// multiplies by the Section 2 scalar multiplier (sqrt(512) = 22.6274166).
+pub fn execute_section2_embedding_lookup(
+    sec2_bytes: &[u8],
+    sec4_weights: &[u8],
+    token_id: i32,
+    out: &mut [f32; 512],
+) -> Result<(), Error> {
+    // 1. Read lower/upper bound and multiplier from Sec 2 buffers
+    let buf1 = inspect_tflite_buffer(sec2_bytes, 1)?
+        .ok_or(Error::InvalidFlatBuffer)?;
+    let lower_bound = if buf1.len() >= 4 { read_u32(buf1, 0)? as i32 } else { 0 };
+
+    let buf2 = inspect_tflite_buffer(sec2_bytes, 2)?
+        .ok_or(Error::InvalidFlatBuffer)?;
+    let upper_bound = if buf2.len() >= 4 { read_u32(buf2, 0)? as i32 } else { 262144 };
+
+    let buf3 = inspect_tflite_buffer(sec2_bytes, 3)?
+        .ok_or(Error::InvalidFlatBuffer)?;
+    let fallback = if buf3.len() >= 4 { read_u32(buf3, 0)? as i32 } else { 0 };
+
+    let buf6 = inspect_tflite_buffer(sec2_bytes, 6)?
+        .ok_or(Error::InvalidFlatBuffer)?;
+    let scalar_mul = if buf6.len() >= 4 {
+        f32::from_bits(read_u32(buf6, 0)?)
+    } else {
+        22.6274166f32
+    };
+
+    // 2. Op 0..3: Clamp token_id using kernels
+    let mut ge = [false; 1];
+    kernel_greater_equal(&[token_id], &[lower_bound], &mut ge)?;
+
+    let mut lt = [false; 1];
+    kernel_less(&[token_id], &[upper_bound], &mut lt)?;
+
+    let mut valid = [false; 1];
+    kernel_logical_and(&ge, &lt, &mut valid)?;
+
+    let mut clamped = [0i32; 1];
+    kernel_select_v2(&valid, &[token_id], &[fallback], &mut clamped)?;
+
+    let mut reshaped = [0i32; 1];
+    kernel_reshape(&clamped, &mut reshaped)?;
+
+    // 3. Op 5: Gather INT4 weights with scale
+    let (scale_offset, num_scales) = extract_tflite_tensor_quantization_scales_offset(sec2_bytes, 0, 10)?;
+    let idx = reshaped[0] as usize;
+    if idx >= num_scales {
+        return Err(Error::SectionRange);
+    }
+    let scale_bytes_offset = scale_offset.checked_add(idx.checked_mul(4).ok_or(Error::SectionRange)?)
+        .ok_or(Error::SectionRange)?;
+    let scale_bits = read_u32(sec2_bytes, scale_bytes_offset)?;
+    let token_scale = f32::from_bits(scale_bits);
+
+    // Unpack INT4 weights
+    let bytes_per_token = 256;
+    let w_start = if sec4_weights.len() == bytes_per_token {
+        0
+    } else {
+        idx.checked_mul(bytes_per_token).ok_or(Error::SectionRange)?
+    };
+    let w_end = w_start.checked_add(bytes_per_token).ok_or(Error::SectionRange)?;
+    if w_end > sec4_weights.len() {
+        return Err(Error::SectionRange);
+    }
+
+    for (b_idx, &byte) in sec4_weights[w_start..w_end].iter().enumerate() {
+        let lo = byte & 0x0f;
+        let hi = (byte >> 4) & 0x0f;
+        let lo_signed = if lo < 8 { lo as f32 } else { (lo as i8 - 16) as f32 };
+        let hi_signed = if hi < 8 { hi as f32 } else { (hi as i8 - 16) as f32 };
+        out[b_idx * 2] = lo_signed * token_scale;
+        out[b_idx * 2 + 1] = hi_signed * token_scale;
+    }
+
+    // 4. Op 6: Multiply by scalar multiplier
+    kernel_mul_scalar_f32(out, scalar_mul);
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,5 +1240,111 @@ mod tests {
             .expect("inspect op io");
         assert!(num_in >= 1);
         assert!(num_out >= 1);
+    }
+
+    #[test]
+    fn test_pure_rust_comparison_and_logical_kernels() {
+        let a = [10, -5, 0, 100];
+        let mut ge = [false; 4];
+        kernel_greater_equal(&a, &[0], &mut ge).expect("ge");
+        assert_eq!(ge, [true, false, true, true]);
+
+        let mut lt = [false; 4];
+        kernel_less(&a, &[50], &mut lt).expect("lt");
+        assert_eq!(lt, [true, true, true, false]);
+
+        let mut and_out = [false; 4];
+        kernel_logical_and(&ge, &lt, &mut and_out).expect("and");
+        assert_eq!(and_out, [true, false, true, false]);
+
+        let mut select_out = [0i32; 4];
+        kernel_select_v2(&and_out, &a, &[999], &mut select_out).expect("select");
+        assert_eq!(select_out, [10, 999, 0, 999]);
+    }
+
+    #[test]
+    fn test_pure_rust_reshape_and_scalar_mul_kernels() {
+        let input = [1.0f32, 2.0, 3.0, 4.0];
+        let mut reshaped = [0.0f32; 4];
+        kernel_reshape(&input, &mut reshaped).expect("reshape");
+        assert_eq!(reshaped, input);
+
+        kernel_mul_scalar_f32(&mut reshaped, 2.5);
+        assert_eq!(reshaped, [2.5, 5.0, 7.5, 10.0]);
+    }
+
+    #[test]
+    fn test_pure_rust_gather_bf16_to_f32() {
+        // 1.0f32 in bfloat16 is 0x3f80
+        // 2.0f32 in bfloat16 is 0x4000
+        let weights = [0x3f80u16, 0x4000u16, 0xbf80u16, 0xc000u16];
+        let mut out = [0.0f32; 4];
+        kernel_gather_bfloat16_to_f32(&[0, 1], &weights, 2, &mut out).expect("gather bf16");
+        assert_eq!(out, [1.0, 2.0, -1.0, -2.0]);
+    }
+
+    #[test]
+    fn test_pure_rust_gather_int4_scaled() {
+        // 2 tokens, 4 dims each (2 bytes per token)
+        // Token 0: byte0: lo=1, hi=2; byte1: lo=7, hi=8 (-8)
+        // Token 1: byte0: lo=15 (-1), hi=0; byte1: lo=9 (-7), hi=6
+        let weights = [0x21u8, 0x87u8, 0x0fu8, 0x69u8];
+        let scales = [0.5f32, 2.0f32];
+        let mut out = [0.0f32; 8];
+        kernel_gather_int4_scaled(&[0, 1], &weights, &scales, 4, &mut out).expect("gather int4");
+        // Token 0: [1 * 0.5, 2 * 0.5, 7 * 0.5, -8 * 0.5] = [0.5, 1.0, 3.5, -4.0]
+        // Token 1: [-1 * 2.0, 0 * 2.0, -7 * 2.0, 6 * 2.0] = [-2.0, 0.0, -14.0, 12.0]
+        assert_eq!(out[0], 0.5);
+        assert_eq!(out[1], 1.0);
+        assert_eq!(out[2], 3.5);
+        assert_eq!(out[3], -4.0);
+        assert_eq!(out[4], -2.0);
+        assert_eq!(out[5], 0.0);
+        assert_eq!(out[6], -14.0);
+        assert_eq!(out[7], 12.0);
+    }
+
+    #[test]
+    fn test_execute_section2_embedding_lookup_if_model_present() {
+        extern crate std as rust_std;
+        let model_path = "models/downloads/embeddinggemma2-text/embeddinggemma-2-text-270m.litertlm";
+        let file_bytes = match rust_std::fs::read(model_path) {
+            Ok(b) => b,
+            Err(_) => return, // optional on systems where model not downloaded
+        };
+        let mut sec2_range = (0usize, 0usize);
+        let mut sec4_range = (0usize, 0usize);
+        parse_sections(&file_bytes[..65536.min(file_bytes.len())], file_bytes.len() as u64, |idx, sec| {
+            if idx == 2 {
+                sec2_range = (sec.begin as usize, sec.end as usize);
+            } else if idx == 4 {
+                sec4_range = (sec.begin as usize, sec.end as usize);
+            }
+            Ok(())
+        }).expect("parse sections");
+
+        let sec2_bytes = &file_bytes[sec2_range.0..sec2_range.1];
+        let sec4_weights = &file_bytes[sec4_range.0..sec4_range.1];
+
+        // Execute token 23391 ("hello")
+        let mut out = [0.0f32; 512];
+        execute_section2_embedding_lookup(sec2_bytes, sec4_weights, 23391, &mut out)
+            .expect("lookup token 23391");
+
+        let mut sum_sq = 0.0f32;
+        for &x in &out {
+            sum_sq += x * x;
+        }
+        let norm = sum_sq.sqrt();
+        assert!((norm - 22.48).abs() < 0.1, "Expected norm ~22.48, got {}", norm);
+
+        // Out of bounds token clamps to token 0
+        let mut out_oob = [0.0f32; 512];
+        execute_section2_embedding_lookup(sec2_bytes, sec4_weights, 999_999, &mut out_oob)
+            .expect("lookup oob token");
+        let mut out_0 = [0.0f32; 512];
+        execute_section2_embedding_lookup(sec2_bytes, sec4_weights, 0, &mut out_0)
+            .expect("lookup token 0");
+        assert_eq!(out_oob, out_0);
     }
 }

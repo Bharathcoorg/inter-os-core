@@ -1138,6 +1138,362 @@ impl InferenceBackend for NativeGgufBackend {
     }
 }
 
+pub const NATIVE_LITERTLM_INFO: BackendInfo = BackendInfo {
+    id: "native-litertlm-rust",
+    version: 1,
+    available: true,
+    format: ModelFormat::LiteRtLm,
+    capabilities: CapabilitySet::TEXT_EMBEDDING,
+    hardware: HardwareBackend::Cpu,
+    architectures: &["embeddinggemma2", "embeddinggemma", "gemma-embedding", "gemma4-e2b"],
+    quantizations: &[Quantization::BackendDefined, Quantization::F16, Quantization::F32],
+    tokenizers: &["embedded", "sentencepiece"],
+};
+
+pub struct NativeLiteRtLmBackend {
+    pub models: [LoadedModelRecord; MAX_LOADED_MODELS],
+    pub sessions: [BackendSessionRecord; MAX_SESSIONS],
+    next_model_handle: u64,
+    next_session_id: u64,
+}
+
+impl NativeLiteRtLmBackend {
+    pub const fn new() -> Self {
+        Self {
+            models: [LoadedModelRecord {
+                handle: 0,
+                id: [0u8; 64],
+                id_len: 0,
+                source: [0u8; 128],
+                source_len: 0,
+                architecture: [0u8; 32],
+                architecture_len: 0,
+                capabilities: CapabilitySet(0),
+                resources: ResourceEstimate::ZERO,
+                active: false,
+            }; MAX_LOADED_MODELS],
+            sessions: [BackendSessionRecord {
+                id: 0,
+                model_handle: 0,
+                owner: 0,
+                active: false,
+                cancelled: false,
+            }; MAX_SESSIONS],
+            next_model_handle: 1,
+            next_session_id: 1,
+        }
+    }
+
+    pub fn active_model_count(&self) -> usize {
+        self.models.iter().filter(|m| m.active).count()
+    }
+
+    pub fn active_session_count(&self) -> usize {
+        self.sessions.iter().filter(|s| s.active).count()
+    }
+
+    pub fn is_session_active(&self, session: u64) -> bool {
+        self.sessions.iter().any(|s| s.active && s.id == session)
+    }
+
+    pub fn is_session_cancelled(&self, session: u64) -> bool {
+        self.sessions.iter().any(|s| s.active && s.id == session && s.cancelled)
+    }
+
+    pub fn reap_owner(&mut self, owner: u64) -> usize {
+        let mut reaped = 0;
+        for session in &mut self.sessions {
+            if session.active && session.owner == owner {
+                *session = BackendSessionRecord::default();
+                reaped += 1;
+            }
+        }
+        reaped
+    }
+}
+
+impl InferenceBackend for NativeLiteRtLmBackend {
+    fn backend_info(&self) -> BackendInfo {
+        NATIVE_LITERTLM_INFO
+    }
+
+    fn probe_model(&self, model: &ModelManifest<'_>) -> ModelProbe {
+        probe_backend(NATIVE_LITERTLM_INFO, model)
+    }
+
+    fn estimate_resources(
+        &self,
+        model: &ModelManifest<'_>,
+    ) -> Result<ResourceEstimate, BackendError> {
+        let probe = self.probe_model(model);
+        if let Err(failure) = probe.result {
+            return match failure {
+                ProbeFailure::BackendUnavailable => Err(BackendError::Unavailable),
+                _ => Err(BackendError::Unsupported),
+            };
+        }
+        if model.resources != ResourceEstimate::ZERO {
+            if model.resources.total().is_none() {
+                return Err(BackendError::InsufficientResources);
+            }
+            return Ok(model.resources);
+        }
+        Ok(ResourceEstimate {
+            model_weights: model.artifact_bytes,
+            kv_cache: 0,
+            activations: 1024 * 1024,
+            scratch: 512 * 1024,
+            tokenizer: 4 * 1024 * 1024,
+            embedding_indexes: 0,
+            audio_buffers: 0,
+            runtime_overhead: 2 * 1024 * 1024,
+        })
+    }
+
+    fn load_model(&mut self, model: &ModelManifest<'_>) -> Result<u64, BackendError> {
+        let probe = self.probe_model(model);
+        if let Err(failure) = probe.result {
+            return match failure {
+                ProbeFailure::BackendUnavailable => Err(BackendError::Unavailable),
+                _ => Err(BackendError::Unsupported),
+            };
+        }
+        let estimate = self.estimate_resources(model)?;
+
+        if self.models.iter().all(|m| m.active) {
+            return Err(BackendError::InsufficientResources);
+        }
+        let mut handle = self.next_model_handle;
+        for _ in 0..=MAX_LOADED_MODELS {
+            if !self.models.iter().any(|m| m.active && m.handle == handle) {
+                break;
+            }
+            handle = handle.wrapping_add(1).max(1);
+        }
+        self.next_model_handle = handle.wrapping_add(1).max(1);
+        let slot = self.models.iter_mut().find(|m| !m.active)
+            .ok_or(BackendError::InsufficientResources)?;
+
+        let mut id_buf = [0u8; 64];
+        let id_bytes = model.id.as_bytes();
+        let id_len = id_bytes.len().min(64);
+        id_buf[..id_len].copy_from_slice(&id_bytes[..id_len]);
+
+        let mut src_buf = [0u8; 128];
+        let src_bytes = model.source.as_bytes();
+        let src_len = src_bytes.len().min(128);
+        src_buf[..src_len].copy_from_slice(&src_bytes[..src_len]);
+
+        let mut arch_buf = [0u8; 32];
+        let arch_bytes = model.architecture.as_bytes();
+        let arch_len = arch_bytes.len().min(32);
+        arch_buf[..arch_len].copy_from_slice(&arch_bytes[..arch_len]);
+
+        *slot = LoadedModelRecord {
+            handle,
+            id: id_buf,
+            id_len,
+            source: src_buf,
+            source_len: src_len,
+            architecture: arch_buf,
+            architecture_len: arch_len,
+            capabilities: model.capabilities,
+            resources: estimate,
+            active: true,
+        };
+
+        Ok(handle)
+    }
+
+    fn create_session(&mut self, model_handle: u64, owner: u64) -> Result<u64, BackendError> {
+        if !self.models.iter().any(|m| m.active && m.handle == model_handle) {
+            return Err(BackendError::InvalidModel);
+        }
+        if self.sessions.iter().all(|s| s.active) {
+            return Err(BackendError::InsufficientResources);
+        }
+        let mut id = self.next_session_id;
+        for _ in 0..=MAX_SESSIONS {
+            if !self.sessions.iter().any(|s| s.active && s.id == id) {
+                break;
+            }
+            id = id.wrapping_add(1).max(1);
+        }
+        self.next_session_id = id.wrapping_add(1).max(1);
+        let slot = self.sessions.iter_mut().find(|s| !s.active)
+            .ok_or(BackendError::InsufficientResources)?;
+
+        *slot = BackendSessionRecord {
+            id,
+            model_handle,
+            owner,
+            active: true,
+            cancelled: false,
+        };
+
+        Ok(id)
+    }
+
+    fn generate(
+        &mut self,
+        _session: u64,
+        _input: &[u8],
+        _on_chunk: &mut dyn FnMut(&[u8]) -> StreamControl,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    fn embed(
+        &mut self,
+        session: u64,
+        input: &[u8],
+        output: &mut [f32],
+    ) -> Result<usize, BackendError> {
+        let sess_idx = self.sessions.iter().position(|s| s.active && s.id == session)
+            .ok_or(BackendError::SessionNotFound)?;
+        if self.sessions[sess_idx].cancelled {
+            return Err(BackendError::Cancelled);
+        }
+        let model_handle = self.sessions[sess_idx].model_handle;
+        let model = self.models.iter().find(|m| m.active && m.handle == model_handle)
+            .ok_or(BackendError::InvalidModel)?;
+        if !model.capabilities.contains(CapabilitySet::TEXT_EMBEDDING) {
+            return Err(BackendError::Unsupported);
+        }
+        if output.len() < 512 {
+            return Err(BackendError::InsufficientResources);
+        }
+        let source_path = core::str::from_utf8(&model.source[..model.source_len])
+            .map_err(|_| BackendError::InvalidModel)?;
+
+        let token_ids: alloc::vec::Vec<i32>;
+        let tokens_slice: &[i32] = if input.len() >= 4 && input.len() % 4 == 0 {
+            unsafe {
+                core::slice::from_raw_parts(input.as_ptr() as *const i32, input.len() / 4)
+            }
+        } else {
+            let mut ids = alloc::vec::Vec::new();
+            if ids.try_reserve_exact(input.len().max(1)).is_err() {
+                return Err(BackendError::InsufficientResources);
+            }
+            for &b in input {
+                ids.push(b as i32);
+            }
+            token_ids = ids;
+            &token_ids[..]
+        };
+
+        if tokens_slice.is_empty() {
+            output[..512].fill(0.0);
+            return Ok(512);
+        }
+
+        let fd = match std::fs_open(source_path, std::FS_READ) {
+            Ok(fd) => fd,
+            Err(_) => return Err(BackendError::Unavailable),
+        };
+
+        let mut header = [0u8; 65536];
+        let n = match std::fs_read_at(fd, 0, &mut header) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = std::fs_close(fd);
+                return Err(BackendError::InvalidModel);
+            }
+        };
+
+        let mut sec2 = (0u64, 0u64);
+        let mut sec4 = (0u64, 0u64);
+        let parse_res = crate::litertlm::parse_sections(&header[..n], u64::MAX, |idx, s| {
+            if idx == 2 {
+                sec2 = (s.begin, s.end);
+            } else if idx == 4 {
+                sec4 = (s.begin, s.end);
+            }
+            Ok(())
+        });
+        if parse_res.is_err() || sec2.1 <= sec2.0 || sec4.1 <= sec4.0 {
+            let _ = std::fs_close(fd);
+            return Err(BackendError::InvalidModel);
+        }
+
+        let sec2_len = (sec2.1 - sec2.0) as usize;
+        let mut sec2_bytes = alloc::vec::Vec::new();
+        if sec2_bytes.try_reserve_exact(sec2_len).is_err() {
+            let _ = std::fs_close(fd);
+            return Err(BackendError::InsufficientResources);
+        }
+        sec2_bytes.resize(sec2_len, 0u8);
+        if std::fs_read_at(fd, sec2.0, &mut sec2_bytes).is_err() {
+            let _ = std::fs_close(fd);
+            return Err(BackendError::InvalidModel);
+        }
+
+        let mut pooled = [0.0f32; 512];
+        let mut token_out = [0.0f32; 512];
+        let mut token_weights = [0u8; 256];
+
+        for &raw_tok in tokens_slice {
+            let tok = if raw_tok >= 0 && raw_tok < 262144 { raw_tok } else { 0 };
+            let w_off = sec4.0.checked_add((tok as u64).checked_mul(256).unwrap_or(0)).unwrap_or(0);
+            if std::fs_read_at(fd, w_off, &mut token_weights).is_err() {
+                let _ = std::fs_close(fd);
+                return Err(BackendError::InvalidModel);
+            }
+            if crate::litertlm::execute_section2_embedding_lookup(&sec2_bytes, &token_weights, tok, &mut token_out).is_err() {
+                let _ = std::fs_close(fd);
+                return Err(BackendError::Crashed);
+            }
+            for d in 0..512 {
+                pooled[d] += token_out[d];
+            }
+        }
+        let _ = std::fs_close(fd);
+
+        let count = tokens_slice.len() as f32;
+        let mut sum_sq = 0.0f32;
+        for d in 0..512 {
+            pooled[d] /= count;
+            sum_sq += pooled[d] * pooled[d];
+        }
+        let norm = crate::f32_sqrt(sum_sq);
+        if norm > 1e-9 {
+            for d in 0..512 {
+                pooled[d] /= norm;
+            }
+        }
+
+        output[..512].copy_from_slice(&pooled);
+        Ok(512)
+    }
+
+    fn cancel(&mut self, session: u64) -> Result<(), BackendError> {
+        let rec = self.sessions.iter_mut().find(|s| s.active && s.id == session)
+            .ok_or(BackendError::SessionNotFound)?;
+        rec.cancelled = true;
+        Ok(())
+    }
+
+    fn destroy_session(&mut self, session: u64) -> Result<(), BackendError> {
+        let rec = self.sessions.iter_mut().find(|s| s.active && s.id == session)
+            .ok_or(BackendError::SessionNotFound)?;
+        *rec = BackendSessionRecord::default();
+        Ok(())
+    }
+
+    fn unload_model(&mut self, model_handle: u64) -> Result<(), BackendError> {
+        let rec = self.models.iter_mut().find(|m| m.active && m.handle == model_handle)
+            .ok_or(BackendError::InvalidModel)?;
+        *rec = LoadedModelRecord::default();
+        for s in &mut self.sessions {
+            if s.active && s.model_handle == model_handle {
+                *s = BackendSessionRecord::default();
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1471,5 +1827,142 @@ memory.runtime_overhead=12000000\n";
         for h in handles {
             assert_eq!(backend.unload_model(h), Ok(()));
         }
+    }
+
+    #[test]
+    fn native_litertlm_backend_lifecycle() {
+        let parsed = parse_model_manifest(MANIFEST).expect("manifest");
+        let manifest = ModelManifest {
+            id: "org.interos.test-litertlm",
+            format: ModelFormat::LiteRtLm,
+            architecture: "embeddinggemma2",
+            quantization: Quantization::BackendDefined,
+            tokenizer: "sentencepiece",
+            capabilities: CapabilitySet::TEXT_EMBEDDING,
+            resources: ResourceEstimate {
+                model_weights: 100,
+                kv_cache: 0,
+                activations: 50,
+                scratch: 0,
+                tokenizer: 10,
+                embedding_indexes: 0,
+                audio_buffers: 0,
+                runtime_overhead: 40,
+            },
+            ..parsed
+        };
+
+        let mut backend = NativeLiteRtLmBackend::new();
+        assert_eq!(backend.backend_info().id, NATIVE_LITERTLM_INFO.id);
+        assert_eq!(backend.probe_model(&manifest).result, Ok(()));
+
+        let estimate = backend.estimate_resources(&manifest).expect("estimate");
+        assert_eq!(estimate.total(), Some(200));
+
+        let handle = backend.load_model(&manifest).expect("load model");
+        assert_eq!(backend.active_model_count(), 1);
+
+        let s1 = backend.create_session(handle, 10).expect("session 1");
+        assert!(backend.is_session_active(s1));
+
+        assert!(!backend.is_session_cancelled(s1));
+        assert_eq!(backend.cancel(s1), Ok(()));
+        assert!(backend.is_session_cancelled(s1));
+
+        let mut emb_out = [0.0f32; 512];
+        assert_eq!(backend.embed(s1, b"test", &mut emb_out), Err(BackendError::Cancelled));
+
+        assert_eq!(backend.destroy_session(s1), Ok(()));
+        assert_eq!(backend.active_session_count(), 0);
+
+        assert_eq!(backend.unload_model(handle), Ok(()));
+        assert_eq!(backend.active_model_count(), 0);
+    }
+
+    #[test]
+    fn native_litertlm_backend_semantic_embedding_cosine() {
+        extern crate std as rust_std;
+        let model_path = "models/downloads/embeddinggemma2-text/embeddinggemma-2-text-270m.litertlm";
+        if rust_std::fs::metadata(model_path).is_err() {
+            return;
+        }
+
+        let parsed = parse_model_manifest(MANIFEST).expect("manifest");
+        let manifest = ModelManifest {
+            id: "org.interos.embeddinggemma2-litertlm",
+            display_name: "EmbeddingGemma 2 270M LiteRT-LM",
+            source: model_path,
+            format: ModelFormat::LiteRtLm,
+            architecture: "embeddinggemma2",
+            quantization: Quantization::BackendDefined,
+            tokenizer: "sentencepiece",
+            capabilities: CapabilitySet::TEXT_EMBEDDING,
+            resources: ResourceEstimate {
+                model_weights: 164626432,
+                kv_cache: 0,
+                activations: 1024 * 1024,
+                scratch: 512 * 1024,
+                tokenizer: 4 * 1024 * 1024,
+                embedding_indexes: 0,
+                audio_buffers: 0,
+                runtime_overhead: 2 * 1024 * 1024,
+            },
+            ..parsed
+        };
+
+        let mut backend = NativeLiteRtLmBackend::new();
+        let handle = backend.load_model(&manifest).expect("load model");
+        let session = backend.create_session(handle, 1).expect("create session");
+
+        // Token sequences:
+        // rent receipt: [1344, 148373]
+        // April housing payment: [30651, 57454, 24471]
+        // local AI: [6047, 12553]
+        let tokens_rent: [i32; 2] = [1344, 148373];
+        let tokens_housing: [i32; 3] = [30651, 57454, 24471];
+        let tokens_ai: [i32; 2] = [6047, 12553];
+
+        let mut emb_rent = [0.0f32; 512];
+        let mut emb_housing = [0.0f32; 512];
+        let mut emb_ai = [0.0f32; 512];
+
+        let rent_bytes = unsafe {
+            core::slice::from_raw_parts(tokens_rent.as_ptr() as *const u8, tokens_rent.len() * 4)
+        };
+        let housing_bytes = unsafe {
+            core::slice::from_raw_parts(tokens_housing.as_ptr() as *const u8, tokens_housing.len() * 4)
+        };
+        let ai_bytes = unsafe {
+            core::slice::from_raw_parts(tokens_ai.as_ptr() as *const u8, tokens_ai.len() * 4)
+        };
+
+        let dim1 = backend.embed(session, rent_bytes, &mut emb_rent).expect("embed rent");
+        let dim2 = backend.embed(session, housing_bytes, &mut emb_housing).expect("embed housing");
+        let dim3 = backend.embed(session, ai_bytes, &mut emb_ai).expect("embed ai");
+
+        assert_eq!(dim1, 512);
+        assert_eq!(dim2, 512);
+        assert_eq!(dim3, 512);
+
+        let mut cos_housing = 0.0f32;
+        let mut cos_ai = 0.0f32;
+        for i in 0..512 {
+            cos_housing += emb_rent[i] * emb_housing[i];
+            cos_ai += emb_rent[i] * emb_ai[i];
+        }
+
+        assert!(
+            cos_housing > 0.1,
+            "Expected positive semantic similarity between 'rent receipt' and 'April housing payment', got {}",
+            cos_housing
+        );
+        assert!(
+            cos_ai < 0.05,
+            "Expected orthogonal/negative similarity between 'rent receipt' and 'local AI', got {}",
+            cos_ai
+        );
+
+        backend.destroy_session(session).expect("destroy session");
+        backend.unload_model(handle).expect("unload model");
     }
 }
