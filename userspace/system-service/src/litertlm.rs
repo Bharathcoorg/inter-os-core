@@ -1017,6 +1017,302 @@ pub fn execute_section2_embedding_lookup(
     Ok(())
 }
 
+fn read_protobuf_varint(data: &[u8], offset: &mut usize) -> Result<u64, Error> {
+    let mut res = 0u64;
+    let mut shift = 0u32;
+    while *offset < data.len() {
+        let b = data[*offset];
+        *offset += 1;
+        res |= ((b & 0x7f) as u64) << shift;
+        if (b & 0x80) == 0 {
+            return Ok(res);
+        }
+        shift += 7;
+        if shift > 64 {
+            return Err(Error::InvalidFlatBuffer);
+        }
+    }
+    Err(Error::Truncated)
+}
+
+fn format_byte_token(b: u8, out: &mut [u8; 6]) -> &[u8] {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    out[0] = b'<';
+    out[1] = b'0';
+    out[2] = b'x';
+    out[3] = HEX[(b >> 4) as usize];
+    out[4] = HEX[(b & 0x0F) as usize];
+    out[5] = b'>';
+    out
+}
+
+/// Pure-Rust `#![no_std]` SentencePiece Byte-Pair Encoding (BPE) tokenizer
+/// parsed directly from Section 1 (`SentencePieceTokenizer`) of LiteRT-LM packages.
+pub struct LiteRtLmTokenizer<'a> {
+    section1_bytes: &'a [u8],
+    sorted_ids: alloc::vec::Vec<u32>,
+    id_to_chunk_offset: alloc::vec::Vec<u32>,
+    byte_tokens: [u32; 256],
+}
+
+impl<'a> LiteRtLmTokenizer<'a> {
+    /// Parses the SentencePiece Model protobuf from Section 1 bytes.
+    pub fn parse(section1_bytes: &'a [u8]) -> Result<Self, Error> {
+        let mut id_to_chunk_offset = alloc::vec::Vec::with_capacity(262_144);
+        let mut offset = 0;
+        while offset < section1_bytes.len() {
+            let tag = read_protobuf_varint(section1_bytes, &mut offset)?;
+            let fnum = tag >> 3;
+            let wtype = (tag & 0x7) as u8;
+            if wtype == 2 {
+                let len = read_protobuf_varint(section1_bytes, &mut offset)? as usize;
+                let chunk_start = offset;
+                offset = offset.checked_add(len).ok_or(Error::SectionRange)?;
+                if offset > section1_bytes.len() {
+                    return Err(Error::Truncated);
+                }
+                if fnum == 1 {
+                    id_to_chunk_offset.push(chunk_start as u32);
+                }
+            } else if wtype == 0 {
+                let _ = read_protobuf_varint(section1_bytes, &mut offset)?;
+            } else if wtype == 1 {
+                offset = offset.checked_add(8).ok_or(Error::SectionRange)?;
+            } else if wtype == 5 {
+                offset = offset.checked_add(4).ok_or(Error::SectionRange)?;
+            } else {
+                return Err(Error::InvalidFlatBuffer);
+            }
+        }
+
+        let token_count = id_to_chunk_offset.len();
+        if token_count == 0 {
+            return Err(Error::Truncated);
+        }
+
+        let mut sorted_ids: alloc::vec::Vec<u32> = (0..token_count as u32).collect();
+        sorted_ids.sort_unstable_by(|&a, &b| {
+            let piece_a = Self::read_piece_bytes(section1_bytes, id_to_chunk_offset[a as usize] as usize);
+            let piece_b = Self::read_piece_bytes(section1_bytes, id_to_chunk_offset[b as usize] as usize);
+            piece_a.cmp(piece_b)
+        });
+
+        // Initialize byte tokens <0x00>..<0xFF>
+        let mut byte_tokens = [3u32; 256];
+        for b in 0..=255u8 {
+            let mut name_buf = [0u8; 6];
+            let name = format_byte_token(b, &mut name_buf);
+            if let Ok(idx) = sorted_ids.binary_search_by(|&id| {
+                let p = Self::read_piece_bytes(section1_bytes, id_to_chunk_offset[id as usize] as usize);
+                p.cmp(name)
+            }) {
+                byte_tokens[b as usize] = sorted_ids[idx];
+            } else if (238 + (b as usize)) < token_count {
+                byte_tokens[b as usize] = (238 + (b as u32)) as u32;
+            }
+        }
+
+        Ok(Self {
+            section1_bytes,
+            sorted_ids,
+            id_to_chunk_offset,
+            byte_tokens,
+        })
+    }
+
+    #[inline]
+    fn read_piece_bytes(section1_bytes: &[u8], chunk_start: usize) -> &[u8] {
+        if chunk_start >= section1_bytes.len() {
+            return b"";
+        }
+        let chunk = &section1_bytes[chunk_start..];
+        if chunk.is_empty() || chunk[0] != 0x0A {
+            return b"";
+        }
+        let mut off = 1;
+        let plen = match read_protobuf_varint(chunk, &mut off) {
+            Ok(l) => l as usize,
+            Err(_) => return b"",
+        };
+        if off + plen <= chunk.len() {
+            &chunk[off..off + plen]
+        } else {
+            b""
+        }
+    }
+
+    #[inline]
+    fn read_score_and_type(section1_bytes: &[u8], chunk_start: usize) -> (f32, u8) {
+        if chunk_start >= section1_bytes.len() {
+            return (0.0, 1);
+        }
+        let chunk = &section1_bytes[chunk_start..];
+        if chunk.is_empty() || chunk[0] != 0x0A {
+            return (0.0, 1);
+        }
+        let mut off = 1;
+        let plen = match read_protobuf_varint(chunk, &mut off) {
+            Ok(l) => l as usize,
+            Err(_) => return (0.0, 1),
+        };
+        let mut p_end = off + plen;
+        let mut score = 0.0f32;
+        let mut ptype = 1u8;
+        while p_end < chunk.len() {
+            let tag = match read_protobuf_varint(chunk, &mut p_end) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            let fnum = tag >> 3;
+            let wtype = (tag & 0x7) as u8;
+            if fnum == 2 && wtype == 5 {
+                if p_end + 4 <= chunk.len() {
+                    score = f32::from_le_bytes([chunk[p_end], chunk[p_end + 1], chunk[p_end + 2], chunk[p_end + 3]]);
+                    p_end += 4;
+                } else {
+                    break;
+                }
+            } else if fnum == 3 && wtype == 0 {
+                if let Ok(t_val) = read_protobuf_varint(chunk, &mut p_end) {
+                    ptype = t_val as u8;
+                } else {
+                    break;
+                }
+            } else if wtype == 0 {
+                let _ = read_protobuf_varint(chunk, &mut p_end);
+            } else if wtype == 1 {
+                p_end += 8;
+            } else if wtype == 2 {
+                if let Ok(l) = read_protobuf_varint(chunk, &mut p_end) {
+                    p_end += l as usize;
+                } else {
+                    break;
+                }
+            } else if wtype == 5 {
+                p_end += 4;
+            } else {
+                break;
+            }
+        }
+        (score, ptype)
+    }
+
+    /// Finds a piece by byte slice in $O(\log N)$ time, returning (piece_bytes, id, score, type).
+    pub fn find_piece(&self, target: &[u8]) -> Option<(&'a [u8], u32, f32, u8)> {
+        let idx = self.sorted_ids.binary_search_by(|&id| {
+            let piece = Self::read_piece_bytes(self.section1_bytes, self.id_to_chunk_offset[id as usize] as usize);
+            piece.cmp(target)
+        }).ok()?;
+        let id = self.sorted_ids[idx];
+        let chunk_off = self.id_to_chunk_offset[id as usize] as usize;
+        let piece = Self::read_piece_bytes(self.section1_bytes, chunk_off);
+        let (score, ptype) = Self::read_score_and_type(self.section1_bytes, chunk_off);
+        Some((piece, id, score, ptype))
+    }
+
+    /// Returns the exact piece bytes for a token ID.
+    pub fn piece_of(&self, id: u32) -> &'a [u8] {
+        if (id as usize) < self.id_to_chunk_offset.len() {
+            Self::read_piece_bytes(self.section1_bytes, self.id_to_chunk_offset[id as usize] as usize)
+        } else {
+            b""
+        }
+    }
+
+    /// Returns the total vocabulary size.
+    pub fn vocab_size(&self) -> usize {
+        self.id_to_chunk_offset.len()
+    }
+
+    /// Tokenizes `text` using SentencePiece BPE into token IDs in `out`.
+    /// Returns the number of tokens written.
+    pub fn encode(&self, text: &str, out: &mut [u32]) -> Result<usize, Error> {
+        if text.is_empty() {
+            return Ok(0);
+        }
+        let mut norm = alloc::vec::Vec::with_capacity(text.len() * 3 + 4);
+        for c in text.chars() {
+            if c == ' ' {
+                norm.extend_from_slice(b"\xe2\x96\x81");
+            } else {
+                let mut buf = [0u8; 4];
+                norm.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+
+        let mut symbols: alloc::vec::Vec<&'a [u8]> = alloc::vec::Vec::new();
+        let mut i = 0;
+        while i < norm.len() {
+            let b = norm[i];
+            let char_len = if b < 0x80 {
+                1
+            } else if (b & 0xE0) == 0xC0 {
+                2
+            } else if (b & 0xF0) == 0xE0 {
+                3
+            } else if (b & 0xF8) == 0xF0 {
+                4
+            } else {
+                1
+            };
+            let end = (i + char_len).min(norm.len());
+            let char_slice = &norm[i..end];
+            if let Some((p, _, _, _)) = self.find_piece(char_slice) {
+                symbols.push(p);
+            } else {
+                for &byte_val in char_slice {
+                    let b_id = self.byte_tokens[byte_val as usize];
+                    symbols.push(self.piece_of(b_id));
+                }
+            }
+            i = end;
+        }
+
+        // BPE iterative merge: repeatedly merge the adjacent pair with the highest unigram score.
+        while symbols.len() >= 2 {
+            let mut best_pair_idx = None;
+            let mut best_score = -1e30f32;
+            let mut best_merged_piece = None;
+
+            let mut j = 0;
+            while j + 1 < symbols.len() {
+                let a = symbols[j];
+                let b = symbols[j + 1];
+                let mut merged_buf = [0u8; 128];
+                if a.len() + b.len() <= merged_buf.len() {
+                    merged_buf[..a.len()].copy_from_slice(a);
+                    merged_buf[a.len()..a.len() + b.len()].copy_from_slice(b);
+                    let merged_slice = &merged_buf[..a.len() + b.len()];
+                    if let Some((merged_piece, _, score, ptype)) = self.find_piece(merged_slice) {
+                        if ptype != 3 && score > best_score {
+                            best_score = score;
+                            best_pair_idx = Some(j);
+                            best_merged_piece = Some(merged_piece);
+                        }
+                    }
+                }
+                j += 1;
+            }
+
+            if let (Some(idx), Some(merged_piece)) = (best_pair_idx, best_merged_piece) {
+                symbols[idx] = merged_piece;
+                symbols.remove(idx + 1);
+            } else {
+                break;
+            }
+        }
+
+        if symbols.len() > out.len() {
+            return Err(Error::SectionRange);
+        }
+        for (idx, &sym) in symbols.iter().enumerate() {
+            let id = self.find_piece(sym).map(|p| p.1).unwrap_or(3);
+            out[idx] = id;
+        }
+        Ok(symbols.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1346,5 +1642,85 @@ mod tests {
         execute_section2_embedding_lookup(sec2_bytes, sec4_weights, 0, &mut out_0)
             .expect("lookup token 0");
         assert_eq!(out_oob, out_0);
+    }
+
+    #[test]
+    fn test_package_backed_sentencepiece_bpe_tokenizer() {
+        extern crate std as rust_std;
+        let model_path = "models/downloads/embeddinggemma2-text/embeddinggemma-2-text-270m.litertlm";
+        let file_bytes = match rust_std::fs::read(model_path) {
+            Ok(b) => b,
+            Err(_) => return, // optional on systems where model not downloaded
+        };
+
+        let mut sec1_range = (0usize, 0usize);
+        parse_sections(&file_bytes[..65536.min(file_bytes.len())], file_bytes.len() as u64, |idx, sec| {
+            if idx == 1 {
+                sec1_range = (sec.begin as usize, sec.end as usize);
+            }
+            Ok(())
+        }).expect("parse sections");
+
+        assert!(sec1_range.1 > sec1_range.0);
+        let sec1_bytes = &file_bytes[sec1_range.0..sec1_range.1];
+        let tokenizer = LiteRtLmTokenizer::parse(sec1_bytes).expect("parse tokenizer");
+        assert_eq!(tokenizer.vocab_size(), 262_144);
+
+        // Verify exact token IDs requested by Section 11 of the specification:
+        let mut tokens = [0u32; 64];
+
+        // 1. "hello" -> [23391]
+        let n = tokenizer.encode("hello", &mut tokens).expect("encode hello");
+        assert_eq!(&tokens[..n], &[23391]);
+
+        // 2. "InterOS" -> [3845, 3354]
+        let n = tokenizer.encode("InterOS", &mut tokens).expect("encode InterOS");
+        assert_eq!(&tokens[..n], &[3845, 3354]);
+
+        // 3. "local AI" -> [6047, 12498]
+        let n = tokenizer.encode("local AI", &mut tokens).expect("encode local AI");
+        assert_eq!(&tokens[..n], &[6047, 12498]);
+
+        // 4. "semantic search" -> [108414, 3927]
+        let n = tokenizer.encode("semantic search", &mut tokens).expect("encode semantic search");
+        assert_eq!(&tokens[..n], &[108414, 3927]);
+
+        // 5. "rent receipt" -> [1344, 19971]
+        let n = tokenizer.encode("rent receipt", &mut tokens).expect("encode rent receipt");
+        assert_eq!(&tokens[..n], &[1344, 19971]);
+
+        // 6. "April housing payment" -> [30651, 11132, 7548]
+        let n = tokenizer.encode("April housing payment", &mut tokens).expect("encode April housing payment");
+        assert_eq!(&tokens[..n], &[30651, 11132, 7548]);
+
+        // 7. "capability security" -> [230811, 5052]
+        let n = tokenizer.encode("capability security", &mut tokens).expect("encode capability security");
+        assert_eq!(&tokens[..n], &[230811, 5052]);
+
+        // 8. "offline smartphone" -> [109076, 15711]
+        let n = tokenizer.encode("offline smartphone", &mut tokens).expect("encode offline smartphone");
+        assert_eq!(&tokens[..n], &[109076, 15711]);
+
+        // 9. "private local assistant" -> [7128, 2263, 16326]
+        let n = tokenizer.encode("private local assistant", &mut tokens).expect("encode private local assistant");
+        assert_eq!(&tokens[..n], &[7128, 2263, 16326]);
+
+        // Edge cases:
+        // Empty string
+        let n = tokenizer.encode("", &mut tokens).expect("encode empty");
+        assert_eq!(n, 0);
+
+        // Whitespace
+        let n = tokenizer.encode("   ", &mut tokens).expect("encode whitespace");
+        assert_eq!(&tokens[..n], &[242]);
+
+        // Punctuation
+        let n = tokenizer.encode("hello, world!", &mut tokens).expect("encode punctuation");
+        assert_eq!(&tokens[..n], &[23391, 235284, 108, 235341]);
+
+        // Decode round-trip verification
+        assert_eq!(tokenizer.piece_of(23391), b"hello");
+        assert_eq!(tokenizer.piece_of(1344), b"rent");
+        assert_eq!(tokenizer.piece_of(19971), b"\xe2\x96\x81receipt");
     }
 }

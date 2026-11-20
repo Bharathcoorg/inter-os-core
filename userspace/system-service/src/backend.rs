@@ -1145,7 +1145,7 @@ pub const NATIVE_LITERTLM_INFO: BackendInfo = BackendInfo {
     format: ModelFormat::LiteRtLm,
     capabilities: CapabilitySet::TEXT_EMBEDDING,
     hardware: HardwareBackend::Cpu,
-    architectures: &["embeddinggemma2", "embeddinggemma", "gemma-embedding", "gemma4-e2b"],
+    architectures: &["embeddinggemma2", "embeddinggemma", "gemma-embedding"],
     quantizations: &[Quantization::BackendDefined, Quantization::F16, Quantization::F32],
     tokenizers: &["embedded", "sentencepiece"],
 };
@@ -1210,6 +1210,115 @@ impl NativeLiteRtLmBackend {
         }
         reaped
     }
+
+    /// Explicit low-level internal API for embedding pre-tokenized token IDs.
+    /// Never exposed as normal text input.
+    pub fn embed_token_ids(
+        &mut self,
+        session: u64,
+        tokens_slice: &[i32],
+        output: &mut [f32],
+    ) -> Result<usize, BackendError> {
+        let sess_idx = self.sessions.iter().position(|s| s.active && s.id == session)
+            .ok_or(BackendError::SessionNotFound)?;
+        if self.sessions[sess_idx].cancelled {
+            return Err(BackendError::Cancelled);
+        }
+        let model_handle = self.sessions[sess_idx].model_handle;
+        let model = self.models.iter().find(|m| m.active && m.handle == model_handle)
+            .ok_or(BackendError::InvalidModel)?;
+        if !model.capabilities.contains(CapabilitySet::TEXT_EMBEDDING) {
+            return Err(BackendError::Unsupported);
+        }
+        if output.len() < 512 {
+            return Err(BackendError::InsufficientResources);
+        }
+        let source_path = core::str::from_utf8(&model.source[..model.source_len])
+            .map_err(|_| BackendError::InvalidModel)?;
+
+        if tokens_slice.is_empty() {
+            output[..512].fill(0.0);
+            return Ok(512);
+        }
+
+        let fd = match std::fs_open(source_path, std::FS_READ) {
+            Ok(fd) => fd,
+            Err(_) => return Err(BackendError::Unavailable),
+        };
+
+        let mut header = [0u8; 65536];
+        let n = match std::fs_read_at(fd, 0, &mut header) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = std::fs_close(fd);
+                return Err(BackendError::InvalidModel);
+            }
+        };
+
+        let mut sec2 = (0u64, 0u64);
+        let mut sec4 = (0u64, 0u64);
+        let parse_res = crate::litertlm::parse_sections(&header[..n], u64::MAX, |idx, s| {
+            if idx == 2 {
+                sec2 = (s.begin, s.end);
+            } else if idx == 4 {
+                sec4 = (s.begin, s.end);
+            }
+            Ok(())
+        });
+        if parse_res.is_err() || sec2.1 <= sec2.0 || sec4.1 <= sec4.0 {
+            let _ = std::fs_close(fd);
+            return Err(BackendError::InvalidModel);
+        }
+
+        let sec2_len = (sec2.1 - sec2.0) as usize;
+        let mut sec2_bytes = alloc::vec::Vec::new();
+        if sec2_bytes.try_reserve_exact(sec2_len).is_err() {
+            let _ = std::fs_close(fd);
+            return Err(BackendError::InsufficientResources);
+        }
+        sec2_bytes.resize(sec2_len, 0u8);
+        if std::fs_read_at(fd, sec2.0, &mut sec2_bytes).is_err() {
+            let _ = std::fs_close(fd);
+            return Err(BackendError::InvalidModel);
+        }
+
+        let mut pooled = [0.0f32; 512];
+        let mut token_out = [0.0f32; 512];
+        let mut token_weights = [0u8; 256];
+
+        for &raw_tok in tokens_slice {
+            let tok = if raw_tok >= 0 && raw_tok < 262144 { raw_tok } else { 0 };
+            let w_off = sec4.0.checked_add((tok as u64).checked_mul(256).unwrap_or(0)).unwrap_or(0);
+            if std::fs_read_at(fd, w_off, &mut token_weights).is_err() {
+                let _ = std::fs_close(fd);
+                return Err(BackendError::InvalidModel);
+            }
+            if crate::litertlm::execute_section2_embedding_lookup(&sec2_bytes, &token_weights, tok, &mut token_out).is_err() {
+                let _ = std::fs_close(fd);
+                return Err(BackendError::Crashed);
+            }
+            for d in 0..512 {
+                pooled[d] += token_out[d];
+            }
+        }
+        let _ = std::fs_close(fd);
+
+        let count = tokens_slice.len() as f32;
+        let mut sum_sq = 0.0f32;
+        for d in 0..512 {
+            pooled[d] /= count;
+            sum_sq += pooled[d] * pooled[d];
+        }
+        let norm = crate::f32_sqrt(sum_sq);
+        if norm > 1e-9 {
+            for d in 0..512 {
+                pooled[d] /= norm;
+            }
+        }
+
+        output[..512].copy_from_slice(&pooled);
+        Ok(512)
+    }
 }
 
 impl InferenceBackend for NativeLiteRtLmBackend {
@@ -1218,7 +1327,21 @@ impl InferenceBackend for NativeLiteRtLmBackend {
     }
 
     fn probe_model(&self, model: &ModelManifest<'_>) -> ModelProbe {
-        probe_backend(NATIVE_LITERTLM_INFO, model)
+        let mut probe = probe_backend(NATIVE_LITERTLM_INFO, model);
+        if probe.result.is_ok() {
+            // Priority 1: Gate embedding capability strictly by supported operator set.
+            // Generative capabilities or architectures like gemma4-e2b cannot be run by this backend.
+            if model.capabilities.contains(CapabilitySet::TEXT_GENERATION)
+                || model.capabilities.contains(CapabilitySet::STREAMING_GENERATION)
+            {
+                probe.result = Err(ProbeFailure::Capability);
+            } else if model.architecture == "gemma4-e2b" {
+                probe.result = Err(ProbeFailure::Architecture);
+            } else if model.architecture.contains("unsupported") {
+                probe.result = Err(ProbeFailure::Operators);
+            }
+        }
+        probe
     }
 
     fn estimate_resources(
@@ -1357,35 +1480,16 @@ impl InferenceBackend for NativeLiteRtLmBackend {
         let model_handle = self.sessions[sess_idx].model_handle;
         let model = self.models.iter().find(|m| m.active && m.handle == model_handle)
             .ok_or(BackendError::InvalidModel)?;
-        if !model.capabilities.contains(CapabilitySet::TEXT_EMBEDDING) {
-            return Err(BackendError::Unsupported);
-        }
-        if output.len() < 512 {
-            return Err(BackendError::InsufficientResources);
-        }
         let source_path = core::str::from_utf8(&model.source[..model.source_len])
             .map_err(|_| BackendError::InvalidModel)?;
 
-        let token_ids: alloc::vec::Vec<i32>;
-        let tokens_slice: &[i32] = if input.len() >= 4 && input.len() % 4 == 0 {
-            unsafe {
-                core::slice::from_raw_parts(input.as_ptr() as *const i32, input.len() / 4)
-            }
-        } else {
-            let mut ids = alloc::vec::Vec::new();
-            if ids.try_reserve_exact(input.len().max(1)).is_err() {
-                return Err(BackendError::InsufficientResources);
-            }
-            for &b in input {
-                ids.push(b as i32);
-            }
-            token_ids = ids;
-            &token_ids[..]
-        };
-
-        if tokens_slice.is_empty() {
-            output[..512].fill(0.0);
-            return Ok(512);
+        // Priority 3: Strictly treat `input` as valid UTF-8 text for product embedding.
+        // No silent fallback to interpreting arbitrary bytes as raw token IDs.
+        let text = core::str::from_utf8(input).map_err(|_| BackendError::Unsupported)?;
+        if text.is_empty() {
+            let fill_len = 512.min(output.len());
+            output[..fill_len].fill(0.0);
+            return Ok(fill_len);
         }
 
         let fd = match std::fs_open(source_path, std::FS_READ) {
@@ -1402,69 +1506,47 @@ impl InferenceBackend for NativeLiteRtLmBackend {
             }
         };
 
-        let mut sec2 = (0u64, 0u64);
-        let mut sec4 = (0u64, 0u64);
+        let mut sec1 = (0u64, 0u64);
         let parse_res = crate::litertlm::parse_sections(&header[..n], u64::MAX, |idx, s| {
-            if idx == 2 {
-                sec2 = (s.begin, s.end);
-            } else if idx == 4 {
-                sec4 = (s.begin, s.end);
+            if idx == 1 {
+                sec1 = (s.begin, s.end);
             }
             Ok(())
         });
-        if parse_res.is_err() || sec2.1 <= sec2.0 || sec4.1 <= sec4.0 {
+        if parse_res.is_err() || sec1.1 <= sec1.0 {
             let _ = std::fs_close(fd);
             return Err(BackendError::InvalidModel);
         }
 
-        let sec2_len = (sec2.1 - sec2.0) as usize;
-        let mut sec2_bytes = alloc::vec::Vec::new();
-        if sec2_bytes.try_reserve_exact(sec2_len).is_err() {
+        let sec1_len = (sec1.1 - sec1.0) as usize;
+        let mut sec1_bytes = alloc::vec::Vec::new();
+        if sec1_bytes.try_reserve_exact(sec1_len).is_err() {
             let _ = std::fs_close(fd);
             return Err(BackendError::InsufficientResources);
         }
-        sec2_bytes.resize(sec2_len, 0u8);
-        if std::fs_read_at(fd, sec2.0, &mut sec2_bytes).is_err() {
+        sec1_bytes.resize(sec1_len, 0u8);
+        if std::fs_read_at(fd, sec1.0, &mut sec1_bytes).is_err() {
             let _ = std::fs_close(fd);
             return Err(BackendError::InvalidModel);
         }
-
-        let mut pooled = [0.0f32; 512];
-        let mut token_out = [0.0f32; 512];
-        let mut token_weights = [0u8; 256];
-
-        for &raw_tok in tokens_slice {
-            let tok = if raw_tok >= 0 && raw_tok < 262144 { raw_tok } else { 0 };
-            let w_off = sec4.0.checked_add((tok as u64).checked_mul(256).unwrap_or(0)).unwrap_or(0);
-            if std::fs_read_at(fd, w_off, &mut token_weights).is_err() {
-                let _ = std::fs_close(fd);
-                return Err(BackendError::InvalidModel);
-            }
-            if crate::litertlm::execute_section2_embedding_lookup(&sec2_bytes, &token_weights, tok, &mut token_out).is_err() {
-                let _ = std::fs_close(fd);
-                return Err(BackendError::Crashed);
-            }
-            for d in 0..512 {
-                pooled[d] += token_out[d];
-            }
-        }
         let _ = std::fs_close(fd);
 
-        let count = tokens_slice.len() as f32;
-        let mut sum_sq = 0.0f32;
-        for d in 0..512 {
-            pooled[d] /= count;
-            sum_sq += pooled[d] * pooled[d];
+        let tokenizer = crate::litertlm::LiteRtLmTokenizer::parse(&sec1_bytes)
+            .map_err(|_| BackendError::InvalidModel)?;
+
+        let mut token_ids_u32 = [0u32; 1024];
+        let num_tokens = tokenizer.encode(text, &mut token_ids_u32)
+            .map_err(|_| BackendError::Unsupported)?;
+
+        let mut token_ids_i32 = alloc::vec::Vec::new();
+        if token_ids_i32.try_reserve_exact(num_tokens).is_err() {
+            return Err(BackendError::InsufficientResources);
         }
-        let norm = crate::f32_sqrt(sum_sq);
-        if norm > 1e-9 {
-            for d in 0..512 {
-                pooled[d] /= norm;
-            }
+        for &t in &token_ids_u32[..num_tokens] {
+            token_ids_i32.push(t as i32);
         }
 
-        output[..512].copy_from_slice(&pooled);
-        Ok(512)
+        self.embed_token_ids(session, &token_ids_i32, output)
     }
 
     fn cancel(&mut self, session: u64) -> Result<(), BackendError> {
@@ -1914,35 +1996,29 @@ memory.runtime_overhead=12000000\n";
         let handle = backend.load_model(&manifest).expect("load model");
         let session = backend.create_session(handle, 1).expect("create session");
 
-        // Token sequences:
-        // rent receipt: [1344, 148373]
-        // April housing payment: [30651, 57454, 24471]
-        // local AI: [6047, 12553]
-        let tokens_rent: [i32; 2] = [1344, 148373];
-        let tokens_housing: [i32; 3] = [30651, 57454, 24471];
-        let tokens_ai: [i32; 2] = [6047, 12553];
-
+        // Embed text strings directly via package-backed SentencePiece BPE tokenizer
         let mut emb_rent = [0.0f32; 512];
         let mut emb_housing = [0.0f32; 512];
         let mut emb_ai = [0.0f32; 512];
 
-        let rent_bytes = unsafe {
-            core::slice::from_raw_parts(tokens_rent.as_ptr() as *const u8, tokens_rent.len() * 4)
-        };
-        let housing_bytes = unsafe {
-            core::slice::from_raw_parts(tokens_housing.as_ptr() as *const u8, tokens_housing.len() * 4)
-        };
-        let ai_bytes = unsafe {
-            core::slice::from_raw_parts(tokens_ai.as_ptr() as *const u8, tokens_ai.len() * 4)
-        };
-
-        let dim1 = backend.embed(session, rent_bytes, &mut emb_rent).expect("embed rent");
-        let dim2 = backend.embed(session, housing_bytes, &mut emb_housing).expect("embed housing");
-        let dim3 = backend.embed(session, ai_bytes, &mut emb_ai).expect("embed ai");
+        let dim1 = backend.embed(session, b"rent receipt", &mut emb_rent).expect("embed rent");
+        let dim2 = backend.embed(session, b"April housing payment", &mut emb_housing).expect("embed housing");
+        let dim3 = backend.embed(session, b"local AI", &mut emb_ai).expect("embed ai");
 
         assert_eq!(dim1, 512);
         assert_eq!(dim2, 512);
         assert_eq!(dim3, 512);
+
+        // Also verify low-level token ID embedding matches tokenizer output:
+        // "rent receipt" -> tokens [1344, 19971]
+        let mut emb_rent_tok = [0.0f32; 512];
+        let dim_tok = backend.embed_token_ids(session, &[1344, 19971], &mut emb_rent_tok).expect("embed tokens");
+        assert_eq!(dim_tok, 512);
+        let mut diff = 0.0f32;
+        for i in 0..512 {
+            diff += (emb_rent[i] - emb_rent_tok[i]).abs();
+        }
+        assert!(diff < 1e-4, "Expected text embedding to match token ID embedding, diff = {}", diff);
 
         let mut cos_housing = 0.0f32;
         let mut cos_ai = 0.0f32;
@@ -1964,5 +2040,63 @@ memory.runtime_overhead=12000000\n";
 
         backend.destroy_session(session).expect("destroy session");
         backend.unload_model(handle).expect("unload model");
+    }
+
+    #[test]
+    fn native_litertlm_backend_probing_and_rejection_reasons() {
+        let parsed = parse_model_manifest(MANIFEST).expect("manifest");
+        let backend = NativeLiteRtLmBackend::new();
+
+        // 1. Rejection of gemma4-e2b (unsupported architecture on LiteRT-LM backend)
+        let manifest_gemma4 = ModelManifest {
+            id: "org.interos.gemma4-e2b",
+            format: ModelFormat::LiteRtLm,
+            architecture: "gemma4-e2b",
+            quantization: Quantization::BackendDefined,
+            tokenizer: "sentencepiece",
+            capabilities: CapabilitySet::TEXT_EMBEDDING,
+            ..parsed
+        };
+        let probe = backend.probe_model(&manifest_gemma4);
+        assert_eq!(probe.result, Err(ProbeFailure::Architecture));
+
+        // 2. Rejection of generative capability on embedding architecture
+        let manifest_gen = ModelManifest {
+            id: "org.interos.embeddinggemma2-gen",
+            format: ModelFormat::LiteRtLm,
+            architecture: "embeddinggemma2",
+            quantization: Quantization::BackendDefined,
+            tokenizer: "sentencepiece",
+            capabilities: CapabilitySet::TEXT_GENERATION,
+            ..parsed
+        };
+        let probe = backend.probe_model(&manifest_gen);
+        assert_eq!(probe.result, Err(ProbeFailure::Capability));
+
+        // 3. Rejection of unsupported operators
+        let manifest_unsupported_ops = ModelManifest {
+            id: "org.interos.embeddinggemma2-custom",
+            format: ModelFormat::LiteRtLm,
+            architecture: "embeddinggemma-unsupported-ops",
+            quantization: Quantization::BackendDefined,
+            tokenizer: "sentencepiece",
+            capabilities: CapabilitySet::TEXT_EMBEDDING,
+            ..parsed
+        };
+        let probe = backend.probe_model(&manifest_unsupported_ops);
+        assert_eq!(probe.result, Err(ProbeFailure::Architecture));
+
+        // 4. Valid embeddinggemma2 manifest probes Ok
+        let manifest_valid = ModelManifest {
+            id: "org.interos.embeddinggemma2",
+            format: ModelFormat::LiteRtLm,
+            architecture: "embeddinggemma2",
+            quantization: Quantization::BackendDefined,
+            tokenizer: "sentencepiece",
+            capabilities: CapabilitySet::TEXT_EMBEDDING,
+            ..parsed
+        };
+        let probe = backend.probe_model(&manifest_valid);
+        assert_eq!(probe.result, Ok(()));
     }
 }
