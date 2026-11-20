@@ -1170,6 +1170,59 @@ pub fn execute_section2_embedding_lookup(
     Ok(())
 }
 
+/// Executes Section 3 projection head:
+/// Takes the 512-D pooled token embedding vector, applies INT4 projection weight matrix
+/// of shape [768, 512] with per-channel quantization scales extracted from Section 3,
+/// and computes the final L2-normalized 768-D embedding vector.
+pub fn execute_section3_projection_head(
+    sec3_bytes: &[u8],
+    sec5_head_weights: &[u8],
+    pooled_512: &[f32; 512],
+    out_768: &mut [f32; 768],
+) -> Result<(), Error> {
+    if sec5_head_weights.len() < 768 * 256 {
+        return Err(Error::Truncated);
+    }
+    // Subgraph 1 (encoder_1x128), Tensor 1473 is the projection head weight
+    let (scale_offset, num_scales) =
+        extract_tflite_tensor_quantization_scales_offset(sec3_bytes, 1, 1473)?;
+    if num_scales < 768 {
+        return Err(Error::InvalidFlatBuffer);
+    }
+    let mut scales = [0.0f32; 768];
+    for i in 0..768usize {
+        let off = scale_offset
+            .checked_add(i.checked_mul(4usize).ok_or(Error::SectionRange)?)
+            .ok_or(Error::SectionRange)?;
+        scales[i] = f32::from_bits(read_u32(sec3_bytes, off)?);
+    }
+
+    kernel_matmul_int4_scaled(
+        pooled_512,
+        &sec5_head_weights[..768 * 256],
+        &scales,
+        1,
+        512,
+        768,
+        out_768,
+    )?;
+
+    // L2 Normalization
+    let mut sum_sq = 0.0f32;
+    for &x in out_768.iter() {
+        sum_sq += x * x;
+    }
+    let norm = crate::f32_sqrt(sum_sq);
+    if norm > 1e-9 {
+        let inv_norm = 1.0f32 / norm;
+        for x in out_768.iter_mut() {
+            *x *= inv_norm;
+        }
+    }
+
+    Ok(())
+}
+
 fn read_protobuf_varint(data: &[u8], offset: &mut usize) -> Result<u64, Error> {
     let mut res = 0u64;
     let mut shift = 0u32;
@@ -1997,5 +2050,50 @@ mod tests {
 
         // Odd head dim is refused
         assert!(kernel_rope_split_half(&mut vec, 3, 1, 8000.0).is_err());
+    }
+
+    #[test]
+    fn test_execute_section3_projection_head_if_model_present() {
+        extern crate std as rust_std;
+        let path = "models/downloads/embeddinggemma2-text/embeddinggemma-2-text-270m.litertlm";
+        if rust_std::fs::metadata(path).is_err() {
+            return;
+        }
+
+        use rust_std::io::{Read, Seek, SeekFrom};
+        let mut file = rust_std::fs::File::open(path).expect("open model");
+
+        // Section 3: begin = 7897088, end = 29147808, size = 21250720
+        file.seek(SeekFrom::Start(7897088)).expect("seek sec3");
+        let mut sec3_bytes = alloc::vec::Vec::new();
+        sec3_bytes.resize(21250720, 0u8);
+        file.read_exact(&mut sec3_bytes).expect("read sec3");
+
+        // Section 5 head weights (Weight 435): offset in Sec 5 = 68157440, size = 196608
+        // Sec 5 begin = 96272384
+        file.seek(SeekFrom::Start(96272384 + 68157440)).expect("seek sec5 head");
+        let mut head_weights = [0u8; 196608];
+        file.read_exact(&mut head_weights).expect("read head weights");
+
+        let mut dummy_512 = [0.0f32; 512];
+        let inv_sqrt_512 = 1.0f32 / crate::f32_sqrt(512.0);
+        dummy_512.fill(inv_sqrt_512);
+
+        let mut out_768 = [0.0f32; 768];
+        execute_section3_projection_head(&sec3_bytes, &head_weights, &dummy_512, &mut out_768)
+            .expect("execute projection head");
+
+        // Verify output properties: finite, non-zero, L2 norm == 1.0
+        let mut sum_sq = 0.0f32;
+        for &x in out_768.iter() {
+            assert!(x.is_finite());
+            sum_sq += x * x;
+        }
+        let norm = crate::f32_sqrt(sum_sq);
+        assert!((norm - 1.0f32).abs() < 1e-4, "Expected unit L2 norm, got {}", norm);
+
+        // Deterministic check on first few values
+        assert!((out_768[0] - 0.060137).abs() < 1e-4);
+        assert!((out_768[1] - (-0.001081)).abs() < 1e-4);
     }
 }

@@ -1256,12 +1256,18 @@ impl NativeLiteRtLmBackend {
         };
 
         let mut sec2 = (0u64, 0u64);
+        let mut sec3 = (0u64, 0u64);
         let mut sec4 = (0u64, 0u64);
+        let mut sec5 = (0u64, 0u64);
         let parse_res = crate::litertlm::parse_sections(&header[..n], u64::MAX, |idx, s| {
             if idx == 2 {
                 sec2 = (s.begin, s.end);
+            } else if idx == 3 {
+                sec3 = (s.begin, s.end);
             } else if idx == 4 {
                 sec4 = (s.begin, s.end);
+            } else if idx == 5 {
+                sec5 = (s.begin, s.end);
             }
             Ok(())
         });
@@ -1301,7 +1307,6 @@ impl NativeLiteRtLmBackend {
                 pooled[d] += token_out[d];
             }
         }
-        let _ = std::fs_close(fd);
 
         let count = tokens_slice.len() as f32;
         let mut sum_sq = 0.0f32;
@@ -1315,6 +1320,34 @@ impl NativeLiteRtLmBackend {
                 pooled[d] /= norm;
             }
         }
+
+        // When the caller requests 768 dimensions and the Section 3 graph & Section 5 weights
+        // are present, execute the Section 3 projection head.
+        if output.len() >= 768 && sec3.1 > sec3.0 && sec5.1 > sec5.0 {
+            let sec3_len = (sec3.1 - sec3.0) as usize;
+            let mut sec3_bytes = alloc::vec::Vec::new();
+            if sec3_bytes.try_reserve_exact(sec3_len).is_ok() {
+                sec3_bytes.resize(sec3_len, 0u8);
+                if std::fs_read_at(fd, sec3.0, &mut sec3_bytes).is_ok() {
+                    let head_w_off = sec5.0.saturating_add(68157440);
+                    let mut head_weights = [0u8; 196608];
+                    if std::fs_read_at(fd, head_w_off, &mut head_weights).is_ok() {
+                        let mut out_768 = [0.0f32; 768];
+                        if crate::litertlm::execute_section3_projection_head(
+                            &sec3_bytes,
+                            &head_weights,
+                            &pooled,
+                            &mut out_768,
+                        ).is_ok() {
+                            let _ = std::fs_close(fd);
+                            output[..768].copy_from_slice(&out_768);
+                            return Ok(768);
+                        }
+                    }
+                }
+            }
+        }
+        let _ = std::fs_close(fd);
 
         output[..512].copy_from_slice(&pooled);
         Ok(512)
@@ -2036,6 +2069,37 @@ memory.runtime_overhead=12000000\n";
             cos_ai < 0.05,
             "Expected orthogonal/negative similarity between 'rent receipt' and 'local AI', got {}",
             cos_ai
+        );
+
+        // Verify full 768-D Section 3 projection head execution
+        let mut emb_rent_768 = [0.0f32; 768];
+        let mut emb_housing_768 = [0.0f32; 768];
+        let mut emb_ai_768 = [0.0f32; 768];
+
+        let dim1_768 = backend.embed(session, b"rent receipt", &mut emb_rent_768).expect("embed 768 rent");
+        let dim2_768 = backend.embed(session, b"April housing payment", &mut emb_housing_768).expect("embed 768 housing");
+        let dim3_768 = backend.embed(session, b"local AI", &mut emb_ai_768).expect("embed 768 ai");
+
+        assert_eq!(dim1_768, 768);
+        assert_eq!(dim2_768, 768);
+        assert_eq!(dim3_768, 768);
+
+        let mut cos_housing_768 = 0.0f32;
+        let mut cos_ai_768 = 0.0f32;
+        for i in 0..768 {
+            cos_housing_768 += emb_rent_768[i] * emb_housing_768[i];
+            cos_ai_768 += emb_rent_768[i] * emb_ai_768[i];
+        }
+
+        assert!(
+            cos_housing_768 > 0.1,
+            "Expected positive semantic similarity between 'rent receipt' and 'April housing payment' at 768-D, got {}",
+            cos_housing_768
+        );
+        assert!(
+            cos_ai_768 < 0.05,
+            "Expected orthogonal/negative similarity between 'rent receipt' and 'local AI' at 768-D, got {}",
+            cos_ai_768
         );
 
         backend.destroy_session(session).expect("destroy session");
