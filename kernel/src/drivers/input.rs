@@ -394,6 +394,7 @@ fn apply_home_to_surfaces(
     // hidden after, and a frame in between would show the application on
     // top of the shell for one flip.
     kms.set_surfaces_visibility_for_task(shell, true);
+    kms.raise_surfaces_for_task(shell);
     let owners: alloc::vec::Vec<u64> = kms
         .surfaces
         .iter()
@@ -402,6 +403,15 @@ fn apply_home_to_surfaces(
         .collect();
     for owner in owners {
         kms.set_surfaces_visibility_for_task(owner, false);
+    }
+    if let Some(top_shell) = kms
+        .surfaces
+        .iter()
+        .filter(|s| s.owner_task == shell && s.visible)
+        .max_by_key(|s| (s.has_frame, s.z_order))
+        .map(|s| s.id)
+    {
+        kms.focused_surface = Some(top_shell);
     }
 }
 
@@ -488,8 +498,11 @@ fn dispatch_in_task_context(event: InputEvent) {
             Some(false) => {
                 if !go_home() {
                     defer_input(event);
+                    return;
                 }
-                return;
+                // Shell is brought forward and focused; proceed to dispatch the navigation
+                // event to the shell so Launcher dismisses its active child, switches to HomeScreen,
+                // and renders its canvas.
             }
             // The shell already owns the screen and handles its own home
             // gesture, so the event is routed to it like any other.
@@ -696,6 +709,7 @@ mod tests {
         let app_visible = kms.surfaces.iter().find(|s| s.id == app).map(|s| s.visible);
         assert_eq!(shell_visible, Some(true), "the shell has to come back");
         assert_eq!(app_visible, Some(false), "the application has to go behind");
+        assert_eq!(kms.focused_surface, Some(shell), "the shell surface must be focused");
     }
 
     #[test]
