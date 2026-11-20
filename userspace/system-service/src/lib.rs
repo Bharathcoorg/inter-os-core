@@ -631,21 +631,45 @@ pub fn run_agent() -> ! {
     let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
 
     let mut state = std::companion::CompanionState::new();
-    let mut tool_registry = std::appmcp::DynamicToolRegistry::new();
-    tool_registry.populate_canonical();
+    let mut tool_registry = std::appmcp::DynamicToolRegistry::canonical();
 
-    let enc_key = [0x5Au8; 32];
+    // Authenticated user resolution and per-user derived cryptographic key
+    let uid = {
+        let u = std::user_get_current();
+        if u == 0 { 1000 } else { u }
+    };
+    let enc_key = std::companion::derive_companion_user_key(uid, &std::companion::COMPANION_KEY_SALT);
+    let mut path_buf = [0u8; 64];
+    let user_path = std::companion::companion_user_storage_path(uid, &mut path_buf)
+        .unwrap_or(std::companion::PATH_COMPANION_MEMORY);
+
     let mut file_buf = [0u8; 4096];
 
-    if let Ok(handle) = std::fs_open(std::companion::PATH_COMPANION_MEMORY, std::FS_READ) {
+    let mut loaded = false;
+    if let Ok(handle) = std::fs_open(user_path, std::FS_READ) {
         if let Ok(bytes) = std::fs_read(handle, &mut file_buf) {
             if bytes > 0 {
                 let _ = state.deserialize_encrypted(&enc_key, &file_buf[..bytes]);
-                let _ = std::log("[agentd] companion memory loaded and decrypted.");
+                let _ = std::log("[agentd] companion user state loaded and decrypted.");
+                loaded = true;
             }
         }
         let _ = std::fs_close(handle);
     }
+
+    if !loaded {
+        if let Ok(handle) = std::fs_open(std::companion::PATH_COMPANION_MEMORY, std::FS_READ) {
+            if let Ok(bytes) = std::fs_read(handle, &mut file_buf) {
+                if bytes > 0 {
+                    let _ = state.deserialize_encrypted(&enc_key, &file_buf[..bytes]);
+                    let _ = std::log("[agentd] legacy companion memory loaded and decrypted.");
+                }
+            }
+            let _ = std::fs_close(handle);
+        }
+    }
+
+    let mut nonce_gen = std::companion::NonceGenerator::new(uid, state.generation);
 
     let mut rx_buf = [0u8; 1024];
     let mut tx_buf = [0u8; 1024];
@@ -687,15 +711,32 @@ pub fn run_agent() -> ! {
                     if !state.is_locked
                         && !state.is_private_session
                         && state.learning_mode != std::companion::LearningMode::Disabled
+                        && state.learning_mode != std::companion::LearningMode::Off
                     {
-                        let nonce = [0x22u8; 12];
+                        let nonce = nonce_gen.next_nonce();
                         if let Ok(enc_len) = state.serialize_encrypted(&enc_key, &nonce, &mut file_buf) {
-                            if let Ok(handle) = std::fs_open(
-                                std::companion::PATH_COMPANION_MEMORY,
-                                std::FS_WRITE,
-                            ) {
-                                let _ = std::fs_write(handle, &file_buf[..enc_len]);
-                                let _ = std::fs_close(handle);
+                            if enc_len <= std::companion::COMPANION_STORAGE_BUDGET_MAX as usize {
+                                let mut tmp_buf = [0u8; 72];
+                                let mut target_buf = [0u8; 64];
+                                let target_path = std::companion::companion_user_storage_path(uid, &mut target_buf)
+                                    .unwrap_or(std::companion::PATH_COMPANION_MEMORY);
+
+                                let t_len = target_path.len().min(68);
+                                tmp_buf[..t_len].copy_from_slice(&target_path.as_bytes()[..t_len]);
+                                tmp_buf[t_len..t_len + 4].copy_from_slice(b".tmp");
+                                if let Ok(tmp_path) = core::str::from_utf8(&tmp_buf[..t_len + 4]) {
+                                    if let Ok(handle) = std::fs_open(tmp_path, std::FS_WRITE) {
+                                        let _ = std::fs_write(handle, &file_buf[..enc_len]);
+                                        let _ = std::fs_fsync(handle);
+                                        let _ = std::fs_close(handle);
+                                    }
+                                    if let Ok(handle) = std::fs_open(target_path, std::FS_WRITE) {
+                                        let _ = std::fs_write(handle, &file_buf[..enc_len]);
+                                        let _ = std::fs_fsync(handle);
+                                        let _ = std::fs_close(handle);
+                                    }
+                                    let _ = std::fs_unlink(tmp_path);
+                                }
                             }
                         }
                     }
@@ -728,6 +769,9 @@ fn handle_agent_ipc(
                 1 => {
                     let locked = payload.get(1).copied().unwrap_or(0) != 0;
                     state.set_locked(locked);
+                    if locked {
+                        tool_registry.expire_session_grants();
+                    }
                     emit_agent_ack(sender_task_id, msg_type, 0, b"LOCK_ACK", tx_buf);
                 }
                 2 => {
@@ -743,6 +787,14 @@ fn handle_agent_ipc(
                 4 => {
                     state.clear_memory();
                     let _ = std::fs_unlink(std::companion::PATH_COMPANION_MEMORY);
+                    let mut path_buf = [0u8; 64];
+                    let uid = {
+                        let u = std::user_get_current();
+                        if u == 0 { 1000 } else { u }
+                    };
+                    if let Ok(p) = std::companion::companion_user_storage_path(uid, &mut path_buf) {
+                        let _ = std::fs_unlink(p);
+                    }
                     emit_agent_ack(sender_task_id, msg_type, 0, b"CLEAR_ACK", tx_buf);
                 }
                 5 => {
@@ -754,6 +806,9 @@ fn handle_agent_ipc(
                     resp[4] = state.corr_count as u8;
                     resp[5] = state.routine_count as u8;
                     resp[6] = tool_registry.count as u8;
+                    let est = (state.pref_count * 32 + state.corr_count * 40 + state.routine_count * 24) as u32;
+                    resp[7..11].copy_from_slice(&est.to_le_bytes());
+                    resp[11..15].copy_from_slice(&std::companion::COMPANION_STORAGE_BUDGET_MAX.to_le_bytes());
                     emit_agent_ack(sender_task_id, msg_type, 0, &resp, tx_buf);
                 }
                 _ => {
@@ -793,6 +848,23 @@ fn handle_agent_ipc(
                     if let Some(ref mut plan) = state.active_plan {
                         plan.user_consent_granted = true;
                         plan.status = std::companion::PlanStatus::Running;
+
+                        for step_idx in 0..plan.step_count {
+                            let tool_id = plan.steps[step_idx].tool_id;
+                            let args = plan.steps[step_idx].args_str();
+                            if let Some(desc) = tool_registry.find_by_id(tool_id) {
+                                if desc.consent_class != std::appmcp::ToolConsentClass::NeverAllow {
+                                    if let Ok(target_tid) = std::app_launch(desc.package_id_str()) {
+                                        let cap_handle = std::cap_lookup(std::cap_type::AGENT_TASK, 0).map(|h| h as u64).unwrap_or(1);
+                                        let token = (std::get_ticks().unwrap_or(1) & 0xFFFF_FFFF) as u32;
+                                        let req = std::appmcp::AppMcpRequest::new(cap_handle, tool_id, token)
+                                            .with_inline_payload(args.as_bytes());
+                                        let _ = std::ipc_send(target_tid, std::appmcp::APPMCP_MSG_INVOKE, &req.to_bytes());
+                                    }
+                                }
+                            }
+                        }
+                        plan.status = std::companion::PlanStatus::Completed;
                         emit_agent_ack(sender_task_id, msg_type, 0, &[plan.status as u8], tx_buf);
                     } else {
                         emit_agent_ack(sender_task_id, msg_type, 1, b"NO_PLAN", tx_buf);
@@ -825,7 +897,7 @@ fn handle_agent_ipc(
             }
             let tool_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let desc = match tool_registry.find_by_id(tool_id) {
-                Some(d) => d,
+                Some(d) => *d,
                 None => {
                     emit_agent_ack(sender_task_id, msg_type, 2, b"TOOL_NOT_FOUND", tx_buf);
                     return;
@@ -838,6 +910,11 @@ fn handle_agent_ipc(
                 return;
             }
 
+            if desc.consent_class == std::appmcp::ToolConsentClass::AllowOnce {
+                tool_registry.consume_consent(tool_id);
+            }
+
+            let cap_handle = std::cap_lookup(std::cap_type::AGENT_TASK, 0).map(|h| h as u64).unwrap_or(1);
             if desc.required_cap_type != 0 {
                 let has_cap = std::cap_lookup(desc.required_cap_type, 0).is_ok();
                 if !has_cap {
@@ -847,8 +924,63 @@ fn handle_agent_ipc(
                 }
             }
 
-            state.record_tool_result(tool_id, true, 0);
-            emit_agent_ack(sender_task_id, msg_type, 0, b"TOOL_SUCCESS", tx_buf);
+            let pkg_str = desc.package_id_str();
+            let target_task_id = match std::app_launch(pkg_str) {
+                Ok(tid) => tid,
+                Err(_) => {
+                    state.record_tool_result(tool_id, false, -3);
+                    emit_agent_ack(sender_task_id, msg_type, 5, b"APP_LAUNCH_FAILED", tx_buf);
+                    return;
+                }
+            };
+
+            let tool_args = if payload.len() > 4 { &payload[4..] } else { b"" };
+            let token = (std::get_ticks().unwrap_or(1) & 0xFFFF_FFFF) as u32;
+            let req = std::appmcp::AppMcpRequest::new(cap_handle, tool_id, token)
+                .with_inline_payload(tool_args);
+            let req_bytes = req.to_bytes();
+
+            if std::ipc_send(target_task_id, std::appmcp::APPMCP_MSG_INVOKE, &req_bytes).is_err() {
+                state.record_tool_result(tool_id, false, -4);
+                emit_agent_ack(sender_task_id, msg_type, 6, b"IPC_SEND_FAILED", tx_buf);
+                return;
+            }
+
+            let mut app_rx_buf = [0u8; 128];
+            let mut success = false;
+            let mut resp_payload_len = 0usize;
+            let mut resp_payload = [0u8; 64];
+
+            let start_tick = std::get_ticks().unwrap_or(0);
+            for _ in 0..10 {
+                if let Ok((sender, resp_msg, len)) = std::ipc::receive_any(&mut app_rx_buf) {
+                    if sender == target_task_id && resp_msg == std::appmcp::APPMCP_MSG_RESPONSE {
+                        if let Some(resp) = std::appmcp::AppMcpResponse::from_bytes(&app_rx_buf[..len]) {
+                            if resp.token == token && resp.tool_id == tool_id {
+                                if resp.status == std::appmcp::APPMCP_STATUS_SUCCESS {
+                                    success = true;
+                                    let p = resp.payload();
+                                    resp_payload_len = p.len().min(64);
+                                    resp_payload[..resp_payload_len].copy_from_slice(&p[..resp_payload_len]);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                std::yield_now();
+            }
+
+            let end_tick = std::get_ticks().unwrap_or(start_tick);
+            let latency_ticks = end_tick.saturating_sub(start_tick) as i32;
+
+            state.record_tool_result(tool_id, success, latency_ticks);
+            if success {
+                let out_data = if resp_payload_len > 0 { &resp_payload[..resp_payload_len] } else { b"TOOL_SUCCESS" };
+                emit_agent_ack(sender_task_id, msg_type, 0, out_data, tx_buf);
+            } else {
+                emit_agent_ack(sender_task_id, msg_type, 7, b"TOOL_EXECUTION_FAILED", tx_buf);
+            }
         }
         _ => {
             emit_agent_ack(sender_task_id, msg_type, 0xFF, b"UNSUPPORTED_MSG", tx_buf);

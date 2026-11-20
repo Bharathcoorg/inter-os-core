@@ -9,11 +9,123 @@
 
 use crate::appmcp::{ToolRiskClass, ToolConsentClass};
 use crate::crypto::chacha20_poly1305::ChaCha20Poly1305;
+use crate::crypto::hkdf;
 
 pub const COMPANION_MAGIC: u32 = 0x434F_4D50; // "COMP"
 pub const COMPANION_VERSION: u32 = 1;
+pub const COMPANION_FORMAT_MAGIC: [u8; 4] = *b"IOCM"; // "InterOS Companion Memory"
+pub const COMPANION_FORMAT_VERSION: u16 = 1;
+pub const COMPANION_HEADER_SIZE: usize = 64;
+pub const CIPHER_CHACHA20_POLY1305: u32 = 0x0001;
+
 pub const PATH_COMPANION_MEMORY: &str = "/data/companion/memory.bin";
 pub const PATH_MODEL_DEFAULTS: &str = "/data/ai/model_defaults.bin";
+
+/// Bounded storage budgets (in bytes)
+pub const COMPANION_STORAGE_BUDGET_MAX: u32 = 64 * 1024; // 64 KiB
+pub const SEMANTIC_INDEX_BUDGET_MAX: u32 = 512 * 1024;   // 512 KiB
+
+/// Domain salt for software-backed companion key derivation.
+pub const COMPANION_KEY_SALT: [u8; 16] = [
+    0x49, 0x4F, 0x43, 0x4D, 0x2D, 0x55, 0x53, 0x45, // "IOCM-USE"
+    0x52, 0x2D, 0x4B, 0x45, 0x59, 0x2D, 0x53, 0x31, // "R-KEY-S1"
+];
+
+/// Volatile zeroization helper to prevent compiler dead-code elimination.
+#[inline(never)]
+pub fn secure_zero(slice: &mut [u8]) {
+    for byte in slice.iter_mut() {
+        unsafe {
+            core::ptr::write_volatile(byte, 0);
+        }
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Derives a 32-byte cryptographic key bound to the authenticated user ID.
+///
+/// SECURITY & PLATFORM TRUTH:
+/// In QEMU environments without hardware-backed root of trust, this is a
+/// software-backed development key provider using RFC 5869 HKDF-SHA256.
+/// It is isolated inside the companion persistence abstraction.
+/// The model, aid, Agent Manager, and third-party apps NEVER receive this key.
+pub fn derive_companion_user_key(uid: u32, salt: &[u8; 16]) -> [u8; 32] {
+    let mut ikm = [0u8; 40];
+    ikm[0..4].copy_from_slice(&uid.to_le_bytes());
+    ikm[4..40].copy_from_slice(b"InterOS-Companion-Memory-Context-v1!");
+    let prk = hkdf::hkdf_extract(salt, &ikm);
+    let mut okm = [0u8; 32];
+    let _ = hkdf::hkdf_expand(&prk, b"interos.companion.storage.key", &mut okm);
+    okm
+}
+
+/// Monotonic Nonce Generator ensuring unique ChaCha20-Poly1305 nonces across
+/// consecutive saves, reboots, crashes, and restores.
+///
+/// Nonce structure (12 bytes):
+/// [0..4]: user_id (u32 LE)
+/// [4..8]: generation (u32 LE low 32 of persistent generation)
+/// [8..12]: monotonic save counter (u32 LE)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NonceGenerator {
+    pub user_id: u32,
+    pub generation: u64,
+    pub counter: u32,
+}
+
+impl NonceGenerator {
+    pub const fn new(user_id: u32, generation: u64) -> Self {
+        Self {
+            user_id,
+            generation,
+            counter: 0,
+        }
+    }
+
+    /// Generates the next unique 12-byte nonce and increments the monotonic counter.
+    pub fn next_nonce(&mut self) -> [u8; 12] {
+        self.counter = self.counter.wrapping_add(1);
+        let mut nonce = [0u8; 12];
+        nonce[0..4].copy_from_slice(&self.user_id.to_le_bytes());
+        nonce[4..8].copy_from_slice(&(self.generation as u32).to_le_bytes());
+        nonce[8..12].copy_from_slice(&self.counter.to_le_bytes());
+        nonce
+    }
+}
+
+/// Builds the authoritative per-user companion memory path: `/user/{uid}/companion/state.bin`.
+pub fn companion_user_storage_path<'a>(uid: u32, buf: &'a mut [u8; 64]) -> Result<&'a str, ()> {
+    let prefix = b"/user/";
+    let suffix = b"/companion/state.bin";
+    let mut pos = 0;
+    buf[pos..pos + prefix.len()].copy_from_slice(prefix);
+    pos += prefix.len();
+
+    let mut num_buf = [0u8; 10];
+    let mut num = uid;
+    let mut num_len = 0;
+    if num == 0 {
+        num_buf[0] = b'0';
+        num_len = 1;
+    } else {
+        while num > 0 {
+            num_buf[num_len] = b'0' + (num % 10) as u8;
+            num /= 10;
+            num_len += 1;
+        }
+        num_buf[..num_len].reverse();
+    }
+
+    if pos + num_len + suffix.len() > buf.len() {
+        return Err(());
+    }
+    buf[pos..pos + num_len].copy_from_slice(&num_buf[..num_len]);
+    pos += num_len;
+    buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+    pos += suffix.len();
+
+    core::str::from_utf8(&buf[..pos]).map_err(|_| ())
+}
 
 /// Maximum capacity of structured companion memory tables.
 pub const MAX_PREFERENCES: usize = 32;
@@ -27,34 +139,54 @@ pub const MAX_PLAN_STEPS: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum LearningMode {
-    /// Active: observes user corrections, preferences, and frequent routines.
-    Active = 0,
-    /// ReadOnly: uses previously learned memory but does not record new items.
-    ReadOnly = 1,
-    /// Disabled: completely ignores personal memory and disables personalization.
-    Disabled = 2,
+    /// Adaptive (Active): observes user corrections, preferences, and frequent routines.
+    Adaptive = 0,
+    /// ExplicitOnly (ReadOnly): uses permitted state; only records explicitly saved preferences/routines.
+    ExplicitOnly = 1,
+    /// Off (Disabled): completely ignores personal memory and disables personalization.
+    Off = 2,
+    /// Custom: fine-grained per-source learning controls.
+    Custom = 3,
 }
 
 impl Default for LearningMode {
     fn default() -> Self {
-        Self::Active
+        Self::Adaptive
     }
 }
 
 impl LearningMode {
+    #[allow(non_upper_case_globals)]
+    pub const Active: Self = Self::Adaptive;
+    #[allow(non_upper_case_globals)]
+    pub const ReadOnly: Self = Self::ExplicitOnly;
+    #[allow(non_upper_case_globals)]
+    pub const Disabled: Self = Self::Off;
+
     pub const fn from_u8(val: u8) -> Self {
         match val {
-            1 => Self::ReadOnly,
-            2 => Self::Disabled,
-            _ => Self::Active,
+            1 => Self::ExplicitOnly,
+            2 => Self::Off,
+            3 => Self::Custom,
+            _ => Self::Adaptive,
         }
     }
 
     pub const fn as_str(&self) -> &'static str {
         match self {
-            Self::Active => "Active",
-            Self::ReadOnly => "Read Only",
-            Self::Disabled => "Disabled",
+            Self::Adaptive => "Active",
+            Self::ExplicitOnly => "Read Only",
+            Self::Off => "Disabled",
+            Self::Custom => "Custom",
+        }
+    }
+
+    pub const fn consumer_label(&self) -> &'static str {
+        match self {
+            Self::Adaptive => "Adaptive",
+            Self::ExplicitOnly => "Explicit only",
+            Self::Off => "Off",
+            Self::Custom => "Custom",
         }
     }
 }
@@ -308,6 +440,16 @@ impl Default for PlanStep {
     }
 }
 
+impl PlanStep {
+    pub fn args_bytes(&self) -> &[u8] {
+        &self.args[..self.args_len as usize]
+    }
+
+    pub fn args_str(&self) -> &str {
+        core::str::from_utf8(self.args_bytes()).unwrap_or("")
+    }
+}
+
 /// An interactive multi-step execution plan subject to user consent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutionPlan {
@@ -413,6 +555,28 @@ impl ExecutionPlan {
     }
 }
 
+pub const REC_TAG_PREFERENCE: u8 = 0x01;
+pub const REC_TAG_CORRECTION: u8 = 0x02;
+pub const REC_TAG_ROUTINE: u8    = 0x03;
+pub const REC_TAG_PATTERN: u8    = 0x04;
+pub const REC_TAG_TOOL_STAT: u8  = 0x05;
+
+/// Standard IEEE 802.3 CRC-32 for binary header validation.
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
 /// Primary companion state managing memory, privacy settings, lock sanitation, and plans.
 pub struct CompanionState {
     pub preferences: [PreferenceRecord; MAX_PREFERENCES],
@@ -429,6 +593,8 @@ pub struct CompanionState {
     pub learning_mode: LearningMode,
     pub is_private_session: bool,
     pub is_locked: bool,
+    pub user_id: u32,
+    pub generation: u64,
 }
 
 impl Default for CompanionState {
@@ -485,9 +651,11 @@ impl CompanionState {
             }; MAX_TOOL_STATS],
             tool_stat_count: 0,
             active_plan: None,
-            learning_mode: LearningMode::Active,
+            learning_mode: LearningMode::Adaptive,
             is_private_session: false,
             is_locked: false,
+            user_id: 1000,
+            generation: 1,
         }
     }
 
@@ -499,34 +667,62 @@ impl CompanionState {
         }
     }
 
-    /// Wipes in-memory plaintexts, setting bytes to zero.
+    /// Wipes in-memory plaintexts using volatile writes to prevent compiler dead-code elimination.
     pub fn wipe_in_memory_plaintext(&mut self) {
         for pref in self.preferences.iter_mut() {
-            pref.key.fill(0);
-            pref.value.fill(0);
+            secure_zero(&mut pref.key);
+            secure_zero(&mut pref.value);
             pref.key_len = 0;
             pref.value_len = 0;
+            pref.confidence = 0;
+            pref.updated_at = 0;
         }
         self.pref_count = 0;
 
         for corr in self.corrections.iter_mut() {
-            corr.query.fill(0);
-            corr.system_action.fill(0);
-            corr.user_fix.fill(0);
+            secure_zero(&mut corr.query);
+            secure_zero(&mut corr.system_action);
+            secure_zero(&mut corr.user_fix);
             corr.query_len = 0;
             corr.action_len = 0;
             corr.fix_len = 0;
+            corr.timestamp = 0;
         }
         self.corr_count = 0;
 
         for routine in self.routines.iter_mut() {
-            routine.trigger_name.fill(0);
-            routine.action.fill(0);
+            secure_zero(&mut routine.trigger_name);
+            secure_zero(&mut routine.action);
             routine.trigger_len = 0;
             routine.action_len = 0;
+            routine.count = 0;
+            routine.last_executed = 0;
         }
         self.routine_count = 0;
 
+        for pat in self.patterns.iter_mut() {
+            secure_zero(&mut pat.pattern);
+            pat.pattern_len = 0;
+            pat.tool_id = 0;
+            pat.confidence = 0;
+        }
+        self.pattern_count = 0;
+
+        for stat in self.tool_stats.iter_mut() {
+            stat.tool_id = 0;
+            stat.invocations = 0;
+            stat.successes = 0;
+            stat.failures = 0;
+            stat.last_failure_code = 0;
+        }
+        self.tool_stat_count = 0;
+
+        if let Some(ref mut plan) = self.active_plan {
+            for step in plan.steps.iter_mut() {
+                secure_zero(&mut step.args);
+                step.args_len = 0;
+            }
+        }
         self.active_plan = None;
     }
 
@@ -540,10 +736,6 @@ impl CompanionState {
 
     pub fn clear_memory(&mut self) {
         self.wipe_in_memory_plaintext();
-        self.patterns.fill(IntentPattern::default());
-        self.pattern_count = 0;
-        self.tool_stats.fill(ToolSuccessRecord::default());
-        self.tool_stat_count = 0;
     }
 
     pub fn add_preference(
@@ -554,7 +746,7 @@ impl CompanionState {
         confidence: u8,
         now: u64,
     ) -> bool {
-        if self.is_locked || self.is_private_session || self.learning_mode == LearningMode::Disabled {
+        if self.is_locked || self.is_private_session || self.learning_mode == LearningMode::Off {
             return false;
         }
 
@@ -583,7 +775,7 @@ impl CompanionState {
     }
 
     pub fn get_preference(&self, category: PreferenceCategory, key: &[u8]) -> Option<&PreferenceRecord> {
-        if self.is_locked || self.learning_mode == LearningMode::Disabled {
+        if self.is_locked || self.learning_mode == LearningMode::Off {
             return None;
         }
         for i in 0..self.pref_count {
@@ -597,7 +789,7 @@ impl CompanionState {
     }
 
     pub fn add_correction(&mut self, query: &[u8], action: &[u8], fix: &[u8], now: u64) -> bool {
-        if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Active {
+        if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Adaptive {
             return false;
         }
         if self.corr_count < MAX_CORRECTIONS {
@@ -612,7 +804,7 @@ impl CompanionState {
     }
 
     pub fn record_routine(&mut self, trigger: &[u8], action: &[u8], now: u64) -> bool {
-        if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Active {
+        if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Adaptive {
             return false;
         }
         for i in 0..self.routine_count {
@@ -644,7 +836,7 @@ impl CompanionState {
     }
 
     pub fn record_tool_result(&mut self, tool_id: u32, success: bool, err_code: i32) {
-        if self.is_locked || self.is_private_session {
+        if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Adaptive {
             return;
         }
         for i in 0..self.tool_stat_count {
@@ -671,76 +863,217 @@ impl CompanionState {
         }
     }
 
+    pub fn record_intent_pattern(&mut self, pattern: &[u8], tool_id: u32, confidence: u8) -> bool {
+        if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Adaptive {
+            return false;
+        }
+        if self.pattern_count < MAX_INTENT_PATTERNS {
+            let mut pat = [0u8; 48];
+            let plen = pattern.len().min(48);
+            pat[..plen].copy_from_slice(&pattern[..plen]);
+            self.patterns[self.pattern_count] = IntentPattern {
+                pattern: pat,
+                pattern_len: plen as u8,
+                tool_id,
+                confidence: confidence.min(100),
+            };
+            self.pattern_count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Serializes and encrypts state with ChaCha20Poly1305.
     /// Wire format:
-    /// [0..4]: COMPANION_MAGIC
-    /// [4..8]: COMPANION_VERSION
-    /// [8]: LearningMode
-    /// [9]: reserved
-    /// [10..12]: pref_count (u16)
-    /// [12..14]: corr_count (u16)
-    /// [14..16]: routine_count (u16)
-    /// [16..28]: 12-byte Nonce
-    /// [28..28+N]: Encrypted records payload
-    /// [28+N..44+N]: 16-byte Poly1305 Tag
+    /// [0..4]: COMPANION_FORMAT_MAGIC ("IOCM")
+    /// [4..6]: COMPANION_FORMAT_VERSION (1)
+    /// [6..14]: generation (u64 LE)
+    /// [14..18]: user_binding (u32 LE)
+    /// [18]: LearningMode
+    /// [19]: privacy_flags
+    /// [20..22]: record_count (u16 LE)
+    /// [22..24]: record_type_mask (u16 LE)
+    /// [24..28]: record_length (u32 LE)
+    /// [28..32]: cipher_metadata (0x0001 = ChaCha20Poly1305)
+    /// [32..44]: 12-byte Nonce
+    /// [44..60]: 16-byte Poly1305 Tag
+    /// [60..64]: CRC32 of bytes 0..60
+    /// [64..64+N]: Encrypted records payload
     pub fn serialize_encrypted(
         &self,
         key: &[u8; 32],
         nonce: &[u8; 12],
         out_buf: &mut [u8],
     ) -> Result<usize, ()> {
-        let hdr_len = 28;
+        if self.is_private_session {
+            // Private session policy: NO records persisted to disk
+            return Err(());
+        }
+        if self.learning_mode == LearningMode::Off {
+            // Companion learning disabled: no learned state persisted
+            return Ok(0);
+        }
+
+        let hdr_len = COMPANION_HEADER_SIZE;
         if out_buf.len() < hdr_len + 16 {
             return Err(());
         }
 
-        out_buf[0..4].copy_from_slice(&COMPANION_MAGIC.to_le_bytes());
-        out_buf[4..8].copy_from_slice(&COMPANION_VERSION.to_le_bytes());
-        out_buf[8] = self.learning_mode as u8;
-        out_buf[9] = 0;
-        out_buf[10..12].copy_from_slice(&(self.pref_count as u16).to_le_bytes());
-        out_buf[12..14].copy_from_slice(&(self.corr_count as u16).to_le_bytes());
-        out_buf[14..16].copy_from_slice(&(self.routine_count as u16).to_le_bytes());
-        out_buf[16..28].copy_from_slice(nonce);
+        // Pack plaintext records into scratch buffer
+        let mut scratch = [0u8; 4096];
+        let mut pt_cursor = 0usize;
+        let mut total_records = 0u16;
+        let mut record_type_mask = 0u16;
 
-        // Pack plaintext records into contiguous scratch area
-        let mut pt_cursor = hdr_len;
+        // 1. Preferences (allowed in Adaptive, ExplicitOnly, Custom)
         for i in 0..self.pref_count {
             let p = &self.preferences[i];
-            let rec_size = 1 + 1 + 32 + 1 + 64 + 1 + 8;
-            if pt_cursor + rec_size + 16 > out_buf.len() {
-                return Err(());
+            let rec_len = 1 + 1 + 32 + 1 + 64 + 1 + 8; // 108
+            if pt_cursor + 2 + rec_len > scratch.len() {
+                break;
             }
-            out_buf[pt_cursor] = p.category as u8;
-            out_buf[pt_cursor + 1] = p.key_len;
-            out_buf[pt_cursor + 2..pt_cursor + 34].copy_from_slice(&p.key);
-            out_buf[pt_cursor + 34] = p.value_len;
-            out_buf[pt_cursor + 35..pt_cursor + 99].copy_from_slice(&p.value);
-            out_buf[pt_cursor + 99] = p.confidence;
-            out_buf[pt_cursor + 100..pt_cursor + 108].copy_from_slice(&p.updated_at.to_le_bytes());
-            pt_cursor += rec_size;
+            scratch[pt_cursor] = REC_TAG_PREFERENCE;
+            scratch[pt_cursor + 1] = rec_len as u8;
+            scratch[pt_cursor + 2] = p.category as u8;
+            scratch[pt_cursor + 3] = p.key_len;
+            scratch[pt_cursor + 4..pt_cursor + 36].copy_from_slice(&p.key);
+            scratch[pt_cursor + 36] = p.value_len;
+            scratch[pt_cursor + 37..pt_cursor + 101].copy_from_slice(&p.value);
+            scratch[pt_cursor + 101] = p.confidence;
+            scratch[pt_cursor + 102..pt_cursor + 110].copy_from_slice(&p.updated_at.to_le_bytes());
+            pt_cursor += 2 + rec_len;
+            total_records += 1;
+            record_type_mask |= 1 << 0;
         }
 
-        let pt_len = pt_cursor - hdr_len;
-        let mut tag = [0u8; 16];
-        let mut scratch = [0u8; 4096];
-        if pt_len > scratch.len() {
+        // 2. Corrections (Adaptive only)
+        if self.learning_mode == LearningMode::Adaptive {
+            for i in 0..self.corr_count {
+                let c = &self.corrections[i];
+                let rec_len = 1 + 64 + 1 + 64 + 1 + 64 + 8; // 203
+                if pt_cursor + 2 + rec_len > scratch.len() {
+                    break;
+                }
+                scratch[pt_cursor] = REC_TAG_CORRECTION;
+                scratch[pt_cursor + 1] = rec_len as u8;
+                scratch[pt_cursor + 2] = c.query_len;
+                scratch[pt_cursor + 3..pt_cursor + 67].copy_from_slice(&c.query);
+                scratch[pt_cursor + 67] = c.action_len;
+                scratch[pt_cursor + 68..pt_cursor + 132].copy_from_slice(&c.system_action);
+                scratch[pt_cursor + 132] = c.fix_len;
+                scratch[pt_cursor + 133..pt_cursor + 197].copy_from_slice(&c.user_fix);
+                scratch[pt_cursor + 197..pt_cursor + 205].copy_from_slice(&c.timestamp.to_le_bytes());
+                pt_cursor += 2 + rec_len;
+                total_records += 1;
+                record_type_mask |= 1 << 1;
+            }
+        }
+
+        // 3. Routines (Adaptive and ExplicitOnly)
+        for i in 0..self.routine_count {
+            let r = &self.routines[i];
+            let rec_len = 1 + 32 + 1 + 64 + 4 + 8; // 110
+            if pt_cursor + 2 + rec_len > scratch.len() {
+                break;
+            }
+            scratch[pt_cursor] = REC_TAG_ROUTINE;
+            scratch[pt_cursor + 1] = rec_len as u8;
+            scratch[pt_cursor + 2] = r.trigger_len;
+            scratch[pt_cursor + 3..pt_cursor + 35].copy_from_slice(&r.trigger_name);
+            scratch[pt_cursor + 35] = r.action_len;
+            scratch[pt_cursor + 36..pt_cursor + 100].copy_from_slice(&r.action);
+            scratch[pt_cursor + 100..pt_cursor + 104].copy_from_slice(&r.count.to_le_bytes());
+            scratch[pt_cursor + 104..pt_cursor + 112].copy_from_slice(&r.last_executed.to_le_bytes());
+            pt_cursor += 2 + rec_len;
+            total_records += 1;
+            record_type_mask |= 1 << 2;
+        }
+
+        // 4. Intent Patterns (Adaptive only)
+        if self.learning_mode == LearningMode::Adaptive {
+            for i in 0..self.pattern_count {
+                let pat = &self.patterns[i];
+                let rec_len = 1 + 48 + 4 + 1; // 54
+                if pt_cursor + 2 + rec_len > scratch.len() {
+                    break;
+                }
+                scratch[pt_cursor] = REC_TAG_PATTERN;
+                scratch[pt_cursor + 1] = rec_len as u8;
+                scratch[pt_cursor + 2] = pat.pattern_len;
+                scratch[pt_cursor + 3..pt_cursor + 51].copy_from_slice(&pat.pattern);
+                scratch[pt_cursor + 51..pt_cursor + 55].copy_from_slice(&pat.tool_id.to_le_bytes());
+                scratch[pt_cursor + 55] = pat.confidence;
+                pt_cursor += 2 + rec_len;
+                total_records += 1;
+                record_type_mask |= 1 << 3;
+            }
+        }
+
+        // 5. Tool Success Records (Adaptive only)
+        if self.learning_mode == LearningMode::Adaptive {
+            for i in 0..self.tool_stat_count {
+                let ts = &self.tool_stats[i];
+                let rec_len = 4 + 4 + 4 + 4 + 4; // 20
+                if pt_cursor + 2 + rec_len > scratch.len() {
+                    break;
+                }
+                scratch[pt_cursor] = REC_TAG_TOOL_STAT;
+                scratch[pt_cursor + 1] = rec_len as u8;
+                scratch[pt_cursor + 2..pt_cursor + 6].copy_from_slice(&ts.tool_id.to_le_bytes());
+                scratch[pt_cursor + 6..pt_cursor + 10].copy_from_slice(&ts.invocations.to_le_bytes());
+                scratch[pt_cursor + 10..pt_cursor + 14].copy_from_slice(&ts.successes.to_le_bytes());
+                scratch[pt_cursor + 14..pt_cursor + 18].copy_from_slice(&ts.failures.to_le_bytes());
+                scratch[pt_cursor + 18..pt_cursor + 22].copy_from_slice(&ts.last_failure_code.to_le_bytes());
+                pt_cursor += 2 + rec_len;
+                total_records += 1;
+                record_type_mask |= 1 << 4;
+            }
+        }
+
+        let pt_len = pt_cursor;
+        if hdr_len + pt_len + 16 > out_buf.len() {
             return Err(());
         }
-        scratch[..pt_len].copy_from_slice(&out_buf[hdr_len..pt_cursor]);
+
+        // Header construction (64 bytes)
+        out_buf[0..4].copy_from_slice(&COMPANION_FORMAT_MAGIC);
+        out_buf[4..6].copy_from_slice(&COMPANION_FORMAT_VERSION.to_le_bytes());
+        out_buf[6..14].copy_from_slice(&self.generation.to_le_bytes());
+        out_buf[14..18].copy_from_slice(&self.user_id.to_le_bytes());
+        out_buf[18] = self.learning_mode as u8;
+        let mut priv_flags = 0u8;
+        if self.is_private_session { priv_flags |= 1 << 0; }
+        if self.is_locked { priv_flags |= 1 << 1; }
+        out_buf[19] = priv_flags;
+        out_buf[20..22].copy_from_slice(&total_records.to_le_bytes());
+        out_buf[22..24].copy_from_slice(&record_type_mask.to_le_bytes());
+        out_buf[24..28].copy_from_slice(&(pt_len as u32).to_le_bytes());
+        out_buf[28..32].copy_from_slice(&CIPHER_CHACHA20_POLY1305.to_le_bytes());
+        out_buf[32..44].copy_from_slice(nonce);
+
+        // Encrypt scratch plaintext into out_buf[64..64+pt_len]
+        let mut tag = [0u8; 16];
         let (header_part, rest) = out_buf.split_at_mut(hdr_len);
-        let (ct_part, tag_part) = rest.split_at_mut(pt_len);
+        let (ct_part, _tag_part) = rest.split_at_mut(pt_len);
         ChaCha20Poly1305::encrypt(
             key,
             nonce,
-            header_part,
+            &header_part[..44], // authenticated additional data: header bytes 0..44
             &scratch[..pt_len],
             ct_part,
             &mut tag,
         );
-        tag_part[..16].copy_from_slice(&tag);
+        header_part[44..60].copy_from_slice(&tag);
 
-        Ok(pt_cursor + 16)
+        // Calculate CRC32 of header bytes 0..60
+        let crc = crc32(&header_part[..60]);
+        header_part[60..64].copy_from_slice(&crc.to_le_bytes());
+
+        // Zeroize scratch buffer
+        secure_zero(&mut scratch[..pt_len]);
+
+        Ok(hdr_len + pt_len)
     }
 
     /// Decrypts and deserializes state using ChaCha20Poly1305.
@@ -749,18 +1082,246 @@ impl CompanionState {
         key: &[u8; 32],
         in_buf: &[u8],
     ) -> Result<(), ()> {
+        self.deserialize_encrypted_with_min_generation(key, in_buf, 0)
+    }
+
+    /// Decrypts and deserializes state, enforcing a minimum monotonic generation to defeat rollback.
+    pub fn deserialize_encrypted_with_min_generation(
+        &mut self,
+        key: &[u8; 32],
+        in_buf: &[u8],
+        min_expected_generation: u64,
+    ) -> Result<(), ()> {
+        let hdr_len = COMPANION_HEADER_SIZE;
+        if in_buf.len() < hdr_len {
+            return Err(());
+        }
+
+        // Check magic
+        let magic = [in_buf[0], in_buf[1], in_buf[2], in_buf[3]];
+        if magic != COMPANION_FORMAT_MAGIC {
+            // Check legacy COMP magic for backwards compatibility
+            if u32::from_le_bytes(magic) == COMPANION_MAGIC {
+                return self.deserialize_legacy(key, in_buf);
+            }
+            return Err(());
+        }
+
+        // Verify CRC32 of header bytes 0..60
+        let want_crc = u32::from_le_bytes([in_buf[60], in_buf[61], in_buf[62], in_buf[63]]);
+        if crc32(&in_buf[..60]) != want_crc {
+            return Err(());
+        }
+
+        let version = u16::from_le_bytes([in_buf[4], in_buf[5]]);
+        if version != COMPANION_FORMAT_VERSION {
+            return Err(());
+        }
+
+        let generation = u64::from_le_bytes([
+            in_buf[6], in_buf[7], in_buf[8], in_buf[9],
+            in_buf[10], in_buf[11], in_buf[12], in_buf[13],
+        ]);
+        if min_expected_generation > 0 && generation < min_expected_generation {
+            // Replay/rollback detected: reject stale state
+            return Err(());
+        }
+
+        let user_binding = u32::from_le_bytes([in_buf[14], in_buf[15], in_buf[16], in_buf[17]]);
+        let learning_mode = LearningMode::from_u8(in_buf[18]);
+        let privacy_flags = in_buf[19];
+        let total_records = u16::from_le_bytes([in_buf[20], in_buf[21]]);
+        let record_length = u32::from_le_bytes([in_buf[24], in_buf[25], in_buf[26], in_buf[27]]) as usize;
+        let cipher_id = u32::from_le_bytes([in_buf[28], in_buf[29], in_buf[30], in_buf[31]]);
+
+        if cipher_id != CIPHER_CHACHA20_POLY1305 {
+            return Err(());
+        }
+
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&in_buf[32..44]);
+
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(&in_buf[44..60]);
+
+        if in_buf.len() < hdr_len + record_length {
+            return Err(());
+        }
+
+        let ct = &in_buf[hdr_len..hdr_len + record_length];
+        let mut scratch = [0u8; 4096];
+        if record_length > scratch.len() {
+            return Err(());
+        }
+        scratch[..record_length].copy_from_slice(ct);
+
+        // Open in place using header bytes 0..44 as AAD
+        if ChaCha20Poly1305::open_in_place(key, &nonce, &in_buf[..44], &mut scratch[..record_length], &tag).is_err() {
+            secure_zero(&mut scratch[..record_length]);
+            return Err(());
+        }
+
+        // Clear existing state before applying restored records
+        self.clear_memory();
+        self.generation = generation;
+        self.user_id = user_binding;
+        self.learning_mode = learning_mode;
+        self.is_private_session = (privacy_flags & (1 << 0)) != 0;
+        self.is_locked = (privacy_flags & (1 << 1)) != 0;
+
+        // Unpack plaintext records
+        let mut cursor = 0usize;
+        let mut records_read = 0u16;
+
+        while cursor + 2 <= record_length && records_read < total_records {
+            let rtag = scratch[cursor];
+            let rec_len = scratch[cursor + 1] as usize;
+            cursor += 2;
+            if cursor + rec_len > record_length {
+                break;
+            }
+
+            match rtag {
+                REC_TAG_PREFERENCE => {
+                    if rec_len >= 108 && self.pref_count < MAX_PREFERENCES {
+                        let cat = PreferenceCategory::from_u8(scratch[cursor]);
+                        let klen = scratch[cursor + 1].min(32);
+                        let mut k = [0u8; 32];
+                        k.copy_from_slice(&scratch[cursor + 2..cursor + 34]);
+                        let vlen = scratch[cursor + 34].min(64);
+                        let mut v = [0u8; 64];
+                        v.copy_from_slice(&scratch[cursor + 35..cursor + 99]);
+                        let conf = scratch[cursor + 99];
+                        let upd = u64::from_le_bytes([
+                            scratch[cursor + 100], scratch[cursor + 101], scratch[cursor + 102], scratch[cursor + 103],
+                            scratch[cursor + 104], scratch[cursor + 105], scratch[cursor + 106], scratch[cursor + 107],
+                        ]);
+                        self.preferences[self.pref_count] = PreferenceRecord {
+                            category: cat,
+                            key: k,
+                            key_len: klen,
+                            value: v,
+                            value_len: vlen,
+                            confidence: conf,
+                            updated_at: upd,
+                        };
+                        self.pref_count += 1;
+                    }
+                }
+                REC_TAG_CORRECTION => {
+                    if rec_len >= 203 && self.corr_count < MAX_CORRECTIONS {
+                        let qlen = scratch[cursor].min(64);
+                        let mut q = [0u8; 64];
+                        q.copy_from_slice(&scratch[cursor + 1..cursor + 65]);
+                        let actlen = scratch[cursor + 65].min(64);
+                        let mut act = [0u8; 64];
+                        act.copy_from_slice(&scratch[cursor + 66..cursor + 130]);
+                        let fixlen = scratch[cursor + 130].min(64);
+                        let mut fix = [0u8; 64];
+                        fix.copy_from_slice(&scratch[cursor + 131..cursor + 195]);
+                        let ts = u64::from_le_bytes([
+                            scratch[cursor + 195], scratch[cursor + 196], scratch[cursor + 197], scratch[cursor + 198],
+                            scratch[cursor + 199], scratch[cursor + 200], scratch[cursor + 201], scratch[cursor + 202],
+                        ]);
+                        self.corrections[self.corr_count] = UserCorrection {
+                            query: q,
+                            query_len: qlen,
+                            system_action: act,
+                            action_len: actlen,
+                            user_fix: fix,
+                            fix_len: fixlen,
+                            timestamp: ts,
+                        };
+                        self.corr_count += 1;
+                    }
+                }
+                REC_TAG_ROUTINE => {
+                    if rec_len >= 110 && self.routine_count < MAX_ROUTINES {
+                        let tlen = scratch[cursor].min(32);
+                        let mut trig = [0u8; 32];
+                        trig.copy_from_slice(&scratch[cursor + 1..cursor + 33]);
+                        let actlen = scratch[cursor + 33].min(64);
+                        let mut act = [0u8; 64];
+                        act.copy_from_slice(&scratch[cursor + 34..cursor + 98]);
+                        let count = u32::from_le_bytes([
+                            scratch[cursor + 98], scratch[cursor + 99], scratch[cursor + 100], scratch[cursor + 101],
+                        ]);
+                        let last_exec = u64::from_le_bytes([
+                            scratch[cursor + 102], scratch[cursor + 103], scratch[cursor + 104], scratch[cursor + 105],
+                            scratch[cursor + 106], scratch[cursor + 107], scratch[cursor + 108], scratch[cursor + 109],
+                        ]);
+                        self.routines[self.routine_count] = RoutineRecord {
+                            trigger_name: trig,
+                            trigger_len: tlen,
+                            action: act,
+                            action_len: actlen,
+                            count,
+                            last_executed: last_exec,
+                        };
+                        self.routine_count += 1;
+                    }
+                }
+                REC_TAG_PATTERN => {
+                    if rec_len >= 54 && self.pattern_count < MAX_INTENT_PATTERNS {
+                        let patlen = scratch[cursor].min(48);
+                        let mut pat = [0u8; 48];
+                        pat.copy_from_slice(&scratch[cursor + 1..cursor + 49]);
+                        let tid = u32::from_le_bytes([
+                            scratch[cursor + 49], scratch[cursor + 50], scratch[cursor + 51], scratch[cursor + 52],
+                        ]);
+                        let conf = scratch[cursor + 53];
+                        self.patterns[self.pattern_count] = IntentPattern {
+                            pattern: pat,
+                            pattern_len: patlen,
+                            tool_id: tid,
+                            confidence: conf,
+                        };
+                        self.pattern_count += 1;
+                    }
+                }
+                REC_TAG_TOOL_STAT => {
+                    if rec_len >= 20 && self.tool_stat_count < MAX_TOOL_STATS {
+                        let tid = u32::from_le_bytes([
+                            scratch[cursor], scratch[cursor + 1], scratch[cursor + 2], scratch[cursor + 3],
+                        ]);
+                        let inv = u32::from_le_bytes([
+                            scratch[cursor + 4], scratch[cursor + 5], scratch[cursor + 6], scratch[cursor + 7],
+                        ]);
+                        let succ = u32::from_le_bytes([
+                            scratch[cursor + 8], scratch[cursor + 9], scratch[cursor + 10], scratch[cursor + 11],
+                        ]);
+                        let fail = u32::from_le_bytes([
+                            scratch[cursor + 12], scratch[cursor + 13], scratch[cursor + 14], scratch[cursor + 15],
+                        ]);
+                        let err = i32::from_le_bytes([
+                            scratch[cursor + 16], scratch[cursor + 17], scratch[cursor + 18], scratch[cursor + 19],
+                        ]);
+                        self.tool_stats[self.tool_stat_count] = ToolSuccessRecord {
+                            tool_id: tid,
+                            invocations: inv,
+                            successes: succ,
+                            failures: fail,
+                            last_failure_code: err,
+                        };
+                        self.tool_stat_count += 1;
+                    }
+                }
+                _ => {}
+            }
+
+            cursor += rec_len;
+            records_read += 1;
+        }
+
+        secure_zero(&mut scratch[..record_length]);
+        Ok(())
+    }
+
+    fn deserialize_legacy(&mut self, key: &[u8; 32], in_buf: &[u8]) -> Result<(), ()> {
         let hdr_len = 28;
         if in_buf.len() < hdr_len + 16 {
             return Err(());
         }
-
-        let magic = u32::from_le_bytes([in_buf[0], in_buf[1], in_buf[2], in_buf[3]]);
-        let ver = u32::from_le_bytes([in_buf[4], in_buf[5], in_buf[6], in_buf[7]]);
-        if magic != COMPANION_MAGIC || ver != COMPANION_VERSION {
-            return Err(());
-        }
-
-        self.learning_mode = LearningMode::from_u8(in_buf[8]);
         let pref_count = u16::from_le_bytes([in_buf[10], in_buf[11]]) as usize;
         let mut nonce = [0u8; 12];
         nonce.copy_from_slice(&in_buf[16..28]);
@@ -769,7 +1330,6 @@ impl CompanionState {
         let mut tag = [0u8; 16];
         tag.copy_from_slice(&in_buf[in_buf.len() - 16..]);
 
-        // Decrypt payload in place into a scratch slice
         let mut scratch = [0u8; 4096];
         if ct_len > scratch.len() {
             return Err(());
@@ -780,7 +1340,6 @@ impl CompanionState {
             return Err(());
         }
 
-        // Unpack preferences
         self.pref_count = 0;
         let mut cursor = 0usize;
         let rec_size = 1 + 1 + 32 + 1 + 64 + 1 + 8;
@@ -904,26 +1463,69 @@ impl Default for ModelRegistryDefaults {
 }
 
 impl ModelRegistryDefaults {
-    pub fn new() -> Self {
-        let mut reg = Self {
+    /// Constructs an unselected default configuration.
+    /// An empty or new installation has no hardcoded model names;
+    /// every role starts as 'Not selected' unless provisioned.
+    pub const fn new() -> Self {
+        Self {
             bindings: [
-                ModelRoleBinding::new(ModelRole::TextGeneration, b"gemma-2-2b-it", 0, false),
-                ModelRoleBinding::new(ModelRole::TextEmbedding, b"embeddinggemma-256", 0, false),
-                ModelRoleBinding::new(ModelRole::SpeechToText, b"whisper-tiny-en", 1, false),
-                ModelRoleBinding::new(ModelRole::TextToSpeech, b"piper-en-low", 1, false),
-                ModelRoleBinding::new(ModelRole::VisionUnderstanding, b"paligemma-3b", 0, false),
+                ModelRoleBinding {
+                    role: ModelRole::TextGeneration,
+                    model_id: [0u8; 32],
+                    model_id_len: 0,
+                    provider_type: 0,
+                    is_custom: false,
+                    enabled: false,
+                },
+                ModelRoleBinding {
+                    role: ModelRole::TextEmbedding,
+                    model_id: [0u8; 32],
+                    model_id_len: 0,
+                    provider_type: 0,
+                    is_custom: false,
+                    enabled: false,
+                },
+                ModelRoleBinding {
+                    role: ModelRole::SpeechToText,
+                    model_id: [0u8; 32],
+                    model_id_len: 0,
+                    provider_type: 0,
+                    is_custom: false,
+                    enabled: false,
+                },
+                ModelRoleBinding {
+                    role: ModelRole::TextToSpeech,
+                    model_id: [0u8; 32],
+                    model_id_len: 0,
+                    provider_type: 0,
+                    is_custom: false,
+                    enabled: false,
+                },
+                ModelRoleBinding {
+                    role: ModelRole::VisionUnderstanding,
+                    model_id: [0u8; 32],
+                    model_id_len: 0,
+                    provider_type: 0,
+                    is_custom: false,
+                    enabled: false,
+                },
             ],
-        };
-        reg.bindings[0].role = ModelRole::TextGeneration;
-        reg.bindings[1].role = ModelRole::TextEmbedding;
-        reg.bindings[2].role = ModelRole::SpeechToText;
-        reg.bindings[3].role = ModelRole::TextToSpeech;
-        reg.bindings[4].role = ModelRole::VisionUnderstanding;
+        }
+    }
+
+    /// Explicitly loads provisioned model weights when present on reference images.
+    pub fn with_provisioned() -> Self {
+        let mut reg = Self::new();
+        reg.set_binding(ModelRole::TextGeneration, b"gemma-2-2b-it", 0, false);
+        reg.set_binding(ModelRole::TextEmbedding, b"embeddinggemma-256", 0, false);
+        reg.set_binding(ModelRole::SpeechToText, b"whisper-tiny-en", 1, false);
+        reg.set_binding(ModelRole::TextToSpeech, b"piper-en-low", 1, false);
+        reg.set_binding(ModelRole::VisionUnderstanding, b"paligemma-3b", 0, false);
         reg
     }
 
     pub fn get_binding(&self, role: ModelRole) -> Option<&ModelRoleBinding> {
-        self.bindings.iter().find(|b| b.role == role && b.enabled)
+        self.bindings.iter().find(|b| b.role == role && b.enabled && b.model_id_len > 0)
     }
 
     pub fn set_binding(&mut self, role: ModelRole, model_id: &[u8], provider: u8, is_custom: bool) {
@@ -943,11 +1545,92 @@ impl ModelRegistryDefaults {
             }
         }
     }
+
+    /// Serializes model role bindings to a compact binary format for persistence.
+    pub fn serialize(&self, out: &mut [u8]) -> Result<usize, ()> {
+        if out.len() < 4 + 5 * 36 {
+            return Err(());
+        }
+        out[0..4].copy_from_slice(b"MRDF");
+        let mut cursor = 4;
+        for b in &self.bindings {
+            out[cursor] = b.role as u8;
+            out[cursor + 1] = b.model_id_len;
+            out[cursor + 2..cursor + 34].copy_from_slice(&b.model_id);
+            out[cursor + 34] = b.provider_type;
+            let flags = (if b.is_custom { 1 } else { 0 }) | (if b.enabled { 2 } else { 0 });
+            out[cursor + 35] = flags;
+            cursor += 36;
+        }
+        Ok(cursor)
+    }
+
+    /// Deserializes model role bindings from binary storage.
+    pub fn deserialize(&mut self, in_buf: &[u8]) -> Result<(), ()> {
+        if in_buf.len() < 4 + 5 * 36 || &in_buf[0..4] != b"MRDF" {
+            return Err(());
+        }
+        let mut cursor = 4;
+        for i in 0..5 {
+            let role_u8 = in_buf[cursor];
+            let id_len = in_buf[cursor + 1].min(32);
+            let mut id = [0u8; 32];
+            id.copy_from_slice(&in_buf[cursor + 2..cursor + 34]);
+            let provider = in_buf[cursor + 34];
+            let flags = in_buf[cursor + 35];
+            cursor += 36;
+
+            let role = match role_u8 {
+                0 => ModelRole::TextGeneration,
+                1 => ModelRole::TextEmbedding,
+                2 => ModelRole::SpeechToText,
+                3 => ModelRole::TextToSpeech,
+                _ => ModelRole::VisionUnderstanding,
+            };
+
+            self.bindings[i] = ModelRoleBinding {
+                role,
+                model_id: id,
+                model_id_len: id_len,
+                provider_type: provider,
+                is_custom: (flags & 1) != 0,
+                enabled: (flags & 2) != 0,
+            };
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_companion_key_derivation_user_isolation() {
+        let key_user_a = derive_companion_user_key(1000, &COMPANION_KEY_SALT);
+        let key_user_b = derive_companion_user_key(1001, &COMPANION_KEY_SALT);
+        assert_ne!(key_user_a, key_user_b, "different users must receive distinct cryptographic keys");
+
+        let key_user_a_again = derive_companion_user_key(1000, &COMPANION_KEY_SALT);
+        assert_eq!(key_user_a, key_user_a_again, "key derivation must be deterministic for the same user");
+    }
+
+    #[test]
+    fn test_consecutive_saves_use_unique_nonces() {
+        let mut gen = NonceGenerator::new(1000, 42);
+        let n1 = gen.next_nonce();
+        let n2 = gen.next_nonce();
+        let n3 = gen.next_nonce();
+
+        assert_ne!(n1, n2);
+        assert_ne!(n2, n3);
+        assert_ne!(n1, n3);
+
+        // Generation difference ensures nonces do not collide across reboot
+        let mut gen_reboot = NonceGenerator::new(1000, 43);
+        let n_after_reboot = gen_reboot.next_nonce();
+        assert_ne!(n1, n_after_reboot);
+    }
 
     #[test]
     fn test_companion_state_learning_and_preferences() {
@@ -975,12 +1658,24 @@ mod tests {
     fn test_companion_state_lock_sanitization() {
         let mut state = CompanionState::new();
         state.add_preference(PreferenceCategory::Apps, b"favorite", b"calculator", 80, 100);
+        state.add_correction(b"calc", b"eval", b"launch", 150);
+        state.record_routine(b"morning", b"weather", 200);
+        state.record_tool_result(1, true, 0);
+
         assert_eq!(state.pref_count, 1);
+        assert_eq!(state.corr_count, 1);
+        assert_eq!(state.routine_count, 1);
+        assert_eq!(state.tool_stat_count, 1);
 
         // Lock the device
         state.set_locked(true);
         assert!(state.is_locked);
         assert_eq!(state.pref_count, 0);
+        assert_eq!(state.corr_count, 0);
+        assert_eq!(state.routine_count, 0);
+        assert_eq!(state.tool_stat_count, 0);
+
+        // Plaintexts are completely wiped with volatile zeros
         assert!(state.get_preference(PreferenceCategory::Apps, b"favorite").is_none());
 
         // Cannot add while locked
@@ -995,34 +1690,102 @@ mod tests {
 
         assert!(!state.add_preference(PreferenceCategory::Search, b"recent", b"query", 50, 100));
         assert!(!state.add_correction(b"turn off", b"settings", b"power", 100));
+        assert!(!state.record_routine(b"alarm", b"sound", 100));
+
+        let key = derive_companion_user_key(1000, &COMPANION_KEY_SALT);
+        let mut buf = [0u8; 1024];
+        let mut gen = NonceGenerator::new(1000, 1);
+        // Private session refuses to serialize to disk
+        assert!(state.serialize_encrypted(&key, &gen.next_nonce(), &mut buf).is_err());
 
         state.set_private_session(false);
         state.set_learning_mode(LearningMode::Disabled);
         assert!(!state.add_preference(PreferenceCategory::Search, b"recent", b"query", 50, 100));
         assert!(!state.add_correction(b"turn off", b"settings", b"power", 100));
+
+        // In Disabled mode, zero bytes are serialized
+        assert_eq!(state.serialize_encrypted(&key, &gen.next_nonce(), &mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_companion_readonly_mode_prevents_passive_mutation() {
+        let mut state = CompanionState::new();
+        state.set_learning_mode(LearningMode::ReadOnly);
+
+        // Passive corrections and routine observations must be refused in ReadOnly
+        assert!(!state.add_correction(b"type", b"typo", b"fix", 100));
+        assert!(!state.record_routine(b"lunch", b"open_music", 200));
+        state.record_tool_result(5, true, 0);
+        assert_eq!(state.tool_stat_count, 0, "ReadOnly mode must not record tool stats");
     }
 
     #[test]
     fn test_companion_encryption_at_rest_roundtrip() {
         let mut state = CompanionState::new();
+        state.user_id = 1000;
+        state.generation = 15;
         state.add_preference(PreferenceCategory::Display, b"brightness", b"80", 90, 500);
         state.add_preference(PreferenceCategory::Audio, b"volume", b"60", 85, 600);
+        state.add_correction(b"open song", b"search", b"music_play", 700);
+        state.record_routine(b"evening", b"night_mode", 800);
+        state.record_intent_pattern(b"check weather", 42, 90);
+        state.record_tool_result(42, true, 0);
 
-        let key = [0x42u8; 32];
-        let nonce = [0x11u8; 12];
-        let mut buf = [0u8; 1024];
+        let key = derive_companion_user_key(1000, &COMPANION_KEY_SALT);
+        let mut gen = NonceGenerator::new(1000, state.generation);
+        let nonce = gen.next_nonce();
+        let mut buf = [0u8; 2048];
 
         let len = state.serialize_encrypted(&key, &nonce, &mut buf).unwrap();
-        assert!(len > 28 + 16);
+        assert!(len >= COMPANION_HEADER_SIZE + 16);
+
+        // Verify header magic and fields
+        assert_eq!(&buf[0..4], b"IOCM");
 
         let mut loaded = CompanionState::new();
         loaded.deserialize_encrypted(&key, &buf[..len]).unwrap();
 
+        assert_eq!(loaded.user_id, 1000);
+        assert_eq!(loaded.generation, 15);
         assert_eq!(loaded.pref_count, 2);
         let p1 = loaded.get_preference(PreferenceCategory::Display, b"brightness").unwrap();
         assert_eq!(p1.value_str(), "80");
         let p2 = loaded.get_preference(PreferenceCategory::Audio, b"volume").unwrap();
         assert_eq!(p2.value_str(), "60");
+        assert_eq!(loaded.corr_count, 1);
+        assert_eq!(loaded.routine_count, 1);
+        assert_eq!(loaded.pattern_count, 1);
+        assert_eq!(loaded.tool_stat_count, 1);
+    }
+
+    #[test]
+    fn test_companion_tamper_and_corruption_fails_closed() {
+        let mut state = CompanionState::new();
+        state.add_preference(PreferenceCategory::Display, b"brightness", b"80", 90, 500);
+
+        let key = derive_companion_user_key(1000, &COMPANION_KEY_SALT);
+        let mut gen = NonceGenerator::new(1000, 1);
+        let mut buf = [0u8; 1024];
+        let len = state.serialize_encrypted(&key, &gen.next_nonce(), &mut buf).unwrap();
+
+        // 1. Tamper with ciphertext
+        let mut corrupted = buf;
+        corrupted[COMPANION_HEADER_SIZE + 2] ^= 0xFF;
+        let mut loaded = CompanionState::new();
+        assert!(loaded.deserialize_encrypted(&key, &corrupted[..len]).is_err(), "corrupted ciphertext must fail closed");
+
+        // 2. Tamper with header CRC
+        let mut bad_crc = buf;
+        bad_crc[60] ^= 0xFF;
+        assert!(loaded.deserialize_encrypted(&key, &bad_crc[..len]).is_err(), "header CRC mismatch must fail closed");
+
+        // 3. Tamper with magic
+        let mut bad_magic = buf;
+        bad_magic[0] = b'X';
+        assert!(loaded.deserialize_encrypted(&key, &bad_magic[..len]).is_err(), "bad magic must fail closed");
+
+        // 4. Rollback detection
+        assert!(loaded.deserialize_encrypted_with_min_generation(&key, &buf[..len], 100).is_err(), "replay of generation 1 when generation 100 expected must be rejected");
     }
 
     #[test]
@@ -1054,15 +1817,21 @@ mod tests {
     }
 
     #[test]
-    fn test_model_registry_defaults() {
-        let mut defaults = ModelRegistryDefaults::new();
-        let binding = defaults.get_binding(ModelRole::TextGeneration).unwrap();
-        assert_eq!(binding.model_id_str(), "gemma-2-2b-it");
-        assert!(!binding.is_custom);
+    fn test_model_registry_defaults_unselected_by_default() {
+        let defaults = ModelRegistryDefaults::new();
+        // Zero models selected by default:
+        for role in ModelRole::ALL {
+            assert!(defaults.get_binding(role).is_none(), "no hardcoded models in new unprovisioned install");
+        }
 
-        defaults.set_binding(ModelRole::TextGeneration, b"custom-local-llama", 2, true);
-        let custom = defaults.get_binding(ModelRole::TextGeneration).unwrap();
-        assert_eq!(custom.model_id_str(), "custom-local-llama");
-        assert!(custom.is_custom);
+        // Test persistence roundtrip
+        let provisioned = ModelRegistryDefaults::with_provisioned();
+        let mut ser_buf = [0u8; 256];
+        let bytes = provisioned.serialize(&mut ser_buf).unwrap();
+
+        let mut restored = ModelRegistryDefaults::new();
+        restored.deserialize(&ser_buf[..bytes]).unwrap();
+        let gen = restored.get_binding(ModelRole::TextGeneration).unwrap();
+        assert_eq!(gen.model_id_str(), "gemma-2-2b-it");
     }
 }

@@ -2259,9 +2259,16 @@ impl AgentManagerApp {
         self.begin_card(b"Model Role Defaults", Tone::Plain);
         let defaults = interos_std::companion::ModelRegistryDefaults::new();
         for role in interos_std::companion::ModelRole::ALL.iter() {
-            if let Some(b) = defaults.get_binding(*role) {
-                self.add_line(role.as_str().as_bytes(), b.model_id_str().as_bytes(), Tone::Plain);
-            }
+            let label = if let Some(b) = defaults.get_binding(*role) {
+                if b.model_id_len == 0 || b.model_id_str().is_empty() {
+                    "Not selected"
+                } else {
+                    b.model_id_str()
+                }
+            } else {
+                "Not selected"
+            };
+            self.add_line(role.as_str().as_bytes(), label.as_bytes(), Tone::Plain);
         }
     }
 

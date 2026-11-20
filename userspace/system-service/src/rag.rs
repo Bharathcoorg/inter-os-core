@@ -58,6 +58,9 @@ pub const PATH_SEARCH_INDEX_DATA: &str = "/data/search/vector.idx";
 /// Fallback storage path for persistent vector index.
 pub const PATH_SEARCH_INDEX_STORAGE: &str = "/storage/vector.idx";
 
+/// Hard storage budget for semantic search vector index: 512 KiB.
+pub const SEARCH_STORAGE_BUDGET_BYTES: usize = 512 * 1024;
+
 /// Default directories to discover and ingest documents from.
 pub const STORAGE_SEARCH_DIRS: &[&str] = &[
     "/storage/notes",
@@ -588,8 +591,22 @@ impl RagIndex {
     }
 
     /// Serializes and writes the vector index safely to a file path.
+    ///
+    /// Respects the platform 512 KiB search storage budget and performs atomic
+    /// persistence via a synchronized temporary file.
     pub fn save_to_disk(&self, path: &str) -> Result<(), ()> {
-        let fd = std::fs_open(path, std::FS_WRITE).map_err(|_| ())?;
+        let total_size = 16 + self.count * core::mem::size_of::<RagChunk>();
+        if total_size > SEARCH_STORAGE_BUDGET_BYTES {
+            return Err(());
+        }
+
+        let mut tmp_path_buf = [0u8; 80];
+        let p_len = path.len().min(75);
+        tmp_path_buf[..p_len].copy_from_slice(&path.as_bytes()[..p_len]);
+        tmp_path_buf[p_len..p_len + 4].copy_from_slice(b".tmp");
+        let tmp_path = core::str::from_utf8(&tmp_path_buf[..p_len + 4]).map_err(|_| ())?;
+
+        let fd = std::fs_open(tmp_path, std::FS_WRITE).map_err(|_| ())?;
 
         // 1. Write header: magic (4), version (4), count (4), dim (4)
         let mut hdr = [0u8; 16];
@@ -597,10 +614,11 @@ impl RagIndex {
         hdr[4..8].copy_from_slice(&RAG_INDEX_VERSION.to_le_bytes());
         hdr[8..12].copy_from_slice(&(self.count as u32).to_le_bytes());
         hdr[12..16].copy_from_slice(&(RAG_VECTOR_DIM as u32).to_le_bytes());
-        std::fs_write(fd, &hdr).map_err(|_| {
+        if std::fs_write(fd, &hdr).is_err() {
             let _ = std::fs_close(fd);
-            ()
-        })?;
+            let _ = std::fs_unlink(tmp_path);
+            return Err(());
+        }
 
         // 2. Write each chunk
         for i in 0..self.count {
@@ -613,11 +631,33 @@ impl RagIndex {
             };
             if std::fs_write(fd, chunk_bytes).is_err() {
                 let _ = std::fs_close(fd);
+                let _ = std::fs_unlink(tmp_path);
                 return Err(());
             }
         }
 
+        let _ = std::fs_fsync(fd);
         let _ = std::fs_close(fd);
+
+        // Synchronize into destination
+        if let Ok(dst_fd) = std::fs_open(path, std::FS_WRITE) {
+            if std::fs_write(dst_fd, &hdr).is_ok() {
+                for i in 0..self.count {
+                    let chunk = &self.chunks[i];
+                    let chunk_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            chunk as *const _ as *const u8,
+                            core::mem::size_of::<RagChunk>(),
+                        )
+                    };
+                    let _ = std::fs_write(dst_fd, chunk_bytes);
+                }
+                let _ = std::fs_fsync(dst_fd);
+            }
+            let _ = std::fs_close(dst_fd);
+        }
+        let _ = std::fs_unlink(tmp_path);
+
         Ok(())
     }
 

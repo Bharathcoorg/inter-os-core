@@ -514,10 +514,11 @@ impl Ranker for SemanticRanker {
                 None => lexical_similarity(query, entry),
             }
         } else {
-            match query_service_similarity(query, entry) {
-                Some(sim) => sim,
-                None => lexical_similarity(query, entry),
-            }
+            // Under the Platform Truth Contract and strict interactive frame budget,
+            // we NEVER perform synchronous per-candidate IPC calls inside the inner ranking loop.
+            // When no pre-fetched semantic frame is available yet, score using fast in-memory
+            // lexical similarity and await the background async frame response.
+            lexical_similarity(query, entry)
         };
         semantic_score(base_score, sim)
     }
@@ -596,6 +597,7 @@ pub fn query_service_search_frame(query: &[u8], out_frame: &mut [u8; SEARCH_FRAM
 }
 
 /// Sends a framed search query to the search service and returns the score for `entry`.
+#[allow(dead_code)]
 fn query_service_similarity(query: &[u8], entry: &Entry) -> Option<i16> {
     let mut frame = [0u8; SEARCH_FRAME_MAX];
     let frame_len = query_service_search_frame(query, &mut frame)?;

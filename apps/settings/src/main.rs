@@ -710,9 +710,9 @@ impl SettingsApp {
         self.agent_consent_state = state;
     }
 
-    /// Cycles companion learning mode (Active -> ReadOnly -> Disabled) and persists over IPC.
+    /// Cycles companion learning mode (Off -> Explicit only -> Adaptive -> Custom) and persists over IPC.
     pub fn cycle_companion_learning_mode(&mut self) {
-        self.companion_learning_mode = (self.companion_learning_mode + 1) % 3;
+        self.companion_learning_mode = (self.companion_learning_mode + 1) % 4;
         let payload = [2u8, self.companion_learning_mode];
         let _ = std::ipc_send(
             interos_std::ai::SERVICE_AGENT_TASK_ID,
@@ -720,6 +720,29 @@ impl SettingsApp {
             &payload,
         );
         std::log("[SETTINGS APP] Companion learning mode updated.").ok();
+    }
+
+    /// Queries live acknowledged companion state from agentd over IPC.
+    pub fn refresh_companion_state(&mut self) {
+        let payload = [5u8];
+        if std::ipc_send(
+            interos_std::ai::SERVICE_AGENT_TASK_ID,
+            interos_std::ai::MSG_TYPE_COMPANION_QUERY,
+            &payload,
+        ).is_ok() {
+            let mut rx_buf = [0u8; 64];
+            if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                if sender == interos_std::ai::SERVICE_AGENT_TASK_ID
+                    && msg_type == interos_std::ai::MSG_TYPE_COMPANION_QUERY
+                {
+                    let hdr_len = core::mem::size_of::<interos_std::ai::AiInferenceResponse>();
+                    if len >= hdr_len + 1 {
+                        let resp = &rx_buf[hdr_len..len];
+                        self.companion_learning_mode = resp[0];
+                    }
+                }
+            }
+        }
     }
 
     /// Toggles or grants/revokes agent task capability based on current consent state.
@@ -5735,10 +5758,11 @@ fn row_pixel(
                 }
             }
             _ => {
-                let (detail, badge): (&[u8], &[u8]) = match app.companion_learning_mode {
-                    0 => (b"Companion Learning: Active (Tap to cycle)", b"ACTIVE"),
-                    1 => (b"Companion Learning: ReadOnly (Tap to cycle)", b"READ_ONLY"),
-                    _ => (b"Companion Learning: Disabled (Tap to cycle)", b"DISABLED"),
+                let (detail, badge, ink): (&[u8], &[u8], u32) = match app.companion_learning_mode {
+                    0 => (b"Companion: Off | Budget: 64KB (Tap to cycle)", b"OFF", THEME.on_surface_variant),
+                    1 => (b"Companion: Explicit only | Budget: 64KB (Tap)", b"EXPLICIT", THEME.primary),
+                    2 => (b"Companion: Adaptive | Budget: 64KB (Tap)", b"ADAPTIVE", SUCCESS_LABEL),
+                    _ => (b"Companion: Custom | Budget: 64KB (Tap to cycle)", b"CUSTOM", THEME.primary),
                 };
                 if let Some(c) = row_head(
                     x,
@@ -5748,7 +5772,7 @@ fn row_pixel(
                     detail,
                     THEME.on_surface,
                     badge,
-                    if app.companion_learning_mode == 2 { THEME.on_surface_variant } else { THEME.primary },
+                    ink,
                     RowBoxes::user(),
                 ) {
                     return c;
@@ -7857,6 +7881,7 @@ fn handle_tap(
         }
         if section == Section::Security {
             settings.refresh_agent_consent();
+            settings.refresh_companion_state();
         }
         settings.refresh_wallpaper_values();
         settings.reset_scroll();
@@ -8128,6 +8153,7 @@ pub extern "C" fn _start() -> ! {
                     settings.pending_section = None;
                     if settings.current_section == Some(Section::Security) && (settings.frame_count % 8) == 0 {
                         settings.refresh_agent_consent();
+                        settings.refresh_companion_state();
                     }
                 }
             }

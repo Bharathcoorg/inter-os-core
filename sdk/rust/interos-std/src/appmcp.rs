@@ -510,7 +510,7 @@ pub const fn compute_dynamic_tool_id(package_id: &[u8], tool_name: &[u8]) -> u32
 }
 
 /// Maximum dynamic tools tracked in the platform AppMCP discovery registry.
-pub const MAX_DYNAMIC_TOOLS: usize = 32;
+pub const MAX_DYNAMIC_TOOLS: usize = 128;
 
 /// A bounded, extensible, dynamic AppMCP tool descriptor declared by native or third-party applications.
 #[repr(C)]
@@ -693,16 +693,49 @@ impl DynamicToolRegistry {
         }
     }
 
-    /// Registers a tool into the dynamic registry. If already registered by tool_id, updates it.
-    pub fn register(&mut self, descriptor: DynamicToolDescriptor) -> Result<u32, ()> {
+    /// Registers a tool into the dynamic registry.
+    ///
+    /// SECURITY INVARIANTS:
+    /// 1. Collision-Safe Identity: If another tool already has `descriptor.tool_id`
+    ///    with a DIFFERENT package or name, registration is REJECTED (`Err(())`).
+    ///    One application can NEVER overwrite or impersonate another application's tool.
+    /// 2. If the tool is re-registered by the SAME package and name, its descriptor is updated.
+    /// 3. High-Risk Policy: `ExternalConsequence` and `SecuritySensitive` actions
+    ///    can never be permanently autonomous. If `AlwaysAllow` is requested, it is
+    ///    clamped by platform security policy to `AlwaysAsk`.
+    pub fn register(&mut self, mut descriptor: DynamicToolDescriptor) -> Result<u32, ()> {
+        // Enforce platform risk policy: external consequences or security-sensitive tools
+        // cannot claim autonomous AlwaysAllow
+        if matches!(
+            descriptor.risk_class,
+            ToolRiskClass::ExternalConsequence | ToolRiskClass::SecuritySensitive
+        ) && descriptor.consent_class == ToolConsentClass::AlwaysAllow {
+            descriptor.consent_class = ToolConsentClass::AlwaysAsk;
+        }
+
+        // Check for existing tool by package_id and name (update scenario)
         for slot in &mut self.tools {
             if let Some(existing) = slot {
-                if existing.tool_id == descriptor.tool_id {
+                if &existing.package_id[..existing.package_id_len as usize] == &descriptor.package_id[..descriptor.package_id_len as usize]
+                    && &existing.name[..existing.name_len as usize] == &descriptor.name[..descriptor.name_len as usize]
+                {
                     *existing = descriptor;
                     return Ok(descriptor.tool_id);
                 }
             }
         }
+
+        // Check for collision: tool_id matches an existing tool belonging to ANOTHER package/name
+        for slot in &self.tools {
+            if let Some(existing) = slot {
+                if existing.tool_id == descriptor.tool_id {
+                    // Collision detected! Fails closed: reject impersonation attempt
+                    return Err(());
+                }
+            }
+        }
+
+        // Insert into first available slot
         for slot in &mut self.tools {
             if slot.is_none() {
                 *slot = Some(descriptor);
@@ -711,6 +744,55 @@ impl DynamicToolRegistry {
             }
         }
         Err(())
+    }
+
+    /// Unregisters a single tool by package ID and tool name.
+    pub fn unregister_tool(&mut self, package_id: &[u8], name: &[u8]) -> bool {
+        for slot in &mut self.tools {
+            if let Some(desc) = slot {
+                if &desc.package_id[..desc.package_id_len as usize] == package_id
+                    && &desc.name[..desc.name_len as usize] == name
+                {
+                    *slot = None;
+                    self.count = self.count.saturating_sub(1);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Unregisters all tools declared by a package (e.g. upon app uninstall).
+    pub fn unregister_package(&mut self, package_id: &[u8]) -> usize {
+        self.invalidate_package(package_id)
+    }
+
+    /// Consumes single-use consent (reverting `AllowOnce` back to `AlwaysAsk`).
+    pub fn consume_consent(&mut self, tool_id: u32) -> bool {
+        for slot in &mut self.tools {
+            if let Some(desc) = slot {
+                if desc.tool_id == tool_id {
+                    if desc.consent_class == ToolConsentClass::AllowOnce {
+                        desc.consent_class = ToolConsentClass::AlwaysAsk;
+                        return true;
+                    }
+                    return false;
+                }
+            }
+        }
+        false
+    }
+
+    /// Expires all session-bound consent grants (`AllowSession` -> `AlwaysAsk`).
+    /// Invoked upon device lock, logout, or session termination.
+    pub fn expire_session_grants(&mut self) {
+        for slot in &mut self.tools {
+            if let Some(desc) = slot {
+                if desc.consent_class == ToolConsentClass::AllowSession {
+                    desc.consent_class = ToolConsentClass::AlwaysAsk;
+                }
+            }
+        }
     }
 
     /// Finds a tool descriptor by its 32-bit tool_id.
@@ -945,5 +1027,117 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(reg.count, initial_count);
         assert!(reg.find_by_id(custom_id).is_none());
+    }
+
+    #[test]
+    fn test_hash_collision_prevention() {
+        let mut reg = DynamicToolRegistry::new();
+        let tool_a = DynamicToolDescriptor::new(
+            0x1234_5678,
+            b"tool.alpha",
+            b"Alpha",
+            b"Alpha tool",
+            b"org.interos.pkg_a",
+            1,
+            ToolRiskClass::Observe,
+            ToolConsentClass::AlwaysAllow,
+            TOOL_CAP_TYPE,
+        );
+        assert!(reg.register(tool_a).is_ok());
+
+        // Attempt to register a different package/tool with colliding tool_id
+        let colliding_tool = DynamicToolDescriptor::new(
+            0x1234_5678, // Same tool_id
+            b"tool.beta", // Different name
+            b"Beta",
+            b"Impersonator tool",
+            b"com.adversary.pkg_b", // Different package
+            1,
+            ToolRiskClass::Observe,
+            ToolConsentClass::AlwaysAllow,
+            TOOL_CAP_TYPE,
+        );
+
+        // Registry must refuse collision: cannot overwrite pkg_a's descriptor!
+        assert!(reg.register(colliding_tool).is_err(), "colliding tool_id from different package must be rejected");
+
+        // Verify pkg_a's descriptor remains intact
+        let existing = reg.find_by_id(0x1234_5678).expect("tool exists");
+        assert_eq!(existing.package_id_str(), "org.interos.pkg_a");
+        assert_eq!(existing.name_str(), "tool.alpha");
+    }
+
+    #[test]
+    fn test_high_risk_actions_prevent_autonomous_always_allow() {
+        let mut reg = DynamicToolRegistry::new();
+        let high_risk_desc = DynamicToolDescriptor::new(
+            0x9999_0001,
+            b"telephony.call_emergency",
+            b"Call",
+            b"External consequence action",
+            b"org.interos.dialer",
+            1,
+            ToolRiskClass::ExternalConsequence,
+            ToolConsentClass::AlwaysAllow, // Asks for AlwaysAllow
+            TOOL_CAP_TYPE,
+        );
+
+        assert!(reg.register(high_risk_desc).is_ok());
+        let registered = reg.find_by_id(0x9999_0001).expect("registered");
+        // Platform policy outranks app: clamped to AlwaysAsk!
+        assert_eq!(registered.consent_class, ToolConsentClass::AlwaysAsk);
+    }
+
+    #[test]
+    fn test_allow_once_and_session_consent_lifecycle() {
+        let mut reg = DynamicToolRegistry::new();
+        let tool = DynamicToolDescriptor::new(
+            0x5555_0001,
+            b"notes.delete",
+            b"Delete",
+            b"Delete note",
+            b"org.interos.notes",
+            1,
+            ToolRiskClass::PersonalMutation,
+            ToolConsentClass::AllowOnce,
+            TOOL_CAP_TYPE,
+        );
+        reg.register(tool).expect("register");
+
+        assert_eq!(reg.find_by_id(0x5555_0001).unwrap().consent_class, ToolConsentClass::AllowOnce);
+
+        // Consuming consent reverts AllowOnce to AlwaysAsk
+        assert!(reg.consume_consent(0x5555_0001));
+        assert_eq!(reg.find_by_id(0x5555_0001).unwrap().consent_class, ToolConsentClass::AlwaysAsk);
+        // Second consumption fails because it is already AlwaysAsk
+        assert!(!reg.consume_consent(0x5555_0001));
+
+        // Test AllowSession expiration
+        reg.set_consent(0x5555_0001, ToolConsentClass::AllowSession);
+        assert_eq!(reg.find_by_id(0x5555_0001).unwrap().consent_class, ToolConsentClass::AllowSession);
+        reg.expire_session_grants();
+        assert_eq!(reg.find_by_id(0x5555_0001).unwrap().consent_class, ToolConsentClass::AlwaysAsk);
+    }
+
+    #[test]
+    fn test_unregister_single_tool() {
+        let mut reg = DynamicToolRegistry::new();
+        let tool = DynamicToolDescriptor::new(
+            0x7777_0001,
+            b"music.pause",
+            b"Pause",
+            b"Pause playback",
+            b"org.interos.music",
+            1,
+            ToolRiskClass::Reversible,
+            ToolConsentClass::AlwaysAllow,
+            TOOL_CAP_TYPE,
+        );
+        reg.register(tool).expect("register");
+        assert_eq!(reg.count, 1);
+
+        assert!(reg.unregister_tool(b"org.interos.music", b"music.pause"));
+        assert_eq!(reg.count, 0);
+        assert!(reg.find_by_id(0x7777_0001).is_none());
     }
 }
