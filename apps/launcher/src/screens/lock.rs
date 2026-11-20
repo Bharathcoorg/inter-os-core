@@ -248,7 +248,7 @@ pub const LOCK_PILL_W: usize = 241;
 pub const LOCK_PILL_H: usize = 9;
 pub const LOCK_PILL_Y: usize = 1421;
 
-const LOCK_NA_TEXT: &[u8] = b"";
+const LOCK_NA_TEXT: &[u8] = b"Unavailable";
 
 const LOCK_BTN_FILL_PERCENT: u32 = 20;
 const LOCK_BTN_RIM_PERCENT: u32 = 32;
@@ -1958,6 +1958,9 @@ fn lock_screen_over_backdrop(
         return color;
     }
 
+    // Adaptive high-contrast ink derived from theme and current backdrop luminance.
+    let ink = layout::ink_on(&THEME, color);
+
     // 2. Status bar: time top-left, cellular signal and battery top-right.
     //
     //    WHY the band is the platform's and the clock is gated on its own box:
@@ -1977,13 +1980,13 @@ fn lock_screen_over_backdrop(
                 LOCK_STATUS_TIME_Y,
                 LOCK_STATUS_TIME_SCALE,
                 &state.clock_time,
-                0xFFFFFFFF,
+                ink,
                 color,
             ) {
                 return c;
             }
         }
-        if let Some(c) = crate::screens::status::marks(x, y, 0xFFFFFFFF) {
+        if let Some(c) = crate::screens::status::marks(x, y, ink) {
             return c;
         }
     }
@@ -1992,7 +1995,7 @@ fn lock_screen_over_backdrop(
     if state.clock_source_ok {
         if f.date.contains(x, y) {
             if let Some(run) = &f.date_outline {
-                if let Some(c) = run.pixel(x, y, 0xFFFFFFFF, color) {
+                if let Some(c) = run.pixel(x, y, ink, color) {
                     return c;
                 }
             } else if let Some(c) = test_text_aa(
@@ -2002,7 +2005,7 @@ fn lock_screen_over_backdrop(
                 f.date.y,
                 LOCK_DATE_SCALE,
                 &state.date_line,
-                0xFFFFFFFF,
+                ink,
                 color,
             ) {
                 return c;
@@ -2012,7 +2015,7 @@ fn lock_screen_over_backdrop(
         // 4. The clock itself.
         if f.clock.contains(x, y) {
             if let Some(run) = &f.clock_outline {
-                if let Some(c) = run.pixel(x, y, 0xFFFFFFFF, color) {
+                if let Some(c) = run.pixel(x, y, ink, color) {
                     return c;
                 }
             } else if let Some(c) = test_text_aa(
@@ -2022,7 +2025,7 @@ fn lock_screen_over_backdrop(
                 f.clock.y,
                 LOCK_CLOCK_SCALE,
                 &state.clock_time,
-                0xFFFFFFFF,
+                ink,
                 color,
             ) {
                 return c;
@@ -2030,7 +2033,7 @@ fn lock_screen_over_backdrop(
         }
     }
 
-    // 5. Centred unlock hint: "Swipe up to unlock" in crisp white 4-bit AA font.
+    // 5. Centred unlock hint: "Swipe up to unlock" in crisp contrast-adaptive AA font.
     if f.hint.contains(x, y) {
         if let Some(c) = test_text_aa(
             x,
@@ -2039,7 +2042,23 @@ fn lock_screen_over_backdrop(
             f.hint.y,
             LOCK_HINT_SCALE,
             LOCK_HINT_TEXT,
-            0xFFFFFFFF,
+            ink,
+            color,
+        ) {
+            return c;
+        }
+    }
+
+    // Flashlight "Unavailable" caption below the torch disc
+    if f.na.contains(x, y) {
+        if let Some(c) = test_text_aa(
+            x,
+            y,
+            f.na.x,
+            f.na.y,
+            type_scale::CAPTION,
+            LOCK_NA_TEXT,
+            ink,
             color,
         ) {
             return c;

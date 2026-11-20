@@ -484,6 +484,7 @@ pub fn sys_waitpid(child_id: u64) -> SyscallResult {
                         child_id,
                         reaped_code
                     );
+                    show_shell_surfaces();
                     SyscallResult::Success
                 }
                 Err(_) => SyscallResult::DeviceError,
@@ -5316,6 +5317,16 @@ pub fn sys_surface_flip(cap_slot: usize) -> Result<u64, SyscallResult> {
     crate::performance::record_flip_request(crate::interrupts::get_system_ticks(), owner.0);
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     kms.commit_surfaces(Some(owner.0));
+    if shell_task_id() == Some(owner.0) {
+        if let Some(shell_surface) = kms.surfaces.iter().filter(|s| s.owner_task == owner.0 && s.visible).max_by_key(|s| s.z_order).map(|s| s.id) {
+            let focus_stale = kms.focused_surface.map_or(true, |f_id| {
+                !kms.surfaces.iter().any(|s| s.id == f_id && s.visible && s.owner_task != owner.0)
+            });
+            if focus_stale {
+                kms.focused_surface = Some(shell_surface);
+            }
+        }
+    }
     // WHY the flip is skipped when it would publish a torn frame: the flip
     // publishes every surface, so a flip that lands while the task above is
     // halfway through writing its frame replaces the display with that
@@ -8074,6 +8085,7 @@ pub(crate) fn show_shell_surfaces() {
     };
     let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
     kms.set_surfaces_visibility_for_task(shell, true);
+    kms.raise_surfaces_for_task(shell);
 }
 
 /// Hides the shell's surfaces, and the surfaces of any application that was

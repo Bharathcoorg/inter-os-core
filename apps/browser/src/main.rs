@@ -11877,8 +11877,12 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
     // Bottom Navigation Bar Buttons
     if BACK_BTN.contains(x, y) {
         let _ = std::audio_haptic_click();
-        app.go_back();
-        return Tap::Redraw;
+        if app.tabs.can_go_back() {
+            app.go_back();
+            return Tap::Redraw;
+        } else {
+            return Tap::None;
+        }
     }
     if FWD_BTN.contains(x, y) {
         let _ = std::audio_haptic_click();
@@ -12845,8 +12849,10 @@ pub extern "C" fn _start() -> ! {
                         if input.kind == 6 {
                             browser.scroll.stop_fling();
                             let _ = std::audio_haptic_click();
-                            browser.go_back();
-                            dirty = Dirty::All;
+                            if browser.tabs.can_go_back() {
+                                browser.go_back();
+                                dirty = Dirty::All;
+                            }
                         }
                         if input.kind == 8 {
                             std::log("[BROWSER APP] Recents is the shell's own surface; this app paints no affordance for it and quits nothing. The shell answers.").ok();

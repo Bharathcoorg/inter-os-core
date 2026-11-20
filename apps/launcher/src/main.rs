@@ -4574,7 +4574,9 @@ pub extern "C" fn _start() -> ! {
                                 let f_dx = (x as i32) - LOCK_BTN_L_CX;
                                 let f_dy = (y as i32) - LOCK_BTN_CY;
                                 if f_dx * f_dx + f_dy * f_dy <= LOCK_BTN_R * LOCK_BTN_R {
-                                    std::log("[LAUNCHER] Flashlight unavailable: no torch hardware or capability exists on this platform.",
+                                    let _ = std::audio_haptic_click();
+                                    std::log(
+                                        "[LAUNCHER] Flashlight unavailable: no torch hardware or capability exists on this platform.",
                                     )
                                     .ok();
                                     let mut drain = std::InputEvent {

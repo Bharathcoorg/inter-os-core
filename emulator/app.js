@@ -1205,10 +1205,10 @@ document.addEventListener('DOMContentLoaded', () => {
       virtualTouchDot.classList.remove('active');
       return;
     }
-    const screenRect = getGuestPointerRect();
-    if (!screenRect) return;
-    const x = clientX - screenRect.left;
-    const y = clientY - screenRect.top;
+    const containerRect = screenLiveScanout.getBoundingClientRect();
+    if (!containerRect) return;
+    const x = clientX - containerRect.left;
+    const y = clientY - containerRect.top;
     virtualTouchDot.style.left = `${x}px`;
     virtualTouchDot.style.top = `${y}px`;
     virtualTouchDot.classList.add('active');
@@ -1265,8 +1265,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const mapPoint = (clientX, clientY) => {
       if (!hasLiveFrame || !liveScanoutCanvas || liveScanoutCanvas.style.display === 'none') return null;
       const rect = getGuestPointerRect();
-      if (!rect || clientX < rect.left || clientX >= rect.left + rect.width
-        || clientY < rect.top || clientY >= rect.top + rect.height) return null;
+      if (!rect) return null;
+      const tolerance = 1.0;
+      if (clientX < rect.left - tolerance || clientX > rect.left + rect.width + tolerance
+        || clientY < rect.top - tolerance || clientY > rect.top + rect.height + tolerance) return null;
       const geometry = guestPointerGeometry();
       const normX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
       const normY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));

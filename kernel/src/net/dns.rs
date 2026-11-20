@@ -426,6 +426,7 @@ mod lifecycle_tests {
     /// unchanged and still has to hold.
     #[test]
     fn query_ids_skip_active_ids_after_wrap() {
+        let _guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut r = DnsResolver::new();
         let first = r.begin(b"one.example", 0).unwrap();
         let second = r.begin(b"two.example", 0).unwrap();
@@ -568,6 +569,7 @@ mod lifecycle_tests {
 
     #[test]
     fn accept_response_rejects_question_spoofing_and_unauthorized_server() {
+        let _guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut resolver = DnsResolver::new();
         let query_id = resolver.begin(b"legit.example.com", 0).unwrap();
 
@@ -628,6 +630,7 @@ mod lifecycle_tests {
 
     #[test]
     fn dns_case_insensitive_question_and_answer_matching() {
+        let _guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut r = DnsResolver::new();
         let query_id = r.begin(b"example.com", 0).unwrap();
 
@@ -720,6 +723,7 @@ mod lifecycle_tests {
 
     #[test]
     fn dns_cname_chain_resolution_and_bailiwick() {
+        let _guard = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut r = DnsResolver::new();
         let query_id = r.begin(b"alias.example.com", 0).unwrap();
 

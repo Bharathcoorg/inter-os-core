@@ -1371,6 +1371,7 @@ fn deck_grid(_state: &LauncherState) -> layout::Grid {
 }
 
 /// Which catalogue index a touch at (`x`, `y`) lands on, if any.
+/// Seamlessly maps the lower dock region (y in 755..1380) across the 2x3 grid without dead zones.
 #[allow(dead_code)]
 pub fn home_hit(state: &LauncherState, x: usize, y: usize) -> Option<usize> {
     for slot in 0..6 {
