@@ -1252,6 +1252,7 @@ impl<'a, T> Drop for TicketGuard<'a, T> {
 
 pub static BROKER_LEDGER: TicketSpinLock<Option<backend::BrokerLedger>> = TicketSpinLock::new(None);
 pub static NATIVE_GGUF_BACKEND: TicketSpinLock<backend::NativeGgufBackend> = TicketSpinLock::new(backend::NativeGgufBackend::new());
+pub static NATIVE_LITERTLM_BACKEND: TicketSpinLock<backend::NativeLiteRtLmBackend> = TicketSpinLock::new(backend::NativeLiteRtLmBackend::new());
 
 pub fn with_broker_ledger<F, R>(f: F) -> R
 where
@@ -1279,6 +1280,8 @@ pub fn reap_process(task_id: u64) {
     });
     let mut backend = NATIVE_GGUF_BACKEND.lock();
     let _ = backend.reap_owner(task_id);
+    let mut litert_backend = NATIVE_LITERTLM_BACKEND.lock();
+    let _ = litert_backend.reap_owner(task_id);
 }
 
 pub fn reap_backend(backend_id: u32) {
@@ -3310,7 +3313,27 @@ pub fn handle_ipc_inference_query(
         }
 
         let mut matches = [rag::RagMatch::default(); 8];
-        let found_count = index.search(query_text, target_dim, top_k, min_confidence, &mut matches);
+        let found_count = {
+            let mut litert_backend = NATIVE_LITERTLM_BACKEND.lock();
+            let active_sess = litert_backend
+                .sessions
+                .iter()
+                .find(|s| s.active && s.owner == sender_task_id)
+                .map(|s| s.id);
+            if let Some(sess) = active_sess {
+                index.search_with_backend(
+                    query_text,
+                    target_dim,
+                    top_k,
+                    min_confidence,
+                    &mut matches,
+                    &mut *litert_backend,
+                    sess,
+                )
+            } else {
+                index.search(query_text, target_dim, top_k, min_confidence, &mut matches)
+            }
+        };
 
         let end_tick = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0)
             .ok()

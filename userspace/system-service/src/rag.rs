@@ -25,6 +25,7 @@
 
 use interos_std as std;
 use crate::embedding::compute_embedding_768;
+use crate::backend::InferenceBackend;
 
 /// Maximum byte length for a source document path string.
 pub const MAX_DOC_PATH_LEN: usize = 64;
@@ -289,6 +290,75 @@ impl RagIndex {
         chunks_added
     }
 
+    /// Ingests a document using a verified inference backend to compute neural embedding vectors.
+    pub fn ingest_document_with_backend<B: InferenceBackend>(
+        &mut self,
+        path: &[u8],
+        content: &[u8],
+        backend: &mut B,
+        session: u64,
+    ) -> usize {
+        if content.is_empty() || path.is_empty() {
+            return 0;
+        }
+
+        let mut chunks_added = 0usize;
+        let mut offset = 0usize;
+        let mut chunk_idx = 0u16;
+
+        let path_len = path.len().min(MAX_DOC_PATH_LEN);
+
+        while offset < content.len() && self.count < MAX_RAG_CHUNKS {
+            let remaining = content.len() - offset;
+            let target_chunk_len = 140usize.min(MAX_CHUNK_TEXT_LEN).min(remaining);
+
+            let mut actual_len = target_chunk_len;
+            if remaining > target_chunk_len {
+                let search_window_start = (target_chunk_len.saturating_sub(40)).max(1);
+                let window = &content[offset + search_window_start..offset + target_chunk_len];
+                if let Some(pos) = window.iter().rposition(|&b| b == b'\n' || b == b'.' || b == b' ') {
+                    actual_len = search_window_start + pos + 1;
+                }
+            }
+
+            let chunk_slice = &content[offset..offset + actual_len];
+
+            let mut chunk = RagChunk::default();
+            chunk.source_path[..path_len].copy_from_slice(&path[..path_len]);
+            chunk.source_path_len = path_len as u8;
+            chunk.start_offset = offset as u32;
+            chunk.end_offset = (offset + actual_len) as u32;
+            chunk.chunk_index = chunk_idx;
+            chunk.id = compute_chunk_id(path, chunk_idx, chunk.start_offset);
+
+            let text_copy_len = actual_len.min(MAX_CHUNK_TEXT_LEN);
+            chunk.text[..text_copy_len].copy_from_slice(&chunk_slice[..text_copy_len]);
+            chunk.text_len = text_copy_len as u16;
+
+            let mut f32_out = [0.0f32; 768];
+            if backend.embed(session, &chunk.text[..chunk.text_len as usize], &mut f32_out).is_ok() {
+                std::ai::quantize_f32_to_q7(&f32_out[..RAG_VECTOR_DIM], &mut chunk.embedding);
+                self.is_neural = true;
+            } else {
+                compute_embedding_768(
+                    &chunk.text[..chunk.text_len as usize],
+                    RAG_VECTOR_DIM,
+                    None,
+                    Some(&mut chunk.embedding),
+                );
+            }
+
+            self.chunks[self.count] = chunk;
+            self.count += 1;
+            chunks_added += 1;
+
+            offset += actual_len;
+            chunk_idx = chunk_idx.saturating_add(1);
+        }
+
+        chunks_added
+    }
+
     /// Performs cosine similarity ranking across all indexed chunks for a query.
     ///
     /// The caller's `target_dim` is clamped into `128..=RAG_VECTOR_DIM`, so a
@@ -350,6 +420,84 @@ impl RagIndex {
             };
 
             // Insertion sort into top-K results (descending score)
+            let mut insert_pos = found_count;
+            while insert_pos > 0 && out_matches[insert_pos - 1].score_q15 < score_q15 {
+                if insert_pos < max_results {
+                    out_matches[insert_pos] = out_matches[insert_pos - 1];
+                }
+                insert_pos -= 1;
+            }
+
+            if insert_pos < max_results {
+                out_matches[insert_pos] = item;
+                if found_count < max_results {
+                    found_count += 1;
+                }
+            }
+        }
+
+        found_count
+    }
+
+    /// Performs neural cosine similarity ranking across all indexed chunks for a query using an inference backend.
+    pub fn search_with_backend<B: InferenceBackend>(
+        &self,
+        query: &[u8],
+        target_dim: usize,
+        top_k: usize,
+        min_confidence: u8,
+        out_matches: &mut [RagMatch],
+        backend: &mut B,
+        session: u64,
+    ) -> usize {
+        if query.is_empty() || self.count == 0 || out_matches.is_empty() || top_k == 0 {
+            return 0;
+        }
+
+        let dim = target_dim.clamp(128, RAG_VECTOR_DIM);
+        let mut query_emb = [0i8; RAG_VECTOR_DIM];
+
+        let mut f32_out = [0.0f32; 768];
+        if backend.embed(session, query, &mut f32_out).is_ok() {
+            std::ai::quantize_f32_to_q7(&f32_out[..dim], &mut query_emb[..dim]);
+        } else {
+            compute_embedding_768(query, dim, None, Some(&mut query_emb));
+        }
+
+        let max_results = top_k.min(out_matches.len());
+        let mut found_count = 0usize;
+
+        for i in 0..self.count {
+            let chunk = &self.chunks[i];
+
+            let score_q15 = std::ai::cosine_similarity_q7(
+                &query_emb[..dim],
+                &chunk.embedding[..dim],
+            );
+
+            let confidence = if score_q15 <= 0 {
+                0u8
+            } else {
+                ((score_q15 as u32 * 100) / 32767).min(100) as u8
+            };
+
+            if confidence < min_confidence {
+                continue;
+            }
+
+            let item = RagMatch {
+                chunk_id: chunk.id,
+                source_path: chunk.source_path,
+                source_path_len: chunk.source_path_len,
+                start_offset: chunk.start_offset,
+                end_offset: chunk.end_offset,
+                score_q15,
+                confidence_percent: confidence,
+                is_neural: self.is_neural,
+                snippet: chunk.text,
+                snippet_len: chunk.text_len,
+            };
+
             let mut insert_pos = found_count;
             while insert_pos > 0 && out_matches[insert_pos - 1].score_q15 < score_q15 {
                 if insert_pos < max_results {
@@ -738,5 +886,69 @@ Vector search is enabled for notes and downloads.";
 
         assert!(prompt_str.contains("[No matching local documents retrieved from storage]"));
         assert!(prompt_str.contains("Explain relativity"));
+    }
+
+    #[test]
+    fn test_rag_with_native_backend_if_model_present() {
+        extern crate std as rust_std;
+        let path = "models/downloads/embeddinggemma2-text/embeddinggemma-2-text-270m.litertlm";
+        if rust_std::fs::metadata(path).is_err() {
+            return;
+        }
+
+        let mut backend = crate::backend::NativeLiteRtLmBackend::new();
+        let manifest_content = "format=litert-lm\n\
+architecture=embeddinggemma-2\n\
+quantization=backend-defined\n\
+source=models/downloads/embeddinggemma2-text/embeddinggemma-2-text-270m.litertlm\n\
+context_length=1024\n\
+capabilities=text-embedding\n\
+memory.weights=0\n\
+memory.kv_cache=0\n\
+memory.activations=1000000\n\
+memory.scratch=0\n\
+memory.tokenizer=0\n\
+memory.runtime_overhead=1000000\n";
+
+        let manifest = crate::backend::parse_model_manifest(manifest_content.as_bytes()).expect("parse manifest");
+        let handle = backend.load_model(&manifest).expect("load model");
+        let session = backend.create_session(handle, 42).expect("create session");
+
+        let mut index = RagIndex::new(false);
+        index.ingest_document_with_backend(
+            b"/storage/notes/housing.txt",
+            b"Monthly rent receipt and April housing payment records for apartment lease.",
+            &mut backend,
+            session,
+        );
+        index.ingest_document_with_backend(
+            b"/storage/notes/ai.txt",
+            b"Local AI inference engine running on device without cloud connectivity.",
+            &mut backend,
+            session,
+        );
+
+        assert!(index.is_neural, "index must be marked neural after backend embedding");
+
+        let mut matches = [RagMatch::default(); 2];
+        let found = index.search_with_backend(
+            b"rent payment",
+            256,
+            2,
+            0,
+            &mut matches,
+            &mut backend,
+            session,
+        );
+
+        assert!(found >= 1);
+        assert!(matches[0].is_neural);
+        assert_eq!(
+            &matches[0].source_path[..matches[0].source_path_len as usize],
+            b"/storage/notes/housing.txt"
+        );
+
+        backend.destroy_session(session).expect("destroy session");
+        backend.unload_model(handle).expect("unload model");
     }
 }
