@@ -42,7 +42,8 @@ ARCH_TARGET_MAP = {
 
 SERVICES = [
     "displayd", "inputd", "storaged", "netd", "powerd",
-    "modemd", "audiod", "camerad", "sensord", "aid"
+    "modemd", "audiod", "camerad", "sensord", "aid",
+    "searchd", "agentd"
 ]
 
 APPS = [

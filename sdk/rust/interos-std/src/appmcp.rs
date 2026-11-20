@@ -432,6 +432,343 @@ impl AppToolDescriptor {
     }
 }
 
+/// Classification of tool risk for authorization and user consent policies.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRiskClass {
+    /// Read-only observation with no side effects (e.g. list calendar, read battery, search files).
+    Observe = 0,
+    /// Reversible device or app state mutation (e.g. play/pause music, set brightness).
+    Reversible = 1,
+    /// Personal data mutation (e.g. create note, edit calendar event).
+    PersonalMutation = 2,
+    /// External communication or financial consequence (e.g. send message, make phone call).
+    ExternalConsequence = 3,
+    /// Security, credential, or vault sensitive operation (e.g. grant permission, change security policy).
+    SecuritySensitive = 4,
+}
+
+impl ToolRiskClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => "Observe",
+            Self::Reversible => "Reversible",
+            Self::PersonalMutation => "PersonalMutation",
+            Self::ExternalConsequence => "ExternalConsequence",
+            Self::SecuritySensitive => "SecuritySensitive",
+        }
+    }
+}
+
+/// User consent requirement and persistent grant policy for AppMCP tools.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolConsentClass {
+    /// Always prompt the user before each invocation.
+    AlwaysAsk = 0,
+    /// Allowed for a single immediate invocation.
+    AllowOnce = 1,
+    /// Allowed for the duration of the current interactive session.
+    AllowSession = 2,
+    /// Persistently allowed across sessions until explicitly revoked.
+    AlwaysAllow = 3,
+    /// Strictly blocked from execution.
+    NeverAllow = 4,
+}
+
+impl ToolConsentClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AlwaysAsk => "AlwaysAsk",
+            Self::AllowOnce => "AllowOnce",
+            Self::AllowSession => "AllowSession",
+            Self::AlwaysAllow => "AlwaysAllow",
+            Self::NeverAllow => "NeverAllow",
+        }
+    }
+}
+
+/// Deterministically computes a 32-bit tool ID from a package identity and tool name.
+pub const fn compute_dynamic_tool_id(package_id: &[u8], tool_name: &[u8]) -> u32 {
+    let mut hash = 0x811c9dc5u32;
+    let prime = 0x01000193u32;
+    let mut i = 0;
+    while i < package_id.len() {
+        hash ^= package_id[i] as u32;
+        hash = hash.wrapping_mul(prime);
+        i += 1;
+    }
+    hash ^= b'/' as u32;
+    hash = hash.wrapping_mul(prime);
+    let mut j = 0;
+    while j < tool_name.len() {
+        hash ^= tool_name[j] as u32;
+        hash = hash.wrapping_mul(prime);
+        j += 1;
+    }
+    hash
+}
+
+/// Maximum dynamic tools tracked in the platform AppMCP discovery registry.
+pub const MAX_DYNAMIC_TOOLS: usize = 32;
+
+/// A bounded, extensible, dynamic AppMCP tool descriptor declared by native or third-party applications.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct DynamicToolDescriptor {
+    /// Unique 32-bit tool identifier (canonical ID or hash from package+name).
+    pub tool_id: u32,
+    /// Stable tool name (e.g. `notes.create`, `calculator.eval`).
+    pub name: [u8; 32],
+    pub name_len: u8,
+    /// Human-readable label for UI rendering.
+    pub label: [u8; 32],
+    pub label_len: u8,
+    /// Concise description of the action and parameters.
+    pub description: [u8; 64],
+    pub description_len: u8,
+    /// Originating package identity (e.g. `org.interos.notes`).
+    pub package_id: [u8; 48],
+    pub package_id_len: u8,
+    /// Tool revision / version.
+    pub version: u32,
+    /// Risk class for authorization policy.
+    pub risk_class: ToolRiskClass,
+    /// Current consent policy.
+    pub consent_class: ToolConsentClass,
+    /// Required kernel capability type.
+    pub required_cap_type: u64,
+}
+
+impl Default for DynamicToolDescriptor {
+    fn default() -> Self {
+        Self {
+            tool_id: 0,
+            name: [0u8; 32],
+            name_len: 0,
+            label: [0u8; 32],
+            label_len: 0,
+            description: [0u8; 64],
+            description_len: 0,
+            package_id: [0u8; 48],
+            package_id_len: 0,
+            version: 1,
+            risk_class: ToolRiskClass::Observe,
+            consent_class: ToolConsentClass::AlwaysAsk,
+            required_cap_type: TOOL_CAP_TYPE,
+        }
+    }
+}
+
+impl DynamicToolDescriptor {
+    pub fn new(
+        tool_id: u32,
+        name: &[u8],
+        label: &[u8],
+        description: &[u8],
+        package_id: &[u8],
+        version: u32,
+        risk_class: ToolRiskClass,
+        consent_class: ToolConsentClass,
+        required_cap_type: u64,
+    ) -> Self {
+        let mut desc = Self {
+            tool_id,
+            version,
+            risk_class,
+            consent_class,
+            required_cap_type,
+            ..Self::default()
+        };
+        let nl = name.len().min(32);
+        desc.name[..nl].copy_from_slice(&name[..nl]);
+        desc.name_len = nl as u8;
+
+        let ll = label.len().min(32);
+        desc.label[..ll].copy_from_slice(&label[..ll]);
+        desc.label_len = ll as u8;
+
+        let dl = description.len().min(64);
+        desc.description[..dl].copy_from_slice(&description[..dl]);
+        desc.description_len = dl as u8;
+
+        let pl = package_id.len().min(48);
+        desc.package_id[..pl].copy_from_slice(&package_id[..pl]);
+        desc.package_id_len = pl as u8;
+
+        desc
+    }
+
+    pub fn name_str(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
+    }
+
+    pub fn label_str(&self) -> &str {
+        core::str::from_utf8(&self.label[..self.label_len as usize]).unwrap_or("")
+    }
+
+    pub fn description_str(&self) -> &str {
+        core::str::from_utf8(&self.description[..self.description_len as usize]).unwrap_or("")
+    }
+
+    pub fn package_id_str(&self) -> &str {
+        core::str::from_utf8(&self.package_id[..self.package_id_len as usize]).unwrap_or("")
+    }
+}
+
+/// Dynamic registry of discovered application tools.
+#[derive(Debug, Clone, Copy)]
+pub struct DynamicToolRegistry {
+    pub tools: [Option<DynamicToolDescriptor>; MAX_DYNAMIC_TOOLS],
+    pub count: usize,
+}
+
+impl Default for DynamicToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DynamicToolRegistry {
+    pub const fn new() -> Self {
+        Self {
+            tools: [None; MAX_DYNAMIC_TOOLS],
+            count: 0,
+        }
+    }
+
+    /// Pre-populates the registry with all canonical platform tools.
+    pub fn canonical() -> Self {
+        let mut reg = Self::new();
+        reg.populate_canonical();
+        reg
+    }
+
+    pub fn populate_canonical(&mut self) {
+        let list: &[(u32, &[u8], &[u8], &[u8], &[u8], ToolRiskClass, ToolConsentClass)] = &[
+            (TOOL_ID_NOTES_CREATE, b"notes.create", b"Create Note", b"Append text to user notes", b"org.interos.notes", ToolRiskClass::PersonalMutation, ToolConsentClass::AlwaysAsk),
+            (TOOL_ID_NOTES_LIST, b"notes.list", b"List Notes", b"List existing note summaries", b"org.interos.notes", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+            (TOOL_ID_NOTES_READ, b"notes.read", b"Read Note", b"Read full text of a note by id", b"org.interos.notes", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+            (TOOL_ID_NOTES_DELETE, b"notes.delete", b"Delete Note", b"Remove a note permanently", b"org.interos.notes", ToolRiskClass::PersonalMutation, ToolConsentClass::AlwaysAsk),
+
+            (TOOL_ID_MESSAGES_SEND_SMS, b"messages.send", b"Send SMS", b"Send text message to contact", b"org.interos.messages", ToolRiskClass::ExternalConsequence, ToolConsentClass::AlwaysAsk),
+            (TOOL_ID_MESSAGES_LIST, b"messages.list", b"List Messages", b"List conversation threads", b"org.interos.messages", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+            (TOOL_ID_MESSAGES_READ, b"messages.read", b"Read Thread", b"Read messages in thread", b"org.interos.messages", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+
+            (TOOL_ID_CALENDAR_SCHEDULE, b"calendar.schedule", b"Schedule Event", b"Create calendar appointment", b"org.interos.calendar", ToolRiskClass::PersonalMutation, ToolConsentClass::AlwaysAsk),
+            (TOOL_ID_CALENDAR_LIST, b"calendar.list", b"List Events", b"List scheduled calendar events", b"org.interos.calendar", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+            (TOOL_ID_CALENDAR_GET_DATE, b"calendar.date", b"Get Date", b"Read current system date and time", b"org.interos.calendar", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+
+            (TOOL_ID_FILES_LIST, b"files.list", b"List Files", b"List files in authorized directory", b"org.interos.file_manager", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+            (TOOL_ID_FILES_READ, b"files.read", b"Read File", b"Read file contents", b"org.interos.file_manager", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+            (TOOL_ID_FILES_WRITE, b"files.write", b"Write File", b"Write data to file", b"org.interos.file_manager", ToolRiskClass::PersonalMutation, ToolConsentClass::AlwaysAsk),
+            (TOOL_ID_FILES_STAT, b"files.stat", b"File Stat", b"Query file attributes and size", b"org.interos.file_manager", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+
+            (TOOL_ID_SETTINGS_GET, b"settings.get", b"Get Setting", b"Read system configuration value", b"org.interos.settings", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+            (TOOL_ID_SETTINGS_SET, b"settings.set", b"Change Setting", b"Modify system setting", b"org.interos.settings", ToolRiskClass::Reversible, ToolConsentClass::AlwaysAsk),
+
+            (TOOL_ID_CALCULATOR_EVAL, b"calculator.eval", b"Calculator", b"Evaluate arithmetic expression", b"org.interos.calculator", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+
+            (TOOL_ID_DIALER_CALL, b"dialer.call", b"Place Call", b"Initiate telephony voice call", b"org.interos.dialer", ToolRiskClass::ExternalConsequence, ToolConsentClass::AlwaysAsk),
+            (TOOL_ID_DIALER_LOGS, b"dialer.logs", b"Call Logs", b"Read recent call history", b"org.interos.dialer", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+
+            (TOOL_ID_MUSIC_PLAY, b"music.play", b"Play Music", b"Start audio playback", b"org.interos.music", ToolRiskClass::Reversible, ToolConsentClass::AlwaysAllow),
+            (TOOL_ID_MUSIC_PAUSE, b"music.pause", b"Pause Music", b"Pause active playback", b"org.interos.music", ToolRiskClass::Reversible, ToolConsentClass::AlwaysAllow),
+            (TOOL_ID_MUSIC_STATUS, b"music.status", b"Playback Status", b"Query track and playing state", b"org.interos.music", ToolRiskClass::Observe, ToolConsentClass::AlwaysAllow),
+        ];
+
+        for &(id, name, label, desc, pkg, risk, consent) in list {
+            let desc = DynamicToolDescriptor::new(
+                id,
+                name,
+                label,
+                desc,
+                pkg,
+                1,
+                risk,
+                consent,
+                TOOL_CAP_TYPE,
+            );
+            let _ = self.register(desc);
+        }
+    }
+
+    /// Registers a tool into the dynamic registry. If already registered by tool_id, updates it.
+    pub fn register(&mut self, descriptor: DynamicToolDescriptor) -> Result<u32, ()> {
+        for slot in &mut self.tools {
+            if let Some(existing) = slot {
+                if existing.tool_id == descriptor.tool_id {
+                    *existing = descriptor;
+                    return Ok(descriptor.tool_id);
+                }
+            }
+        }
+        for slot in &mut self.tools {
+            if slot.is_none() {
+                *slot = Some(descriptor);
+                self.count += 1;
+                return Ok(descriptor.tool_id);
+            }
+        }
+        Err(())
+    }
+
+    /// Finds a tool descriptor by its 32-bit tool_id.
+    pub fn find_by_id(&self, tool_id: u32) -> Option<&DynamicToolDescriptor> {
+        for slot in &self.tools {
+            if let Some(desc) = slot {
+                if desc.tool_id == tool_id {
+                    return Some(desc);
+                }
+            }
+        }
+        None
+    }
+
+    /// Finds a tool descriptor by package_id and tool name.
+    pub fn find_by_name(&self, package_id: &[u8], name: &[u8]) -> Option<&DynamicToolDescriptor> {
+        for slot in &self.tools {
+            if let Some(desc) = slot {
+                if &desc.package_id[..desc.package_id_len as usize] == package_id
+                    && &desc.name[..desc.name_len as usize] == name
+                {
+                    return Some(desc);
+                }
+            }
+        }
+        None
+    }
+
+    /// Updates the user consent class for a specific tool.
+    pub fn set_consent(&mut self, tool_id: u32, consent: ToolConsentClass) -> bool {
+        for slot in &mut self.tools {
+            if let Some(desc) = slot {
+                if desc.tool_id == tool_id {
+                    desc.consent_class = consent;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Invalidates all registered tools belonging to a package (e.g., when updated or uninstalled).
+    /// This prevents stale grants from authorizing changed semantics under the platform security contract.
+    pub fn invalidate_package(&mut self, package_id: &[u8]) -> usize {
+        let mut removed = 0;
+        for slot in &mut self.tools {
+            if let Some(desc) = slot {
+                if &desc.package_id[..desc.package_id_len as usize] == package_id {
+                    *slot = None;
+                    self.count = self.count.saturating_sub(1);
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,5 +889,61 @@ mod tests {
             assert_eq!(parsed.cap_handle, forged);
             assert_eq!(parsed.tool_id, TOOL_ID_NOTES_CREATE);
         }
+    }
+
+    #[test]
+    fn test_dynamic_tool_registry_canonical_and_custom() {
+        let mut reg = DynamicToolRegistry::canonical();
+        assert!(reg.count >= 20);
+
+        // Canonical lookup by ID
+        let notes_create = reg.find_by_id(TOOL_ID_NOTES_CREATE).expect("notes.create registered");
+        assert_eq!(notes_create.name_str(), "notes.create");
+        assert_eq!(notes_create.package_id_str(), "org.interos.notes");
+        assert_eq!(notes_create.risk_class, ToolRiskClass::PersonalMutation);
+        assert_eq!(notes_create.consent_class, ToolConsentClass::AlwaysAsk);
+
+        // Canonical lookup by name
+        let calc = reg.find_by_name(b"org.interos.calculator", b"calculator.eval").expect("calculator.eval");
+        assert_eq!(calc.tool_id, TOOL_ID_CALCULATOR_EVAL);
+        assert_eq!(calc.risk_class, ToolRiskClass::Observe);
+        assert_eq!(calc.consent_class, ToolConsentClass::AlwaysAllow);
+
+        // Third-party tool dynamic registration without SDK enum changes
+        let third_party_pkg = b"com.example.budget";
+        let third_party_tool = b"budget.record_expense";
+        let custom_id = compute_dynamic_tool_id(third_party_pkg, third_party_tool);
+        let custom_desc = DynamicToolDescriptor::new(
+            custom_id,
+            third_party_tool,
+            b"Record Expense",
+            b"Add an expense to the user's budget log",
+            third_party_pkg,
+            1,
+            ToolRiskClass::ExternalConsequence,
+            ToolConsentClass::AlwaysAsk,
+            TOOL_CAP_TYPE,
+        );
+
+        let initial_count = reg.count;
+        let registered_id = reg.register(custom_desc).expect("register custom tool");
+        assert_eq!(registered_id, custom_id);
+        assert_eq!(reg.count, initial_count + 1);
+
+        // Discovered and queried dynamically
+        let retrieved = reg.find_by_id(custom_id).expect("retrieved custom tool");
+        assert_eq!(retrieved.name_str(), "budget.record_expense");
+        assert_eq!(retrieved.package_id_str(), "com.example.budget");
+        assert_eq!(retrieved.risk_class, ToolRiskClass::ExternalConsequence);
+
+        // Consent change
+        assert!(reg.set_consent(custom_id, ToolConsentClass::AllowSession));
+        assert_eq!(reg.find_by_id(custom_id).unwrap().consent_class, ToolConsentClass::AllowSession);
+
+        // Invalidation on package update / uninstall
+        let removed = reg.invalidate_package(third_party_pkg);
+        assert_eq!(removed, 1);
+        assert_eq!(reg.count, initial_count);
+        assert!(reg.find_by_id(custom_id).is_none());
     }
 }

@@ -88,9 +88,10 @@ pub use tokenizer::{
     FileTokenizer, TOKEN_BOS, TOKEN_EOS, TOKEN_PAD, TOKEN_UNK,
 };
 pub use std::ai::{
-    MSG_TYPE_CANCEL, MSG_TYPE_EMBED, MSG_TYPE_EMBED_CHUNK, MSG_TYPE_GENERATE,
-    MSG_TYPE_GENERATE_ALT, MSG_TYPE_GENERATE_CHUNK, MSG_TYPE_GGUF, MSG_TYPE_INSTALL,
-    MSG_TYPE_INSTALL_CHUNK, MSG_TYPE_SEARCH, MSG_TYPE_SEARCH_CHUNK, STATUS_BASELINE_LEXICAL, STATUS_CANCELLED,
+    MSG_TYPE_AGENT_PLAN, MSG_TYPE_CANCEL, MSG_TYPE_COMPANION_QUERY, MSG_TYPE_EMBED,
+    MSG_TYPE_EMBED_CHUNK, MSG_TYPE_GENERATE, MSG_TYPE_GENERATE_ALT, MSG_TYPE_GENERATE_CHUNK,
+    MSG_TYPE_GGUF, MSG_TYPE_INSTALL, MSG_TYPE_INSTALL_CHUNK, MSG_TYPE_SEARCH,
+    MSG_TYPE_SEARCH_CHUNK, MSG_TYPE_TOOL_EXEC, STATUS_BASELINE_LEXICAL, STATUS_CANCELLED,
     STATUS_ERROR, STATUS_SUCCESS, STATUS_UNAVAILABLE, STATUS_UNSUPPORTED,
 };
 
@@ -459,6 +460,425 @@ pub fn run_wasm() -> ! {
             let _ = std::event_poll(std::EVENT_IPC_MSG, 50);
         } else {
             std::yield_now();
+        }
+    }
+}
+
+/// Semantic Search & RAG daemon execution path (`searchd`).
+///
+/// Designated as service id 13 (`SERVICE_SEARCH`) in the system service ABI.
+/// Manages vector index, storage ingestion, semantic retrieval queries, and
+/// storage budgets.
+pub fn run_search() -> ! {
+    let _ = std::log("[searchd] userspace Search & RAG daemon online.");
+    let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
+    let ipc_slot = std::cap_lookup(std::cap_type::IPC_RECEIVE, 0).ok();
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
+    let mut last_tick = 0u64;
+
+    let mut index = rag::RagIndex::new(false);
+    if index.load_from_disk(rag::PATH_SEARCH_INDEX_DATA).is_err()
+        && index.load_from_disk(rag::PATH_SEARCH_INDEX_STORAGE).is_err()
+    {
+        let _count = index.discover_and_ingest_storage();
+        let _ = index.save_to_disk(rag::PATH_SEARCH_INDEX_STORAGE);
+        let _ = std::log("[searchd] initialized vector index from storage documents.");
+    } else {
+        let _ = std::log("[searchd] loaded existing vector index from persistent storage.");
+    }
+
+    let mut rx_buf = [0u8; 1024];
+    let mut tx_buf = [0u8; 1024];
+
+    loop {
+        let _ = std::service_heartbeat(std::ai::SERVICE_SEARCH);
+
+        if let Some(_) = ipc_slot {
+            if let Ok((sender_task_id, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                if len > 0 {
+                    handle_search_ipc(sender_task_id, msg_type, &rx_buf[..len], &mut index, &mut tx_buf);
+                }
+            } else if let Ok(len) = std::ipc_recv(&mut rx_buf) {
+                if len > 0 {
+                    handle_search_ipc(0, 0, &rx_buf[..len], &mut index, &mut tx_buf);
+                }
+            }
+        }
+
+        if let Some(_) = timer_slot {
+            if let Ok(ticks) = std::get_ticks() {
+                if ticks.saturating_sub(last_tick) >= 60_000 {
+                    last_tick = ticks;
+                    let added = index.discover_and_ingest_storage();
+                    if added > 0 {
+                        let _ = index.save_to_disk(rag::PATH_SEARCH_INDEX_STORAGE);
+                    }
+                }
+            }
+        }
+
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 50);
+        } else {
+            std::yield_now();
+        }
+    }
+}
+
+fn handle_search_ipc(
+    sender_task_id: u64,
+    msg_type: u32,
+    payload: &[u8],
+    index: &mut rag::RagIndex,
+    tx_buf: &mut [u8; 1024],
+) {
+    if msg_type != MSG_TYPE_SEARCH && msg_type != 0 {
+        return;
+    }
+
+    let mut target_dim = 256usize;
+    let mut top_k = 4usize;
+    let mut min_confidence = 10u8;
+    let mut query_text = payload;
+
+    if payload.len() >= core::mem::size_of::<std::ai::AiSearchRequest>() {
+        let req = unsafe {
+            core::ptr::read_unaligned(payload.as_ptr() as *const std::ai::AiSearchRequest)
+        };
+        if req.top_k > 0 && req.top_k <= 10 && req.target_dim <= 768 {
+            if let Some(m_dim) = std::ai::MatryoshkaDim::from_u32(req.target_dim) {
+                target_dim = m_dim.as_usize();
+            }
+            top_k = req.top_k as usize;
+            min_confidence = req.min_confidence as u8;
+            let hdr_len = core::mem::size_of::<std::ai::AiSearchRequest>();
+            if req.query_len > 0 {
+                let end = hdr_len + (req.query_len as usize).min(payload.len().saturating_sub(hdr_len));
+                query_text = &payload[hdr_len..end];
+            } else if payload.len() > hdr_len {
+                query_text = &payload[hdr_len..];
+            }
+        }
+    } else if payload.len() >= 4 && (&payload[..4] == b"SRCH" || &payload[..4] == b"RAGQ") {
+        query_text = &payload[4..];
+    }
+
+    let mut matches = [rag::RagMatch::default(); 8];
+    let found_count = index.search(query_text, target_dim, top_k, min_confidence, &mut matches);
+
+    let status = if found_count == 0 {
+        STATUS_UNAVAILABLE
+    } else {
+        STATUS_SUCCESS
+    };
+
+    let resp = std::ai::AiInferenceResponse {
+        status,
+        output_dim: found_count as u32,
+        latency_micros: 0,
+        output_offset: core::mem::size_of::<std::ai::AiInferenceResponse>() as u64,
+    };
+    let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+    let resp_bytes = unsafe {
+        core::slice::from_raw_parts(&resp as *const _ as *const u8, resp_hdr_len)
+    };
+    tx_buf[..resp_hdr_len].copy_from_slice(resp_bytes);
+    let mut cursor = resp_hdr_len;
+
+    for i in 0..found_count.min(8) {
+        let m = &matches[i];
+        let path_str = m.source_path_str();
+        let text_str = m.snippet_str();
+        let p_len = path_str.len().min(64);
+        let t_len = text_str.len().min(128);
+
+        if cursor + 4 + p_len + t_len + 8 > tx_buf.len() {
+            break;
+        }
+        tx_buf[cursor..cursor + 2].copy_from_slice(&(p_len as u16).to_le_bytes());
+        cursor += 2;
+        tx_buf[cursor..cursor + p_len].copy_from_slice(&path_str.as_bytes()[..p_len]);
+        cursor += p_len;
+
+        tx_buf[cursor..cursor + 2].copy_from_slice(&(t_len as u16).to_le_bytes());
+        cursor += 2;
+        tx_buf[cursor..cursor + t_len].copy_from_slice(&text_str.as_bytes()[..t_len]);
+        cursor += t_len;
+
+        tx_buf[cursor..cursor + 2].copy_from_slice(&m.score_q15.to_le_bytes());
+        cursor += 2;
+        tx_buf[cursor] = m.confidence_percent;
+        cursor += 1;
+        tx_buf[cursor] = if m.is_neural { 1 } else { 0 };
+        cursor += 1;
+    }
+
+    if sender_task_id != 0 {
+        let _ = std::ipc_send(sender_task_id, MSG_TYPE_SEARCH, &tx_buf[..cursor]);
+    }
+}
+
+/// Companion & Autonomous Agent runtime daemon execution path (`agentd`).
+///
+/// Designated as service id 14 (`SERVICE_AGENT`) in the system service ABI.
+/// Owns the user's CompanionState (preferences, routines, corrections, tool stats),
+/// AppMCP dynamic tool dispatch, interactive execution plans, lock sanitization,
+/// and privacy modes.
+pub fn run_agent() -> ! {
+    let _ = std::log("[agentd] userspace Companion & Agent runtime daemon online.");
+    let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
+    let ipc_slot = std::cap_lookup(std::cap_type::IPC_RECEIVE, 0).ok();
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
+
+    let mut state = std::companion::CompanionState::new();
+    let mut tool_registry = std::appmcp::DynamicToolRegistry::new();
+    tool_registry.populate_canonical();
+
+    let enc_key = [0x5Au8; 32];
+    let mut file_buf = [0u8; 4096];
+
+    if let Ok(handle) = std::fs_open(std::companion::PATH_COMPANION_MEMORY, std::FS_READ) {
+        if let Ok(bytes) = std::fs_read(handle, &mut file_buf) {
+            if bytes > 0 {
+                let _ = state.deserialize_encrypted(&enc_key, &file_buf[..bytes]);
+                let _ = std::log("[agentd] companion memory loaded and decrypted.");
+            }
+        }
+        let _ = std::fs_close(handle);
+    }
+
+    let mut rx_buf = [0u8; 1024];
+    let mut tx_buf = [0u8; 1024];
+    let mut last_save_tick = 0u64;
+
+    loop {
+        let _ = std::service_heartbeat(std::ai::SERVICE_AGENT);
+
+        if let Some(_) = ipc_slot {
+            if let Ok((sender_task_id, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                if len > 0 {
+                    handle_agent_ipc(
+                        sender_task_id,
+                        msg_type,
+                        &rx_buf[..len],
+                        &mut state,
+                        &mut tool_registry,
+                        &mut tx_buf,
+                    );
+                }
+            } else if let Ok(len) = std::ipc_recv(&mut rx_buf) {
+                if len > 0 {
+                    handle_agent_ipc(
+                        0,
+                        0,
+                        &rx_buf[..len],
+                        &mut state,
+                        &mut tool_registry,
+                        &mut tx_buf,
+                    );
+                }
+            }
+        }
+
+        if let Some(_) = timer_slot {
+            if let Ok(ticks) = std::get_ticks() {
+                if ticks.saturating_sub(last_save_tick) >= 30_000 {
+                    last_save_tick = ticks;
+                    if !state.is_locked
+                        && !state.is_private_session
+                        && state.learning_mode != std::companion::LearningMode::Disabled
+                    {
+                        let nonce = [0x22u8; 12];
+                        if let Ok(enc_len) = state.serialize_encrypted(&enc_key, &nonce, &mut file_buf) {
+                            if let Ok(handle) = std::fs_open(
+                                std::companion::PATH_COMPANION_MEMORY,
+                                std::FS_WRITE,
+                            ) {
+                                let _ = std::fs_write(handle, &file_buf[..enc_len]);
+                                let _ = std::fs_close(handle);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 50);
+        } else {
+            std::yield_now();
+        }
+    }
+}
+
+fn handle_agent_ipc(
+    sender_task_id: u64,
+    msg_type: u32,
+    payload: &[u8],
+    state: &mut std::companion::CompanionState,
+    tool_registry: &mut std::appmcp::DynamicToolRegistry,
+    tx_buf: &mut [u8; 1024],
+) {
+    match msg_type {
+        std::ai::MSG_TYPE_COMPANION_QUERY => {
+            if payload.is_empty() {
+                return;
+            }
+            match payload[0] {
+                1 => {
+                    let locked = payload.get(1).copied().unwrap_or(0) != 0;
+                    state.set_locked(locked);
+                    emit_agent_ack(sender_task_id, msg_type, 0, b"LOCK_ACK", tx_buf);
+                }
+                2 => {
+                    let mode = std::companion::LearningMode::from_u8(payload.get(1).copied().unwrap_or(0));
+                    state.set_learning_mode(mode);
+                    emit_agent_ack(sender_task_id, msg_type, 0, b"MODE_ACK", tx_buf);
+                }
+                3 => {
+                    let priv_sess = payload.get(1).copied().unwrap_or(0) != 0;
+                    state.set_private_session(priv_sess);
+                    emit_agent_ack(sender_task_id, msg_type, 0, b"PRIV_ACK", tx_buf);
+                }
+                4 => {
+                    state.clear_memory();
+                    let _ = std::fs_unlink(std::companion::PATH_COMPANION_MEMORY);
+                    emit_agent_ack(sender_task_id, msg_type, 0, b"CLEAR_ACK", tx_buf);
+                }
+                5 => {
+                    let mut resp = [0u8; 16];
+                    resp[0] = state.learning_mode as u8;
+                    resp[1] = if state.is_private_session { 1 } else { 0 };
+                    resp[2] = if state.is_locked { 1 } else { 0 };
+                    resp[3] = state.pref_count as u8;
+                    resp[4] = state.corr_count as u8;
+                    resp[5] = state.routine_count as u8;
+                    resp[6] = tool_registry.count as u8;
+                    emit_agent_ack(sender_task_id, msg_type, 0, &resp, tx_buf);
+                }
+                _ => {
+                    emit_agent_ack(sender_task_id, msg_type, 1, b"UNKNOWN_OP", tx_buf);
+                }
+            }
+        }
+        std::ai::MSG_TYPE_AGENT_PLAN => {
+            if payload.is_empty() {
+                return;
+            }
+            match payload[0] {
+                1 => {
+                    let plan_id = std::get_ticks().unwrap_or(1);
+                    let mut plan = std::companion::ExecutionPlan::new(plan_id);
+                    if payload.len() >= 5 {
+                        let tool_id = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+                        let (risk, consent) = if let Some(desc) = tool_registry.find_by_id(tool_id) {
+                            (desc.risk_class, desc.consent_class)
+                        } else {
+                            (std::appmcp::ToolRiskClass::Observe, std::appmcp::ToolConsentClass::AlwaysAsk)
+                        };
+                        let args = if payload.len() > 5 { &payload[5..] } else { b"" };
+                        plan.add_step(tool_id, risk, consent, args);
+                    }
+                    if plan.requires_user_consent() {
+                        plan.status = std::companion::PlanStatus::AwaitingConsent;
+                    } else {
+                        plan.status = std::companion::PlanStatus::Running;
+                    }
+                    state.active_plan = Some(plan);
+
+                    let status_byte = plan.status as u8;
+                    emit_agent_ack(sender_task_id, msg_type, 0, &[status_byte], tx_buf);
+                }
+                2 => {
+                    if let Some(ref mut plan) = state.active_plan {
+                        plan.user_consent_granted = true;
+                        plan.status = std::companion::PlanStatus::Running;
+                        emit_agent_ack(sender_task_id, msg_type, 0, &[plan.status as u8], tx_buf);
+                    } else {
+                        emit_agent_ack(sender_task_id, msg_type, 1, b"NO_PLAN", tx_buf);
+                    }
+                }
+                3 => {
+                    if let Some(ref mut plan) = state.active_plan {
+                        plan.cancel();
+                        emit_agent_ack(sender_task_id, msg_type, 0, &[plan.status as u8], tx_buf);
+                    } else {
+                        emit_agent_ack(sender_task_id, msg_type, 1, b"NO_PLAN", tx_buf);
+                    }
+                }
+                4 => {
+                    if let Some(ref plan) = state.active_plan {
+                        emit_agent_ack(sender_task_id, msg_type, 0, &[plan.status as u8], tx_buf);
+                    } else {
+                        emit_agent_ack(sender_task_id, msg_type, 0, &[std::companion::PlanStatus::Completed as u8], tx_buf);
+                    }
+                }
+                _ => {
+                    emit_agent_ack(sender_task_id, msg_type, 1, b"UNKNOWN_PLAN_OP", tx_buf);
+                }
+            }
+        }
+        std::ai::MSG_TYPE_TOOL_EXEC => {
+            if payload.len() < 4 {
+                emit_agent_ack(sender_task_id, msg_type, 1, b"INVALID_TOOL_PAYLOAD", tx_buf);
+                return;
+            }
+            let tool_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            let desc = match tool_registry.find_by_id(tool_id) {
+                Some(d) => d,
+                None => {
+                    emit_agent_ack(sender_task_id, msg_type, 2, b"TOOL_NOT_FOUND", tx_buf);
+                    return;
+                }
+            };
+
+            if desc.consent_class == std::appmcp::ToolConsentClass::NeverAllow {
+                state.record_tool_result(tool_id, false, -1);
+                emit_agent_ack(sender_task_id, msg_type, 3, b"TOOL_DENIED_BY_POLICY", tx_buf);
+                return;
+            }
+
+            if desc.required_cap_type != 0 {
+                let has_cap = std::cap_lookup(desc.required_cap_type, 0).is_ok();
+                if !has_cap {
+                    state.record_tool_result(tool_id, false, -2);
+                    emit_agent_ack(sender_task_id, msg_type, 4, b"CAPABILITY_NOT_HELD", tx_buf);
+                    return;
+                }
+            }
+
+            state.record_tool_result(tool_id, true, 0);
+            emit_agent_ack(sender_task_id, msg_type, 0, b"TOOL_SUCCESS", tx_buf);
+        }
+        _ => {
+            emit_agent_ack(sender_task_id, msg_type, 0xFF, b"UNSUPPORTED_MSG", tx_buf);
+        }
+    }
+}
+
+fn emit_agent_ack(
+    sender_task_id: u64,
+    msg_type: u32,
+    status: u32,
+    data: &[u8],
+    tx_buf: &mut [u8; 1024],
+) {
+    let resp = std::ai::AiInferenceResponse {
+        status,
+        output_dim: data.len() as u32,
+        latency_micros: 0,
+        output_offset: core::mem::size_of::<std::ai::AiInferenceResponse>() as u64,
+    };
+    let hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+    let resp_bytes = unsafe {
+        core::slice::from_raw_parts(&resp as *const _ as *const u8, hdr_len)
+    };
+    tx_buf[..hdr_len].copy_from_slice(resp_bytes);
+    let total = hdr_len + data.len();
+    if total <= tx_buf.len() {
+        tx_buf[hdr_len..total].copy_from_slice(data);
+        if sender_task_id != 0 {
+            let _ = std::ipc_send(sender_task_id, msg_type, &tx_buf[..total]);
         }
     }
 }

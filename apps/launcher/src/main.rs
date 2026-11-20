@@ -1790,7 +1790,17 @@ fn rank_search_results(state: &mut LauncherState) {
             state.search_index.set_ai_state(launcher::search::SourceState::Unavailable(reason));
         }
     }
-    state.search_results = state.search_index.search(query, &search_ranker(ai_status));
+    let ranker = if ai_status.is_available() && !query.is_empty() {
+        let mut frame = [0u8; launcher::search::SEARCH_FRAME_MAX];
+        if let Some(len) = launcher::search::query_service_search_frame(query, &mut frame) {
+            launcher::search::SemanticRanker::with_cached_frame(ai_status, &frame[..len])
+        } else {
+            search_ranker(ai_status)
+        }
+    } else {
+        search_ranker(ai_status)
+    };
+    state.search_results = state.search_index.search(query, &ranker);
 }
 
 /// Whether a package is one of the shell's own parts.

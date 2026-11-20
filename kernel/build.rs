@@ -49,6 +49,8 @@ const EMBEDDED_USER_IMAGES: &[&str] = &[
     "video_player",
     "webview_demo",
     "aid",
+    "searchd",
+    "agentd",
 ];
 
 fn main() {

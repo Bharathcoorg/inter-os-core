@@ -2256,6 +2256,13 @@ impl AgentManagerApp {
             );
         }
 
+        self.begin_card(b"Model Role Defaults", Tone::Plain);
+        let defaults = interos_std::companion::ModelRegistryDefaults::new();
+        for role in interos_std::companion::ModelRole::ALL.iter() {
+            if let Some(b) = defaults.get_binding(*role) {
+                self.add_line(role.as_str().as_bytes(), b.model_id_str().as_bytes(), Tone::Plain);
+            }
+        }
     }
 
     /// Builds the permissions surface.
@@ -2340,6 +2347,25 @@ impl AgentManagerApp {
         }
         if !any {
             self.add_wide(b"Nothing is missing: every capability asked about was granted.", Tone::Muted);
+        }
+
+        self.begin_card(b"AppMCP Dynamic Tools", Tone::Plain);
+        let mut reg = interos_std::appmcp::DynamicToolRegistry::new();
+        reg.populate_canonical();
+        let mut count_buf = [0u8; 16];
+        let cn = format_u32(reg.count as u32, &mut count_buf);
+        self.add_line(b"Registered tools", &count_buf[..cn], Tone::Plain);
+        for i in 0..reg.count.min(10) {
+            if let Some(tool) = &reg.tools[i] {
+                let tone = match tool.risk_class {
+                    interos_std::appmcp::ToolRiskClass::Observe => Tone::Good,
+                    interos_std::appmcp::ToolRiskClass::Reversible => Tone::Plain,
+                    interos_std::appmcp::ToolRiskClass::PersonalMutation => Tone::Accent,
+                    interos_std::appmcp::ToolRiskClass::ExternalConsequence => Tone::Unavailable,
+                    interos_std::appmcp::ToolRiskClass::SecuritySensitive => Tone::Bad,
+                };
+                self.add_chip(tool.name_str().as_bytes(), tool.consent_class.as_str().as_bytes(), tone);
+            }
         }
     }
 

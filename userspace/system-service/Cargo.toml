@@ -85,4 +85,17 @@ path = "src/bin/aid.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "searchd"
+path = "src/bin/searchd.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "agentd"
+path = "src/bin/agentd.rs"
+test = false
+bench = false
+
+
 

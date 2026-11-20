@@ -41,6 +41,8 @@ pub static APP_AGENT_MANAGER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MAN
 pub static APP_VIDEO_PLAYER_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/video_player"));
 pub static APP_WEBVIEW_DEMO_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/webview_demo"));
 pub static AID_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/aid"));
+pub static SEARCHD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/searchd"));
+pub static AGENTD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/agentd"));
 
 // WHY the app statics above are embedded rather than loaded from the VFS: every
 // first-party app already on the launch path (settings, browser, gallery, ...)
@@ -62,6 +64,8 @@ pub fn service_image(service_id: u8) -> Option<UserImage> {
         10 => UserImage { name: "launcher", elf: LAUNCHER_ELF },
         11 => UserImage { name: "sensord", elf: SENSORD_ELF },
         12 => UserImage { name: "aid", elf: AID_ELF },
+        13 => UserImage { name: "searchd", elf: SEARCHD_ELF },
+        14 => UserImage { name: "agentd", elf: AGENTD_ELF },
         _ => return None,
     })
 }

@@ -160,7 +160,7 @@ Invoke-GuestBuild -Label "userspace/init" `
 # sensord must be here: kernel/src/task/images.rs embeds it as ServiceId 11, so
 # omitting it leaves a stale artifact in the boot image (or a hard compile error
 # on a clean tree).
-foreach ($svc in @("displayd", "inputd", "storaged", "netd", "powerd", "modemd", "audiod", "camerad", "sensord", "aid")) {
+foreach ($svc in @("displayd", "inputd", "storaged", "netd", "powerd", "modemd", "audiod", "camerad", "sensord", "aid", "searchd", "agentd")) {
     Invoke-GuestBuild -Label "system service: $svc" `
         -CargoArgs (@("rustc", "-p", "interos-system-service", "--bin", $svc, "--target", "x86_64-unknown-none", "--") + $StaticFlags) `
         -Artifact $svc -StripTool $StripExe

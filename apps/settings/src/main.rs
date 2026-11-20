@@ -495,6 +495,7 @@ pub power_profile: Option<PowerProfile>,
     pub agent_consent_request_id: Option<u64>,
     pub agent_consent_task_id: Option<u64>,
     pub agent_consent_state: AgentConsentState,
+    pub companion_learning_mode: u8,
 }
 
 /// Dynamic permission consent state queried from kernel Permission Manager.
@@ -695,6 +696,7 @@ impl SettingsApp {
             agent_consent_request_id: None,
             agent_consent_task_id: None,
             agent_consent_state: AgentConsentState::None,
+            companion_learning_mode: 0,
         }
     }
 
@@ -706,6 +708,18 @@ impl SettingsApp {
         self.agent_consent_request_id = req_id;
         self.agent_consent_task_id = task_id;
         self.agent_consent_state = state;
+    }
+
+    /// Cycles companion learning mode (Active -> ReadOnly -> Disabled) and persists over IPC.
+    pub fn cycle_companion_learning_mode(&mut self) {
+        self.companion_learning_mode = (self.companion_learning_mode + 1) % 3;
+        let payload = [2u8, self.companion_learning_mode];
+        let _ = std::ipc_send(
+            interos_std::ai::SERVICE_AGENT_TASK_ID,
+            interos_std::ai::MSG_TYPE_COMPANION_QUERY,
+            &payload,
+        );
+        std::log("[SETTINGS APP] Companion learning mode updated.").ok();
     }
 
     /// Toggles or grants/revokes agent task capability based on current consent state.
@@ -5721,15 +5735,20 @@ fn row_pixel(
                 }
             }
             _ => {
+                let (detail, badge): (&[u8], &[u8]) = match app.companion_learning_mode {
+                    0 => (b"Companion Learning: Active (Tap to cycle)", b"ACTIVE"),
+                    1 => (b"Companion Learning: ReadOnly (Tap to cycle)", b"READ_ONLY"),
+                    _ => (b"Companion Learning: Disabled (Tap to cycle)", b"DISABLED"),
+                };
                 if let Some(c) = row_head(
                     x,
                     y,
                     cy,
-                    b"Local AI Memory Isolation",
-                    b"Persistent embeddings zero-knowledge",
-                    THEME.on_surface_variant,
-                    b"ENFORCED",
-                    THEME.on_surface_variant,
+                    b"Local AI Companion Memory",
+                    detail,
+                    THEME.on_surface,
+                    badge,
+                    if app.companion_learning_mode == 2 { THEME.on_surface_variant } else { THEME.primary },
                     RowBoxes::user(),
                 ) {
                     return c;
@@ -7814,6 +7833,19 @@ fn handle_tap(
                     CARD_R,
                 ) {
                     settings.toggle_consent_or_agent_permission();
+                }
+                let (cy5, ch5) =
+                    detail_row_rect_scrolled(Section::Security, 5, settings.scroll.offset);
+                if in_round_rect(
+                    input.x as usize,
+                    input.y as usize,
+                    DETAIL_X,
+                    cy5,
+                    DETAIL_W,
+                    ch5,
+                    CARD_R,
+                ) {
+                    settings.cycle_companion_learning_mode();
                 }
             }
             _ => {}

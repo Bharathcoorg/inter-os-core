@@ -11,6 +11,7 @@
 pub mod ai;
 pub mod app;
 pub mod appmcp;
+pub mod companion;
 pub mod calendar;
 pub mod content;
 pub mod design;

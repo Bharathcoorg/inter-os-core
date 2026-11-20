@@ -395,12 +395,14 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
         }
         ServiceId::Search => {
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemWrite, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::ContentIndexRead, rights: Rights::READ, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::SearchService, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
         }
         ServiceId::Agent => {
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemRead, rights: Rights::READ, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemWrite, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::AgentTask, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
         }
@@ -626,6 +628,14 @@ fn start_locked(id: ServiceId, parent_id: TaskId) -> Result<TaskId, &'static str
         if !matches!(record.state, ServiceState::Declared | ServiceState::Stopped | ServiceState::Failed) {
             bail!("service is not startable");
         }
+    } else if matches!(id, ServiceId::Search | ServiceId::Agent | ServiceId::Voice) {
+        let generation = 0;
+        SERVICE_RECORDS.try_lock().ok_or("service registry busy")?[id as usize] = Some(ServiceRecord {
+            id,
+            task: TaskId(0),
+            state: ServiceState::Declared,
+            generation,
+        });
     } else { bail!("service not declared"); }
     let desc = descriptor(id);
     if desc.abi_version != SERVICE_ABI_VERSION { bail!("unsupported service ABI"); }

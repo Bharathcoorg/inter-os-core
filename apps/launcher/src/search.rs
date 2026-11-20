@@ -319,10 +319,23 @@ impl Ranker for ExactMatch {
 /// When the system AI inference service and weights are available, it incorporates
 /// embedding vector cosine similarity into candidate scoring. When unavailable or absent,
 /// it falls back strictly and honestly to deterministic token prefix matching.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct SemanticRanker {
     pub exact: ExactMatch,
     pub ai_status: AiEmbeddingStatus,
+    pub frame: [u8; SEARCH_FRAME_MAX],
+    pub frame_len: usize,
+}
+
+impl Default for SemanticRanker {
+    fn default() -> Self {
+        Self {
+            exact: ExactMatch,
+            ai_status: AiEmbeddingStatus::default(),
+            frame: [0u8; SEARCH_FRAME_MAX],
+            frame_len: 0,
+        }
+    }
 }
 
 impl SemanticRanker {
@@ -330,7 +343,17 @@ impl SemanticRanker {
         Self {
             exact: ExactMatch,
             ai_status: status,
+            frame: [0u8; SEARCH_FRAME_MAX],
+            frame_len: 0,
         }
+    }
+
+    pub fn with_cached_frame(status: AiEmbeddingStatus, cached: &[u8]) -> Self {
+        let mut r = Self::new(status);
+        let take = cached.len().min(SEARCH_FRAME_MAX);
+        r.frame[..take].copy_from_slice(&cached[..take]);
+        r.frame_len = take;
+        r
     }
 }
 
@@ -342,15 +365,15 @@ const SEARCH_HIT_LEN: usize = core::mem::size_of::<interos_std::ai::AiSearchHit>
 
 /// The most hits one reply can carry: the service ranks into a fixed eight-slot
 /// match array, so a larger `top_k` cannot produce more frames than this.
-const SEARCH_MAX_HITS: usize = 8;
+pub const SEARCH_MAX_HITS: usize = 8;
 /// The longest source path and snippet a hit frame may name, per the service's
 /// document bounds (`MAX_DOC_PATH_LEN`, `MAX_CHUNK_TEXT_LEN`).
-const SEARCH_PATH_MAX: usize = 64;
-const SEARCH_SNIPPET_MAX: usize = 192;
+pub const SEARCH_PATH_MAX: usize = 64;
+pub const SEARCH_SNIPPET_MAX: usize = 192;
 /// The frame buffer sized from those bounds: a reply header plus every hit the
 /// service can return, each with its path and snippet. A frame that arrives
 /// larger is parsed only as far as it reached and then refused, never overflowed.
-const SEARCH_FRAME_MAX: usize =
+pub const SEARCH_FRAME_MAX: usize =
     SEARCH_REPLY_HDR + SEARCH_MAX_HITS * (SEARCH_HIT_LEN + SEARCH_PATH_MAX + SEARCH_SNIPPET_MAX);
 
 /// The Matryoshka width the query asks for, matching the lexical fallback's 128-D
@@ -482,40 +505,42 @@ impl Ranker for SemanticRanker {
             return base_score;
         }
 
-        // Ask the inference service for a real retrieval and use the score it
-        // reported for THIS entry. Only a per-entry score that actually arrived
-        // counts; everything else -- no service, no reply, no matching hit, a
-        // truncated frame -- falls back to the labelled lexical projection.
-        let sim = match query_service_similarity(query, entry) {
-            Some(sim) => sim,
-            None => lexical_similarity(query, entry),
+        // When a frame was pre-fetched for this query generation, score against the frame
+        // in-memory with zero IPC roundtrips! This enforces the rule: ONE semantic retrieval
+        // request per query generation, never one per candidate.
+        let sim = if self.frame_len > 0 {
+            match service_hit_score(&self.frame[..self.frame_len], entry) {
+                Some(sim) => sim,
+                None => lexical_similarity(query, entry),
+            }
+        } else {
+            match query_service_similarity(query, entry) {
+                Some(sim) => sim,
+                None => lexical_similarity(query, entry),
+            }
         };
         semantic_score(base_score, sim)
     }
 }
 
-/// Sends a framed search query to `aid` and returns the service's real score for
-/// `entry`, or `None` when no per-entry score arrived.
-///
-/// WHY the reply is taken by sender and type: the mailbox carries whatever the
-/// platform posted, so an untargeted read could interpret an unrelated message
-/// as the answer. `receive_any` reports the router-stamped sender and the message
-/// type, and only the inference service's search reply is accepted.
-///
-/// WHY two routes are read: the service streams a multi-hit frame over a shared
-/// memory channel and posts a sixteen-byte `AiStreamNotice` (`MSG_TYPE_SEARCH_CHUNK`);
-/// when no channel is free it falls back to an inline `MSG_TYPE_SEARCH` reply the
-/// mailbox cuts at sixty-four bytes. The streamed frame is drained slot by slot
-/// into a buffer sized from the protocol bounds; the inline frame is parsed as far
-/// as it reached. Either way the parser, not the transport, decides what is whole.
-fn query_service_similarity(query: &[u8], entry: &Entry) -> Option<i16> {
+/// Sends a single framed search request for the query to the search/inference service
+/// and receives the complete hit frame into `out_frame`.
+pub fn query_service_search_frame(query: &[u8], out_frame: &mut [u8; SEARCH_FRAME_MAX]) -> Option<usize> {
     let mut req_buf = [0u8; 64];
     let req_len = frame_search_request(query, &mut req_buf);
     if req_len == 0 {
         return None;
     }
+
+    // Try searchd first (ServiceId 13), fallback to aid (ServiceId 12)
+    let target = if interos_std::service_peer_matches(interos_std::ai::SERVICE_SEARCH, interos_std::ai::SERVICE_SEARCH_TASK_ID) {
+        interos_std::ai::SERVICE_SEARCH_TASK_ID
+    } else {
+        interos_std::ai::SERVICE_INFERENCE_TASK_ID
+    };
+
     if interos_std::ipc_send(
-        interos_std::ai::SERVICE_INFERENCE_TASK_ID,
+        target,
         interos_std::ai::MSG_TYPE_SEARCH,
         &req_buf[..req_len],
     )
@@ -533,11 +558,12 @@ fn query_service_similarity(query: &[u8], entry: &Entry) -> Option<i16> {
 
     let mut rx_buf = [0u8; 64];
     let (sender, msg_type, rx_len) = interos_std::ipc::receive_any(&mut rx_buf).ok()?;
-    if !interos_std::service_peer_matches(interos_std::ai::SERVICE_INFERENCE, sender) {
+    if !interos_std::service_peer_matches(interos_std::ai::SERVICE_INFERENCE, sender)
+        && !interos_std::service_peer_matches(interos_std::ai::SERVICE_SEARCH, sender)
+    {
         return None;
     }
 
-    let mut frame = [0u8; SEARCH_FRAME_MAX];
     let frame_len = if msg_type == interos_std::ai::MSG_TYPE_SEARCH_CHUNK {
         let notice = interos_std::ai::AiStreamNotice::from_bytes(&rx_buf[..rx_len])?;
         if notice.status != interos_std::ai::STATUS_SUCCESS {
@@ -545,13 +571,13 @@ fn query_service_similarity(query: &[u8], entry: &Entry) -> Option<i16> {
         }
         let want = (notice.streamed_len as usize)
             .min(notice.total_len as usize)
-            .min(frame.len());
+            .min(out_frame.len());
         let mut collected = 0usize;
         while collected < want {
             let cap = (want - collected).min(interos_std::ai::ANSWER_SLOT_BYTES);
             match interos_std::shm_pipe_receive(
                 notice.pipe_id,
-                &mut frame[collected..collected + cap],
+                &mut out_frame[collected..collected + cap],
             ) {
                 Ok(read) if read > 0 => collected += read.min(cap),
                 _ => break,
@@ -559,13 +585,20 @@ fn query_service_similarity(query: &[u8], entry: &Entry) -> Option<i16> {
         }
         collected
     } else if msg_type == interos_std::ai::MSG_TYPE_SEARCH {
-        let take = rx_len.min(frame.len());
-        frame[..take].copy_from_slice(&rx_buf[..take]);
+        let take = rx_len.min(out_frame.len());
+        out_frame[..take].copy_from_slice(&rx_buf[..take]);
         take
     } else {
         return None;
     };
 
+    Some(frame_len)
+}
+
+/// Sends a framed search query to the search service and returns the score for `entry`.
+fn query_service_similarity(query: &[u8], entry: &Entry) -> Option<i16> {
+    let mut frame = [0u8; SEARCH_FRAME_MAX];
+    let frame_len = query_service_search_frame(query, &mut frame)?;
     service_hit_score(&frame[..frame_len], entry)
 }
 

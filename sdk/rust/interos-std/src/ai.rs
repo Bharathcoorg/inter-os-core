@@ -64,8 +64,17 @@ pub const SERVICE_INFERENCE: u8 = 12;
 /// Virtual TaskId used to route IPC directly to the system inference service (`aid`, Service #12).
 pub const SERVICE_INFERENCE_TASK_ID: u64 = 0xFFFF_000C;
 
+/// The service id the platform's semantic search service answers to.
+pub const SERVICE_SEARCH: u8 = 13;
+
 /// Virtual TaskId used to route IPC directly to the semantic search service (Service #13).
 pub const SERVICE_SEARCH_TASK_ID: u64 = 0xFFFF_000D;
+
+/// The service id the platform's companion orchestration service answers to.
+pub const SERVICE_AGENT: u8 = 14;
+
+/// Virtual TaskId used to route IPC directly to the companion runtime service (Service #14).
+pub const SERVICE_AGENT_TASK_ID: u64 = 0xFFFF_000E;
 
 /// Virtual TaskId used to route IPC directly to the storage service (Service #3).
 ///
@@ -141,6 +150,15 @@ pub const MSG_TYPE_INSTALL_CHUNK: u32 = 0x494E_5343;
 
 /// IPC message type for cancelling active streaming generation: `0x4341_4E43` (ASCII `b"CANC"`).
 pub const MSG_TYPE_CANCEL: u32 = 0x4341_4E43;
+
+/// IPC message type for proposing and executing interactive agent plans: `0x504C_414E` (ASCII `b"PLAN"`).
+pub const MSG_TYPE_AGENT_PLAN: u32 = 0x504C_414E;
+
+/// IPC message type for querying or updating companion state / privacy settings: `0x434F_4D50` (ASCII `b"COMP"`).
+pub const MSG_TYPE_COMPANION_QUERY: u32 = 0x434F_4D50;
+
+/// IPC message type for executing an AppMCP dynamic tool through the capability broker: `0x544F_4F4C` (ASCII `b"TOOL"`).
+pub const MSG_TYPE_TOOL_EXEC: u32 = 0x544F_4F4C;
 
 /// Status code: Success.
 pub const STATUS_SUCCESS: u32 = 0;
