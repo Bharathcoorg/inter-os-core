@@ -21,6 +21,7 @@
 
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 
 use core::panic::PanicInfo;
 use interos_std as std;
@@ -76,7 +77,7 @@ const CARD_BORDER: u32 = match CARD.border {
 
 const W: usize = 720;
 const H: usize = 1440;
-const CHUNK: usize = 4096;
+const CHUNK: usize = 1024;
 /// The scale the editor draws its body text at, and the column it wraps to.
 const EDITOR_BODY_SCALE: usize = 2;
 
@@ -441,7 +442,6 @@ impl AppState {
     }
 }
 
-static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
 
 /// Draws a run of text with the sharp outline face, falling back to the
 /// bitmap face when the outline face refuses the run.
@@ -2111,6 +2111,7 @@ fn render_soft_keyboard(x: usize, y: usize, state: &AppState) -> u32 {
 fn render_notes_ui(surface: u32, state: &AppState) {
     let total_pixels = W * H;
     let mut pixel_idx = 0;
+    let mut chunk_buf = [0u32; CHUNK];
 
     while pixel_idx < total_pixels {
         let count = CHUNK.min(total_pixels - pixel_idx);
@@ -2118,16 +2119,12 @@ fn render_notes_ui(surface: u32, state: &AppState) {
             let px = pixel_idx + i;
             let x = px % W;
             let y = px / W;
-            unsafe {
-                CHUNK_BUF[i] = render_pixel(x, y, state);
-            }
+            chunk_buf[i] = render_pixel(x, y, state);
         }
-        unsafe {
-            let _ = std::surface_write(surface,
-                pixel_idx,
-                &CHUNK_BUF[..count],
-            );
-        }
+        let _ = std::surface_write(surface,
+            pixel_idx,
+            &chunk_buf[..count],
+        );
         pixel_idx += count;
     }
 }
@@ -3014,6 +3011,7 @@ fn handle_appmcp_request(store: &mut NotesStore, raw: &[u8], sender: u64, msg_ty
 // Ring-3 Entrypoint & Lifecycle
 // -----------------------------------------------------------------------------
 
+#[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     // WHY there is no capability lookup before the surface is asked for: the

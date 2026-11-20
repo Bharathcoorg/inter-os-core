@@ -32,10 +32,12 @@
 
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 
 mod font;
 
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicU32, Ordering};
 use interos_std as std;
 use interos_std::design::{components, outline_text};
 use vault::theme::{spacing, type_scale, THEME};
@@ -47,7 +49,7 @@ use vault::{
 
 const W: usize = 720;
 const H: usize = 1440;
-const CHUNK: usize = 4096;
+const CHUNK: usize = 1024;
 
 /// Sector metadata record.
 #[derive(Debug, Clone, Copy)]
@@ -2560,18 +2562,14 @@ fn handle_vault_touch(vault: &mut VaultApp, x: u32, y: u32) -> Tap {
 /// and the panic handler is a separate entry point with no access to it, so
 /// a panic left the surface allocated until the task was reaped. The
 /// platform's compositor keeps a surface's pixels until it is destroyed.
-static mut VAULT_SURFACE: u32 = 0;
+static VAULT_SURFACE: AtomicU32 = AtomicU32::new(0);
 
 /// Destroys the app's surface, if it has one.
 ///
 /// WHY it is safe to call twice: the exit paths destroy the surface and then
 /// exit, and the panic path may run after either.
 fn release_surface() {
-    let surface = unsafe {
-        let s = core::ptr::addr_of!(VAULT_SURFACE).read_volatile();
-        core::ptr::addr_of_mut!(VAULT_SURFACE).write_volatile(0);
-        s
-    };
+    let surface = VAULT_SURFACE.swap(0, Ordering::SeqCst);
     if surface > 0 {
         let _ = std::surface_destroy(surface);
     }
@@ -2592,6 +2590,7 @@ fn publish_text_scale() -> bool {
     interos_std::design::accessibility::DynamicType::new(next).publish() != before
 }
 
+#[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     publish_text_scale();
@@ -2632,9 +2631,7 @@ pub extern "C" fn _start() -> ! {
     };
     // WHY the surface is published here: the panic handler has to be able to
     // give it back, and it cannot reach a local of `_start`.
-    unsafe {
-        core::ptr::addr_of_mut!(VAULT_SURFACE).write_volatile(surface);
-    }
+    VAULT_SURFACE.store(surface, Ordering::SeqCst);
 
     // 3. Render initial UI and present
     status(

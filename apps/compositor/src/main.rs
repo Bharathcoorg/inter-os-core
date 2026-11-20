@@ -3,6 +3,7 @@
 
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 use core::panic::PanicInfo;
 use interos_std as std;
 
@@ -100,6 +101,7 @@ fn draw_system_line(surface: u32, ticks: u64, windows: usize, services: usize) {
     }
 }
 
+#[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[COMPOSITOR USERSPACE] Ring-3 system-line compositor online.",

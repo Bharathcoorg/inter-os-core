@@ -3,6 +3,7 @@
 
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 
 use core::panic::PanicInfo;
 use interos_std as std;
@@ -42,6 +43,7 @@ fn render_demo(surface: u32, page: &InterWebView) {
     }
 }
 
+#[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[WEBVIEW DEMO] Application starting in Ring 3.").ok();

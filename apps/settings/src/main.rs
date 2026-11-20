@@ -27,6 +27,7 @@
 
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 
 use core::panic::PanicInfo;
 use interos_std as std;
@@ -54,8 +55,7 @@ const H: usize = 1440;
 /// not a capability slot, and the two are not interchangeable. Naming it
 /// keeps the difference visible at the call site.
 const SETTINGS_KEY_SLOT: u32 = 0;
-const CHUNK: usize = 32768;
-static mut CHUNK_BUF: [u32; CHUNK] = [0; CHUNK];
+const CHUNK: usize = 1024;
 
 // -----------------------------------------------------------------------------
 // System Space categories (design system screen 6)
@@ -7554,7 +7554,7 @@ fn render_settings_ui(surface: u32, app: &SettingsApp) {
 fn render_settings_band(surface: u32, app: &SettingsApp, y0: usize, y1: usize) {
     let y0 = y0.min(H);
     let y1 = y1.min(H);
-    let chunk = unsafe { &mut *core::ptr::addr_of_mut!(CHUNK_BUF) };
+    let mut chunk = [0u32; CHUNK];
     let mut offset = y0 * W;
     while offset < y1 * W {
         let count = (y1 * W - offset).min(CHUNK);
@@ -8013,6 +8013,7 @@ fn handle_appmcp_request(_settings: &mut SettingsApp, raw: &[u8], sender: u64, m
     }
 }
 
+#[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[SETTINGS APP (Ring 3)] System Space (Sovereign Settings & Diagnostics) online.",

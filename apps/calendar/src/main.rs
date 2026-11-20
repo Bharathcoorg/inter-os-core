@@ -3,6 +3,7 @@
 
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 
 //! Inter OS Native Sovereign Calendar & Chrono-Planner
 //!
@@ -3827,6 +3828,7 @@ fn handle_appmcp_request(calendar: &mut CalendarApp, raw: &[u8], sender: u64, ms
 // Entry Point & Event Reactor Loop
 // -----------------------------------------------------------------------------
 
+#[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn _start() {
     std::log("[CALENDAR APP (Ring 3)] Calendar Agenda service online.").ok();

@@ -15,6 +15,7 @@
 
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 
 use core::panic::PanicInfo;
 use interos_std as std;
@@ -5117,6 +5118,7 @@ fn handle_appmcp_request(app: &mut MessagesApp, raw: &[u8], sender: u64, msg_typ
     }
 }
 
+#[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     // WHY this does not announce a wire protocol: the app binds no

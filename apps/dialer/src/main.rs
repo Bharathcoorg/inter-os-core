@@ -85,6 +85,7 @@
 
 #![no_std]
 #![no_main]
+#![deny(unsafe_code)]
 
 use interos_std::design::accessibility::{DynamicType, UserTextScale};
 use interos_std::design::components;
@@ -1480,16 +1481,16 @@ impl DialerApp {
     pub fn play_notification(&mut self) {
         if let Ok(cap) = std::capability_handle(std::cap_type::AUDIO_STREAM, 0) {
             if std::audio_stream_open(cap, std::AUDIO_STREAM_FORMAT_NATIVE).is_ok() {
-                let mut pcm = [0i16; 512];
+                let mut pcm_bytes = [0u8; 1024];
                 for i in 0..256 {
-                    let val = if (i / 16) % 2 == 0 { 4000i16 } else { -4000i16 };
-                    pcm[i * 2] = val;
-                    pcm[i * 2 + 1] = val;
+                    let val: i16 = if (i / 16) % 2 == 0 { 4000 } else { -4000 };
+                    let le = val.to_le_bytes();
+                    pcm_bytes[i * 4] = le[0];
+                    pcm_bytes[i * 4 + 1] = le[1];
+                    pcm_bytes[i * 4 + 2] = le[0];
+                    pcm_bytes[i * 4 + 3] = le[1];
                 }
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 2)
-                };
-                let _ = std::audio_stream_write(cap, bytes);
+                let _ = std::audio_stream_write(cap, &pcm_bytes);
                 std::log("[DIALER APP] Notification chime streamed over audio output.").ok();
                 return;
             }
@@ -6428,6 +6429,7 @@ fn handle_appmcp_request(dialer: &mut DialerApp, raw: &[u8], sender: u64, msg_ty
     }
 }
 
+#[allow(unsafe_code)]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     std::log("[DIALER APP (Ring 3)] Sovereign Dialer & Telephony online.",
