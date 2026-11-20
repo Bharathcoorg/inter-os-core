@@ -405,6 +405,7 @@ pub fn capability_policy(id: ServiceId, parent_id: TaskId) -> Result<Vec<Service
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::FileSystemWrite, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::IpcSend, rights: Rights::WRITE, object_id: 0 });
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::AgentTask, rights: Rights::READ | Rights::WRITE | Rights::INVOKE, object_id: 0 });
+            policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::CryptoEntropyRead, rights: Rights::READ, object_id: 0 });
         }
         ServiceId::Voice => {
             policy.push(ServiceCapabilitySpec { cap_type: CapabilityType::AudioStream, rights: Rights::READ | Rights::WRITE, object_id: 0 });

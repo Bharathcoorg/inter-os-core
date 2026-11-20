@@ -68,6 +68,20 @@ pub const STORAGE_SEARCH_DIRS: &[&str] = &[
     "/storage",
 ];
 
+/// Homogeneous vector space representation for RAG embeddings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum VectorSpace {
+    LexicalQ7 = 1,
+    NeuralGemmaQ7 = 2,
+}
+
+impl Default for VectorSpace {
+    fn default() -> Self {
+        Self::LexicalQ7
+    }
+}
+
 /// A single parsed document chunk with stable ID and source attribution.
 #[derive(Clone, Copy)]
 pub struct RagChunk {
@@ -85,6 +99,8 @@ pub struct RagChunk {
     /// Raw text snippet of this chunk.
     pub text: [u8; MAX_CHUNK_TEXT_LEN],
     pub text_len: u16,
+    /// Vector space representation.
+    pub vector_space: VectorSpace,
     /// 256-D Q7 fixed-point vector embedding (Matryoshka representation).
     pub embedding: [i8; RAG_VECTOR_DIM],
 }
@@ -100,6 +116,7 @@ impl Default for RagChunk {
             chunk_index: 0,
             text: [0u8; MAX_CHUNK_TEXT_LEN],
             text_len: 0,
+            vector_space: VectorSpace::LexicalQ7,
             embedding: [0i8; RAG_VECTOR_DIM],
         }
     }
@@ -192,6 +209,7 @@ pub struct RagIndex {
     /// Platform Truth Contract: true if neural EmbeddingGemma 2 weights are present;
     /// false if operating in deterministic lexical baseline mode.
     pub is_neural: bool,
+    pub vector_space: VectorSpace,
 }
 
 impl RagIndex {
@@ -207,10 +225,12 @@ impl RagIndex {
                 chunk_index: 0,
                 text: [0u8; MAX_CHUNK_TEXT_LEN],
                 text_len: 0,
+                vector_space: VectorSpace::LexicalQ7,
                 embedding: [0i8; RAG_VECTOR_DIM],
             }; MAX_RAG_CHUNKS],
             count: 0,
             is_neural,
+            vector_space: if is_neural { VectorSpace::NeuralGemmaQ7 } else { VectorSpace::LexicalQ7 },
         }
     }
 
@@ -281,6 +301,7 @@ impl RagIndex {
                 None,
                 Some(&mut chunk.embedding),
             );
+            chunk.vector_space = self.vector_space;
 
             self.chunks[self.count] = chunk;
             self.count += 1;
@@ -391,6 +412,9 @@ impl RagIndex {
 
         for i in 0..self.count {
             let chunk = &self.chunks[i];
+            if chunk.vector_space != self.vector_space {
+                continue;
+            }
 
             // Compute cosine similarity between unit-normalized Q7 vectors
             let score_q15 = std::ai::cosine_similarity_q7(
@@ -472,6 +496,9 @@ impl RagIndex {
 
         for i in 0..self.count {
             let chunk = &self.chunks[i];
+            if chunk.vector_space != self.vector_space {
+                continue;
+            }
 
             let score_q15 = std::ai::cosine_similarity_q7(
                 &query_emb[..dim],

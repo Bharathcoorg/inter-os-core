@@ -45,27 +45,53 @@ pub fn secure_zero(slice: &mut [u8]) {
 /// Derives a 32-byte cryptographic key bound to the authenticated user ID.
 ///
 /// SECURITY & PLATFORM TRUTH:
-/// In QEMU environments without hardware-backed root of trust, this is a
-/// software-backed development key provider using RFC 5869 HKDF-SHA256.
-/// It is isolated inside the companion persistence abstraction.
+/// Derived from user binding and domain salt.
+/// Fails closed if `uid == 0` (unauthenticated).
 /// The model, aid, Agent Manager, and third-party apps NEVER receive this key.
-pub fn derive_companion_user_key(uid: u32, salt: &[u8; 16]) -> [u8; 32] {
+pub fn try_derive_companion_user_key(uid: u32, salt: &[u8; 16]) -> Result<[u8; 32], ()> {
+    if uid == 0 {
+        return Err(());
+    }
     let mut ikm = [0u8; 40];
     ikm[0..4].copy_from_slice(&uid.to_le_bytes());
     ikm[4..40].copy_from_slice(b"InterOS-Companion-Memory-Context-v1!");
     let prk = hkdf::hkdf_extract(salt, &ikm);
     let mut okm = [0u8; 32];
     let _ = hkdf::hkdf_expand(&prk, b"interos.companion.storage.key", &mut okm);
-    okm
+    secure_zero(&mut ikm);
+    Ok(okm)
+}
+
+pub fn derive_companion_user_key(uid: u32, salt: &[u8; 16]) -> [u8; 32] {
+    try_derive_companion_user_key(uid, salt).unwrap_or([0u8; 32])
+}
+
+/// Derives a 32-byte cryptographic key for semantic search vector index at rest.
+pub fn try_derive_search_user_key(uid: u32, salt: &[u8; 16]) -> Result<[u8; 32], ()> {
+    if uid == 0 {
+        return Err(());
+    }
+    let mut ikm = [0u8; 40];
+    ikm[0..4].copy_from_slice(&uid.to_le_bytes());
+    ikm[4..40].copy_from_slice(b"InterOS-Search-Index-Encrypted-v1.0!");
+    let prk = hkdf::hkdf_extract(salt, &ikm);
+    let mut okm = [0u8; 32];
+    let _ = hkdf::hkdf_expand(&prk, b"interos.search.storage.key", &mut okm);
+    secure_zero(&mut ikm);
+    Ok(okm)
+}
+
+pub fn derive_search_user_key(uid: u32, salt: &[u8; 16]) -> [u8; 32] {
+    try_derive_search_user_key(uid, salt).unwrap_or([0u8; 32])
 }
 
 /// Monotonic Nonce Generator ensuring unique ChaCha20-Poly1305 nonces across
 /// consecutive saves, reboots, crashes, and restores.
 ///
 /// Nonce structure (12 bytes):
-/// [0..4]: user_id (u32 LE)
+/// [0..4]: entropy / random salt (sys_getrandom or user_id)
 /// [4..8]: generation (u32 LE low 32 of persistent generation)
-/// [8..12]: monotonic save counter (u32 LE)
+/// [8..12]: monotonic save counter (u32 LE checked addition, never wraps)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NonceGenerator {
     pub user_id: u32,
@@ -82,21 +108,101 @@ impl NonceGenerator {
         }
     }
 
-    /// Generates the next unique 12-byte nonce and increments the monotonic counter.
-    pub fn next_nonce(&mut self) -> [u8; 12] {
-        self.counter = self.counter.wrapping_add(1);
+    /// Generates the next unique 12-byte nonce, failing closed if counter overflows.
+    pub fn try_next_nonce(&mut self) -> Result<[u8; 12], ()> {
+        let next = self.counter.checked_add(1).ok_or(())?;
+        self.counter = next;
         let mut nonce = [0u8; 12];
-        nonce[0..4].copy_from_slice(&self.user_id.to_le_bytes());
+        let mut entropy = [0u8; 4];
+        if crate::get_random(&mut entropy).is_err() {
+            entropy.copy_from_slice(&self.user_id.to_le_bytes());
+        }
+        nonce[0..4].copy_from_slice(&entropy);
         nonce[4..8].copy_from_slice(&(self.generation as u32).to_le_bytes());
         nonce[8..12].copy_from_slice(&self.counter.to_le_bytes());
-        nonce
+        Ok(nonce)
+    }
+
+    /// Generates the next unique 12-byte nonce and increments the monotonic counter.
+    pub fn next_nonce(&mut self) -> [u8; 12] {
+        self.try_next_nonce().unwrap_or([0xFF; 12])
     }
 }
 
-/// Builds the authoritative per-user companion memory path: `/user/{uid}/companion/state.bin`.
-pub fn companion_user_storage_path<'a>(uid: u32, buf: &'a mut [u8; 64]) -> Result<&'a str, ()> {
+pub const MARKER_MAGIC: [u8; 4] = *b"IOMK";
+pub const MARKER_VERSION: u16 = 1;
+pub const MARKER_LEN: usize = 32;
+
+/// On-disk marker identifying the active, authenticated two-slot journal partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotMarker {
+    pub active_slot: u8, // b'A' or b'B'
+    pub generation: u64,
+    pub user_id: u32,
+    pub record_len: u32,
+    pub payload_crc32: u32,
+}
+
+impl SlotMarker {
+    pub fn new(active_slot: u8, generation: u64, user_id: u32, record_len: u32, payload_crc32: u32) -> Self {
+        Self {
+            active_slot,
+            generation,
+            user_id,
+            record_len,
+            payload_crc32,
+        }
+    }
+
+    pub fn serialize(&self, out: &mut [u8; 32]) {
+        out[0..4].copy_from_slice(&MARKER_MAGIC);
+        out[4..6].copy_from_slice(&MARKER_VERSION.to_le_bytes());
+        out[6] = self.active_slot;
+        out[7] = 0;
+        out[8..16].copy_from_slice(&self.generation.to_le_bytes());
+        out[16..20].copy_from_slice(&self.user_id.to_le_bytes());
+        out[20..24].copy_from_slice(&self.record_len.to_le_bytes());
+        out[24..28].copy_from_slice(&self.payload_crc32.to_le_bytes());
+        let crc = crc32(&out[0..28]);
+        out[28..32].copy_from_slice(&crc.to_le_bytes());
+    }
+
+    pub fn deserialize(buf: &[u8; 32]) -> Result<Self, ()> {
+        if &buf[0..4] != &MARKER_MAGIC {
+            return Err(());
+        }
+        let ver = u16::from_le_bytes([buf[4], buf[5]]);
+        if ver != MARKER_VERSION {
+            return Err(());
+        }
+        let want_crc = u32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]);
+        if crc32(&buf[0..28]) != want_crc {
+            return Err(());
+        }
+        let active_slot = buf[6];
+        if active_slot != b'A' && active_slot != b'B' {
+            return Err(());
+        }
+        let generation = u64::from_le_bytes([
+            buf[8], buf[9], buf[10], buf[11],
+            buf[12], buf[13], buf[14], buf[15],
+        ]);
+        let user_id = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        let record_len = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
+        let payload_crc32 = u32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
+
+        Ok(Self {
+            active_slot,
+            generation,
+            user_id,
+            record_len,
+            payload_crc32,
+        })
+    }
+}
+
+pub fn format_companion_user_path<'a>(uid: u32, suffix: &[u8], buf: &'a mut [u8; 64]) -> Result<&'a str, ()> {
     let prefix = b"/user/";
-    let suffix = b"/companion/state.bin";
     let mut pos = 0;
     buf[pos..pos + prefix.len()].copy_from_slice(prefix);
     pos += prefix.len();
@@ -125,6 +231,27 @@ pub fn companion_user_storage_path<'a>(uid: u32, buf: &'a mut [u8; 64]) -> Resul
     pos += suffix.len();
 
     core::str::from_utf8(&buf[..pos]).map_err(|_| ())
+}
+
+/// Builds the authoritative per-user companion memory path: `/user/{uid}/companion/state.bin`.
+pub fn companion_user_storage_path<'a>(uid: u32, buf: &'a mut [u8; 64]) -> Result<&'a str, ()> {
+    format_companion_user_path(uid, b"/companion/state.bin", buf)
+}
+
+pub fn companion_user_slot_a_path<'a>(uid: u32, buf: &'a mut [u8; 64]) -> Result<&'a str, ()> {
+    format_companion_user_path(uid, b"/companion/state_a.bin", buf)
+}
+
+pub fn companion_user_slot_b_path<'a>(uid: u32, buf: &'a mut [u8; 64]) -> Result<&'a str, ()> {
+    format_companion_user_path(uid, b"/companion/state_b.bin", buf)
+}
+
+pub fn companion_user_marker_path<'a>(uid: u32, buf: &'a mut [u8; 64]) -> Result<&'a str, ()> {
+    format_companion_user_path(uid, b"/companion/state.marker", buf)
+}
+
+pub fn companion_user_gen_path<'a>(uid: u32, buf: &'a mut [u8; 64]) -> Result<&'a str, ()> {
+    format_companion_user_path(uid, b"/companion/generation.meta", buf)
 }
 
 /// Maximum capacity of structured companion memory tables.
@@ -447,6 +574,10 @@ impl PlanStep {
 
     pub fn args_str(&self) -> &str {
         core::str::from_utf8(self.args_bytes()).unwrap_or("")
+    }
+
+    pub fn args_crc(&self) -> u32 {
+        crc32(self.args_bytes())
     }
 }
 
@@ -1082,7 +1213,7 @@ impl CompanionState {
         key: &[u8; 32],
         in_buf: &[u8],
     ) -> Result<(), ()> {
-        self.deserialize_encrypted_with_min_generation(key, in_buf, 0)
+        self.deserialize_encrypted_for_user(key, in_buf, 0, 0)
     }
 
     /// Decrypts and deserializes state, enforcing a minimum monotonic generation to defeat rollback.
@@ -1090,6 +1221,17 @@ impl CompanionState {
         &mut self,
         key: &[u8; 32],
         in_buf: &[u8],
+        min_expected_generation: u64,
+    ) -> Result<(), ()> {
+        self.deserialize_encrypted_for_user(key, in_buf, 0, min_expected_generation)
+    }
+
+    /// Decrypts and deserializes state, enforcing expected authenticated UID binding and minimum generation.
+    pub fn deserialize_encrypted_for_user(
+        &mut self,
+        key: &[u8; 32],
+        in_buf: &[u8],
+        expected_uid: u32,
         min_expected_generation: u64,
     ) -> Result<(), ()> {
         let hdr_len = COMPANION_HEADER_SIZE;
@@ -1128,6 +1270,10 @@ impl CompanionState {
         }
 
         let user_binding = u32::from_le_bytes([in_buf[14], in_buf[15], in_buf[16], in_buf[17]]);
+        if expected_uid != 0 && user_binding != expected_uid {
+            // Foreign UID load strictly rejected (Fail Closed)
+            return Err(());
+        }
         let learning_mode = LearningMode::from_u8(in_buf[18]);
         let privacy_flags = in_buf[19];
         let total_records = u16::from_le_bytes([in_buf[20], in_buf[21]]);
@@ -1833,5 +1979,73 @@ mod tests {
         restored.deserialize(&ser_buf[..bytes]).unwrap();
         let gen = restored.get_binding(ModelRole::TextGeneration).unwrap();
         assert_eq!(gen.model_id_str(), "gemma-2-2b-it");
+    }
+
+    #[test]
+    fn test_slot_marker_roundtrip_and_crc() {
+        let marker = SlotMarker::new(b'A', 42, 1000, 1024, 0xDEAD_BEEF);
+        let mut buf = [0u8; 32];
+        marker.serialize(&mut buf);
+
+        let parsed = SlotMarker::deserialize(&buf).expect("deserialize marker");
+        assert_eq!(parsed.active_slot, b'A');
+        assert_eq!(parsed.generation, 42);
+        assert_eq!(parsed.user_id, 1000);
+        assert_eq!(parsed.record_len, 1024);
+        assert_eq!(parsed.payload_crc32, 0xDEAD_BEEF);
+
+        // Tamper with magic
+        let mut bad_magic = buf;
+        bad_magic[0] = b'X';
+        assert!(SlotMarker::deserialize(&bad_magic).is_err());
+
+        // Tamper with CRC
+        let mut bad_crc = buf;
+        bad_crc[30] ^= 0xFF;
+        assert!(SlotMarker::deserialize(&bad_crc).is_err());
+
+        // Tamper with slot (and update CRC so CRC passes but slot validation fails)
+        let mut bad_slot = buf;
+        bad_slot[6] = b'C';
+        let new_crc = crc32(&bad_slot[0..28]);
+        bad_slot[28..32].copy_from_slice(&new_crc.to_le_bytes());
+        assert!(SlotMarker::deserialize(&bad_slot).is_err());
+    }
+
+    #[test]
+    fn test_try_derive_companion_user_key_failing_closed_on_root() {
+        assert!(try_derive_companion_user_key(0, &COMPANION_KEY_SALT).is_err());
+        assert!(try_derive_search_user_key(0, &COMPANION_KEY_SALT).is_err());
+
+        let key = try_derive_companion_user_key(1000, &COMPANION_KEY_SALT).expect("valid user");
+        assert_ne!(key, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_deserialize_encrypted_for_user_rejects_foreign_uid() {
+        let mut state = CompanionState::new();
+        state.user_id = 1000;
+        state.generation = 5;
+        state.add_preference(PreferenceCategory::Theme, b"dark_mode", b"true", 90, 100);
+
+        let key = try_derive_companion_user_key(1000, &COMPANION_KEY_SALT).unwrap();
+        let mut gen = NonceGenerator::new(1000, state.generation);
+        let mut buf = [0u8; 2048];
+        let len = state.serialize_encrypted(&key, &gen.next_nonce(), &mut buf).unwrap();
+
+        let mut loaded = CompanionState::new();
+        // Foreign user 1001 must be rejected
+        assert!(loaded.deserialize_encrypted_for_user(&key, &buf[..len], 1001, 0).is_err());
+        // Stale generation 10 must be rejected
+        assert!(loaded.deserialize_encrypted_for_user(&key, &buf[..len], 1000, 10).is_err());
+        // Matching UID and valid generation succeeds
+        assert!(loaded.deserialize_encrypted_for_user(&key, &buf[..len], 1000, 5).is_ok());
+    }
+
+    #[test]
+    fn test_nonce_generator_checked_overflow() {
+        let mut gen = NonceGenerator::new(1000, 1);
+        gen.counter = u32::MAX;
+        assert!(gen.try_next_nonce().is_err());
     }
 }

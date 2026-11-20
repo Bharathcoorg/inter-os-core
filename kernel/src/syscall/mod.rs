@@ -1984,15 +1984,18 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                 return SyscallResult::InvalidArguments as i64;
             }
             let mut kbuf = [0u8; 32];
-            match sys_keystore_derive(slot_idx, &mut kbuf) {
+            let res = match sys_keystore_derive(slot_idx, &mut kbuf) {
                 Ok(n) => {
                     if copy_to_user(a2, &kbuf).is_err() {
-                        return SyscallResult::InvalidArguments as i64;
+                        SyscallResult::InvalidArguments as i64
+                    } else {
+                        n as i64
                     }
-                    n as i64
                 }
                 Err(e) => e as i64,
-            }
+            };
+            crate::crypto::zeroize_slice(&mut kbuf);
+            res
         }
         35 => {
             // SensorRead: a1 = out_buf_ptr, a2 = out_buf_len

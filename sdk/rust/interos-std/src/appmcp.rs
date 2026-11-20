@@ -616,11 +616,33 @@ impl DynamicToolDescriptor {
     }
 }
 
+pub const MAX_INVOCATION_GRANTS: usize = 16;
+
+/// Specific user consent grant bound to an exact tool ID and arguments digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvocationGrant {
+    pub tool_id: u32,
+    pub args_crc: u32,
+    pub valid: bool,
+}
+
+impl Default for InvocationGrant {
+    fn default() -> Self {
+        Self {
+            tool_id: 0,
+            args_crc: 0,
+            valid: false,
+        }
+    }
+}
+
 /// Dynamic registry of discovered application tools.
 #[derive(Debug, Clone, Copy)]
 pub struct DynamicToolRegistry {
     pub tools: [Option<DynamicToolDescriptor>; MAX_DYNAMIC_TOOLS],
     pub count: usize,
+    pub invocation_grants: [InvocationGrant; MAX_INVOCATION_GRANTS],
+    pub grant_count: usize,
 }
 
 impl Default for DynamicToolRegistry {
@@ -634,6 +656,8 @@ impl DynamicToolRegistry {
         Self {
             tools: [None; MAX_DYNAMIC_TOOLS],
             count: 0,
+            invocation_grants: [InvocationGrant { tool_id: 0, args_crc: 0, valid: false }; MAX_INVOCATION_GRANTS],
+            grant_count: 0,
         }
     }
 
@@ -793,6 +817,54 @@ impl DynamicToolRegistry {
                 }
             }
         }
+        self.clear_invocation_grants();
+    }
+
+    /// Grants user consent for a specific tool invocation bound to the arguments digest.
+    pub fn grant_invocation_consent(&mut self, tool_id: u32, args_crc: u32) -> bool {
+        for g in &mut self.invocation_grants {
+            if g.valid && g.tool_id == tool_id && g.args_crc == args_crc {
+                return true;
+            }
+        }
+        for g in &mut self.invocation_grants {
+            if !g.valid {
+                *g = InvocationGrant { tool_id, args_crc, valid: true };
+                self.grant_count = self.grant_count.saturating_add(1);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Verifies and consumes user consent for a specific tool invocation.
+    pub fn consume_invocation_consent(&mut self, tool_id: u32, args_crc: u32) -> bool {
+        for g in &mut self.invocation_grants {
+            if g.valid && g.tool_id == tool_id && g.args_crc == args_crc {
+                g.valid = false;
+                self.grant_count = self.grant_count.saturating_sub(1);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Checks whether user consent exists for a specific tool invocation.
+    pub fn has_invocation_consent(&self, tool_id: u32, args_crc: u32) -> bool {
+        for g in &self.invocation_grants {
+            if g.valid && g.tool_id == tool_id && g.args_crc == args_crc {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Clears all active invocation consent grants.
+    pub fn clear_invocation_grants(&mut self) {
+        for g in &mut self.invocation_grants {
+            g.valid = false;
+        }
+        self.grant_count = 0;
     }
 
     /// Finds a tool descriptor by its 32-bit tool_id.
@@ -1139,5 +1211,35 @@ mod tests {
         assert!(reg.unregister_tool(b"org.interos.music", b"music.pause"));
         assert_eq!(reg.count, 0);
         assert!(reg.find_by_id(0x7777_0001).is_none());
+    }
+
+    #[test]
+    fn test_invocation_consent_exact_binding() {
+        let mut reg = DynamicToolRegistry::new();
+        let tool_id = 0x8888_0001;
+        let args_crc_a = 0x1234_5678;
+        let args_crc_b = 0x8765_4321;
+
+        assert!(!reg.has_invocation_consent(tool_id, args_crc_a));
+
+        // Grant consent for args_crc_a
+        reg.grant_invocation_consent(tool_id, args_crc_a);
+        assert!(reg.has_invocation_consent(tool_id, args_crc_a));
+        assert!(!reg.has_invocation_consent(tool_id, args_crc_b));
+
+        // Consume for wrong args fails
+        assert!(!reg.consume_invocation_consent(tool_id, args_crc_b));
+        assert!(reg.has_invocation_consent(tool_id, args_crc_a));
+
+        // Consume for correct args succeeds and removes grant
+        assert!(reg.consume_invocation_consent(tool_id, args_crc_a));
+        assert!(!reg.has_invocation_consent(tool_id, args_crc_a));
+        assert!(!reg.consume_invocation_consent(tool_id, args_crc_a));
+
+        // Clear invocation grants
+        reg.grant_invocation_consent(tool_id, args_crc_b);
+        assert!(reg.has_invocation_consent(tool_id, args_crc_b));
+        reg.clear_invocation_grants();
+        assert!(!reg.has_invocation_consent(tool_id, args_crc_b));
     }
 }

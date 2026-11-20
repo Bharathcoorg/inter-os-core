@@ -711,14 +711,32 @@ impl SettingsApp {
     }
 
     /// Cycles companion learning mode (Off -> Explicit only -> Adaptive -> Custom) and persists over IPC.
+    /// The UI state is authoritatively updated only upon receiving an ACK from agentd.
     pub fn cycle_companion_learning_mode(&mut self) {
-        self.companion_learning_mode = (self.companion_learning_mode + 1) % 4;
-        let payload = [2u8, self.companion_learning_mode];
-        let _ = std::ipc_send(
+        let target_mode = (self.companion_learning_mode + 1) % 4;
+        let payload = [2u8, target_mode];
+        if std::ipc_send(
             interos_std::ai::SERVICE_AGENT_TASK_ID,
             interos_std::ai::MSG_TYPE_COMPANION_QUERY,
             &payload,
-        );
+        ).is_ok() {
+            let mut rx_buf = [0u8; 64];
+            for _ in 0..10 {
+                if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                    if sender == interos_std::ai::SERVICE_AGENT_TASK_ID
+                        && msg_type == interos_std::ai::MSG_TYPE_COMPANION_QUERY
+                    {
+                        let hdr_len = core::mem::size_of::<interos_std::ai::AiInferenceResponse>();
+                        if len >= hdr_len + 1 {
+                            let resp = &rx_buf[hdr_len..len];
+                            self.companion_learning_mode = resp[0];
+                            break;
+                        }
+                    }
+                }
+                std::yield_now();
+            }
+        }
         std::log("[SETTINGS APP] Companion learning mode updated.").ok();
     }
 

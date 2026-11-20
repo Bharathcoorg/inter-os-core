@@ -618,12 +618,28 @@ fn handle_search_ipc(
     }
 }
 
+static mut AGENT_FILE_BUF: [u8; std::companion::COMPANION_STORAGE_BUDGET_MAX as usize] = [0u8; 65536];
+static mut AGENT_SLOT_B_BUF: [u8; std::companion::COMPANION_STORAGE_BUDGET_MAX as usize] = [0u8; 65536];
+
+fn is_authorized_agent_admin(sender_task_id: u64) -> bool {
+    if sender_task_id == 0 {
+        return true;
+    }
+    sender_task_id == 0xFFFF_000A // Launcher virtual task
+        || sender_task_id == std::ai::SERVICE_AGENT_TASK_ID
+        || std::service_peer_matches(10, sender_task_id) // ServiceId::Launcher
+        || std::service_peer_matches(14, sender_task_id) // ServiceId::Agent
+        || sender_task_id == 0xFFFF_000B // Settings virtual task
+        || std::cap_lookup(std::cap_type::SYSTEM_CONTROL, 0).is_ok()
+}
+
 /// Companion & Autonomous Agent runtime daemon execution path (`agentd`).
 ///
 /// Designated as service id 14 (`SERVICE_AGENT`) in the system service ABI.
 /// Owns the user's CompanionState (preferences, routines, corrections, tool stats),
 /// AppMCP dynamic tool dispatch, interactive execution plans, lock sanitization,
 /// and privacy modes.
+#[allow(static_mut_refs)]
 pub fn run_agent() -> ! {
     let _ = std::log("[agentd] userspace Companion & Agent runtime daemon online.");
     let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
@@ -633,39 +649,113 @@ pub fn run_agent() -> ! {
     let mut state = std::companion::CompanionState::new();
     let mut tool_registry = std::appmcp::DynamicToolRegistry::canonical();
 
-    // Authenticated user resolution and per-user derived cryptographic key
-    let uid = {
-        let u = std::user_get_current();
-        if u == 0 { 1000 } else { u }
-    };
-    let enc_key = std::companion::derive_companion_user_key(uid, &std::companion::COMPANION_KEY_SALT);
-    let mut path_buf = [0u8; 64];
-    let user_path = std::companion::companion_user_storage_path(uid, &mut path_buf)
-        .unwrap_or(std::companion::PATH_COMPANION_MEMORY);
+    // Authenticated user resolution - fails closed if unauthenticated
+    let uid = std::user_get_current();
+    if uid == 0 {
+        state.set_locked(true);
+        state.user_id = 0;
+    } else {
+        state.user_id = uid;
+    }
 
-    let mut file_buf = [0u8; 4096];
+    let enc_key = std::companion::derive_companion_user_key(uid, &std::companion::COMPANION_KEY_SALT);
+
+    let mut marker_buf = [0u8; 64];
+    let mut slot_a_buf = [0u8; 64];
+    let mut slot_b_buf = [0u8; 64];
+    let mut active_slot = b'A';
+
+    let marker_path = std::companion::companion_user_marker_path(uid, &mut marker_buf).ok();
+    let slot_a_path = std::companion::companion_user_slot_a_path(uid, &mut slot_a_buf).ok();
+    let slot_b_path = std::companion::companion_user_slot_b_path(uid, &mut slot_b_buf).ok();
 
     let mut loaded = false;
-    if let Ok(handle) = std::fs_open(user_path, std::FS_READ) {
-        if let Ok(bytes) = std::fs_read(handle, &mut file_buf) {
-            if bytes > 0 {
-                let _ = state.deserialize_encrypted(&enc_key, &file_buf[..bytes]);
-                let _ = std::log("[agentd] companion user state loaded and decrypted.");
+
+    // 1. Two-Slot Journal: check marker first if authenticated
+    if uid > 0 {
+        if let Some(mpath) = marker_path {
+            let mut mraw = [0u8; 32];
+            if let Ok(h) = std::fs_open(mpath, std::FS_READ) {
+                let n = std::fs_read(h, &mut mraw).unwrap_or(0);
+                let _ = std::fs_close(h);
+                if n == 32 {
+                    if let Ok(marker) = std::companion::SlotMarker::deserialize(&mraw) {
+                        if marker.user_id == uid {
+                            let target_path = if marker.active_slot == b'B' { slot_b_path } else { slot_a_path };
+                            if let Some(p) = target_path {
+                                if let Ok(h) = std::fs_open(p, std::FS_READ) {
+                                    let bytes = unsafe { std::fs_read(h, &mut AGENT_FILE_BUF).unwrap_or(0) };
+                                    let _ = std::fs_close(h);
+                                    if bytes > 0 && bytes == marker.record_len as usize {
+                                        let crc = unsafe { std::companion::crc32(&AGENT_FILE_BUF[..bytes]) };
+                                        if crc == marker.payload_crc32 {
+                                            if unsafe { state.deserialize_encrypted_for_user(&enc_key, &AGENT_FILE_BUF[..bytes], uid, marker.generation).is_ok() } {
+                                                active_slot = marker.active_slot;
+                                                loaded = true;
+                                                let _ = std::log("[agentd] companion two-slot journal state loaded and verified.");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !loaded {
+            // 2. Fallback: inspect both slots and select highest valid generation
+            let mut best_gen = 0u64;
+            let mut best_slot = None;
+            if let Some(pa) = slot_a_path {
+                if let Ok(h) = std::fs_open(pa, std::FS_READ) {
+                    let bytes = unsafe { std::fs_read(h, &mut AGENT_FILE_BUF).unwrap_or(0) };
+                    let _ = std::fs_close(h);
+                    if bytes > 0 {
+                        let mut test_state = std::companion::CompanionState::new();
+                        if unsafe { test_state.deserialize_encrypted_for_user(&enc_key, &AGENT_FILE_BUF[..bytes], uid, 0).is_ok() } {
+                            best_gen = test_state.generation;
+                            best_slot = Some(b'A');
+                        }
+                    }
+                }
+            }
+            if let Some(pb) = slot_b_path {
+                if let Ok(h) = std::fs_open(pb, std::FS_READ) {
+                    let bytes = unsafe { std::fs_read(h, &mut AGENT_SLOT_B_BUF).unwrap_or(0) };
+                    let _ = std::fs_close(h);
+                    if bytes > 0 {
+                        let mut test_state = std::companion::CompanionState::new();
+                        if unsafe { test_state.deserialize_encrypted_for_user(&enc_key, &AGENT_SLOT_B_BUF[..bytes], uid, 0).is_ok() } {
+                            if test_state.generation > best_gen || best_slot.is_none() {
+                                best_gen = test_state.generation;
+                                best_slot = Some(b'B');
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(slot) = best_slot {
+                active_slot = slot;
+                let src = if slot == b'B' { unsafe { &AGENT_SLOT_B_BUF } } else { unsafe { &AGENT_FILE_BUF } };
+                let _ = state.deserialize_encrypted_for_user(&enc_key, src, uid, best_gen);
                 loaded = true;
             }
         }
-        let _ = std::fs_close(handle);
-    }
 
-    if !loaded {
-        if let Ok(handle) = std::fs_open(std::companion::PATH_COMPANION_MEMORY, std::FS_READ) {
-            if let Ok(bytes) = std::fs_read(handle, &mut file_buf) {
-                if bytes > 0 {
-                    let _ = state.deserialize_encrypted(&enc_key, &file_buf[..bytes]);
-                    let _ = std::log("[agentd] legacy companion memory loaded and decrypted.");
+        if !loaded {
+            // 3. Legacy path fallback
+            let mut path_buf = [0u8; 64];
+            if let Ok(user_path) = std::companion::companion_user_storage_path(uid, &mut path_buf) {
+                if let Ok(handle) = std::fs_open(user_path, std::FS_READ) {
+                    let bytes = unsafe { std::fs_read(handle, &mut AGENT_FILE_BUF).unwrap_or(0) };
+                    let _ = std::fs_close(handle);
+                    if bytes > 0 {
+                        let _ = state.deserialize_encrypted_for_user(&enc_key, unsafe { &AGENT_FILE_BUF[..bytes] }, uid, 0);
+                    }
                 }
             }
-            let _ = std::fs_close(handle);
         }
     }
 
@@ -708,34 +798,53 @@ pub fn run_agent() -> ! {
             if let Ok(ticks) = std::get_ticks() {
                 if ticks.saturating_sub(last_save_tick) >= 30_000 {
                     last_save_tick = ticks;
-                    if !state.is_locked
+                    if uid > 0
+                        && !state.is_locked
                         && !state.is_private_session
                         && state.learning_mode != std::companion::LearningMode::Disabled
                         && state.learning_mode != std::companion::LearningMode::Off
                     {
-                        let nonce = nonce_gen.next_nonce();
-                        if let Ok(enc_len) = state.serialize_encrypted(&enc_key, &nonce, &mut file_buf) {
-                            if enc_len <= std::companion::COMPANION_STORAGE_BUDGET_MAX as usize {
-                                let mut tmp_buf = [0u8; 72];
-                                let mut target_buf = [0u8; 64];
-                                let target_path = std::companion::companion_user_storage_path(uid, &mut target_buf)
-                                    .unwrap_or(std::companion::PATH_COMPANION_MEMORY);
+                        let next_slot = if active_slot == b'A' { b'B' } else { b'A' };
+                        let target_path = if next_slot == b'B' { slot_b_path } else { slot_a_path };
+                        if let Some(tpath) = target_path {
+                            state.generation = state.generation.saturating_add(1);
+                            let nonce = nonce_gen.next_nonce();
+                            if let Ok(enc_len) = unsafe { state.serialize_encrypted(&enc_key, &nonce, &mut AGENT_FILE_BUF) } {
+                                if enc_len <= std::companion::COMPANION_STORAGE_BUDGET_MAX as usize {
+                                    if let Ok(handle) = std::fs_open(tpath, std::FS_WRITE) {
+                                        let _ = unsafe { std::fs_write(handle, &AGENT_FILE_BUF[..enc_len]) };
+                                        let _ = std::fs_fsync(handle);
+                                        let _ = std::fs_close(handle);
 
-                                let t_len = target_path.len().min(68);
-                                tmp_buf[..t_len].copy_from_slice(&target_path.as_bytes()[..t_len]);
-                                tmp_buf[t_len..t_len + 4].copy_from_slice(b".tmp");
-                                if let Ok(tmp_path) = core::str::from_utf8(&tmp_buf[..t_len + 4]) {
-                                    if let Ok(handle) = std::fs_open(tmp_path, std::FS_WRITE) {
-                                        let _ = std::fs_write(handle, &file_buf[..enc_len]);
-                                        let _ = std::fs_fsync(handle);
-                                        let _ = std::fs_close(handle);
+                                        let payload_crc = unsafe { std::companion::crc32(&AGENT_FILE_BUF[..enc_len]) };
+                                        if let Some(mpath) = marker_path {
+                                            let marker = std::companion::SlotMarker::new(
+                                                next_slot,
+                                                state.generation,
+                                                uid,
+                                                enc_len as u32,
+                                                payload_crc,
+                                            );
+                                            let mut mbytes = [0u8; 32];
+                                            marker.serialize(&mut mbytes);
+                                            if let Ok(mh) = std::fs_open(mpath, std::FS_WRITE) {
+                                                let _ = std::fs_write(mh, &mbytes);
+                                                let _ = std::fs_fsync(mh);
+                                                let _ = std::fs_close(mh);
+                                                active_slot = next_slot;
+                                            }
+                                        }
+
+                                        let mut gen_buf = [0u8; 64];
+                                        if let Ok(gpath) = std::companion::companion_user_gen_path(uid, &mut gen_buf) {
+                                            if let Ok(gh) = std::fs_open(gpath, std::FS_WRITE) {
+                                                let gen_bytes = state.generation.to_le_bytes();
+                                                let _ = std::fs_write(gh, &gen_bytes);
+                                                let _ = std::fs_fsync(gh);
+                                                let _ = std::fs_close(gh);
+                                            }
+                                        }
                                     }
-                                    if let Ok(handle) = std::fs_open(target_path, std::FS_WRITE) {
-                                        let _ = std::fs_write(handle, &file_buf[..enc_len]);
-                                        let _ = std::fs_fsync(handle);
-                                        let _ = std::fs_close(handle);
-                                    }
-                                    let _ = std::fs_unlink(tmp_path);
                                 }
                             }
                         }
@@ -765,6 +874,10 @@ fn handle_agent_ipc(
             if payload.is_empty() {
                 return;
             }
+            if matches!(payload[0], 1 | 2 | 3 | 4 | 6 | 7) && !is_authorized_agent_admin(sender_task_id) {
+                emit_agent_ack(sender_task_id, msg_type, 3, b"UNAUTHORIZED_CALLER", tx_buf);
+                return;
+            }
             match payload[0] {
                 1 => {
                     let locked = payload.get(1).copied().unwrap_or(0) != 0;
@@ -777,7 +890,8 @@ fn handle_agent_ipc(
                 2 => {
                     let mode = std::companion::LearningMode::from_u8(payload.get(1).copied().unwrap_or(0));
                     state.set_learning_mode(mode);
-                    emit_agent_ack(sender_task_id, msg_type, 0, b"MODE_ACK", tx_buf);
+                    let resp = [mode as u8];
+                    emit_agent_ack(sender_task_id, msg_type, 0, &resp, tx_buf);
                 }
                 3 => {
                     let priv_sess = payload.get(1).copied().unwrap_or(0) != 0;
@@ -788,12 +902,23 @@ fn handle_agent_ipc(
                     state.clear_memory();
                     let _ = std::fs_unlink(std::companion::PATH_COMPANION_MEMORY);
                     let mut path_buf = [0u8; 64];
-                    let uid = {
-                        let u = std::user_get_current();
-                        if u == 0 { 1000 } else { u }
-                    };
-                    if let Ok(p) = std::companion::companion_user_storage_path(uid, &mut path_buf) {
-                        let _ = std::fs_unlink(p);
+                    let uid = std::user_get_current();
+                    if uid > 0 {
+                        if let Ok(p) = std::companion::companion_user_storage_path(uid, &mut path_buf) {
+                            let _ = std::fs_unlink(p);
+                        }
+                        if let Ok(pa) = std::companion::companion_user_slot_a_path(uid, &mut path_buf) {
+                            let _ = std::fs_unlink(pa);
+                        }
+                        if let Ok(pb) = std::companion::companion_user_slot_b_path(uid, &mut path_buf) {
+                            let _ = std::fs_unlink(pb);
+                        }
+                        if let Ok(pm) = std::companion::companion_user_marker_path(uid, &mut path_buf) {
+                            let _ = std::fs_unlink(pm);
+                        }
+                        if let Ok(pg) = std::companion::companion_user_gen_path(uid, &mut path_buf) {
+                            let _ = std::fs_unlink(pg);
+                        }
                     }
                     emit_agent_ack(sender_task_id, msg_type, 0, b"CLEAR_ACK", tx_buf);
                 }
@@ -810,6 +935,20 @@ fn handle_agent_ipc(
                     resp[7..11].copy_from_slice(&est.to_le_bytes());
                     resp[11..15].copy_from_slice(&std::companion::COMPANION_STORAGE_BUDGET_MAX.to_le_bytes());
                     emit_agent_ack(sender_task_id, msg_type, 0, &resp, tx_buf);
+                }
+                6 => {
+                    if payload.len() >= 9 {
+                        let tool_id = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+                        let args_crc = u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]]);
+                        tool_registry.grant_invocation_consent(tool_id, args_crc);
+                        emit_agent_ack(sender_task_id, msg_type, 0, b"GRANT_ACK", tx_buf);
+                    } else {
+                        emit_agent_ack(sender_task_id, msg_type, 1, b"INVALID_GRANT_PAYLOAD", tx_buf);
+                    }
+                }
+                7 => {
+                    tool_registry.clear_invocation_grants();
+                    emit_agent_ack(sender_task_id, msg_type, 0, b"CLEAR_GRANTS_ACK", tx_buf);
                 }
                 _ => {
                     emit_agent_ack(sender_task_id, msg_type, 1, b"UNKNOWN_OP", tx_buf);
@@ -845,27 +984,129 @@ fn handle_agent_ipc(
                     emit_agent_ack(sender_task_id, msg_type, 0, &[status_byte], tx_buf);
                 }
                 2 => {
-                    if let Some(ref mut plan) = state.active_plan {
+                    if let Some(mut plan) = state.active_plan.take() {
                         plan.user_consent_granted = true;
                         plan.status = std::companion::PlanStatus::Running;
 
-                        for step_idx in 0..plan.step_count {
+                        for i in 0..plan.step_count {
+                            let step = &plan.steps[i];
+                            tool_registry.grant_invocation_consent(step.tool_id, step.args_crc());
+                        }
+
+                        let mut all_succeeded = true;
+                        while plan.current_step < plan.step_count {
+                            if plan.status == std::companion::PlanStatus::Cancelled {
+                                all_succeeded = false;
+                                break;
+                            }
+                            let step_idx = plan.current_step;
                             let tool_id = plan.steps[step_idx].tool_id;
-                            let args = plan.steps[step_idx].args_str();
-                            if let Some(desc) = tool_registry.find_by_id(tool_id) {
-                                if desc.consent_class != std::appmcp::ToolConsentClass::NeverAllow {
-                                    if let Ok(target_tid) = std::app_launch(desc.package_id_str()) {
-                                        let cap_handle = std::cap_lookup(std::cap_type::AGENT_TASK, 0).map(|h| h as u64).unwrap_or(1);
-                                        let token = (std::get_ticks().unwrap_or(1) & 0xFFFF_FFFF) as u32;
-                                        let req = std::appmcp::AppMcpRequest::new(cap_handle, tool_id, token)
-                                            .with_inline_payload(args.as_bytes());
-                                        let _ = std::ipc_send(target_tid, std::appmcp::APPMCP_MSG_INVOKE, &req.to_bytes());
+                            let args_crc = plan.steps[step_idx].args_crc();
+                            let args_str = plan.steps[step_idx].args_str();
+
+                            let desc = match tool_registry.find_by_id(tool_id) {
+                                Some(d) => *d,
+                                None => {
+                                    plan.steps[step_idx].status = std::companion::StepStatus::Failed;
+                                    plan.status = std::companion::PlanStatus::Failed;
+                                    all_succeeded = false;
+                                    break;
+                                }
+                            };
+
+                            if desc.consent_class == std::appmcp::ToolConsentClass::NeverAllow {
+                                plan.steps[step_idx].status = std::companion::StepStatus::Failed;
+                                plan.status = std::companion::PlanStatus::Failed;
+                                all_succeeded = false;
+                                break;
+                            }
+
+                            if desc.consent_class == std::appmcp::ToolConsentClass::AlwaysAsk {
+                                if !tool_registry.consume_invocation_consent(tool_id, args_crc) {
+                                    plan.steps[step_idx].status = std::companion::StepStatus::Failed;
+                                    plan.status = std::companion::PlanStatus::Failed;
+                                    all_succeeded = false;
+                                    break;
+                                }
+                            } else if desc.consent_class == std::appmcp::ToolConsentClass::AllowOnce {
+                                tool_registry.consume_consent(tool_id);
+                            }
+
+                            let cap_handle = match std::capability_handle(std::cap_type::AGENT_TASK, tool_id as u64) {
+                                Ok(h) => h,
+                                Err(_) => match std::capability_handle(std::cap_type::AGENT_TASK, 0x1F) {
+                                    Ok(h) => h,
+                                    Err(_) => match std::capability_handle(std::cap_type::AGENT_TASK, 0) {
+                                        Ok(h) => h,
+                                        Err(_) => {
+                                            plan.steps[step_idx].status = std::companion::StepStatus::Failed;
+                                            plan.status = std::companion::PlanStatus::Failed;
+                                            all_succeeded = false;
+                                            break;
+                                        }
+                                    },
+                                },
+                            };
+
+                            let target_tid = match std::app_launch(desc.package_id_str()) {
+                                Ok(tid) => tid,
+                                Err(_) => {
+                                    plan.steps[step_idx].status = std::companion::StepStatus::Failed;
+                                    plan.status = std::companion::PlanStatus::Failed;
+                                    all_succeeded = false;
+                                    break;
+                                }
+                            };
+
+                            let token = (std::get_ticks().unwrap_or(1) & 0xFFFF_FFFF) as u32;
+                            let req = std::appmcp::AppMcpRequest::new(cap_handle, tool_id, token)
+                                .with_inline_payload(args_str.as_bytes());
+
+                            plan.steps[step_idx].status = std::companion::StepStatus::Executing;
+                            if std::ipc_send(target_tid, std::appmcp::APPMCP_MSG_INVOKE, &req.to_bytes()).is_err() {
+                                plan.steps[step_idx].status = std::companion::StepStatus::Failed;
+                                plan.status = std::companion::PlanStatus::Failed;
+                                all_succeeded = false;
+                                break;
+                            }
+
+                            let mut wait_rx = [0u8; 128];
+                            let mut step_ok = false;
+                            for _ in 0..20 {
+                                if let Ok((sender, msg_type, rlen)) = std::ipc::receive_any(&mut wait_rx) {
+                                    if sender == target_tid && msg_type == std::appmcp::APPMCP_MSG_RESPONSE && rlen >= 8 {
+                                        if let Some(resp) = std::appmcp::AppMcpResponse::from_bytes(&wait_rx[..rlen]) {
+                                            if resp.token == token && resp.tool_id == tool_id {
+                                                if resp.status == std::appmcp::APPMCP_STATUS_SUCCESS {
+                                                    step_ok = true;
+                                                }
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
+                                std::yield_now();
+                            }
+
+                            if step_ok {
+                                plan.steps[step_idx].status = std::companion::StepStatus::Succeeded;
+                                state.record_tool_result(tool_id, true, 0);
+                                plan.current_step += 1;
+                            } else {
+                                plan.steps[step_idx].status = std::companion::StepStatus::Failed;
+                                state.record_tool_result(tool_id, false, -1);
+                                plan.status = std::companion::PlanStatus::Failed;
+                                all_succeeded = false;
+                                break;
                             }
                         }
-                        plan.status = std::companion::PlanStatus::Completed;
-                        emit_agent_ack(sender_task_id, msg_type, 0, &[plan.status as u8], tx_buf);
+
+                        if all_succeeded && plan.current_step >= plan.step_count {
+                            plan.status = std::companion::PlanStatus::Completed;
+                        }
+                        let status_byte = plan.status as u8;
+                        state.active_plan = Some(plan);
+                        emit_agent_ack(sender_task_id, msg_type, 0, &[status_byte], tx_buf);
                     } else {
                         emit_agent_ack(sender_task_id, msg_type, 1, b"NO_PLAN", tx_buf);
                     }
@@ -910,11 +1151,33 @@ fn handle_agent_ipc(
                 return;
             }
 
-            if desc.consent_class == std::appmcp::ToolConsentClass::AllowOnce {
+            let tool_args = if payload.len() > 4 { &payload[4..] } else { b"" };
+            let args_crc = std::companion::crc32(tool_args);
+
+            if desc.consent_class == std::appmcp::ToolConsentClass::AlwaysAsk {
+                if !tool_registry.consume_invocation_consent(tool_id, args_crc) {
+                    state.record_tool_result(tool_id, false, -6);
+                    emit_agent_ack(sender_task_id, msg_type, 6, b"CONSENT_REQUIRED", tx_buf);
+                    return;
+                }
+            } else if desc.consent_class == std::appmcp::ToolConsentClass::AllowOnce {
                 tool_registry.consume_consent(tool_id);
             }
 
-            let cap_handle = std::cap_lookup(std::cap_type::AGENT_TASK, 0).map(|h| h as u64).unwrap_or(1);
+            let cap_handle = match std::capability_handle(std::cap_type::AGENT_TASK, tool_id as u64) {
+                Ok(h) => h,
+                Err(_) => match std::capability_handle(std::cap_type::AGENT_TASK, 0x1F) {
+                    Ok(h) => h,
+                    Err(_) => match std::capability_handle(std::cap_type::AGENT_TASK, 0) {
+                        Ok(h) => h,
+                        Err(_) => {
+                            state.record_tool_result(tool_id, false, -5);
+                            emit_agent_ack(sender_task_id, msg_type, 4, b"CAPABILITY_NOT_HELD", tx_buf);
+                            return;
+                        }
+                    },
+                },
+            };
             if desc.required_cap_type != 0 {
                 let has_cap = std::cap_lookup(desc.required_cap_type, 0).is_ok();
                 if !has_cap {
@@ -934,7 +1197,6 @@ fn handle_agent_ipc(
                 }
             };
 
-            let tool_args = if payload.len() > 4 { &payload[4..] } else { b"" };
             let token = (std::get_ticks().unwrap_or(1) & 0xFFFF_FFFF) as u32;
             let req = std::appmcp::AppMcpRequest::new(cap_handle, tool_id, token)
                 .with_inline_payload(tool_args);
@@ -952,7 +1214,7 @@ fn handle_agent_ipc(
             let mut resp_payload = [0u8; 64];
 
             let start_tick = std::get_ticks().unwrap_or(0);
-            for _ in 0..10 {
+            for _ in 0..20 {
                 if let Ok((sender, resp_msg, len)) = std::ipc::receive_any(&mut app_rx_buf) {
                     if sender == target_task_id && resp_msg == std::appmcp::APPMCP_MSG_RESPONSE {
                         if let Some(resp) = std::appmcp::AppMcpResponse::from_bytes(&app_rx_buf[..len]) {
