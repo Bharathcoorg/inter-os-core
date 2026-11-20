@@ -25,11 +25,108 @@ pub const PATH_MODEL_DEFAULTS: &str = "/data/ai/model_defaults.bin";
 pub const COMPANION_STORAGE_BUDGET_MAX: u32 = 64 * 1024; // 64 KiB
 pub const SEMANTIC_INDEX_BUDGET_MAX: u32 = 512 * 1024;   // 512 KiB
 
-/// Domain salt for software-backed companion key derivation.
-pub const COMPANION_KEY_SALT: [u8; 16] = [
-    0x49, 0x4F, 0x43, 0x4D, 0x2D, 0x55, 0x53, 0x45, // "IOCM-USE"
-    0x52, 0x2D, 0x4B, 0x45, 0x59, 0x2D, 0x53, 0x31, // "R-KEY-S1"
-];
+/// Cryptographic domain separation labels for service keys derived from the secret root.
+pub const DOMAIN_COMPANION_STATE: &[u8] = b"companion-state";
+pub const DOMAIN_SEMANTIC_SEARCH: &[u8] = b"semantic-search";
+pub const DOMAIN_CONVERSATION_HISTORY: &[u8] = b"conversation-history";
+
+/// Protected filesystem path for software-backed secret custody in development / QEMU.
+pub const PATH_DEVICE_SECRET: &str = "/data/.device_secret";
+pub const DEVICE_SECRET_MAGIC: [u8; 4] = *b"ISDK";
+pub const DEVICE_SECRET_VERSION: u16 = 1;
+pub const DEVICE_SECRET_FLAG_SOFTWARE: u16 = 0;
+pub const DEVICE_SECRET_LABEL: &[u8; 24] = b"software-backed dev key\0";
+
+/// Record format for device secret root custody.
+///
+/// PLATFORM TRUTH & ARCHITECTURE:
+/// In QEMU or environments lacking a hardware secure enclave/keystore,
+/// this stores a cryptographically random 32-byte root labeled honestly as
+/// "software-backed development key". It is NEVER claimed to be physical silicon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceSecretRecord {
+    pub version: u16,
+    pub flags: u16,
+    pub label: [u8; 24],
+    pub secret: [u8; 32],
+}
+
+impl DeviceSecretRecord {
+    pub fn new(secret: [u8; 32]) -> Self {
+        Self {
+            version: DEVICE_SECRET_VERSION,
+            flags: DEVICE_SECRET_FLAG_SOFTWARE,
+            label: *DEVICE_SECRET_LABEL,
+            secret,
+        }
+    }
+
+    pub fn serialize(&self, out: &mut [u8; 64]) {
+        out[0..4].copy_from_slice(&DEVICE_SECRET_MAGIC);
+        out[4..6].copy_from_slice(&self.version.to_le_bytes());
+        out[6..8].copy_from_slice(&self.flags.to_le_bytes());
+        out[8..32].copy_from_slice(&self.label);
+        out[32..64].copy_from_slice(&self.secret);
+    }
+
+    pub fn deserialize(buf: &[u8; 64]) -> Result<Self, ()> {
+        if &buf[0..4] != &DEVICE_SECRET_MAGIC {
+            return Err(());
+        }
+        let version = u16::from_le_bytes([buf[4], buf[5]]);
+        if version != DEVICE_SECRET_VERSION {
+            return Err(());
+        }
+        let flags = u16::from_le_bytes([buf[6], buf[7]]);
+        let mut label = [0u8; 24];
+        label.copy_from_slice(&buf[8..32]);
+        if &label != DEVICE_SECRET_LABEL {
+            return Err(());
+        }
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&buf[32..64]);
+        if secret == [0u8; 32] {
+            return Err(());
+        }
+        Ok(Self {
+            version,
+            flags,
+            label,
+            secret,
+        })
+    }
+}
+
+/// Loads the persistent device secret root from `/data/.device_secret`, or generates a
+/// fresh CSPRNG random root and commits it to disk. Fails closed if randomness is unavailable.
+pub fn load_or_generate_device_secret() -> Result<[u8; 32], ()> {
+    if let Ok(fd) = crate::fs_open(PATH_DEVICE_SECRET, crate::FS_READ) {
+        let mut buf = [0u8; 64];
+        let n = crate::fs_read(fd, &mut buf).unwrap_or(0);
+        let _ = crate::fs_close(fd);
+        if n == 64 {
+            if let Ok(rec) = DeviceSecretRecord::deserialize(&buf) {
+                return Ok(rec.secret);
+            }
+        }
+    }
+
+    let mut secret = [0u8; 32];
+    if crate::get_random(&mut secret).is_err() || secret == [0u8; 32] {
+        return Err(());
+    }
+
+    let rec = DeviceSecretRecord::new(secret);
+    let mut out = [0u8; 64];
+    rec.serialize(&mut out);
+
+    if let Ok(fd) = crate::fs_open(PATH_DEVICE_SECRET, crate::FS_WRITE) {
+        let _ = crate::fs_write(fd, &out);
+        let _ = crate::fs_fsync(fd);
+        let _ = crate::fs_close(fd);
+    }
+    Ok(secret)
+}
 
 /// Volatile zeroization helper to prevent compiler dead-code elimination.
 #[inline(never)]
@@ -42,56 +139,72 @@ pub fn secure_zero(slice: &mut [u8]) {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
-/// Derives a 32-byte cryptographic key bound to the authenticated user ID.
+/// Derives a 32-byte cryptographic service key bound to an authenticated user and a specific domain.
 ///
-/// SECURITY & PLATFORM TRUTH:
-/// Derived from user binding and domain salt.
-/// Fails closed if `uid == 0` (unauthenticated).
-/// The model, aid, Agent Manager, and third-party apps NEVER receive this key.
-pub fn try_derive_companion_user_key(uid: u32, salt: &[u8; 16]) -> Result<[u8; 32], ()> {
-    if uid == 0 {
+/// SECRECY ARCHITECTURE:
+/// Key = HKDF-Expand(HKDF-Extract(domain, secret_root), "InterOS-v1-UserKey:" || uid || domain)
+/// - Requires a non-zero device secret root.
+/// - Requires an authenticated user (`uid > 0`).
+/// - Strict domain separation prevents cross-service key reuse.
+/// - Fails closed on invalid root, unauthenticated user, or empty domain.
+pub fn derive_service_user_key(secret_root: &[u8; 32], uid: u32, domain: &[u8]) -> Result<[u8; 32], ()> {
+    if secret_root == &[0u8; 32] || uid == 0 || domain.is_empty() {
         return Err(());
     }
-    let mut ikm = [0u8; 40];
-    ikm[0..4].copy_from_slice(&uid.to_le_bytes());
-    ikm[4..40].copy_from_slice(b"InterOS-Companion-Memory-Context-v1!");
-    let prk = hkdf::hkdf_extract(salt, &ikm);
+
+    let prk = hkdf::hkdf_extract(domain, secret_root);
+    let mut info = [0u8; 64];
+    let prefix = b"InterOS-v1-UserKey:";
+    let prefix_len = prefix.len();
+    info[..prefix_len].copy_from_slice(prefix);
+    info[prefix_len..prefix_len + 4].copy_from_slice(&uid.to_le_bytes());
+    let domain_len = domain.len().min(info.len() - prefix_len - 4);
+    info[prefix_len + 4..prefix_len + 4 + domain_len].copy_from_slice(&domain[..domain_len]);
+    let total_info_len = prefix_len + 4 + domain_len;
+
     let mut okm = [0u8; 32];
-    let _ = hkdf::hkdf_expand(&prk, b"interos.companion.storage.key", &mut okm);
-    secure_zero(&mut ikm);
+    hkdf::hkdf_expand(&prk, &info[..total_info_len], &mut okm)?;
+    secure_zero(&mut info);
+    if okm == [0u8; 32] {
+        return Err(());
+    }
     Ok(okm)
 }
 
-pub fn derive_companion_user_key(uid: u32, salt: &[u8; 16]) -> [u8; 32] {
-    try_derive_companion_user_key(uid, salt).unwrap_or([0u8; 32])
+/// Derives the companion state encryption key for an authenticated user.
+pub fn try_derive_companion_user_key(secret_root: &[u8; 32], uid: u32) -> Result<[u8; 32], ()> {
+    derive_service_user_key(secret_root, uid, DOMAIN_COMPANION_STATE)
 }
 
-/// Derives a 32-byte cryptographic key for semantic search vector index at rest.
-pub fn try_derive_search_user_key(uid: u32, salt: &[u8; 16]) -> Result<[u8; 32], ()> {
-    if uid == 0 {
-        return Err(());
+/// Derives the semantic search index encryption key for an authenticated user.
+pub fn try_derive_search_user_key(secret_root: &[u8; 32], uid: u32) -> Result<[u8; 32], ()> {
+    derive_service_user_key(secret_root, uid, DOMAIN_SEMANTIC_SEARCH)
+}
+
+/// Derives the conversation history encryption key for an authenticated user.
+pub fn try_derive_conversation_user_key(secret_root: &[u8; 32], uid: u32) -> Result<[u8; 32], ()> {
+    derive_service_user_key(secret_root, uid, DOMAIN_CONVERSATION_HISTORY)
+}
+
+/// Legacy backward compatibility constant (for transitional checks only).
+pub const COMPANION_KEY_SALT: [u8; 16] = [
+    0x49, 0x4F, 0x43, 0x4D, 0x2D, 0x55, 0x53, 0x45, // "IOCM-USE"
+    0x52, 0x2D, 0x4B, 0x45, 0x59, 0x2D, 0x53, 0x31, // "R-KEY-S1"
+];
+
+/// Generates a fresh, full 96-bit (12-byte) CSPRNG nonce.
+/// Fails closed if TRNG / CSPRNG is unavailable or returns an all-zero nonce.
+pub fn generate_crypto_nonce() -> Result<[u8; 12], ()> {
+    let mut nonce = [0u8; 12];
+    if crate::get_random(&mut nonce).is_ok() && nonce != [0u8; 12] {
+        Ok(nonce)
+    } else {
+        Err(())
     }
-    let mut ikm = [0u8; 40];
-    ikm[0..4].copy_from_slice(&uid.to_le_bytes());
-    ikm[4..40].copy_from_slice(b"InterOS-Search-Index-Encrypted-v1.0!");
-    let prk = hkdf::hkdf_extract(salt, &ikm);
-    let mut okm = [0u8; 32];
-    let _ = hkdf::hkdf_expand(&prk, b"interos.search.storage.key", &mut okm);
-    secure_zero(&mut ikm);
-    Ok(okm)
 }
 
-pub fn derive_search_user_key(uid: u32, salt: &[u8; 16]) -> [u8; 32] {
-    try_derive_search_user_key(uid, salt).unwrap_or([0u8; 32])
-}
-
-/// Monotonic Nonce Generator ensuring unique ChaCha20-Poly1305 nonces across
-/// consecutive saves, reboots, crashes, and restores.
-///
-/// Nonce structure (12 bytes):
-/// [0..4]: entropy / random salt (sys_getrandom or user_id)
-/// [4..8]: generation (u32 LE low 32 of persistent generation)
-/// [8..12]: monotonic save counter (u32 LE checked addition, never wraps)
+/// Nonce Generator producing fresh CSPRNG nonces for every encryption operation,
+/// with counter overflow protection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NonceGenerator {
     pub user_id: u32,
@@ -108,24 +221,16 @@ impl NonceGenerator {
         }
     }
 
-    /// Generates the next unique 12-byte nonce, failing closed if counter overflows.
+    /// Generates the next unique 12-byte CSPRNG nonce, failing closed if counter overflows.
     pub fn try_next_nonce(&mut self) -> Result<[u8; 12], ()> {
         let next = self.counter.checked_add(1).ok_or(())?;
         self.counter = next;
-        let mut nonce = [0u8; 12];
-        let mut entropy = [0u8; 4];
-        if crate::get_random(&mut entropy).is_err() {
-            entropy.copy_from_slice(&self.user_id.to_le_bytes());
-        }
-        nonce[0..4].copy_from_slice(&entropy);
-        nonce[4..8].copy_from_slice(&(self.generation as u32).to_le_bytes());
-        nonce[8..12].copy_from_slice(&self.counter.to_le_bytes());
-        Ok(nonce)
+        generate_crypto_nonce()
     }
 
-    /// Generates the next unique 12-byte nonce and increments the monotonic counter.
-    pub fn next_nonce(&mut self) -> [u8; 12] {
-        self.try_next_nonce().unwrap_or([0xFF; 12])
+    /// Generates the next CSPRNG nonce. Fails closed with error if unavailable.
+    pub fn next_nonce(&mut self) -> Result<[u8; 12], ()> {
+        self.try_next_nonce()
     }
 }
 
@@ -579,6 +684,12 @@ impl PlanStep {
     pub fn args_crc(&self) -> u32 {
         crc32(self.args_bytes())
     }
+
+    /// Computes the 32-byte cryptographic SHA-256 digest of step arguments
+    /// for tamper-proof invocation consent verification.
+    pub fn args_digest(&self) -> [u8; 32] {
+        crate::crypto::Sha256::digest(self.args_bytes())
+    }
 }
 
 /// An interactive multi-step execution plan subject to user consent.
@@ -869,6 +980,106 @@ impl CompanionState {
         self.wipe_in_memory_plaintext();
     }
 
+    /// Evicts the lowest priority item across CompanionState when storage budget or capacity is reached.
+    ///
+    /// CAPACITY EVICTION HIERARCHY (Hardest to evict -> easiest to evict):
+    /// 1. Explicit persistent preferences (confidence >= 80) - protected, never evicted here
+    /// 2. Explicit corrections (`corrections`)
+    /// 3. Approved routines (`routines`)
+    /// 4. Adaptive preferences (confidence < 80)
+    /// 5. Intent patterns (`patterns`)
+    /// 6. Tool statistics (`tool_stats`)
+    pub fn evict_lowest_priority(&mut self) -> bool {
+        // 1. Tool statistics (oldest/least active)
+        if self.tool_stat_count > 0 {
+            let mut min_idx = 0;
+            let mut min_inv = self.tool_stats[0].invocations;
+            for i in 1..self.tool_stat_count {
+                if self.tool_stats[i].invocations < min_inv {
+                    min_inv = self.tool_stats[i].invocations;
+                    min_idx = i;
+                }
+            }
+            for i in min_idx..self.tool_stat_count - 1 {
+                self.tool_stats[i] = self.tool_stats[i + 1];
+            }
+            self.tool_stat_count -= 1;
+            return true;
+        }
+
+        // 2. Intent patterns (lowest confidence)
+        if self.pattern_count > 0 {
+            let mut min_idx = 0;
+            let mut min_conf = self.patterns[0].confidence;
+            for i in 1..self.pattern_count {
+                if self.patterns[i].confidence < min_conf {
+                    min_conf = self.patterns[i].confidence;
+                    min_idx = i;
+                }
+            }
+            for i in min_idx..self.pattern_count - 1 {
+                self.patterns[i] = self.patterns[i + 1];
+            }
+            self.pattern_count -= 1;
+            return true;
+        }
+
+        // 3. Adaptive preferences (low confidence < 80)
+        if self.pref_count > 0 {
+            let mut min_idx = None;
+            let mut min_conf = 80u8;
+            for i in 0..self.pref_count {
+                if self.preferences[i].confidence < min_conf {
+                    min_conf = self.preferences[i].confidence;
+                    min_idx = Some(i);
+                }
+            }
+            if let Some(idx) = min_idx {
+                for i in idx..self.pref_count - 1 {
+                    self.preferences[i] = self.preferences[i + 1];
+                }
+                self.pref_count -= 1;
+                return true;
+            }
+        }
+
+        // 4. Routines (lowest execution count)
+        if self.routine_count > 0 {
+            let mut min_idx = 0;
+            let mut min_cnt = self.routines[0].count;
+            for i in 1..self.routine_count {
+                if self.routines[i].count < min_cnt {
+                    min_cnt = self.routines[i].count;
+                    min_idx = i;
+                }
+            }
+            for i in min_idx..self.routine_count - 1 {
+                self.routines[i] = self.routines[i + 1];
+            }
+            self.routine_count -= 1;
+            return true;
+        }
+
+        // 5. Corrections (oldest timestamp)
+        if self.corr_count > 0 {
+            let mut min_idx = 0;
+            let mut min_ts = self.corrections[0].timestamp;
+            for i in 1..self.corr_count {
+                if self.corrections[i].timestamp < min_ts {
+                    min_ts = self.corrections[i].timestamp;
+                    min_idx = i;
+                }
+            }
+            for i in min_idx..self.corr_count - 1 {
+                self.corrections[i] = self.corrections[i + 1];
+            }
+            self.corr_count -= 1;
+            return true;
+        }
+
+        false
+    }
+
     pub fn add_preference(
         &mut self,
         category: PreferenceCategory,
@@ -895,14 +1106,31 @@ impl CompanionState {
             }
         }
 
-        if self.pref_count < MAX_PREFERENCES {
-            self.preferences[self.pref_count] =
-                PreferenceRecord::new(category, key, val, confidence, now);
-            self.pref_count += 1;
-            true
-        } else {
-            false
+        if self.pref_count >= MAX_PREFERENCES {
+            // Find lowest confidence adaptive preference (< 80) to evict
+            let mut min_idx = None;
+            let mut min_conf = 80u8;
+            for i in 0..self.pref_count {
+                if self.preferences[i].confidence < min_conf {
+                    min_conf = self.preferences[i].confidence;
+                    min_idx = Some(i);
+                }
+            }
+            if let Some(idx) = min_idx {
+                for i in idx..self.pref_count - 1 {
+                    self.preferences[i] = self.preferences[i + 1];
+                }
+                self.pref_count -= 1;
+            } else {
+                // All preferences are explicit/high-confidence; cannot evict
+                return false;
+            }
         }
+
+        self.preferences[self.pref_count] =
+            PreferenceRecord::new(category, key, val, confidence, now);
+        self.pref_count += 1;
+        true
     }
 
     pub fn get_preference(&self, category: PreferenceCategory, key: &[u8]) -> Option<&PreferenceRecord> {
@@ -923,7 +1151,7 @@ impl CompanionState {
         if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Adaptive {
             return false;
         }
-        if self.corr_count < MAX_CORRECTIONS {
+        if self.corr_count < MAX_CORRECTIONS || self.evict_lowest_priority() {
             self.corrections[self.corr_count] = UserCorrection::new(query, action, fix, now);
             self.corr_count += 1;
             true
@@ -962,7 +1190,27 @@ impl CompanionState {
             self.routine_count += 1;
             true
         } else {
-            false
+            // Overwrite routine with lowest execution count
+            let mut min_idx = 0;
+            let mut min_cnt = self.routines[0].count;
+            for i in 1..self.routine_count {
+                if self.routines[i].count < min_cnt {
+                    min_cnt = self.routines[i].count;
+                    min_idx = i;
+                }
+            }
+            let mut r = RoutineRecord {
+                trigger_name: [0u8; 32],
+                trigger_len: trigger.len().min(32) as u8,
+                action: [0u8; 64],
+                action_len: action.len().min(64) as u8,
+                count: 1,
+                last_executed: now,
+            };
+            r.trigger_name[..r.trigger_len as usize].copy_from_slice(&trigger[..r.trigger_len as usize]);
+            r.action[..r.action_len as usize].copy_from_slice(&action[..r.action_len as usize]);
+            self.routines[min_idx] = r;
+            true
         }
     }
 
@@ -991,6 +1239,22 @@ impl CompanionState {
                 last_failure_code: err_code,
             };
             self.tool_stat_count += 1;
+        } else {
+            let mut min_idx = 0;
+            let mut min_inv = self.tool_stats[0].invocations;
+            for i in 1..self.tool_stat_count {
+                if self.tool_stats[i].invocations < min_inv {
+                    min_inv = self.tool_stats[i].invocations;
+                    min_idx = i;
+                }
+            }
+            self.tool_stats[min_idx] = ToolSuccessRecord {
+                tool_id,
+                invocations: 1,
+                successes: if success { 1 } else { 0 },
+                failures: if success { 0 } else { 1 },
+                last_failure_code: err_code,
+            };
         }
     }
 
@@ -1011,7 +1275,25 @@ impl CompanionState {
             self.pattern_count += 1;
             true
         } else {
-            false
+            // Overwrite pattern with lowest confidence
+            let mut min_idx = 0;
+            let mut min_conf = self.patterns[0].confidence;
+            for i in 1..self.pattern_count {
+                if self.patterns[i].confidence < min_conf {
+                    min_conf = self.patterns[i].confidence;
+                    min_idx = i;
+                }
+            }
+            let mut pat = [0u8; 48];
+            let plen = pattern.len().min(48);
+            pat[..plen].copy_from_slice(&pattern[..plen]);
+            self.patterns[min_idx] = IntentPattern {
+                pattern: pat,
+                pattern_len: plen as u8,
+                tool_id,
+                confidence: confidence.min(100),
+            };
+            true
         }
     }
 
@@ -1039,6 +1321,10 @@ impl CompanionState {
     ) -> Result<usize, ()> {
         if self.is_private_session {
             // Private session policy: NO records persisted to disk
+            return Err(());
+        }
+        if key == &[0u8; 32] || nonce == &[0u8; 12] {
+            // Refuse unauthenticated or zero key / zero nonce
             return Err(());
         }
         if self.learning_mode == LearningMode::Off {
@@ -1234,6 +1520,9 @@ impl CompanionState {
         expected_uid: u32,
         min_expected_generation: u64,
     ) -> Result<(), ()> {
+        if key == &[0u8; 32] {
+            return Err(());
+        }
         let hdr_len = COMPANION_HEADER_SIZE;
         if in_buf.len() < hdr_len {
             return Err(());
@@ -1751,31 +2040,92 @@ impl ModelRegistryDefaults {
 mod tests {
     use super::*;
 
+    const TEST_SECRET_ROOT: [u8; 32] = [0x7B; 32];
+
     #[test]
     fn test_companion_key_derivation_user_isolation() {
-        let key_user_a = derive_companion_user_key(1000, &COMPANION_KEY_SALT);
-        let key_user_b = derive_companion_user_key(1001, &COMPANION_KEY_SALT);
+        let key_user_a = try_derive_companion_user_key(&TEST_SECRET_ROOT, 1000).expect("user A");
+        let key_user_b = try_derive_companion_user_key(&TEST_SECRET_ROOT, 1001).expect("user B");
         assert_ne!(key_user_a, key_user_b, "different users must receive distinct cryptographic keys");
 
-        let key_user_a_again = derive_companion_user_key(1000, &COMPANION_KEY_SALT);
+        let key_user_a_again = try_derive_companion_user_key(&TEST_SECRET_ROOT, 1000).expect("user A again");
         assert_eq!(key_user_a, key_user_a_again, "key derivation must be deterministic for the same user");
+    }
+
+    #[test]
+    fn test_service_key_derivation_domain_separation() {
+        let root = [0x42u8; 32];
+        let uid = 1000;
+
+        let key_comp = derive_service_user_key(&root, uid, DOMAIN_COMPANION_STATE).expect("comp key");
+        let key_search = derive_service_user_key(&root, uid, DOMAIN_SEMANTIC_SEARCH).expect("search key");
+        let key_conv = derive_service_user_key(&root, uid, DOMAIN_CONVERSATION_HISTORY).expect("conv key");
+
+        // Strict domain separation
+        assert_ne!(key_comp, key_search, "companion domain key must differ from search domain key");
+        assert_ne!(key_search, key_conv, "search domain key must differ from conversation domain key");
+        assert_ne!(key_comp, key_conv, "companion domain key must differ from conversation domain key");
+
+        // Deterministic
+        let key_comp2 = derive_service_user_key(&root, uid, DOMAIN_COMPANION_STATE).expect("comp key 2");
+        assert_eq!(key_comp, key_comp2);
+
+        // Fails closed on zero secret root
+        assert!(derive_service_user_key(&[0u8; 32], uid, DOMAIN_COMPANION_STATE).is_err());
+        // Fails closed on unauthenticated UID
+        assert!(derive_service_user_key(&root, 0, DOMAIN_COMPANION_STATE).is_err());
+        // Fails closed on empty domain
+        assert!(derive_service_user_key(&root, uid, b"").is_err());
+    }
+
+    #[test]
+    fn test_device_secret_record_serialization_and_validation() {
+        let secret = [0x99u8; 32];
+        let record = DeviceSecretRecord::new(secret);
+        assert_eq!(record.version, DEVICE_SECRET_VERSION);
+        assert_eq!(record.flags, DEVICE_SECRET_FLAG_SOFTWARE);
+        assert_eq!(&record.label, DEVICE_SECRET_LABEL);
+        assert_eq!(record.secret, secret);
+
+        let mut buf = [0u8; 64];
+        record.serialize(&mut buf);
+        assert_eq!(&buf[0..4], &DEVICE_SECRET_MAGIC);
+
+        let decoded = DeviceSecretRecord::deserialize(&buf).expect("deserialize record");
+        assert_eq!(decoded, record);
+
+        // Tamper with magic
+        let mut bad_magic = buf;
+        bad_magic[0] = b'X';
+        assert!(DeviceSecretRecord::deserialize(&bad_magic).is_err());
+
+        // Tamper with version
+        let mut bad_ver = buf;
+        bad_ver[4] = 99;
+        assert!(DeviceSecretRecord::deserialize(&bad_ver).is_err());
+
+        // Tamper with label
+        let mut bad_label = buf;
+        bad_label[8] = b'H'; // Hardware claim must be rejected!
+        assert!(DeviceSecretRecord::deserialize(&bad_label).is_err());
+
+        // Zero secret fails closed
+        let mut zero_sec = buf;
+        zero_sec[32..64].copy_from_slice(&[0u8; 32]);
+        assert!(DeviceSecretRecord::deserialize(&zero_sec).is_err());
     }
 
     #[test]
     fn test_consecutive_saves_use_unique_nonces() {
         let mut gen = NonceGenerator::new(1000, 42);
-        let n1 = gen.next_nonce();
-        let n2 = gen.next_nonce();
-        let n3 = gen.next_nonce();
+        let n1 = gen.next_nonce().expect("nonce 1");
+        let n2 = gen.next_nonce().expect("nonce 2");
+        let n3 = gen.next_nonce().expect("nonce 3");
 
         assert_ne!(n1, n2);
         assert_ne!(n2, n3);
         assert_ne!(n1, n3);
-
-        // Generation difference ensures nonces do not collide across reboot
-        let mut gen_reboot = NonceGenerator::new(1000, 43);
-        let n_after_reboot = gen_reboot.next_nonce();
-        assert_ne!(n1, n_after_reboot);
+        assert_ne!(n1, [0u8; 12]);
     }
 
     #[test]
@@ -1838,11 +2188,12 @@ mod tests {
         assert!(!state.add_correction(b"turn off", b"settings", b"power", 100));
         assert!(!state.record_routine(b"alarm", b"sound", 100));
 
-        let key = derive_companion_user_key(1000, &COMPANION_KEY_SALT);
+        let key = try_derive_companion_user_key(&TEST_SECRET_ROOT, 1000).expect("key");
         let mut buf = [0u8; 1024];
         let mut gen = NonceGenerator::new(1000, 1);
+        let nonce = gen.next_nonce().expect("nonce");
         // Private session refuses to serialize to disk
-        assert!(state.serialize_encrypted(&key, &gen.next_nonce(), &mut buf).is_err());
+        assert!(state.serialize_encrypted(&key, &nonce, &mut buf).is_err());
 
         state.set_private_session(false);
         state.set_learning_mode(LearningMode::Disabled);
@@ -1850,7 +2201,8 @@ mod tests {
         assert!(!state.add_correction(b"turn off", b"settings", b"power", 100));
 
         // In Disabled mode, zero bytes are serialized
-        assert_eq!(state.serialize_encrypted(&key, &gen.next_nonce(), &mut buf).unwrap(), 0);
+        let n2 = gen.next_nonce().expect("nonce 2");
+        assert_eq!(state.serialize_encrypted(&key, &n2, &mut buf).unwrap(), 0);
     }
 
     #[test]
@@ -1877,9 +2229,9 @@ mod tests {
         state.record_intent_pattern(b"check weather", 42, 90);
         state.record_tool_result(42, true, 0);
 
-        let key = derive_companion_user_key(1000, &COMPANION_KEY_SALT);
+        let key = try_derive_companion_user_key(&TEST_SECRET_ROOT, 1000).expect("key");
         let mut gen = NonceGenerator::new(1000, state.generation);
-        let nonce = gen.next_nonce();
+        let nonce = gen.next_nonce().expect("nonce");
         let mut buf = [0u8; 2048];
 
         let len = state.serialize_encrypted(&key, &nonce, &mut buf).unwrap();
@@ -1909,10 +2261,11 @@ mod tests {
         let mut state = CompanionState::new();
         state.add_preference(PreferenceCategory::Display, b"brightness", b"80", 90, 500);
 
-        let key = derive_companion_user_key(1000, &COMPANION_KEY_SALT);
+        let key = try_derive_companion_user_key(&TEST_SECRET_ROOT, 1000).expect("key");
         let mut gen = NonceGenerator::new(1000, 1);
+        let nonce = gen.next_nonce().expect("nonce");
         let mut buf = [0u8; 1024];
-        let len = state.serialize_encrypted(&key, &gen.next_nonce(), &mut buf).unwrap();
+        let len = state.serialize_encrypted(&key, &nonce, &mut buf).unwrap();
 
         // 1. Tamper with ciphertext
         let mut corrupted = buf;
@@ -1932,6 +2285,9 @@ mod tests {
 
         // 4. Rollback detection
         assert!(loaded.deserialize_encrypted_with_min_generation(&key, &buf[..len], 100).is_err(), "replay of generation 1 when generation 100 expected must be rejected");
+
+        // 5. Zero key fails closed
+        assert!(loaded.deserialize_encrypted_for_user(&[0u8; 32], &buf[..len], 1000, 0).is_err(), "zero key must fail closed");
     }
 
     #[test]
@@ -1960,6 +2316,92 @@ mod tests {
 
         let s2 = plan.advance_step(true);
         assert_eq!(s2, PlanStatus::Completed);
+    }
+
+    #[test]
+    fn test_plan_step_args_digest() {
+        let mut step = PlanStep::default();
+        let args = b"{\"recipient\": \"Alice\", \"message\": \"Hello\"}";
+        step.args[..args.len()].copy_from_slice(args);
+        step.args_len = args.len() as u8;
+
+        let digest = step.args_digest();
+        let expected = crate::crypto::Sha256::digest(args);
+        assert_eq!(digest, expected);
+        assert_ne!(digest, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_companion_capacity_eviction_hierarchy() {
+        let mut state = CompanionState::new();
+
+        // 1. Add 1 tool stat
+        state.record_tool_result(101, true, 0);
+        assert_eq!(state.tool_stat_count, 1);
+
+        // 2. Add 1 pattern
+        state.record_intent_pattern(b"pat", 102, 50);
+        assert_eq!(state.pattern_count, 1);
+
+        // 3. Add 1 routine
+        state.record_routine(b"trig", b"act", 100);
+        assert_eq!(state.routine_count, 1);
+
+        // 4. Add 1 correction
+        state.add_correction(b"q", b"a", b"f", 200);
+        assert_eq!(state.corr_count, 1);
+
+        // 5. Add 1 adaptive preference (conf < 80)
+        state.add_preference(PreferenceCategory::Search, b"adapt", b"val", 50, 10);
+        assert_eq!(state.pref_count, 1);
+
+        // 6. Add 1 explicit preference (conf >= 80)
+        state.add_preference(PreferenceCategory::Theme, b"expl", b"val", 95, 20);
+        assert_eq!(state.pref_count, 2);
+
+        // Eviction order verification:
+        // First eviction must drop tool stat:
+        assert!(state.evict_lowest_priority());
+        assert_eq!(state.tool_stat_count, 0, "tool stats must be evicted first");
+
+        // Second eviction must drop intent pattern:
+        assert!(state.evict_lowest_priority());
+        assert_eq!(state.pattern_count, 0, "patterns must be evicted second");
+
+        // Third eviction must drop adaptive preference:
+        assert!(state.evict_lowest_priority());
+        assert_eq!(state.pref_count, 1, "adaptive preference must be evicted third");
+        assert_eq!(state.preferences[0].key_str(), "expl");
+
+        // Fourth eviction must drop routine:
+        assert!(state.evict_lowest_priority());
+        assert_eq!(state.routine_count, 0, "routines must be evicted fourth");
+
+        // Fifth eviction must drop correction:
+        assert!(state.evict_lowest_priority());
+        assert_eq!(state.corr_count, 0, "corrections must be evicted fifth");
+
+        // Sixth eviction: only explicit preference remains, cannot evict!
+        assert!(!state.evict_lowest_priority(), "explicit preferences must be protected from eviction");
+        assert_eq!(state.pref_count, 1);
+
+        // Test preference table capacity eviction when table is full (32 items)
+        let mut full_state = CompanionState::new();
+        for i in 0..16 {
+            let k = [b'A' + i as u8; 4];
+            full_state.add_preference(PreferenceCategory::Search, &k, b"val", 40, 10);
+        }
+        for i in 16..MAX_PREFERENCES {
+            let k = [b'E' + i as u8; 4];
+            full_state.add_preference(PreferenceCategory::Custom, &k, b"val", 95, 20);
+        }
+        assert_eq!(full_state.pref_count, MAX_PREFERENCES);
+
+        // Adding an explicit preference when table is full evicts an adaptive preference:
+        let ok = full_state.add_preference(PreferenceCategory::Theme, b"dark", b"1", 99, 500);
+        assert!(ok);
+        assert_eq!(full_state.pref_count, MAX_PREFERENCES);
+        assert!(full_state.get_preference(PreferenceCategory::Theme, b"dark").is_some());
     }
 
     #[test]
@@ -2014,10 +2456,12 @@ mod tests {
 
     #[test]
     fn test_try_derive_companion_user_key_failing_closed_on_root() {
-        assert!(try_derive_companion_user_key(0, &COMPANION_KEY_SALT).is_err());
-        assert!(try_derive_search_user_key(0, &COMPANION_KEY_SALT).is_err());
+        assert!(try_derive_companion_user_key(&[0u8; 32], 1000).is_err());
+        assert!(try_derive_search_user_key(&[0u8; 32], 1000).is_err());
+        assert!(try_derive_companion_user_key(&TEST_SECRET_ROOT, 0).is_err());
+        assert!(try_derive_search_user_key(&TEST_SECRET_ROOT, 0).is_err());
 
-        let key = try_derive_companion_user_key(1000, &COMPANION_KEY_SALT).expect("valid user");
+        let key = try_derive_companion_user_key(&TEST_SECRET_ROOT, 1000).expect("valid user");
         assert_ne!(key, [0u8; 32]);
     }
 
@@ -2028,10 +2472,11 @@ mod tests {
         state.generation = 5;
         state.add_preference(PreferenceCategory::Theme, b"dark_mode", b"true", 90, 100);
 
-        let key = try_derive_companion_user_key(1000, &COMPANION_KEY_SALT).unwrap();
+        let key = try_derive_companion_user_key(&TEST_SECRET_ROOT, 1000).unwrap();
         let mut gen = NonceGenerator::new(1000, state.generation);
+        let nonce = gen.next_nonce().expect("nonce");
         let mut buf = [0u8; 2048];
-        let len = state.serialize_encrypted(&key, &gen.next_nonce(), &mut buf).unwrap();
+        let len = state.serialize_encrypted(&key, &nonce, &mut buf).unwrap();
 
         let mut loaded = CompanionState::new();
         // Foreign user 1001 must be rejected

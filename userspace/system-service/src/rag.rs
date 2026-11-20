@@ -49,6 +49,9 @@ pub const MAX_RAG_CHUNKS: usize = 48;
 /// Binary index format magic: `0x5241_4758` (ASCII `b"RAGX"`).
 pub const RAG_INDEX_MAGIC: u32 = 0x5241_4758;
 
+/// Encrypted binary index format magic: `0x5241_4745` (ASCII `b"RAGE"`).
+pub const RAG_INDEX_ENCRYPTED_MAGIC: u32 = 0x5241_4745;
+
 /// Binary index format version.
 pub const RAG_INDEX_VERSION: u32 = 1;
 
@@ -363,6 +366,8 @@ impl RagIndex {
             if backend.embed(session, &chunk.text[..chunk.text_len as usize], &mut f32_out).is_ok() {
                 std::ai::quantize_f32_to_q7(&f32_out[..RAG_VECTOR_DIM], &mut chunk.embedding);
                 self.is_neural = true;
+                self.vector_space = VectorSpace::NeuralGemmaQ7;
+                chunk.vector_space = VectorSpace::NeuralGemmaQ7;
             } else {
                 compute_embedding_768(
                     &chunk.text[..chunk.text_len as usize],
@@ -370,6 +375,7 @@ impl RagIndex {
                     None,
                     Some(&mut chunk.embedding),
                 );
+                chunk.vector_space = VectorSpace::LexicalQ7;
             }
 
             self.chunks[self.count] = chunk;
@@ -733,6 +739,273 @@ impl RagIndex {
         let _ = std::fs_close(fd);
         Ok(self.count)
     }
+
+    /// Serializes and encrypts the vector index into `out_buf` using ChaCha20-Poly1305.
+    pub fn serialize_encrypted(&self, key: &[u8; 32], out_buf: &mut [u8]) -> Result<usize, ()> {
+        if key == &[0u8; 32] {
+            return Err(());
+        }
+        let chunk_size = core::mem::size_of::<RagChunk>();
+        let rec_size = 12 + 16 + chunk_size;
+        let total = 16 + self.count * rec_size;
+        if total > out_buf.len() || total > SEARCH_STORAGE_BUDGET_BYTES {
+            return Err(());
+        }
+        let mut hdr = [0u8; 16];
+        hdr[0..4].copy_from_slice(&RAG_INDEX_ENCRYPTED_MAGIC.to_le_bytes());
+        hdr[4..8].copy_from_slice(&RAG_INDEX_VERSION.to_le_bytes());
+        hdr[8..12].copy_from_slice(&(self.count as u32).to_le_bytes());
+        hdr[12..16].copy_from_slice(&(RAG_VECTOR_DIM as u32).to_le_bytes());
+        out_buf[0..16].copy_from_slice(&hdr);
+
+        let mut pos = 16;
+        for i in 0..self.count {
+            let chunk_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &self.chunks[i] as *const _ as *const u8,
+                    chunk_size,
+                )
+            };
+            let nonce = std::companion::generate_crypto_nonce()?;
+            let mut tag = [0u8; 16];
+            out_buf[pos..pos + 12].copy_from_slice(&nonce);
+            pos += 12;
+            let tag_pos = pos;
+            pos += 16;
+            let ct_slice = &mut out_buf[pos..pos + chunk_size];
+            std::crypto::chacha20_poly1305::ChaCha20Poly1305::encrypt(
+                key,
+                &nonce,
+                &hdr,
+                chunk_bytes,
+                ct_slice,
+                &mut tag,
+            );
+            out_buf[tag_pos..tag_pos + 16].copy_from_slice(&tag);
+            pos += chunk_size;
+        }
+        Ok(total)
+    }
+
+    /// Deserializes and decrypts the vector index from `in_buf` using ChaCha20-Poly1305.
+    pub fn deserialize_encrypted(&mut self, key: &[u8; 32], in_buf: &[u8]) -> Result<usize, ()> {
+        if key == &[0u8; 32] || in_buf.len() < 16 {
+            return Err(());
+        }
+        let magic = u32::from_le_bytes([in_buf[0], in_buf[1], in_buf[2], in_buf[3]]);
+        let version = u32::from_le_bytes([in_buf[4], in_buf[5], in_buf[6], in_buf[7]]);
+        let count = u32::from_le_bytes([in_buf[8], in_buf[9], in_buf[10], in_buf[11]]) as usize;
+        let dim = u32::from_le_bytes([in_buf[12], in_buf[13], in_buf[14], in_buf[15]]) as usize;
+
+        if magic != RAG_INDEX_ENCRYPTED_MAGIC || version != RAG_INDEX_VERSION || dim != RAG_VECTOR_DIM {
+            return Err(());
+        }
+
+        let chunk_size = core::mem::size_of::<RagChunk>();
+        let rec_size = 12 + 16 + chunk_size;
+        let expected_len = 16 + count * rec_size;
+        if in_buf.len() < expected_len {
+            return Err(());
+        }
+
+        self.clear();
+        let load_count = count.min(MAX_RAG_CHUNKS);
+        let mut pos = 16;
+        let mut scratch = [0u8; core::mem::size_of::<RagChunk>()];
+
+        for _ in 0..load_count {
+            let mut nonce = [0u8; 12];
+            nonce.copy_from_slice(&in_buf[pos..pos + 12]);
+            pos += 12;
+
+            let mut tag = [0u8; 16];
+            tag.copy_from_slice(&in_buf[pos..pos + 16]);
+            pos += 16;
+
+            scratch.copy_from_slice(&in_buf[pos..pos + chunk_size]);
+            pos += chunk_size;
+
+            if std::crypto::chacha20_poly1305::ChaCha20Poly1305::open_in_place(
+                key,
+                &nonce,
+                &in_buf[..16],
+                &mut scratch,
+                &tag,
+            ).is_err() {
+                self.clear();
+                return Err(());
+            }
+
+            let chunk = unsafe {
+                core::ptr::read_unaligned(scratch.as_ptr() as *const RagChunk)
+            };
+            self.add_chunk(chunk);
+        }
+
+        Ok(self.count)
+    }
+
+    /// Serializes and writes the vector index encrypted with the semantic search user key.
+    pub fn save_to_disk_encrypted(&self, path: &str, key: &[u8; 32]) -> Result<(), ()> {
+        if key == &[0u8; 32] {
+            return Err(());
+        }
+        let chunk_size = core::mem::size_of::<RagChunk>();
+        let rec_size = 12 + 16 + chunk_size;
+        let total_size = 16 + self.count * rec_size;
+        if total_size > SEARCH_STORAGE_BUDGET_BYTES {
+            return Err(());
+        }
+
+        let mut tmp_path_buf = [0u8; 80];
+        let p_len = path.len().min(75);
+        tmp_path_buf[..p_len].copy_from_slice(&path.as_bytes()[..p_len]);
+        tmp_path_buf[p_len..p_len + 4].copy_from_slice(b".tmp");
+        let tmp_path = core::str::from_utf8(&tmp_path_buf[..p_len + 4]).map_err(|_| ())?;
+
+        let fd = std::fs_open(tmp_path, std::FS_WRITE).map_err(|_| ())?;
+
+        let mut hdr = [0u8; 16];
+        hdr[0..4].copy_from_slice(&RAG_INDEX_ENCRYPTED_MAGIC.to_le_bytes());
+        hdr[4..8].copy_from_slice(&RAG_INDEX_VERSION.to_le_bytes());
+        hdr[8..12].copy_from_slice(&(self.count as u32).to_le_bytes());
+        hdr[12..16].copy_from_slice(&(RAG_VECTOR_DIM as u32).to_le_bytes());
+        if std::fs_write(fd, &hdr).is_err() {
+            let _ = std::fs_close(fd);
+            let _ = std::fs_unlink(tmp_path);
+            return Err(());
+        }
+
+        let mut ct_chunk = [0u8; core::mem::size_of::<RagChunk>()];
+        let mut tag = [0u8; 16];
+        for i in 0..self.count {
+            let chunk_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &self.chunks[i] as *const _ as *const u8,
+                    chunk_size,
+                )
+            };
+            let nonce = std::companion::generate_crypto_nonce()?;
+            std::crypto::chacha20_poly1305::ChaCha20Poly1305::encrypt(
+                key,
+                &nonce,
+                &hdr,
+                chunk_bytes,
+                &mut ct_chunk,
+                &mut tag,
+            );
+            if std::fs_write(fd, &nonce).is_err()
+                || std::fs_write(fd, &tag).is_err()
+                || std::fs_write(fd, &ct_chunk).is_err()
+            {
+                let _ = std::fs_close(fd);
+                let _ = std::fs_unlink(tmp_path);
+                return Err(());
+            }
+        }
+
+        let _ = std::fs_fsync(fd);
+        let _ = std::fs_close(fd);
+
+        if let Ok(dst_fd) = std::fs_open(path, std::FS_WRITE) {
+            if std::fs_write(dst_fd, &hdr).is_ok() {
+                for i in 0..self.count {
+                    let chunk_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            &self.chunks[i] as *const _ as *const u8,
+                            chunk_size,
+                        )
+                    };
+                    if let Ok(nonce) = std::companion::generate_crypto_nonce() {
+                        std::crypto::chacha20_poly1305::ChaCha20Poly1305::encrypt(
+                            key,
+                            &nonce,
+                            &hdr,
+                            chunk_bytes,
+                            &mut ct_chunk,
+                            &mut tag,
+                        );
+                        let _ = std::fs_write(dst_fd, &nonce);
+                        let _ = std::fs_write(dst_fd, &tag);
+                        let _ = std::fs_write(dst_fd, &ct_chunk);
+                    }
+                }
+                let _ = std::fs_fsync(dst_fd);
+            }
+            let _ = std::fs_close(dst_fd);
+        }
+        let _ = std::fs_unlink(tmp_path);
+
+        Ok(())
+    }
+
+    /// Loads and decrypts the vector index from disk using the semantic search user key.
+    pub fn load_from_disk_encrypted(&mut self, path: &str, key: &[u8; 32]) -> Result<usize, ()> {
+        if key == &[0u8; 32] {
+            return Err(());
+        }
+        let fd = std::fs_open(path, std::FS_READ).map_err(|_| ())?;
+
+        let mut hdr = [0u8; 16];
+        let n = std::fs_read(fd, &mut hdr).map_err(|_| {
+            let _ = std::fs_close(fd);
+            ()
+        })?;
+        if n < 16 {
+            let _ = std::fs_close(fd);
+            return Err(());
+        }
+
+        let magic = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+        let version = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+        let count = u32::from_le_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]) as usize;
+        let dim = u32::from_le_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]) as usize;
+
+        if magic != RAG_INDEX_ENCRYPTED_MAGIC || version != RAG_INDEX_VERSION || dim != RAG_VECTOR_DIM {
+            let _ = std::fs_close(fd);
+            return Err(());
+        }
+
+        self.clear();
+        let load_count = count.min(MAX_RAG_CHUNKS);
+        let chunk_size = core::mem::size_of::<RagChunk>();
+
+        let mut nonce = [0u8; 12];
+        let mut tag = [0u8; 16];
+        let mut chunk_buf = [0u8; core::mem::size_of::<RagChunk>()];
+
+        for _ in 0..load_count {
+            if std::fs_read(fd, &mut nonce).map_err(|_| { let _ = std::fs_close(fd); () })? != 12 {
+                break;
+            }
+            if std::fs_read(fd, &mut tag).map_err(|_| { let _ = std::fs_close(fd); () })? != 16 {
+                break;
+            }
+            if std::fs_read(fd, &mut chunk_buf).map_err(|_| { let _ = std::fs_close(fd); () })? != chunk_size {
+                break;
+            }
+
+            if std::crypto::chacha20_poly1305::ChaCha20Poly1305::open_in_place(
+                key,
+                &nonce,
+                &hdr,
+                &mut chunk_buf,
+                &tag,
+            ).is_err() {
+                self.clear();
+                let _ = std::fs_close(fd);
+                return Err(());
+            }
+
+            let chunk = unsafe {
+                core::ptr::read_unaligned(chunk_buf.as_ptr() as *const RagChunk)
+            };
+            self.add_chunk(chunk);
+        }
+
+        let _ = std::fs_close(fd);
+        Ok(self.count)
+    }
 }
 
 /// Formats retrieved document context and query into a RAG generative prompt with exact citations.
@@ -1017,5 +1290,58 @@ memory.runtime_overhead=1000000\n";
 
         backend.destroy_session(session).expect("destroy session");
         backend.unload_model(handle).expect("unload model");
+    }
+
+    #[test]
+    fn test_rag_index_encrypted_serialization_and_domain_separation() {
+        let mut index = RagIndex::new(false);
+        index.ingest_document(
+            b"/storage/notes/kernel.txt",
+            b"Microkernel security architecture capability tokens zero ambient authority.",
+        );
+        index.ingest_document(
+            b"/storage/notes/search.txt",
+            b"Semantic search vector indexing cosine similarity retrieval.",
+        );
+        assert_eq!(index.count, 2);
+
+        let secret_root = [0x42u8; 32];
+        let search_key = std::companion::try_derive_search_user_key(&secret_root, 1000).expect("derive search key");
+        let foreign_key = std::companion::try_derive_search_user_key(&secret_root, 1001).expect("derive foreign key");
+        let companion_key = std::companion::try_derive_companion_user_key(&secret_root, 1000).expect("derive companion key");
+
+        // Domain separation check: companion key != search key
+        assert_ne!(search_key, companion_key);
+        assert_ne!(search_key, foreign_key);
+
+        let mut enc_buf = [0u8; 4096];
+        let len = index.serialize_encrypted(&search_key, &mut enc_buf).expect("serialize encrypted");
+        assert!(len > 16);
+
+        // 1. Successful decrypt with legitimate search key
+        let mut loaded = RagIndex::new(false);
+        let loaded_count = loaded.deserialize_encrypted(&search_key, &enc_buf[..len]).expect("deserialize encrypted");
+        assert_eq!(loaded_count, 2);
+        assert_eq!(loaded.count, 2);
+        assert_eq!(&loaded.chunks[0].text[..loaded.chunks[0].text_len as usize], &index.chunks[0].text[..index.chunks[0].text_len as usize]);
+
+        // 2. Reject foreign user key
+        let mut fail_user = RagIndex::new(false);
+        assert!(fail_user.deserialize_encrypted(&foreign_key, &enc_buf[..len]).is_err());
+
+        // 3. Reject wrong domain key (companion key for same user)
+        let mut fail_domain = RagIndex::new(false);
+        assert!(fail_domain.deserialize_encrypted(&companion_key, &enc_buf[..len]).is_err());
+
+        // 4. Reject zero key
+        let mut fail_zero = RagIndex::new(false);
+        assert!(fail_zero.deserialize_encrypted(&[0u8; 32], &enc_buf[..len]).is_err());
+
+        // 5. Reject tampered ciphertext
+        let mut tampered = [0u8; 4096];
+        tampered[..len].copy_from_slice(&enc_buf[..len]);
+        tampered[30] ^= 0x01; // flip bit in tag or ciphertext
+        let mut fail_tamper = RagIndex::new(false);
+        assert!(fail_tamper.deserialize_encrypted(&search_key, &tampered[..len]).is_err());
     }
 }

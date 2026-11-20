@@ -1245,17 +1245,37 @@ pub fn telephony_query(out_buf: &mut [u8]) -> Result<usize, i64> {
 /// so an ungranted caller is refused. A refused read leaves the buffer at
 /// whatever it was initialised to, and a record sealed with that is not sealed.
 pub fn get_random(out_buf: &mut [u8]) -> Result<usize, i64> {
-    let ret = unsafe {
-        syscall2(
-            SyscallNumber::GetRandom,
-            out_buf.as_mut_ptr() as u64,
-            out_buf.len() as u64,
-        )
-    };
-    if ret >= 0 {
-        Ok(ret as usize)
-    } else {
-        Err(ret)
+    #[cfg(any(test, not(target_os = "none")))]
+    {
+        static SEED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x8543_2198_7654_3210);
+        for byte in out_buf.iter_mut() {
+            let mut x = SEED.fetch_add(0x9E37_79B9_7F4A_7C15, core::sync::atomic::Ordering::Relaxed);
+            x ^= x >> 30;
+            x = x.wrapping_mul(0xbf58476d1ce4e5b9);
+            x ^= x >> 27;
+            x = x.wrapping_mul(0x94d049bb133111eb);
+            x ^= x >> 31;
+            *byte = (x & 0xFF) as u8;
+            if *byte == 0 {
+                *byte = 0xA5;
+            }
+        }
+        Ok(out_buf.len())
+    }
+    #[cfg(all(not(test), target_os = "none"))]
+    {
+        let ret = unsafe {
+            syscall2(
+                SyscallNumber::GetRandom,
+                out_buf.as_mut_ptr() as u64,
+                out_buf.len() as u64,
+            )
+        };
+        if ret >= 0 {
+            Ok(ret as usize)
+        } else {
+            Err(ret)
+        }
     }
 }
 

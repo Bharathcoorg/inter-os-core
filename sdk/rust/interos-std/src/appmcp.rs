@@ -512,12 +512,24 @@ pub const fn compute_dynamic_tool_id(package_id: &[u8], tool_name: &[u8]) -> u32
 /// Maximum dynamic tools tracked in the platform AppMCP discovery registry.
 pub const MAX_DYNAMIC_TOOLS: usize = 128;
 
+/// Authoritative, generation-counted handle identifying an active dynamic tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AuthoritativeToolHandle {
+    pub slot: u16,
+    pub generation: u32,
+    pub tool_id: u32,
+}
+
 /// A bounded, extensible, dynamic AppMCP tool descriptor declared by native or third-party applications.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct DynamicToolDescriptor {
     /// Unique 32-bit tool identifier (canonical ID or hash from package+name).
     pub tool_id: u32,
+    /// Slot index in the registry.
+    pub slot: u16,
+    /// Generation number of this slot assignment.
+    pub generation: u32,
     /// Stable tool name (e.g. `notes.create`, `calculator.eval`).
     pub name: [u8; 32],
     pub name_len: u8,
@@ -544,6 +556,8 @@ impl Default for DynamicToolDescriptor {
     fn default() -> Self {
         Self {
             tool_id: 0,
+            slot: 0,
+            generation: 0,
             name: [0u8; 32],
             name_len: 0,
             label: [0u8; 32],
@@ -622,7 +636,12 @@ pub const MAX_INVOCATION_GRANTS: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvocationGrant {
     pub tool_id: u32,
-    pub args_crc: u32,
+    pub user_id: u32,
+    pub plan_id: u64,
+    pub plan_gen: u64,
+    pub tool_gen: u32,
+    pub args_digest: [u8; 32],
+    pub expiry_ticks: u64,
     pub valid: bool,
 }
 
@@ -630,7 +649,12 @@ impl Default for InvocationGrant {
     fn default() -> Self {
         Self {
             tool_id: 0,
-            args_crc: 0,
+            user_id: 0,
+            plan_id: 0,
+            plan_gen: 0,
+            tool_gen: 0,
+            args_digest: [0u8; 32],
+            expiry_ticks: 0,
             valid: false,
         }
     }
@@ -641,6 +665,7 @@ impl Default for InvocationGrant {
 pub struct DynamicToolRegistry {
     pub tools: [Option<DynamicToolDescriptor>; MAX_DYNAMIC_TOOLS],
     pub count: usize,
+    pub slot_generations: [u32; MAX_DYNAMIC_TOOLS],
     pub invocation_grants: [InvocationGrant; MAX_INVOCATION_GRANTS],
     pub grant_count: usize,
 }
@@ -656,7 +681,17 @@ impl DynamicToolRegistry {
         Self {
             tools: [None; MAX_DYNAMIC_TOOLS],
             count: 0,
-            invocation_grants: [InvocationGrant { tool_id: 0, args_crc: 0, valid: false }; MAX_INVOCATION_GRANTS],
+            slot_generations: [0u32; MAX_DYNAMIC_TOOLS],
+            invocation_grants: [InvocationGrant {
+                tool_id: 0,
+                user_id: 0,
+                plan_id: 0,
+                plan_gen: 0,
+                tool_gen: 0,
+                args_digest: [0u8; 32],
+                expiry_ticks: 0,
+                valid: false,
+            }; MAX_INVOCATION_GRANTS],
             grant_count: 0,
         }
     }
@@ -723,7 +758,8 @@ impl DynamicToolRegistry {
     /// 1. Collision-Safe Identity: If another tool already has `descriptor.tool_id`
     ///    with a DIFFERENT package or name, registration is REJECTED (`Err(())`).
     ///    One application can NEVER overwrite or impersonate another application's tool.
-    /// 2. If the tool is re-registered by the SAME package and name, its descriptor is updated.
+    /// 2. If the tool is re-registered by the SAME package and name, its descriptor is updated
+    ///    and the slot generation is incremented, invalidating stale handles.
     /// 3. High-Risk Policy: `ExternalConsequence` and `SecuritySensitive` actions
     ///    can never be permanently autonomous. If `AlwaysAllow` is requested, it is
     ///    clamped by platform security policy to `AlwaysAsk`.
@@ -738,11 +774,14 @@ impl DynamicToolRegistry {
         }
 
         // Check for existing tool by package_id and name (update scenario)
-        for slot in &mut self.tools {
+        for (idx, slot) in self.tools.iter_mut().enumerate() {
             if let Some(existing) = slot {
                 if &existing.package_id[..existing.package_id_len as usize] == &descriptor.package_id[..descriptor.package_id_len as usize]
                     && &existing.name[..existing.name_len as usize] == &descriptor.name[..descriptor.name_len as usize]
                 {
+                    self.slot_generations[idx] = self.slot_generations[idx].wrapping_add(1);
+                    descriptor.slot = idx as u16;
+                    descriptor.generation = self.slot_generations[idx];
                     *existing = descriptor;
                     return Ok(descriptor.tool_id);
                 }
@@ -760,8 +799,11 @@ impl DynamicToolRegistry {
         }
 
         // Insert into first available slot
-        for slot in &mut self.tools {
+        for (idx, slot) in self.tools.iter_mut().enumerate() {
             if slot.is_none() {
+                self.slot_generations[idx] = self.slot_generations[idx].wrapping_add(1);
+                descriptor.slot = idx as u16;
+                descriptor.generation = self.slot_generations[idx];
                 *slot = Some(descriptor);
                 self.count += 1;
                 return Ok(descriptor.tool_id);
@@ -770,15 +812,126 @@ impl DynamicToolRegistry {
         Err(())
     }
 
+    /// Returns the authoritative, generation-safe handle for a tool if currently active.
+    pub fn get_handle(&self, tool_id: u32) -> Option<AuthoritativeToolHandle> {
+        for slot in &self.tools {
+            if let Some(desc) = slot {
+                if desc.tool_id == tool_id {
+                    return Some(AuthoritativeToolHandle {
+                        slot: desc.slot,
+                        generation: desc.generation,
+                        tool_id,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// Validates an authoritative handle against the current registry state.
+    /// Checks:
+    /// 1. `(handle.slot as usize) < MAX_DYNAMIC_TOOLS`.
+    /// 2. `self.tools[handle.slot as usize]`.
+    /// 3. `desc.generation == handle.generation` and `desc.tool_id == handle.tool_id`.
+    /// If generation does not match or slot is empty or tool_id differs, returns `None`!
+    pub fn validate_handle(&self, handle: AuthoritativeToolHandle) -> Option<&DynamicToolDescriptor> {
+        let slot = handle.slot as usize;
+        if slot >= MAX_DYNAMIC_TOOLS {
+            return None;
+        }
+        if let Some(desc) = &self.tools[slot] {
+            if desc.generation == handle.generation && desc.tool_id == handle.tool_id {
+                return Some(desc);
+            }
+        }
+        None
+    }
+
+    /// Registers a tool declared in an application manifest.
+    ///
+    /// Computes FNV-1a hash of `package_id/tool_name` for `tool_id`.
+    /// Clamps high risk actions (`ExternalConsequence` / `SecuritySensitive` clamped to `AlwaysAsk`).
+    /// Calls `self.register(desc)`.
+    /// Returns `self.get_handle(desc.tool_id).ok_or(())`.
+    pub fn register_manifest_tool(
+        &mut self,
+        package_id: &[u8],
+        tool_name: &[u8],
+        label: &[u8],
+        description: &[u8],
+        version: u32,
+        risk_class: ToolRiskClass,
+        mut consent_class: ToolConsentClass,
+    ) -> Result<AuthoritativeToolHandle, ()> {
+        let tool_id = compute_dynamic_tool_id(package_id, tool_name);
+        if matches!(
+            risk_class,
+            ToolRiskClass::ExternalConsequence | ToolRiskClass::SecuritySensitive
+        ) {
+            consent_class = ToolConsentClass::AlwaysAsk;
+        }
+        let desc = DynamicToolDescriptor::new(
+            tool_id,
+            tool_name,
+            label,
+            description,
+            package_id,
+            version,
+            risk_class,
+            consent_class,
+            TOOL_CAP_TYPE,
+        );
+        self.register(desc)?;
+        self.get_handle(desc.tool_id).ok_or(())
+    }
+
+    /// Revokes all tools registered by a package (e.g. upon package uninstall).
+    /// Scans `self.tools`. For any tool matching `package_id`:
+    /// - `self.tools[slot] = None;`
+    /// - `self.slot_generations[slot] = self.slot_generations[slot].wrapping_add(1);`
+    /// - Clears any invocation grants for that `tool_id`.
+    /// Returns count of revoked tools.
+    pub fn revoke_package_tools(&mut self, package_id: &[u8]) -> usize {
+        let mut revoked_count = 0;
+        for slot in 0..MAX_DYNAMIC_TOOLS {
+            if let Some(desc) = self.tools[slot] {
+                if &desc.package_id[..desc.package_id_len as usize] == package_id {
+                    let tool_id = desc.tool_id;
+                    self.tools[slot] = None;
+                    self.slot_generations[slot] = self.slot_generations[slot].wrapping_add(1);
+                    self.count = self.count.saturating_sub(1);
+                    revoked_count += 1;
+
+                    // Clear any invocation grants for that tool_id
+                    for g in &mut self.invocation_grants {
+                        if g.valid && g.tool_id == tool_id {
+                            g.valid = false;
+                            self.grant_count = self.grant_count.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+        }
+        revoked_count
+    }
+
     /// Unregisters a single tool by package ID and tool name.
     pub fn unregister_tool(&mut self, package_id: &[u8], name: &[u8]) -> bool {
-        for slot in &mut self.tools {
-            if let Some(desc) = slot {
+        for slot in 0..MAX_DYNAMIC_TOOLS {
+            if let Some(desc) = self.tools[slot] {
                 if &desc.package_id[..desc.package_id_len as usize] == package_id
                     && &desc.name[..desc.name_len as usize] == name
                 {
-                    *slot = None;
+                    let tool_id = desc.tool_id;
+                    self.tools[slot] = None;
+                    self.slot_generations[slot] = self.slot_generations[slot].wrapping_add(1);
                     self.count = self.count.saturating_sub(1);
+                    for g in &mut self.invocation_grants {
+                        if g.valid && g.tool_id == tool_id {
+                            g.valid = false;
+                            self.grant_count = self.grant_count.saturating_sub(1);
+                        }
+                    }
                     return true;
                 }
             }
@@ -788,7 +941,7 @@ impl DynamicToolRegistry {
 
     /// Unregisters all tools declared by a package (e.g. upon app uninstall).
     pub fn unregister_package(&mut self, package_id: &[u8]) -> usize {
-        self.invalidate_package(package_id)
+        self.revoke_package_tools(package_id)
     }
 
     /// Consumes single-use consent (reverting `AllowOnce` back to `AlwaysAsk`).
@@ -820,16 +973,25 @@ impl DynamicToolRegistry {
         self.clear_invocation_grants();
     }
 
-    /// Grants user consent for a specific tool invocation bound to the arguments digest.
-    pub fn grant_invocation_consent(&mut self, tool_id: u32, args_crc: u32) -> bool {
+    /// Grants an exact cryptographic invocation grant.
+    pub fn grant_exact_invocation(&mut self, mut grant: InvocationGrant) -> bool {
+        grant.valid = true;
         for g in &mut self.invocation_grants {
-            if g.valid && g.tool_id == tool_id && g.args_crc == args_crc {
+            if g.valid
+                && g.tool_id == grant.tool_id
+                && g.user_id == grant.user_id
+                && g.plan_id == grant.plan_id
+                && g.plan_gen == grant.plan_gen
+                && g.tool_gen == grant.tool_gen
+                && g.args_digest == grant.args_digest
+            {
+                g.expiry_ticks = grant.expiry_ticks;
                 return true;
             }
         }
         for g in &mut self.invocation_grants {
             if !g.valid {
-                *g = InvocationGrant { tool_id, args_crc, valid: true };
+                *g = grant;
                 self.grant_count = self.grant_count.saturating_add(1);
                 return true;
             }
@@ -837,10 +999,30 @@ impl DynamicToolRegistry {
         false
     }
 
-    /// Verifies and consumes user consent for a specific tool invocation.
-    pub fn consume_invocation_consent(&mut self, tool_id: u32, args_crc: u32) -> bool {
+    /// Consumes an exact cryptographic invocation grant.
+    /// Must match: `tool_id`, `user_id` (or if grant.user_id == 0 wildcard), `plan_id`, `plan_gen`,
+    /// `tool_gen`, `args_digest`, and `current_ticks <= grant.expiry_ticks` (or grant.expiry_ticks == 0 for indefinite).
+    /// Upon match, sets `grant.valid = false`, decrements `grant_count`, and returns `true`.
+    pub fn consume_exact_invocation(
+        &mut self,
+        tool_id: u32,
+        user_id: u32,
+        plan_id: u64,
+        plan_gen: u64,
+        tool_gen: u32,
+        args_digest: &[u8; 32],
+        current_ticks: u64,
+    ) -> bool {
         for g in &mut self.invocation_grants {
-            if g.valid && g.tool_id == tool_id && g.args_crc == args_crc {
+            if g.valid
+                && g.tool_id == tool_id
+                && (g.user_id == 0 || g.user_id == user_id)
+                && g.plan_id == plan_id
+                && g.plan_gen == plan_gen
+                && g.tool_gen == tool_gen
+                && &g.args_digest == args_digest
+                && (g.expiry_ticks == 0 || current_ticks <= g.expiry_ticks)
+            {
                 g.valid = false;
                 self.grant_count = self.grant_count.saturating_sub(1);
                 return true;
@@ -849,14 +1031,64 @@ impl DynamicToolRegistry {
         false
     }
 
-    /// Checks whether user consent exists for a specific tool invocation.
-    pub fn has_invocation_consent(&self, tool_id: u32, args_crc: u32) -> bool {
+    /// Checks whether an exact cryptographic invocation grant is valid.
+    pub fn has_exact_invocation(
+        &self,
+        tool_id: u32,
+        user_id: u32,
+        plan_id: u64,
+        plan_gen: u64,
+        tool_gen: u32,
+        args_digest: &[u8; 32],
+        current_ticks: u64,
+    ) -> bool {
         for g in &self.invocation_grants {
-            if g.valid && g.tool_id == tool_id && g.args_crc == args_crc {
+            if g.valid
+                && g.tool_id == tool_id
+                && (g.user_id == 0 || g.user_id == user_id)
+                && g.plan_id == plan_id
+                && g.plan_gen == plan_gen
+                && g.tool_gen == tool_gen
+                && &g.args_digest == args_digest
+                && (g.expiry_ticks == 0 || current_ticks <= g.expiry_ticks)
+            {
                 return true;
             }
         }
         false
+    }
+
+    /// Grants user consent for a specific tool invocation bound to an arguments CRC.
+    /// Backward-compatible wrapper delegating to exact cryptographic grants.
+    pub fn grant_invocation_consent(&mut self, tool_id: u32, args_crc: u32) -> bool {
+        let mut digest = [0u8; 32];
+        digest[..4].copy_from_slice(&args_crc.to_le_bytes());
+        let grant = InvocationGrant {
+            tool_id,
+            user_id: 0,
+            plan_id: 0,
+            plan_gen: 0,
+            tool_gen: 0,
+            args_digest: digest,
+            expiry_ticks: 0,
+            valid: true,
+        };
+        self.grant_exact_invocation(grant)
+    }
+
+    /// Verifies and consumes user consent for a specific tool invocation bound to an arguments CRC.
+    /// Backward-compatible wrapper delegating to exact cryptographic grants.
+    pub fn consume_invocation_consent(&mut self, tool_id: u32, args_crc: u32) -> bool {
+        let mut digest = [0u8; 32];
+        digest[..4].copy_from_slice(&args_crc.to_le_bytes());
+        self.consume_exact_invocation(tool_id, 0, 0, 0, 0, &digest, 0)
+    }
+
+    /// Checks whether user consent exists for a specific tool invocation bound to an arguments CRC.
+    pub fn has_invocation_consent(&self, tool_id: u32, args_crc: u32) -> bool {
+        let mut digest = [0u8; 32];
+        digest[..4].copy_from_slice(&args_crc.to_le_bytes());
+        self.has_exact_invocation(tool_id, 0, 0, 0, 0, &digest, 0)
     }
 
     /// Clears all active invocation consent grants.
@@ -909,17 +1141,7 @@ impl DynamicToolRegistry {
     /// Invalidates all registered tools belonging to a package (e.g., when updated or uninstalled).
     /// This prevents stale grants from authorizing changed semantics under the platform security contract.
     pub fn invalidate_package(&mut self, package_id: &[u8]) -> usize {
-        let mut removed = 0;
-        for slot in &mut self.tools {
-            if let Some(desc) = slot {
-                if &desc.package_id[..desc.package_id_len as usize] == package_id {
-                    *slot = None;
-                    self.count = self.count.saturating_sub(1);
-                    removed += 1;
-                }
-            }
-        }
-        removed
+        self.revoke_package_tools(package_id)
     }
 }
 
@@ -1241,5 +1463,243 @@ mod tests {
         assert!(reg.has_invocation_consent(tool_id, args_crc_b));
         reg.clear_invocation_grants();
         assert!(!reg.has_invocation_consent(tool_id, args_crc_b));
+    }
+
+    #[test]
+    fn test_authoritative_tool_handle_generation_lifecycle() {
+        let mut reg = DynamicToolRegistry::new();
+        let pkg = b"org.interos.notes";
+        let tool_name = b"notes.quick_add";
+
+        // Register manifest tool
+        let handle1 = reg
+            .register_manifest_tool(
+                pkg,
+                tool_name,
+                b"Quick Add",
+                b"Add note quickly",
+                1,
+                ToolRiskClass::PersonalMutation,
+                ToolConsentClass::AlwaysAsk,
+            )
+            .expect("registration succeeds");
+
+        assert_eq!(handle1.slot, 0);
+        assert_eq!(handle1.generation, 1);
+        assert_eq!(handle1.tool_id, compute_dynamic_tool_id(pkg, tool_name));
+
+        // Validation succeeds for active handle
+        let desc = reg.validate_handle(handle1).expect("handle is valid");
+        assert_eq!(desc.name_str(), "notes.quick_add");
+        assert_eq!(desc.generation, 1);
+        assert_eq!(desc.slot, 0);
+
+        // Validation fails if slot out of bounds
+        let out_of_bounds = AuthoritativeToolHandle {
+            slot: MAX_DYNAMIC_TOOLS as u16,
+            generation: handle1.generation,
+            tool_id: handle1.tool_id,
+        };
+        assert!(reg.validate_handle(out_of_bounds).is_none());
+
+        // Validation fails if generation is stale or mismatched
+        let bad_gen = AuthoritativeToolHandle {
+            slot: handle1.slot,
+            generation: 99,
+            tool_id: handle1.tool_id,
+        };
+        assert!(reg.validate_handle(bad_gen).is_none());
+
+        // Validation fails if tool_id differs
+        let bad_id = AuthoritativeToolHandle {
+            slot: handle1.slot,
+            generation: handle1.generation,
+            tool_id: 0xDEAD_BEEF,
+        };
+        assert!(reg.validate_handle(bad_id).is_none());
+
+        // Updating the tool increments slot generation
+        let handle2 = reg
+            .register_manifest_tool(
+                pkg,
+                tool_name,
+                b"Quick Add v2",
+                b"Add note quickly with tags",
+                2,
+                ToolRiskClass::PersonalMutation,
+                ToolConsentClass::AlwaysAsk,
+            )
+            .expect("update succeeds");
+
+        assert_eq!(handle2.slot, 0);
+        assert_eq!(handle2.generation, 2);
+        assert_eq!(handle2.tool_id, handle1.tool_id);
+
+        // Stale handle1 is now rejected!
+        assert!(reg.validate_handle(handle1).is_none(), "stale handle1 must be rejected after update");
+
+        // Updated handle2 is valid
+        let desc2 = reg.validate_handle(handle2).expect("handle2 is valid");
+        assert_eq!(desc2.version, 2);
+        assert_eq!(desc2.generation, 2);
+
+        // Unregistering the tool invalidates handle2
+        assert!(reg.unregister_tool(pkg, tool_name));
+        assert!(reg.validate_handle(handle2).is_none(), "handle2 must be rejected after unregister");
+        assert!(reg.get_handle(handle2.tool_id).is_none());
+    }
+
+    #[test]
+    fn test_exact_cryptographic_invocation_grants_and_expiry() {
+        use crate::crypto::Sha256;
+
+        let mut reg = DynamicToolRegistry::new();
+        let tool_id = 0x4D53_534E; // messages.send
+        let user_id = 1001;
+        let plan_id = 0xCAFE_BABE_0000_1234;
+        let plan_gen = 7;
+        let tool_gen = 3;
+
+        let args_json = b"{\"recipient\":\"+15550199\",\"body\":\"Hello InterOS\"}";
+        let args_digest = Sha256::digest(args_json);
+        let expiry_ticks = 20_000;
+
+        let grant = InvocationGrant {
+            tool_id,
+            user_id,
+            plan_id,
+            plan_gen,
+            tool_gen,
+            args_digest,
+            expiry_ticks,
+            valid: true,
+        };
+
+        assert!(reg.grant_exact_invocation(grant));
+        assert_eq!(reg.grant_count, 1);
+        assert!(reg.has_exact_invocation(tool_id, user_id, plan_id, plan_gen, tool_gen, &args_digest, 10_000));
+
+        // Rejection: mismatched tool_id
+        assert!(!reg.consume_exact_invocation(tool_id + 1, user_id, plan_id, plan_gen, tool_gen, &args_digest, 10_000));
+
+        // Rejection: mismatched user_id (not wildcard and not matching)
+        assert!(!reg.consume_exact_invocation(tool_id, 1002, plan_id, plan_gen, tool_gen, &args_digest, 10_000));
+
+        // Rejection: mismatched plan_id
+        assert!(!reg.consume_exact_invocation(tool_id, user_id, plan_id + 1, plan_gen, tool_gen, &args_digest, 10_000));
+
+        // Rejection: mismatched plan_gen
+        assert!(!reg.consume_exact_invocation(tool_id, user_id, plan_id, plan_gen + 1, tool_gen, &args_digest, 10_000));
+
+        // Rejection: mismatched tool_gen
+        assert!(!reg.consume_exact_invocation(tool_id, user_id, plan_id, plan_gen, tool_gen + 1, &args_digest, 10_000));
+
+        // Rejection: mismatched args_digest (tampered payload)
+        let tampered_digest = Sha256::digest(b"{\"recipient\":\"+15550199\",\"body\":\"Tampered!\"}");
+        assert!(!reg.consume_exact_invocation(tool_id, user_id, plan_id, plan_gen, tool_gen, &tampered_digest, 10_000));
+
+        // Rejection: expired ticks (ticks > expiry_ticks)
+        assert!(!reg.consume_exact_invocation(tool_id, user_id, plan_id, plan_gen, tool_gen, &args_digest, 20_001));
+
+        // Success: valid exact consumption at unexpired ticks
+        assert!(reg.consume_exact_invocation(tool_id, user_id, plan_id, plan_gen, tool_gen, &args_digest, 19_999));
+        assert_eq!(reg.grant_count, 0);
+
+        // Cannot consume twice
+        assert!(!reg.consume_exact_invocation(tool_id, user_id, plan_id, plan_gen, tool_gen, &args_digest, 19_999));
+
+        // Test wildcard user_id (user_id = 0 matches any caller user_id)
+        let wildcard_grant = InvocationGrant {
+            tool_id: 0x1111,
+            user_id: 0,
+            plan_id: 10,
+            plan_gen: 1,
+            tool_gen: 1,
+            args_digest: [0xAA; 32],
+            expiry_ticks: 0, // indefinite
+            valid: true,
+        };
+        assert!(reg.grant_exact_invocation(wildcard_grant));
+        assert!(reg.consume_exact_invocation(0x1111, 4242, 10, 1, 1, &[0xAA; 32], 999_999));
+    }
+
+    #[test]
+    fn test_package_manifest_registration_and_revocation() {
+        let mut reg = DynamicToolRegistry::new();
+        let pkg = b"com.example.cryptosuite";
+
+        // Register high-risk tool: ExternalConsequence with AlwaysAllow must be clamped to AlwaysAsk
+        let h_send = reg
+            .register_manifest_tool(
+                pkg,
+                b"crypto.transfer",
+                b"Transfer",
+                b"Transfer sovereign currency",
+                1,
+                ToolRiskClass::ExternalConsequence,
+                ToolConsentClass::AlwaysAllow,
+            )
+            .expect("register transfer tool");
+
+        let desc_send = reg.validate_handle(h_send).expect("valid h_send");
+        assert_eq!(desc_send.consent_class, ToolConsentClass::AlwaysAsk, "must clamp ExternalConsequence to AlwaysAsk");
+
+        // Register read-only observe tool: Observe with AlwaysAllow remains AlwaysAllow
+        let h_balance = reg
+            .register_manifest_tool(
+                pkg,
+                b"crypto.balance",
+                b"Balance",
+                b"Check wallet balance",
+                1,
+                ToolRiskClass::Observe,
+                ToolConsentClass::AlwaysAllow,
+            )
+            .expect("register balance tool");
+
+        let desc_bal = reg.validate_handle(h_balance).expect("valid h_balance");
+        assert_eq!(desc_bal.consent_class, ToolConsentClass::AlwaysAllow);
+
+        // Add invocation grants for both tools
+        let grant1 = InvocationGrant {
+            tool_id: h_send.tool_id,
+            user_id: 500,
+            plan_id: 1,
+            plan_gen: 1,
+            tool_gen: h_send.generation,
+            args_digest: [1u8; 32],
+            expiry_ticks: 0,
+            valid: true,
+        };
+        let grant2 = InvocationGrant {
+            tool_id: h_balance.tool_id,
+            user_id: 500,
+            plan_id: 1,
+            plan_gen: 1,
+            tool_gen: h_balance.generation,
+            args_digest: [2u8; 32],
+            expiry_ticks: 0,
+            valid: true,
+        };
+
+        assert!(reg.grant_exact_invocation(grant1));
+        assert!(reg.grant_exact_invocation(grant2));
+        assert_eq!(reg.grant_count, 2);
+
+        // Revoke package tools
+        let revoked = reg.revoke_package_tools(pkg);
+        assert_eq!(revoked, 2);
+        assert_eq!(reg.count, 0);
+
+        // Handles are now completely invalidated
+        assert!(reg.validate_handle(h_send).is_none());
+        assert!(reg.validate_handle(h_balance).is_none());
+        assert!(reg.get_handle(h_send.tool_id).is_none());
+        assert!(reg.get_handle(h_balance.tool_id).is_none());
+
+        // Grants for the revoked tools were cleared
+        assert_eq!(reg.grant_count, 0);
+        assert!(!reg.consume_exact_invocation(h_send.tool_id, 500, 1, 1, h_send.generation, &[1u8; 32], 0));
+        assert!(!reg.consume_exact_invocation(h_balance.tool_id, 500, 1, 1, h_balance.generation, &[2u8; 32], 0));
     }
 }
