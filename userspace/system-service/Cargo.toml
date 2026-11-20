@@ -97,5 +97,11 @@ path = "src/bin/agentd.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "keystored"
+path = "src/bin/keystored.rs"
+test = false
+bench = false
+
 
 

@@ -1364,6 +1364,281 @@ fn emit_agent_ack(
     }
 }
 
+/// Dedicated Keystore Service Daemon execution path (`keystored`).
+///
+/// Designated for opaque cryptographic key derivation, AEAD encryption/decryption,
+/// HMAC signing/verification, and secure lifecycle custody.
+pub fn run_keystore() -> ! {
+    let _ = std::log("[keystored] userspace Keystore & Key Custody daemon online.");
+    let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
+    let ipc_slot = std::cap_lookup(std::cap_type::IPC_RECEIVE, 0).ok();
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
+    let mut last_tick = 0u64;
+
+    let secret_root = std::companion::load_or_generate_device_secret().ok();
+    let mut table = std::keystore::KeystoreTable::<64>::new();
+    let mut rx_buf = [0u8; 2048];
+    let mut tx_buf = [0u8; 2048];
+
+    loop {
+        let _ = std::service_heartbeat(15);
+
+        if ipc_slot.is_some() {
+            while let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                if msg_type == std::keystore::SERVICE_KEYSTORE_MSG && len > 0 {
+                    handle_keystore_ipc(
+                        &mut table,
+                        &secret_root,
+                        sender,
+                        &rx_buf[..len],
+                        &mut tx_buf,
+                    );
+                }
+            }
+        }
+
+        let now = timer_slot.and_then(|_| std::get_ticks().ok()).unwrap_or(last_tick);
+        if now.saturating_sub(last_tick) >= 1000 || last_tick == 0 {
+            last_tick = now;
+        }
+
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_IPC_MSG | std::EVENT_TIMER_TICK, 50);
+        } else {
+            std::yield_now();
+        }
+    }
+}
+
+fn handle_keystore_ipc<const N: usize>(
+    table: &mut std::keystore::KeystoreTable<N>,
+    secret_root: &Option<[u8; 32]>,
+    sender: u64,
+    req: &[u8],
+    tx_buf: &mut [u8; 2048],
+) {
+    if req.is_empty() {
+        return;
+    }
+    let opcode = req[0];
+    let caller_uid = std::user_get_current();
+
+    match opcode {
+        std::keystore::KEYSTORE_OP_DERIVE => {
+            if req.len() < 10 {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 1]);
+                return;
+            }
+            let domain = u32::from_le_bytes([req[1], req[2], req[3], req[4]]);
+            let rights = u32::from_le_bytes([req[5], req[6], req[7], req[8]]);
+            let label_len = req[9] as usize;
+            if req.len() < 10 + label_len {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 2]);
+                return;
+            }
+            let label = &req[10..10 + label_len];
+
+            let root = match secret_root {
+                Some(r) => r,
+                None => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 3]);
+                    return;
+                }
+            };
+
+            match table.derive_key(caller_uid, sender, domain, label, rights, root) {
+                Ok(handle) => {
+                    let mut resp = [0u8; 13];
+                    resp[0] = 0x00;
+                    resp[1..13].copy_from_slice(&handle.to_bytes());
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &resp);
+                }
+                Err(_) => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 4]);
+                }
+            }
+        }
+        std::keystore::KEYSTORE_OP_ENCRYPT => {
+            if req.len() < 29 {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 1]);
+                return;
+            }
+            let handle = match std::keystore::KeyHandle::from_bytes(&req[1..13]) {
+                Some(h) => h,
+                None => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 2]);
+                    return;
+                }
+            };
+            let mut nonce = [0u8; 12];
+            nonce.copy_from_slice(&req[13..25]);
+            let aad_len = u16::from_le_bytes([req[25], req[26]]) as usize;
+            let plain_len = u16::from_le_bytes([req[27], req[28]]) as usize;
+            if req.len() < 29 + aad_len + plain_len {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 3]);
+                return;
+            }
+            let aad = &req[29..29 + aad_len];
+            let plain = &req[29 + aad_len..29 + aad_len + plain_len];
+
+            if 17 + plain_len > tx_buf.len() {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 4]);
+                return;
+            }
+
+            match table.encrypt(
+                handle,
+                caller_uid,
+                sender,
+                &nonce,
+                aad,
+                plain,
+                &mut tx_buf[17..17 + plain_len],
+            ) {
+                Ok(tag) => {
+                    tx_buf[0] = 0x00;
+                    tx_buf[1..17].copy_from_slice(&tag);
+                    let _ = std::ipc_send(
+                        sender,
+                        std::keystore::SERVICE_KEYSTORE_MSG,
+                        &tx_buf[..17 + plain_len],
+                    );
+                }
+                Err(_) => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 5]);
+                }
+            }
+        }
+        std::keystore::KEYSTORE_OP_DECRYPT => {
+            if req.len() < 45 {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 1]);
+                return;
+            }
+            let handle = match std::keystore::KeyHandle::from_bytes(&req[1..13]) {
+                Some(h) => h,
+                None => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 2]);
+                    return;
+                }
+            };
+            let mut nonce = [0u8; 12];
+            nonce.copy_from_slice(&req[13..25]);
+            let mut tag = [0u8; 16];
+            tag.copy_from_slice(&req[25..41]);
+            let aad_len = u16::from_le_bytes([req[41], req[42]]) as usize;
+            let ct_len = u16::from_le_bytes([req[43], req[44]]) as usize;
+            if req.len() < 45 + aad_len + ct_len {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 3]);
+                return;
+            }
+            let aad = &req[45..45 + aad_len];
+            let ct = &req[45 + aad_len..45 + aad_len + ct_len];
+
+            if 1 + ct_len > tx_buf.len() {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 4]);
+                return;
+            }
+
+            match table.decrypt(
+                handle,
+                caller_uid,
+                sender,
+                &nonce,
+                aad,
+                ct,
+                &tag,
+                &mut tx_buf[1..1 + ct_len],
+            ) {
+                Ok(()) => {
+                    tx_buf[0] = 0x00;
+                    let _ = std::ipc_send(
+                        sender,
+                        std::keystore::SERVICE_KEYSTORE_MSG,
+                        &tx_buf[..1 + ct_len],
+                    );
+                }
+                Err(_) => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 5]);
+                }
+            }
+        }
+        std::keystore::KEYSTORE_OP_SIGN => {
+            if req.len() < 13 {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 1]);
+                return;
+            }
+            let handle = match std::keystore::KeyHandle::from_bytes(&req[1..13]) {
+                Some(h) => h,
+                None => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 2]);
+                    return;
+                }
+            };
+            let msg = &req[13..];
+            match table.sign(handle, caller_uid, sender, msg) {
+                Ok(sig) => {
+                    let mut resp = [0u8; 33];
+                    resp[0] = 0x00;
+                    resp[1..33].copy_from_slice(&sig);
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &resp);
+                }
+                Err(_) => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 3]);
+                }
+            }
+        }
+        std::keystore::KEYSTORE_OP_VERIFY => {
+            if req.len() < 45 {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 1]);
+                return;
+            }
+            let handle = match std::keystore::KeyHandle::from_bytes(&req[1..13]) {
+                Some(h) => h,
+                None => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 2]);
+                    return;
+                }
+            };
+            let mut tag = [0u8; 32];
+            tag.copy_from_slice(&req[13..45]);
+            let msg = &req[45..];
+            match table.verify(handle, caller_uid, sender, msg, &tag) {
+                Ok(valid) => {
+                    let resp = [0x00, if valid { 1 } else { 0 }];
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &resp);
+                }
+                Err(_) => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 3]);
+                }
+            }
+        }
+        std::keystore::KEYSTORE_OP_DESTROY => {
+            if req.len() < 13 {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 1]);
+                return;
+            }
+            let handle = match std::keystore::KeyHandle::from_bytes(&req[1..13]) {
+                Some(h) => h,
+                None => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 2]);
+                    return;
+                }
+            };
+            match table.destroy_key(handle, caller_uid, sender) {
+                Ok(()) => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0x00]);
+                }
+                Err(_) => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 3]);
+                }
+            }
+        }
+        _ => {
+            let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 0xEE]);
+        }
+    }
+}
+
 /// AI & Embedding inference service daemon execution path (`aid`).
 ///
 /// Designated as service id 12 (`SERVICE_INFERENCE`) in the system service ABI.

@@ -28,6 +28,7 @@ pub mod wav;
 pub mod engine;
 pub mod webview;
 pub mod crypto;
+pub mod keystore;
 pub mod tls;
 
 // WHY std under test only: the guest build of this crate is `#![no_std]` and must
