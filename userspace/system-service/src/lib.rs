@@ -542,10 +542,15 @@ pub fn run_search() -> ! {
     let mut last_tick = 0u64;
 
     let uid = std::user_get_current();
-    let secret_root = std::companion::load_or_generate_device_secret().ok();
-    let search_key = match (secret_root, uid) {
-        (Some(root), u) if u > 0 => std::companion::try_derive_search_user_key(&root, u).ok(),
-        _ => None,
+    // Sole custody of master secret root belongs to keystored. Ordinary services query keystored.
+    let search_key = if uid > 0 {
+        std::keystore::keystore_derive_service_key(
+            std::ai::SERVICE_KEYSTORE_TASK_ID,
+            std::keystore::DOMAIN_SEMANTIC_SEARCH,
+            uid,
+        ).ok()
+    } else {
+        None
     };
 
     let mut index = rag::RagIndex::new(false);
@@ -743,10 +748,15 @@ pub fn run_agent() -> ! {
         state.user_id = uid;
     }
 
-    let secret_root = std::companion::load_or_generate_device_secret().ok();
-    let enc_key = match (secret_root, uid) {
-        (Some(root), u) if u > 0 => std::companion::try_derive_companion_user_key(&root, u).ok(),
-        _ => None,
+    // Sole custody of master secret root belongs to keystored. Ordinary services query keystored.
+    let enc_key = if uid > 0 {
+        std::keystore::keystore_derive_service_key(
+            std::ai::SERVICE_KEYSTORE_TASK_ID,
+            std::keystore::DOMAIN_COMPANION,
+            uid,
+        ).ok()
+    } else {
+        None
     };
     if enc_key.is_none() {
         state.set_locked(true);
@@ -1300,10 +1310,11 @@ fn handle_agent_ipc(
 
             let tool_args = if payload.len() > 4 { &payload[4..] } else { b"" };
             let args_digest = std::crypto::Sha256::digest(tool_args);
-            let args_crc = std::companion::crc32(tool_args);
             let ticks = std::get_ticks().unwrap_or(0);
 
             if desc.consent_class == std::appmcp::ToolConsentClass::AlwaysAsk {
+                // Cryptographic binding: only an exact match on user, tool, generations,
+                // and SHA-256 argument digest authorizes execution. No CRC32 fallback!
                 if !tool_registry.consume_exact_invocation(
                     tool_id,
                     state.user_id,
@@ -1312,7 +1323,7 @@ fn handle_agent_ipc(
                     desc.generation,
                     &args_digest,
                     ticks,
-                ) && !tool_registry.consume_invocation_consent(tool_id, args_crc) {
+                ) {
                     state.record_tool_result(tool_id, false, -6);
                     emit_agent_ack(sender_task_id, msg_type, 6, b"CONSENT_REQUIRED", tx_buf);
                     return;
@@ -1486,7 +1497,28 @@ fn handle_keystore_ipc<const N: usize>(
         return;
     }
     let opcode = req[0];
-    let caller_uid = std::user_get_current();
+
+    // Authenticate sender identity through the kernel (Syscall 167 TaskIdentityQuery)
+    // Never trust payload strings or infer caller identity from ambient state!
+    let caller_identity = match std::task_identity_query(sender) {
+        Ok(id) => id,
+        Err(_) => {
+            let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 0x10]);
+            return;
+        }
+    };
+
+    let caller_uid = if caller_identity.is_system != 0 {
+        let active = std::user_get_current();
+        if active > 0 { active } else { caller_identity.user_id }
+    } else {
+        caller_identity.user_id
+    };
+
+    if caller_uid == 0 && caller_identity.is_system == 0 {
+        let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 0x11]);
+        return;
+    }
 
     match opcode {
         std::keystore::KEYSTORE_OP_DERIVE => {
@@ -1695,6 +1727,46 @@ fn handle_keystore_ipc<const N: usize>(
                 }
                 Err(_) => {
                     let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 3]);
+                }
+            }
+        }
+        std::keystore::KEYSTORE_OP_DERIVE_SERVICE_KEY => {
+            // Strict zero-ambient-authority check: ordinary applications can NEVER request raw keys!
+            if caller_identity.is_system == 0 {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 0x12]);
+                return;
+            }
+            if req.len() < 9 {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 1]);
+                return;
+            }
+            let domain = u32::from_le_bytes([req[1], req[2], req[3], req[4]]);
+            let target_uid = u32::from_le_bytes([req[5], req[6], req[7], req[8]]);
+            let root = match secret_root {
+                Some(r) => r,
+                None => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 3]);
+                    return;
+                }
+            };
+            let domain_bytes: &[u8] = match domain {
+                std::keystore::DOMAIN_COMPANION => std::companion::DOMAIN_COMPANION_STATE,
+                std::keystore::DOMAIN_SEMANTIC_SEARCH => std::companion::DOMAIN_SEMANTIC_SEARCH,
+                std::keystore::DOMAIN_CONVERSATION_HISTORY => std::companion::DOMAIN_CONVERSATION_HISTORY,
+                _ => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 4]);
+                    return;
+                }
+            };
+            match std::companion::derive_service_user_key(root, target_uid, domain_bytes) {
+                Ok(key) => {
+                    let mut resp = [0u8; 33];
+                    resp[0] = 0x00;
+                    resp[1..33].copy_from_slice(&key);
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &resp);
+                }
+                Err(_) => {
+                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 5]);
                 }
             }
         }

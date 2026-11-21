@@ -2479,3 +2479,46 @@ fn every_path_that_names_a_view_for_the_next_tap_is_the_path_that_painted_it() {
         &offenders[..shown]
     );
 }
+
+#[test]
+fn command_space_chip_row_fits_within_search_band() {
+    let (top, bottom) = search_content_band();
+    let row = command_chip_row();
+    assert!(row.band.y >= top && row.band.y + row.band.h <= bottom);
+    assert_eq!(row.chips.len(), 3);
+    for (i, chip) in row.chips.iter().enumerate() {
+        assert!(chip.w > 0 && chip.h > 0);
+        assert!(chip.y >= row.band.y && chip.y + chip.h <= row.band.y + row.band.h);
+        if i > 0 {
+            assert!(chip.x > row.chips[i - 1].x + row.chips[i - 1].w - 1);
+        }
+    }
+}
+
+#[test]
+fn command_space_intent_classification() {
+    use crate::search::{classify_intent, CommandMode};
+
+    // Default is Find
+    assert_eq!(classify_intent(b"terminal", None).0, CommandMode::Find);
+    assert_eq!(classify_intent(b"browser", None).0, CommandMode::Find);
+
+    // Explicit prefix overrides
+    assert_eq!(classify_intent(b"find: files", None).0, CommandMode::Find);
+    assert_eq!(classify_intent(b"ask: how to configure wifi", None).0, CommandMode::Ask);
+    assert_eq!(classify_intent(b"ai: summarize notes", None).0, CommandMode::Ask);
+    assert_eq!(classify_intent(b"do: note buy milk", None).0, CommandMode::Do);
+
+    // Questions -> Ask
+    assert_eq!(classify_intent(b"what is interos?", None).0, CommandMode::Ask);
+    assert_eq!(classify_intent(b"how do capabilities work", None).0, CommandMode::Ask);
+
+    // Actions -> Do
+    assert_eq!(classify_intent(b"calc 42 * 8", None).0, CommandMode::Do);
+    assert_eq!(classify_intent(b"note grocery list", None).0, CommandMode::Do);
+    assert_eq!(classify_intent(b"call 555-0199", None).0, CommandMode::Do);
+
+    // Manual override honors user selection
+    assert_eq!(classify_intent(b"calc 42 * 8", Some(CommandMode::Find)).0, CommandMode::Find);
+    assert_eq!(classify_intent(b"browser", Some(CommandMode::Ask)).0, CommandMode::Ask);
+}

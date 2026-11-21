@@ -285,6 +285,9 @@ pub enum SyscallNumber {
     /// table. The receiver supplies the `sender` TaskId the IPC router stamped
     /// on the message, which the calling app cannot forge.
     AppMcpAuthorize = 166,
+    /// Queries the kernel-authenticated identity (UserId, package identity,
+    /// system status, code digest) of a target task.
+    TaskIdentityQuery = 167,
 }
 
 // -----------------------------------------------------------------------------
@@ -3666,6 +3669,59 @@ pub fn app_launch(app_id: &str) -> Result<u64, i64> {
 /// Queries the active foreground user ID.
 pub fn user_get_current() -> u32 {
     unsafe { syscall0(SyscallNumber::UserGetCurrent) as u32 }
+}
+
+/// 96-byte kernel-authenticated task security identity descriptor.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskIdentityInfo {
+    pub task_id: u64,
+    pub user_id: u32,
+    pub is_system: u8,
+    pub is_application: u8,
+    pub name_len: u8,
+    pub pkg_len: u8,
+    pub name: [u8; 16],
+    pub package_id: [u8; 32],
+    pub code_digest: [u8; 32],
+}
+
+impl TaskIdentityInfo {
+    pub fn package_name(&self) -> &str {
+        core::str::from_utf8(&self.package_id[..self.pkg_len as usize]).unwrap_or("")
+    }
+
+    pub fn task_name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len as usize]).unwrap_or("")
+    }
+}
+
+/// Queries the kernel-authenticated identity of a target task.
+pub fn task_identity_query(task_id: u64) -> Result<TaskIdentityInfo, i64> {
+    let mut info = TaskIdentityInfo {
+        task_id: 0,
+        user_id: 0,
+        is_system: 0,
+        is_application: 0,
+        name_len: 0,
+        pkg_len: 0,
+        name: [0u8; 16],
+        package_id: [0u8; 32],
+        code_digest: [0u8; 32],
+    };
+    let r = unsafe {
+        syscall3(
+            SyscallNumber::TaskIdentityQuery,
+            task_id,
+            core::ptr::addr_of_mut!(info) as u64,
+            core::mem::size_of::<TaskIdentityInfo>() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(info)
+    } else {
+        Err(r)
+    }
 }
 
 /// Requests switching the active foreground user.

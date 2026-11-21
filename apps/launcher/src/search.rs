@@ -55,6 +55,94 @@ impl SearchKind {
     }
 }
 
+/// The Command Space tri-mode interaction space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum CommandMode {
+    /// Semantic and lexical search across apps, settings, and files.
+    #[default]
+    Find = 0,
+    /// Direct conversational questions and explanations routed to aid.
+    Ask = 1,
+    /// Semantic tool execution and actions routed to agentd / AppMCP.
+    Do = 2,
+}
+
+impl CommandMode {
+    pub const ALL: [CommandMode; 3] = [CommandMode::Find, CommandMode::Ask, CommandMode::Do];
+
+    pub const fn label(self) -> &'static [u8] {
+        match self {
+            CommandMode::Find => b"Find",
+            CommandMode::Ask => b"Ask",
+            CommandMode::Do => b"Do",
+        }
+    }
+
+    pub const fn hint(self) -> &'static [u8] {
+        match self {
+            CommandMode::Find => b"Find apps, settings and files",
+            CommandMode::Ask => b"Ask a question or request explanation",
+            CommandMode::Do => b"Execute action: note, calc, call, setting",
+        }
+    }
+}
+
+/// Classifies query text into a CommandMode and stripped query.
+pub fn classify_intent(query: &[u8], manual_mode: Option<CommandMode>) -> (CommandMode, &[u8]) {
+    // 1. If explicit manual mode is chosen, honor it
+    if let Some(m) = manual_mode {
+        return (m, query);
+    }
+
+    // 2. Prefix overrides
+    if query.len() >= 5 && (query[..5].eq_ignore_ascii_case(b"find:") || query[..5].eq_ignore_ascii_case(b"find ")) {
+        return (CommandMode::Find, &query[5..]);
+    }
+    if query.len() >= 4 && (query[..4].eq_ignore_ascii_case(b"ask:") || query[..4].eq_ignore_ascii_case(b"ask ")) {
+        return (CommandMode::Ask, &query[4..]);
+    }
+    if query.len() >= 3 && (query[..3].eq_ignore_ascii_case(b"ai:") || query[..3].eq_ignore_ascii_case(b"ai ")) {
+        return (CommandMode::Ask, &query[3..]);
+    }
+    if query.len() >= 3 && (query[..3].eq_ignore_ascii_case(b"do:") || query[..3].eq_ignore_ascii_case(b"do ")) {
+        return (CommandMode::Do, &query[3..]);
+    }
+
+    // 3. Question markers -> Ask
+    if query.ends_with(b"?")
+        || query.starts_with(b"what")
+        || query.starts_with(b"how")
+        || query.starts_with(b"why")
+        || query.starts_with(b"who")
+        || query.starts_with(b"when")
+        || query.starts_with(b"where")
+        || query.starts_with(b"explain")
+        || query.starts_with(b"summarize")
+    {
+        return (CommandMode::Ask, query);
+    }
+
+    // 4. Action keywords -> Do
+    if query.starts_with(b"note")
+        || query.starts_with(b"calc")
+        || query.starts_with(b"eval")
+        || query.starts_with(b"call")
+        || query.starts_with(b"dial")
+        || query.starts_with(b"send")
+        || query.starts_with(b"sms")
+        || query.starts_with(b"play")
+        || query.starts_with(b"pause")
+        || query.starts_with(b"set")
+        || query.starts_with(b"schedule")
+        || query.starts_with(b"remind")
+    {
+        return (CommandMode::Do, query);
+    }
+
+    (CommandMode::Find, query)
+}
+
 /// The longest title an entry may carry.
 pub const TITLE_MAX: usize = 40;
 /// The longest subtitle an entry may carry.

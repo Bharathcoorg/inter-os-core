@@ -282,8 +282,27 @@ pub fn app_drawer_chip_row() -> ChipRow {
 /// ([`app_drawer_chip_row`]) is the same precedent.
 pub const SEARCH_FIELD: Rect = Rect::new(32, 76, 656, 64);
 
+/// The Command Space tri-mode chip row (Find • Ask • Do).
+pub struct CommandChipRow {
+    pub band: Rect,
+    pub chips: [Rect; 3],
+}
+
+pub const COMMAND_CHIP_NAMES: [&[u8]; 3] = [b"Find", b"Ask", b"Do"];
+
+pub fn command_chip_row() -> CommandChipRow {
+    let content = content_area(CONTENT_PADDING);
+    let band = Rect::new(content.x, 146, content.w, 32);
+    let chip_w = (band.w.saturating_sub(CHIP_GAP * 2)) / 3;
+    let mut chips = [Rect::new(0, 0, 0, 0); 3];
+    for (i, chip) in chips.iter_mut().enumerate() {
+        *chip = Rect::new(band.x + i * (chip_w + CHIP_GAP), band.y, chip_w, band.h);
+    }
+    CommandChipRow { band, chips }
+}
+
 /// The headline's box top: "Type to search" / "Results" / "No results".
-pub const SEARCH_HEADLINE_TOP: usize = 168;
+pub const SEARCH_HEADLINE_TOP: usize = 186;
 
 /// The first result row's top, one row's height, and how many rows the list shows.
 pub const SEARCH_ROWS_TOP: usize = 216;

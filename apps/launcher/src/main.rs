@@ -459,6 +459,8 @@ pub struct LauncherState {
     pub app_drawer_page: usize,
     pub search_query: [u8; 32],
     pub search_query_len: usize,
+    pub command_mode: launcher::search::CommandMode,
+    pub command_mode_explicit: bool,
     /// The one index the search runs against.
     ///
     /// WHY the index is in the state and not rebuilt per keystroke: the index
@@ -588,6 +590,8 @@ impl LauncherState {
             app_drawer_page: 0,
             search_query: [0u8; 32],
             search_query_len: 0,
+            command_mode: launcher::search::CommandMode::Find,
+            command_mode_explicit: false,
             search_index: launcher::search::Index::new(),
             search_results: launcher::search::Results::new(),
             recents_cards: [launcher::recents::Card::EMPTY; launcher::recents::MAX_CARDS],
@@ -1780,7 +1784,16 @@ fn refresh_search_index(state: &mut LauncherState) {
 
 /// Runs the query across the index.
 fn rank_search_results(state: &mut LauncherState) {
-    let query = &state.search_query[..state.search_query_len];
+    let raw_query = &state.search_query[..state.search_query_len];
+    let (mode, query) = launcher::search::classify_intent(
+        raw_query,
+        if state.command_mode_explicit {
+            Some(state.command_mode)
+        } else {
+            None
+        },
+    );
+    state.command_mode = mode;
     let ai_status = cached_ai_status();
     match ai_status {
         launcher::search::AiEmbeddingStatus::Available { .. } => {
@@ -2882,6 +2895,8 @@ pub enum Dirty {
     /// Search: the query field, the result count headline, the result rows and
     /// the per-source verdict card -- everything a keystroke re-ranks.
     SearchQuery,
+    /// Search: mode chip selection ([Find] [Ask] [Do]).
+    SearchMode,
     /// The home surface's bottom navigation band: the three marks and the rows
     /// that answer them.
     ///
@@ -2951,6 +2966,7 @@ impl Dirty {
             Dirty::DrawerQuery => Some(screens::app_drawer::query_band()),
             Dirty::DrawerFilter => Some(screens::app_drawer::filter_band()),
             Dirty::SearchQuery => Some(screens::search::query_band()),
+            Dirty::SearchMode => Some(screens::search::query_band()),
             Dirty::NavBar => Some((nav::BAND_TOP, nav::BAND_BOTTOM)),
             Dirty::LockPinPad => Some(screens::lock::pin_pad_entry_band()),
             Dirty::LockPinDots => Some(screens::lock::pin_pad_dot_band()),
@@ -4900,6 +4916,8 @@ pub extern "C" fn _start() -> ! {
                                     // query, rebuild the index from the platform, show
                                     // the results -- so the two entries cannot drift.
                                     state.search_query_len = 0usize;
+                                    state.command_mode = launcher::search::CommandMode::Find;
+                                    state.command_mode_explicit = false;
                                     refresh_search_index(&mut state);
                                     state.current_view = ViewMode::Search;
                                     render_view(surface, &state);
@@ -5231,12 +5249,18 @@ pub extern "C" fn _start() -> ! {
                                     if key.code == std::input_key_code::BACKSPACE || key.code == 8 {
                                         if state.search_query_len > 0 {
                                             state.search_query_len -= 1;
+                                            if state.search_query_len == 0 {
+                                                state.command_mode_explicit = false;
+                                                state.command_mode = launcher::search::CommandMode::Find;
+                                            }
                                             rank_search_results(&mut state);
                                             present_dirty(surface, &state, Dirty::SearchQuery);
                                         }
                                     } else if key.code == std::input_key_code::ESCAPE {
                                         if state.search_query_len > 0 {
                                             state.search_query_len = 0;
+                                            state.command_mode_explicit = false;
+                                            state.command_mode = launcher::search::CommandMode::Find;
                                             rank_search_results(&mut state);
                                             present_dirty(surface, &state, Dirty::SearchQuery);
                                         } else {
@@ -5265,6 +5289,22 @@ pub extern "C" fn _start() -> ! {
                             if input.kind == 1 {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
+                                if let Some(mode) = screens::search::command_chip_at(x, y) {
+                                    state.command_mode = mode;
+                                    state.command_mode_explicit = true;
+                                    rank_search_results(&mut state);
+                                    present_dirty(surface, &state, Dirty::SearchMode);
+                                    let mut drain = std::InputEvent {
+                                        kind: 0,
+                                        x: 0,
+                                        y: 0,
+                                        dx: 0,
+                                        dy: 0,
+                                        scale_milli: 1000,
+                                    };
+                                    while std::input_event_poll(&mut drain).is_ok() {}
+                                    break;
+                                }
                                 // WHY the row comes from the list this surface would ink and
                                 // not from the ranking's count: see `screens::search::result_at`.
                                 let tapped = screens::search::result_at(x, y, &state);
@@ -5673,6 +5713,8 @@ pub extern "C" fn _start() -> ! {
                                 // used.
                                 if screens::home::search_control_hit(x, y) {
                                     state.search_query_len = 0;
+                                    state.command_mode = launcher::search::CommandMode::Find;
+                                    state.command_mode_explicit = false;
                                     refresh_search_index(&mut state);
                                     state.current_view = ViewMode::Search;
                                     render_view(surface, &state);

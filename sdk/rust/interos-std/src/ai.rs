@@ -76,6 +76,12 @@ pub const SERVICE_AGENT: u8 = 14;
 /// Virtual TaskId used to route IPC directly to the companion runtime service (Service #14).
 pub const SERVICE_AGENT_TASK_ID: u64 = 0xFFFF_000E;
 
+/// The service id the platform's dedicated keystore and key custody service answers to.
+pub const SERVICE_KEYSTORE: u8 = 15;
+
+/// Virtual TaskId used to route IPC directly to the keystore service (Service #15).
+pub const SERVICE_KEYSTORE_TASK_ID: u64 = 0xFFFF_000F;
+
 /// Virtual TaskId used to route IPC directly to the storage service (Service #3).
 ///
 /// WHY the storage service and not the inference service writes a model file:

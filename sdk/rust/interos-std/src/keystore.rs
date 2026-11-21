@@ -25,6 +25,7 @@ pub const KEYSTORE_OP_DECRYPT: u8 = 3;
 pub const KEYSTORE_OP_SIGN: u8 = 4;
 pub const KEYSTORE_OP_VERIFY: u8 = 5;
 pub const KEYSTORE_OP_DESTROY: u8 = 6;
+pub const KEYSTORE_OP_DERIVE_SERVICE_KEY: u8 = 7;
 
 /// Keystore permission rights bitmask.
 pub const RIGHT_ENCRYPT: u32 = 1 << 0;
@@ -347,6 +348,156 @@ impl<const SLOTS: usize> KeystoreTable<SLOTS> {
         }
         Ok(())
     }
+}
+
+/// Derives an opaque key handle from `keystored` via IPC.
+pub fn keystore_derive_key(
+    keystored_task: u64,
+    domain: u32,
+    rights: u32,
+    label: &[u8],
+) -> Result<KeyHandle, KeystoreError> {
+    let mut req = [0u8; 64];
+    req[0] = KEYSTORE_OP_DERIVE;
+    req[1..5].copy_from_slice(&domain.to_le_bytes());
+    req[5..9].copy_from_slice(&rights.to_le_bytes());
+    let label_len = label.len().min(54);
+    req[9] = label_len as u8;
+    req[10..10 + label_len].copy_from_slice(&label[..label_len]);
+
+    crate::ipc_send(keystored_task, SERVICE_KEYSTORE_MSG, &req[..10 + label_len])
+        .map_err(|_| KeystoreError::CryptoFailure)?;
+
+    let mut resp = [0u8; 32];
+    let (sender, msg_type, len) = crate::ipc::receive_any(&mut resp)
+        .map_err(|_| KeystoreError::CryptoFailure)?;
+
+    if sender != keystored_task || msg_type != SERVICE_KEYSTORE_MSG || len < 13 {
+        return Err(KeystoreError::CryptoFailure);
+    }
+    if resp[0] != 0 {
+        return Err(KeystoreError::PermissionDenied);
+    }
+    KeyHandle::from_bytes(&resp[1..13]).ok_or(KeystoreError::CryptoFailure)
+}
+
+/// Encrypts plaintext in-place using `keystored` via IPC.
+pub fn keystore_encrypt(
+    keystored_task: u64,
+    handle: KeyHandle,
+    nonce: &[u8; 12],
+    aad: &[u8],
+    plaintext: &[u8],
+    out_ciphertext: &mut [u8],
+) -> Result<[u8; 16], KeystoreError> {
+    if plaintext.len() > 1024 || out_ciphertext.len() < plaintext.len() {
+        return Err(KeystoreError::InvalidArguments);
+    }
+    let mut req = [0u8; 2048];
+    req[0] = KEYSTORE_OP_ENCRYPT;
+    req[1..13].copy_from_slice(&handle.to_bytes());
+    req[13..25].copy_from_slice(nonce);
+    let aad_len = aad.len().min(64);
+    req[25..27].copy_from_slice(&(aad_len as u16).to_le_bytes());
+    req[27..27 + aad_len].copy_from_slice(&aad[..aad_len]);
+    let pt_offset = 27 + aad_len;
+    req[pt_offset..pt_offset + plaintext.len()].copy_from_slice(plaintext);
+
+    crate::ipc_send(keystored_task, SERVICE_KEYSTORE_MSG, &req[..pt_offset + plaintext.len()])
+        .map_err(|_| KeystoreError::CryptoFailure)?;
+
+    let mut resp = [0u8; 2048];
+    let (sender, msg_type, len) = crate::ipc::receive_any(&mut resp)
+        .map_err(|_| KeystoreError::CryptoFailure)?;
+
+    if sender != keystored_task || msg_type != SERVICE_KEYSTORE_MSG || len < 17 {
+        return Err(KeystoreError::CryptoFailure);
+    }
+    if resp[0] != 0 {
+        return Err(KeystoreError::CryptoFailure);
+    }
+    let mut tag = [0u8; 16];
+    tag.copy_from_slice(&resp[1..17]);
+    let ct_len = len - 17;
+    out_ciphertext[..ct_len].copy_from_slice(&resp[17..len]);
+    Ok(tag)
+}
+
+/// Decrypts ciphertext in-place using `keystored` via IPC.
+pub fn keystore_decrypt(
+    keystored_task: u64,
+    handle: KeyHandle,
+    nonce: &[u8; 12],
+    aad: &[u8],
+    ciphertext: &[u8],
+    tag: &[u8; 16],
+    out_plaintext: &mut [u8],
+) -> Result<usize, KeystoreError> {
+    if ciphertext.len() > 1024 || out_plaintext.len() < ciphertext.len() {
+        return Err(KeystoreError::InvalidArguments);
+    }
+    let mut req = [0u8; 2048];
+    req[0] = KEYSTORE_OP_DECRYPT;
+    req[1..13].copy_from_slice(&handle.to_bytes());
+    req[13..25].copy_from_slice(nonce);
+    let aad_len = aad.len().min(64);
+    req[25..27].copy_from_slice(&(aad_len as u16).to_le_bytes());
+    req[27..27 + aad_len].copy_from_slice(&aad[..aad_len]);
+    let tag_offset = 27 + aad_len;
+    req[tag_offset..tag_offset + 16].copy_from_slice(tag);
+    let ct_offset = tag_offset + 16;
+    req[ct_offset..ct_offset + ciphertext.len()].copy_from_slice(ciphertext);
+
+    crate::ipc_send(keystored_task, SERVICE_KEYSTORE_MSG, &req[..ct_offset + ciphertext.len()])
+        .map_err(|_| KeystoreError::CryptoFailure)?;
+
+    let mut resp = [0u8; 2048];
+    let (sender, msg_type, len) = crate::ipc::receive_any(&mut resp)
+        .map_err(|_| KeystoreError::CryptoFailure)?;
+
+    if sender != keystored_task || msg_type != SERVICE_KEYSTORE_MSG || len < 1 {
+        return Err(KeystoreError::CryptoFailure);
+    }
+    if resp[0] != 0 {
+        return Err(KeystoreError::CryptoFailure);
+    }
+    let pt_len = len - 1;
+    out_plaintext[..pt_len].copy_from_slice(&resp[1..len]);
+    Ok(pt_len)
+}
+
+/// Derives a raw 32-byte domain service key from `keystored` via IPC.
+///
+/// STRICT ACCESS CONTROL: `keystored` refuses this request with `PermissionDenied`
+/// unless the caller is authenticated by the kernel as an authorized system service (`is_system != 0`).
+/// Ordinary Ring-3 applications receive `PermissionDenied` and must interact exclusively
+/// via opaque `KeyHandle`s.
+pub fn keystore_derive_service_key(
+    keystored_task: u64,
+    domain: u32,
+    uid: u32,
+) -> Result<[u8; 32], KeystoreError> {
+    let mut req = [0u8; 9];
+    req[0] = KEYSTORE_OP_DERIVE_SERVICE_KEY;
+    req[1..5].copy_from_slice(&domain.to_le_bytes());
+    req[5..9].copy_from_slice(&uid.to_le_bytes());
+
+    crate::ipc_send(keystored_task, SERVICE_KEYSTORE_MSG, &req)
+        .map_err(|_| KeystoreError::CryptoFailure)?;
+
+    let mut resp = [0u8; 64];
+    let (sender, msg_type, len) = crate::ipc::receive_any(&mut resp)
+        .map_err(|_| KeystoreError::CryptoFailure)?;
+
+    if sender != keystored_task || msg_type != SERVICE_KEYSTORE_MSG || len < 33 {
+        return Err(KeystoreError::CryptoFailure);
+    }
+    if resp[0] != 0 {
+        return Err(KeystoreError::PermissionDenied);
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&resp[1..33]);
+    Ok(key)
 }
 
 #[cfg(test)]

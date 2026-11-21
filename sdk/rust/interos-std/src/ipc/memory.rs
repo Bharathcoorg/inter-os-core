@@ -9,8 +9,13 @@
 //! - Strict Lifetime Enforcement: borrowed read-only and mutable buffers cannot outlive their
 //!   originating scope.
 //! - Single-Ownership Invariants: transferred memory regions invalidate sender handles upon consumption.
-//! - Circular Streaming Channels: double- and ring-buffered streaming with hardware CRC-32 integrity
+//! - Circular Streaming Channels: double- and ring-buffered streaming with CRC-32 integrity
 //!   for audio PCM, camera sensors, and neural embeddings.
+//!
+//! Note (Platform Truth Contract): In userspace, `BorrowedReadOnlyBuffer`, `BorrowedMutableBuffer`,
+//! and `TransferredBuffer` provide lifetime-bound borrow and single-consumer transfer abstractions.
+//! Cross-process memory transfer across address spaces is mediated through kernel ShmPipe channels
+//! and capability-enforced IPC; these types enforce API ownership invariants.
 
 use crate::companion::crc32;
 

@@ -99,6 +99,9 @@ struct StatusPlan {
 struct Plan {
     clock: Label,
     field: Rect,
+    command_chips: [Rect; 3],
+    command_labels: [Label; 3],
+    active_mode: launcher::search::CommandMode,
     query: Label,
     placeholder: Label,
     headline: Label,
@@ -108,6 +111,7 @@ struct Plan {
     status: [StatusPlan; 4],
     hint: Label,
     /// The state this plan was built from.
+    cached_command_mode: launcher::search::CommandMode,
     cached_query_len: usize,
     /// The needle's bytes, not only their count.
     ///
@@ -143,6 +147,7 @@ fn plan(x: usize, y: usize, state: &LauncherState) -> &'static Plan {
                 // repaint never passes through (0, 0), so a plan built for the
                 // last query would keep being drawn for the new one.
                 (x == 0 && y == 0)
+                    || p.cached_command_mode != state.command_mode
                     || p.cached_query_len != state.search_query_len
                     || p.cached_query != state.search_query
                     || p.cached_result_count != state.search_results.count
@@ -160,6 +165,27 @@ fn plan(x: usize, y: usize, state: &LauncherState) -> &'static Plan {
 
 fn build(state: &LauncherState) -> Plan {
     let theme = THEME;
+    let chip_row = launcher::layout::command_chip_row();
+    let mut command_labels = [Label::EMPTY; 3];
+    for (i, &name) in launcher::layout::COMMAND_CHIP_NAMES.iter().enumerate() {
+        let chip_rect = chip_row.chips[i];
+        let mode = match i {
+            0 => launcher::search::CommandMode::Find,
+            1 => launcher::search::CommandMode::Ask,
+            _ => launcher::search::CommandMode::Do,
+        };
+        let is_active = state.command_mode == mode;
+        let text_ink = if is_active {
+            theme.surface
+        } else {
+            theme.on_surface_variant
+        };
+        let w = launcher::text::measure(name, type_scale::CAPTION);
+        let text_x = chip_rect.x + (chip_rect.w.saturating_sub(w)) / 2;
+        let text_y = chip_rect.y + (chip_rect.h.saturating_sub(launcher::font::line_height(type_scale::CAPTION))) / 2;
+        command_labels[i] = Label::at(text_x, text_y, type_scale::CAPTION, name, text_ink);
+    }
+
     let mut plan = Plan {
         clock: Label::at(
             crate::screens::status::CLOCK_X,
@@ -173,6 +199,9 @@ fn build(state: &LauncherState) -> Plan {
             theme.on_surface,
         ),
         field: FIELD,
+        command_chips: chip_row.chips,
+        command_labels,
+        active_mode: state.command_mode,
         query: Label::at(0, 0, type_scale::BODY, b"", theme.on_surface),
         placeholder: Label::at(0, 0, type_scale::BODY, b"", theme.on_surface_variant),
         headline: Label::at(0, 0, type_scale::BODY, b"", theme.on_surface),
@@ -206,6 +235,7 @@ fn build(state: &LauncherState) -> Plan {
             },
         ],
         hint: Label::EMPTY,
+        cached_command_mode: state.command_mode,
         cached_query_len: state.search_query_len,
         cached_query: state.search_query,
         cached_result_count: state.search_results.count,
@@ -214,11 +244,6 @@ fn build(state: &LauncherState) -> Plan {
 
     // The query field's text: the needle, or the hint that says what the field is
     // for while nobody has typed one.
-    //
-    // WHY the hint comes from `launcher::search::field_hint`: the rule that keeps a
-    // hint a hint -- no needle, and inside the field only -- is one rule, and the
-    // surface cannot enforce it from a copy of the literal. Once a needle exists the
-    // model answers `None` and the field's only ink is what was typed.
     let field_text_y = FIELD_Y + (FIELD_H - FIELD_TEXT_BOX_H) / 2;
     match launcher::search::field_hint(state.search_query_len) {
         None => {
@@ -231,11 +256,16 @@ fn build(state: &LauncherState) -> Plan {
             );
         }
         Some(hint) => {
+            let active_hint = if state.command_mode == launcher::search::CommandMode::Find {
+                hint
+            } else {
+                state.command_mode.hint()
+            };
             plan.placeholder = Label::at(
                 FIELD_X + 56,
                 field_text_y,
                 type_scale::BODY,
-                hint,
+                active_hint,
                 theme.on_surface_variant,
             );
         }
@@ -519,6 +549,21 @@ pub fn result_at(x: usize, y: usize, state: &LauncherState) -> Option<usize> {
     ListRows::build(&state.search_results, &state.search_index).row_at(x, y)
 }
 
+/// The Command Space mode chip at (`x`, `y`) if tapped.
+pub fn command_chip_at(x: usize, y: usize) -> Option<launcher::search::CommandMode> {
+    let chip_row = launcher::layout::command_chip_row();
+    for (i, &chip) in chip_row.chips.iter().enumerate() {
+        if chip.contains(x, y) {
+            return match i {
+                0 => Some(launcher::search::CommandMode::Find),
+                1 => Some(launcher::search::CommandMode::Ask),
+                _ => Some(launcher::search::CommandMode::Do),
+            };
+        }
+    }
+    None
+}
+
 /// Rows a keystroke in the query field can move.
 ///
 /// WHY an accessor here and not a band typed in the shell: the field's text, the
@@ -591,6 +636,30 @@ pub fn get_search_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             return c;
         }
         return fill;
+    }
+
+    // The Command Space tri-mode chip bar ([Find] [Ask] [Do]).
+    for (i, &chip) in p.command_chips.iter().enumerate() {
+        if inside_rounded(chip, radius::CONTROL, x, y) {
+            let mode = match i {
+                0 => launcher::search::CommandMode::Find,
+                1 => launcher::search::CommandMode::Ask,
+                _ => launcher::search::CommandMode::Do,
+            };
+            let is_active = p.active_mode == mode;
+            let fill = if is_active {
+                theme.on_surface
+            } else {
+                theme.surface_container_high
+            };
+            if !inside_rounded(chip.inset(1), radius::CONTROL.saturating_sub(1), x, y) {
+                return theme.border;
+            }
+            if let Some(c) = p.command_labels[i].pixel(x, y, fill) {
+                return c;
+            }
+            return fill;
+        }
     }
 
     if let Some(c) = p.headline.pixel(x, y, theme.surface) {

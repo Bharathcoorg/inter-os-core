@@ -331,6 +331,24 @@ pub enum SyscallNumber {
     /// kernel can read the sender's table. The receiver supplies the `sender`
     /// TaskId the router stamped on the message, which userspace cannot forge.
     AppMcpAuthorize = 166,
+    /// Queries the kernel-authenticated identity (UserId, package identity,
+    /// system status, code digest) of a target task.
+    TaskIdentityQuery = 167,
+}
+
+/// 96-byte kernel-authenticated task security identity descriptor.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskIdentityInfo {
+    pub task_id: u64,
+    pub user_id: u32,
+    pub is_system: u8,
+    pub is_application: u8,
+    pub name_len: u8,
+    pub pkg_len: u8,
+    pub name: [u8; 16],
+    pub package_id: [u8; 32],
+    pub code_digest: [u8; 32],
 }
 
 /// System call result status codes.
@@ -1668,6 +1686,23 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             // nothing to copy and nothing to validate a pointer for.
             match sys_appmcp_authorize(a1, a2, a3, a4, a5) {
                 Ok(()) => SyscallResult::Success as i64,
+                Err(e) => e as i64,
+            }
+        }
+        167 => {
+            // TaskIdentityQuery: a1 = target_task_id, a2 = out_buf_ptr, a3 = out_buf_len
+            let capacity = a3 as usize;
+            if capacity < core::mem::size_of::<TaskIdentityInfo>() || a2 == 0 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut info_buf = [0u8; core::mem::size_of::<TaskIdentityInfo>()];
+            match sys_task_identity_query(a1, &mut info_buf) {
+                Ok(bytes) => {
+                    if copy_to_user(a2, &info_buf[..bytes]).is_err() {
+                        return SyscallResult::InvalidArguments as i64;
+                    }
+                    bytes as i64
+                }
                 Err(e) => e as i64,
             }
         }
@@ -6242,9 +6277,17 @@ pub fn sys_appmcp_authorize(
     let sched = SCHEDULER.lock();
     // A verification request must come from a task that exists: there is no
     // anonymous kernel context in which this question may be asked.
-    if sched.current_task_id().is_none() {
+    let caller_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    let caller_task = sched.get_task(caller_id).ok_or(SyscallResult::PermissionDenied)?;
+
+    let caller_authorized = caller_task.security_identity.as_ref().map(|s| s.is_system).unwrap_or(false)
+        || caller_task.cap_table.holds_capability_type(CapabilityType::SystemControl, Rights::READ)
+        || caller_task.cap_table.holds_capability_type(CapabilityType::AgentTask, Rights::READ)
+        || caller_task.id.0 == sender_task_id;
+    if !caller_authorized {
         return Err(SyscallResult::PermissionDenied);
     }
+
     let sender = sched
         .get_task(TaskId(sender_task_id))
         .ok_or(SyscallResult::PermissionDenied)?;
@@ -6288,6 +6331,91 @@ pub fn sys_appmcp_authorize(
         }
     }
     Ok(())
+}
+
+/// Queries the authenticated identity of a target task (syscall 167).
+///
+/// WHY this is a dedicated kernel syscall: in an asymmetric microkernel, security-critical
+/// system daemons (keystored, agentd, searchd, aid) receive IPC messages tagged with an
+/// authenticated sender TaskId. They must not guess or trust payload strings or infer
+/// authority from ambient caller state. This call queries the kernel scheduler and
+/// process tables to resolve the verified UserId, application package identity,
+/// system flag, and binary code digest of the sender.
+pub fn sys_task_identity_query(
+    target_task_id: u64,
+    out_buf: &mut [u8],
+) -> Result<usize, SyscallResult> {
+    let required_len = core::mem::size_of::<TaskIdentityInfo>();
+    if out_buf.len() < required_len {
+        return Err(SyscallResult::InvalidArguments);
+    }
+
+    let sched = SCHEDULER.lock();
+    let caller_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    let caller_task = sched.get_task(caller_id).ok_or(SyscallResult::PermissionDenied)?;
+
+    let target_id = if target_task_id == 0 {
+        caller_id
+    } else {
+        TaskId(target_task_id)
+    };
+
+    // A task may query itself without special rights. Cross-task queries require
+    // caller to be a verified system service or hold SystemControl or AgentTask.
+    let is_authorized = target_id == caller_id
+        || caller_task.security_identity.as_ref().map(|s| s.is_system).unwrap_or(false)
+        || caller_task.cap_table.holds_capability_type(CapabilityType::SystemControl, Rights::READ)
+        || caller_task.cap_table.holds_capability_type(CapabilityType::AgentTask, Rights::READ);
+    if !is_authorized {
+        return Err(SyscallResult::PermissionDenied);
+    }
+
+    let target = sched.get_task(target_id).ok_or(SyscallResult::TargetNotFound)?;
+    if matches!(target.state, crate::task::TaskState::Zombie | crate::task::TaskState::Terminated) {
+        return Err(SyscallResult::PermissionDenied);
+    }
+
+    let user_id = crate::task::process::user_for_task(target.id).unwrap_or(0);
+    let mut name_buf = [0u8; 16];
+    let name_bytes = target.name.as_bytes();
+    let name_len = name_bytes.len().min(16);
+    name_buf[..name_len].copy_from_slice(&name_bytes[..name_len]);
+
+    let mut pkg_buf = [0u8; 32];
+    let mut code_digest = [0u8; 32];
+    let (pkg_len, is_system) = if let Some(ref sec) = target.security_identity {
+        let pkg_bytes = sec.package_id.as_bytes();
+        let plen = pkg_bytes.len().min(32) as u8;
+        pkg_buf[..plen as usize].copy_from_slice(&pkg_bytes[..plen as usize]);
+        code_digest.copy_from_slice(&sec.code_digest);
+        (plen, if sec.is_system { 1u8 } else { 0u8 })
+    } else {
+        pkg_buf[..name_len].copy_from_slice(&name_buf[..name_len]);
+        (name_len as u8, if target.id == TaskId(0) { 1u8 } else { 0u8 })
+    };
+
+    let is_app = if crate::task::process::task_is_application(target.id).unwrap_or(false) { 1 } else { 0 };
+
+    let info = TaskIdentityInfo {
+        task_id: target.id.0,
+        user_id,
+        is_system,
+        is_application: is_app,
+        name_len: name_len as u8,
+        pkg_len,
+        name: name_buf,
+        package_id: pkg_buf,
+        code_digest,
+    };
+
+    let info_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &info as *const TaskIdentityInfo as *const u8,
+            required_len,
+        )
+    };
+    out_buf[..required_len].copy_from_slice(info_bytes);
+    Ok(required_len)
 }
 
 /// Advances or interacts with the Gravity Glass fluid inertial physics scroller.
