@@ -698,6 +698,13 @@ pub fn parse_action_query(query: &[u8]) -> Option<(u32, &[u8])> {
     while let Some((&b' ', rest)) = q.split_first() {
         q = rest;
     }
+    // 1. Dynamic schema matching against installed AppMCP tool registry
+    let registry = interos_std::appmcp::DynamicToolRegistry::canonical();
+    if let Some((tool_id, args)) = registry.match_intent(q) {
+        return Some((tool_id, args));
+    }
+
+    // 2. Deterministic bootstrap / fallback parser
     if starts_with_ignore_case(q, b"note ") {
         Some((interos_std::appmcp::TOOL_ID_NOTES_CREATE, &q[5..]))
     } else if starts_with_ignore_case(q, b"calc ") {
@@ -729,7 +736,7 @@ pub fn query_service_generate(prompt: &[u8], out_buf: &mut [u8]) -> Result<usize
     }
     let target = interos_std::ai::SERVICE_INFERENCE_TASK_ID;
     let req = interos_std::ai::AiInferenceRequest {
-        model_id: 2, // Gemma 4 2B generative model
+        model_id: interos_std::ai::MODEL_ROLE_GENERATIVE_TEXT, // Decoupled GenerativeText semantic role
         target_dim: 0,
         input_len: prompt.len() as u32,
         flags: 0,
@@ -812,8 +819,8 @@ pub fn query_agent_propose_plan(tool_id: u32, args: &[u8]) -> Result<u32, ()> {
             return Ok(rx_buf[0] as u32);
         }
     }
-    // Default to AwaitingConsent (1)
-    Ok(1)
+    // Fail closed: timeout, invalid sender, missing response produces explicit error
+    Err(())
 }
 
 /// Dispatches Opcode 2 (APPROVE) to agentd to execute the consented tool action.
@@ -836,7 +843,8 @@ pub fn query_agent_approve_plan() -> Result<u32, ()> {
             return Ok(rx_buf[0] as u32);
         }
     }
-    Ok(3) // Completed
+    // Fail closed: timeout, invalid sender, missing response produces explicit error
+    Err(())
 }
 
 /// Dispatches Opcode 3 (CANCEL) to agentd to abort the proposed plan.

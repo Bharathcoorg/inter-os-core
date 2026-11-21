@@ -491,7 +491,12 @@ pub fn run_acr() -> ! {
                             if len > 8 {
                                 let surface_id = u32::from_le_bytes([rx_buf[4], rx_buf[5], rx_buf[6], rx_buf[7]]);
                                 let apk_slice = &rx_buf[8..len];
-                                if let Ok(pid) = manager.install_and_launch(apk_slice, surface_id, 8 * 1024 * 1024) {
+                                let task_id = if let Ok(apk) = interos_android_format::apk::ApkPackage::parse(apk_slice) {
+                                    std::app_launch(&apk.manifest.package_name).ok()
+                                } else {
+                                    None
+                                };
+                                if let Ok(pid) = manager.install_and_launch_with_task_id(apk_slice, surface_id, 8 * 1024 * 1024, task_id) {
                                     let mut resp = [0u8; 8];
                                     resp[0..4].copy_from_slice(&0x0052_4341u32.to_le_bytes());
                                     resp[4..8].copy_from_slice(&pid.to_le_bytes());
@@ -1147,16 +1152,30 @@ fn handle_agent_ipc(
                     let plan_id = std::get_ticks().unwrap_or(1);
                     let mut plan = std::companion::ExecutionPlan::new(plan_id);
                     if payload.len() >= 5 {
-                        let tool_id = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
-                        let (risk, consent) = if let Some(desc) = tool_registry.find_by_id(tool_id) {
-                            (desc.risk_class, desc.consent_class)
+                        let tool_id_raw = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+                        let (tool_id, args) = if tool_id_raw == 0 && payload.len() > 5 {
+                            // Dynamic action planning: user request + installed tool schemas
+                            if let Some((dyn_id, dyn_args)) = tool_registry.match_intent(&payload[5..]) {
+                                (dyn_id, dyn_args)
+                            } else {
+                                (0, &payload[5..])
+                            }
                         } else {
-                            (std::appmcp::ToolRiskClass::Observe, std::appmcp::ToolConsentClass::AlwaysAsk)
+                            (tool_id_raw, if payload.len() > 5 { &payload[5..] } else { b"" })
                         };
-                        let args = if payload.len() > 5 { &payload[5..] } else { b"" };
-                        plan.add_step(tool_id, risk, consent, args);
+
+                        if tool_id > 0 {
+                            let (risk, consent) = if let Some(desc) = tool_registry.find_by_id(tool_id) {
+                                (desc.risk_class, desc.consent_class)
+                            } else {
+                                (std::appmcp::ToolRiskClass::Observe, std::appmcp::ToolConsentClass::AlwaysAsk)
+                            };
+                            plan.add_step(tool_id, risk, consent, args);
+                        }
                     }
-                    if plan.requires_user_consent() {
+                    if plan.step_count == 0 {
+                        plan.status = std::companion::PlanStatus::Failed;
+                    } else if plan.requires_user_consent() {
                         plan.status = std::companion::PlanStatus::AwaitingConsent;
                     } else {
                         plan.status = std::companion::PlanStatus::Running;
@@ -1531,6 +1550,70 @@ pub fn run_keystore() -> ! {
     }
 }
 
+/// Enforces kernel-authenticated keystore domain and rights authorization policy.
+pub fn authorize_keystore_derive_policy(
+    caller_identity: &std::TaskIdentityInfo,
+    sender: u64,
+    domain: u32,
+    rights: u32,
+) -> Result<(), std::keystore::KeystoreError> {
+    // 1. DOMAIN_DEVICE_ROOT must never be directly derivable by callers over IPC
+    if domain == std::keystore::DOMAIN_DEVICE_ROOT {
+        return Err(std::keystore::KeystoreError::UnauthorizedDomain);
+    }
+
+    // 2. Validate requested rights: must be non-zero and within RIGHT_ALL
+    if rights == 0 || (rights & !std::keystore::RIGHT_ALL) != 0 {
+        return Err(std::keystore::KeystoreError::InvalidRights);
+    }
+
+    // 3. Domain authorization policy:
+    match domain {
+        std::keystore::DOMAIN_SEMANTIC_SEARCH => {
+            // Must be searchd
+            let is_searchd = std::service_peer_matches(std::ai::SERVICE_SEARCH, sender)
+                || sender == std::ai::SERVICE_SEARCH_TASK_ID
+                || (caller_identity.is_system != 0 && (caller_identity.task_name() == "searchd" || caller_identity.package_name() == "searchd"));
+            if !is_searchd {
+                return Err(std::keystore::KeystoreError::UnauthorizedDomain);
+            }
+        }
+        std::keystore::DOMAIN_COMPANION => {
+            // Must be agentd
+            let is_agentd = std::service_peer_matches(std::ai::SERVICE_AGENT, sender)
+                || sender == std::ai::SERVICE_AGENT_TASK_ID
+                || (caller_identity.is_system != 0 && (caller_identity.task_name() == "agentd" || caller_identity.package_name() == "agentd"));
+            if !is_agentd {
+                return Err(std::keystore::KeystoreError::UnauthorizedDomain);
+            }
+        }
+        std::keystore::DOMAIN_CONVERSATION_HISTORY => {
+            // Must be agentd or conversation service
+            let is_conv = std::service_peer_matches(std::ai::SERVICE_AGENT, sender)
+                || sender == std::ai::SERVICE_AGENT_TASK_ID
+                || (caller_identity.is_system != 0 && (caller_identity.task_name() == "agentd" || caller_identity.task_name() == "conversation"));
+            if !is_conv {
+                return Err(std::keystore::KeystoreError::UnauthorizedDomain);
+            }
+        }
+        std::keystore::DOMAIN_APP_STORAGE => {
+            // Ordinary applications may only derive their own application storage domain
+            // Rights for ordinary apps in app storage are limited to encrypt/decrypt
+            if caller_identity.is_system == 0 {
+                let allowed = std::keystore::RIGHT_ENCRYPT | std::keystore::RIGHT_DECRYPT;
+                if (rights & !allowed) != 0 {
+                    return Err(std::keystore::KeystoreError::InvalidRights);
+                }
+            }
+        }
+        _ => {
+            return Err(std::keystore::KeystoreError::UnauthorizedDomain);
+        }
+    }
+
+    Ok(())
+}
+
 fn handle_keystore_ipc<const N: usize>(
     table: &mut std::keystore::KeystoreTable<N>,
     secret_root: &Option<[u8; 32]>,
@@ -1579,6 +1662,17 @@ fn handle_keystore_ipc<const N: usize>(
                 return;
             }
             let label = &req[10..10 + label_len];
+
+            // Explicit authenticated domain and rights authorization policy check
+            if let Err(e) = authorize_keystore_derive_policy(&caller_identity, sender, domain, rights) {
+                let err_code = match e {
+                    std::keystore::KeystoreError::UnauthorizedDomain => 0x20,
+                    std::keystore::KeystoreError::InvalidRights => 0x21,
+                    _ => 0x22,
+                };
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, err_code]);
+                return;
+            }
 
             let root = match secret_root {
                 Some(r) => r,
@@ -1865,6 +1959,10 @@ pub fn run_ai() -> ! {
         if let Some(_) = ipc_slot {
             if let Ok((sender_task_id, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
                 if len > 0 {
+                    if sender_task_id == 0 {
+                        let _ = std::log("[aid] rejected anonymous AI query: sender=0 violates authenticated identity requirement");
+                        continue;
+                    }
                     let _ = std::log("[aid] received inference / embedding query over IPC");
                     handle_ipc_inference_query(
                         sender_task_id,
@@ -1876,14 +1974,7 @@ pub fn run_ai() -> ! {
                 }
             } else if let Ok(len) = std::ipc_recv(&mut rx_buf) {
                 if len > 0 {
-                    let _ = std::log("[aid] received inference query via direct ipc_recv");
-                    handle_ipc_inference_query(
-                        0,
-                        0,
-                        &rx_buf[..len],
-                        &probed_models,
-                        &mut tx_buf,
-                    );
+                    let _ = std::log("[aid] rejected anonymous AI query via direct ipc_recv: sender unknown");
                 }
             }
         }
@@ -4631,11 +4722,8 @@ pub fn handle_ipc_inference_query(
         // claim to be one; until it does, the arm refuses the claim rather than
         // inheriting it from a directory listing.
         let mut index = rag::RagIndex::new(false);
-        if index.load_from_disk(rag::PATH_SEARCH_INDEX_DATA).is_err()
-            && index.load_from_disk(rag::PATH_SEARCH_INDEX_STORAGE).is_err()
-        {
-            let _ = index.discover_and_ingest_storage();
-        }
+        let _ = index.load_from_disk(rag::PATH_SEARCH_INDEX_DATA)
+            .or_else(|_| index.load_from_disk(rag::PATH_SEARCH_INDEX_STORAGE));
 
         let mut matches = [rag::RagMatch::default(); 8];
         let found_count = {
@@ -7571,6 +7659,166 @@ mod tests {
         ACTIVE_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
         ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::SeqCst);
         ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn make_test_identity(task_id: u64, is_system: u8, name_str: &str) -> std::TaskIdentityInfo {
+        let mut name = [0u8; 16];
+        let bytes = name_str.as_bytes();
+        let len = bytes.len().min(16);
+        name[..len].copy_from_slice(&bytes[..len]);
+        std::TaskIdentityInfo {
+            task_id,
+            user_id: 1000,
+            is_system,
+            is_application: if is_system == 0 { 1 } else { 0 },
+            name_len: len as u8,
+            pkg_len: len as u8,
+            name,
+            package_id: [0u8; 32],
+            code_digest: [0u8; 32],
+        }
+    }
+
+    #[test]
+    fn test_keystore_derive_device_root_denied() {
+        let sys_id = make_test_identity(1, 1, "system");
+        let app_id = make_test_identity(20, 0, "calc");
+        let rights = std::keystore::RIGHT_ENCRYPT | std::keystore::RIGHT_DECRYPT;
+
+        assert_eq!(
+            authorize_keystore_derive_policy(&sys_id, 1, std::keystore::DOMAIN_DEVICE_ROOT, rights),
+            Err(std::keystore::KeystoreError::UnauthorizedDomain)
+        );
+        assert_eq!(
+            authorize_keystore_derive_policy(&app_id, 20, std::keystore::DOMAIN_DEVICE_ROOT, rights),
+            Err(std::keystore::KeystoreError::UnauthorizedDomain)
+        );
+    }
+
+    #[test]
+    fn test_keystore_derive_rights_validation() {
+        let app_id = make_test_identity(20, 0, "calc");
+        // Zero rights
+        assert_eq!(
+            authorize_keystore_derive_policy(&app_id, 20, std::keystore::DOMAIN_APP_STORAGE, 0),
+            Err(std::keystore::KeystoreError::InvalidRights)
+        );
+        // Unknown/unsupported right bits
+        assert_eq!(
+            authorize_keystore_derive_policy(&app_id, 20, std::keystore::DOMAIN_APP_STORAGE, 0x8000_0000),
+            Err(std::keystore::KeystoreError::InvalidRights)
+        );
+    }
+
+    #[test]
+    fn test_keystore_derive_semantic_search_policy() {
+        let app_id = make_test_identity(20, 0, "calc");
+        let agent_id = make_test_identity(std::ai::SERVICE_AGENT_TASK_ID, 1, "agentd");
+        let search_id = make_test_identity(std::ai::SERVICE_SEARCH_TASK_ID, 1, "searchd");
+        let rights = std::keystore::RIGHT_ENCRYPT | std::keystore::RIGHT_DECRYPT;
+
+        // Ordinary app denied
+        assert_eq!(
+            authorize_keystore_derive_policy(&app_id, 20, std::keystore::DOMAIN_SEMANTIC_SEARCH, rights),
+            Err(std::keystore::KeystoreError::UnauthorizedDomain)
+        );
+        // agentd denied search domain
+        assert_eq!(
+            authorize_keystore_derive_policy(&agent_id, std::ai::SERVICE_AGENT_TASK_ID, std::keystore::DOMAIN_SEMANTIC_SEARCH, rights),
+            Err(std::keystore::KeystoreError::UnauthorizedDomain)
+        );
+        // searchd allowed
+        assert_eq!(
+            authorize_keystore_derive_policy(&search_id, std::ai::SERVICE_SEARCH_TASK_ID, std::keystore::DOMAIN_SEMANTIC_SEARCH, rights),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_keystore_derive_companion_policy() {
+        let app_id = make_test_identity(20, 0, "calc");
+        let search_id = make_test_identity(std::ai::SERVICE_SEARCH_TASK_ID, 1, "searchd");
+        let agent_id = make_test_identity(std::ai::SERVICE_AGENT_TASK_ID, 1, "agentd");
+        let rights = std::keystore::RIGHT_ENCRYPT | std::keystore::RIGHT_DECRYPT;
+
+        // Ordinary app denied
+        assert_eq!(
+            authorize_keystore_derive_policy(&app_id, 20, std::keystore::DOMAIN_COMPANION, rights),
+            Err(std::keystore::KeystoreError::UnauthorizedDomain)
+        );
+        // searchd denied companion domain
+        assert_eq!(
+            authorize_keystore_derive_policy(&search_id, std::ai::SERVICE_SEARCH_TASK_ID, std::keystore::DOMAIN_COMPANION, rights),
+            Err(std::keystore::KeystoreError::UnauthorizedDomain)
+        );
+        // agentd allowed
+        assert_eq!(
+            authorize_keystore_derive_policy(&agent_id, std::ai::SERVICE_AGENT_TASK_ID, std::keystore::DOMAIN_COMPANION, rights),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_keystore_derive_conversation_history_policy() {
+        let app_id = make_test_identity(20, 0, "calc");
+        let conv_id = make_test_identity(55, 1, "conversation");
+        let agent_id = make_test_identity(std::ai::SERVICE_AGENT_TASK_ID, 1, "agentd");
+        let search_id = make_test_identity(std::ai::SERVICE_SEARCH_TASK_ID, 1, "searchd");
+        let rights = std::keystore::RIGHT_ENCRYPT | std::keystore::RIGHT_DECRYPT;
+
+        assert_eq!(
+            authorize_keystore_derive_policy(&app_id, 20, std::keystore::DOMAIN_CONVERSATION_HISTORY, rights),
+            Err(std::keystore::KeystoreError::UnauthorizedDomain)
+        );
+        assert_eq!(
+            authorize_keystore_derive_policy(&search_id, std::ai::SERVICE_SEARCH_TASK_ID, std::keystore::DOMAIN_CONVERSATION_HISTORY, rights),
+            Err(std::keystore::KeystoreError::UnauthorizedDomain)
+        );
+        assert_eq!(
+            authorize_keystore_derive_policy(&conv_id, 55, std::keystore::DOMAIN_CONVERSATION_HISTORY, rights),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_keystore_derive_policy(&agent_id, std::ai::SERVICE_AGENT_TASK_ID, std::keystore::DOMAIN_CONVERSATION_HISTORY, rights),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_keystore_derive_ordinary_app_storage_rights() {
+        let app_id = make_test_identity(20, 0, "calc");
+        let enc_dec = std::keystore::RIGHT_ENCRYPT | std::keystore::RIGHT_DECRYPT;
+
+        // Encrypt and decrypt allowed for ordinary app
+        assert_eq!(
+            authorize_keystore_derive_policy(&app_id, 20, std::keystore::DOMAIN_APP_STORAGE, enc_dec),
+            Ok(())
+        );
+        // Derivation right denied for ordinary app
+        assert_eq!(
+            authorize_keystore_derive_policy(&app_id, 20, std::keystore::DOMAIN_APP_STORAGE, std::keystore::RIGHT_DERIVE),
+            Err(std::keystore::KeystoreError::InvalidRights)
+        );
+        // Sign right denied for ordinary app
+        assert_eq!(
+            authorize_keystore_derive_policy(&app_id, 20, std::keystore::DOMAIN_APP_STORAGE, std::keystore::RIGHT_SIGN),
+            Err(std::keystore::KeystoreError::InvalidRights)
+        );
+        // RIGHT_ALL denied for ordinary app
+        assert_eq!(
+            authorize_keystore_derive_policy(&app_id, 20, std::keystore::DOMAIN_APP_STORAGE, std::keystore::RIGHT_ALL),
+            Err(std::keystore::KeystoreError::InvalidRights)
+        );
+    }
+
+    #[test]
+    fn test_keystore_derive_unknown_domain_denied() {
+        let app_id = make_test_identity(20, 0, "calc");
+        let rights = std::keystore::RIGHT_ENCRYPT | std::keystore::RIGHT_DECRYPT;
+        assert_eq!(
+            authorize_keystore_derive_policy(&app_id, 20, 0x1337, rights),
+            Err(std::keystore::KeystoreError::UnauthorizedDomain)
+        );
     }
 }
 

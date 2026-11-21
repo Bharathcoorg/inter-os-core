@@ -52,6 +52,7 @@ pub struct AcrAppInstance {
 impl AcrAppInstance {
     pub fn new(
         pid: u32,
+        task_id: u64,
         package_name: &str,
         target_sdk: u32,
         surface_id: u32,
@@ -59,7 +60,6 @@ impl AcrAppInstance {
         classes_dex: Vec<u8>,
     ) -> Self {
         let uid = 10000 + (pid.saturating_sub(1000));
-        let task_id = 0x8000_0000_0000_0000 | (pid as u64);
         let data_dir = alloc::format!("/data/data/{}", package_name);
         Self {
             pid,
@@ -115,6 +115,17 @@ impl AcrManager {
         surface_id: u32,
         memory_quota_bytes: usize,
     ) -> Result<u32, AcrError> {
+        self.install_and_launch_with_task_id(apk_bytes, surface_id, memory_quota_bytes, None)
+    }
+
+    /// Verifies, installs, and launches an Android APK with a kernel-assigned TaskId.
+    pub fn install_and_launch_with_task_id(
+        &mut self,
+        apk_bytes: &[u8],
+        surface_id: u32,
+        memory_quota_bytes: usize,
+        assigned_task_id: Option<u64>,
+    ) -> Result<u32, AcrError> {
         let apk = ApkPackage::parse(apk_bytes).map_err(|_| AcrError::ApkParseFailed)?;
         if !apk.is_signed {
             return Err(AcrError::SignatureVerificationFailed);
@@ -135,6 +146,9 @@ impl AcrManager {
         let pid = self.next_pid;
         self.next_pid += 1;
 
+        // Use real kernel-assigned TaskId when available
+        let task_id = assigned_task_id.unwrap_or(pid as u64);
+
         // Execute MainActivity->onCreate if found
         let mut vm = DalvikVmState::new();
         let main_activity_class = alloc::format!("L{}/MainActivity;", profile.package_name.replace('.', "/"));
@@ -145,6 +159,7 @@ impl AcrManager {
 
         let mut instance = AcrAppInstance::new(
             pid,
+            task_id,
             &profile.package_name,
             profile.target_sdk,
             surface_id,
@@ -207,7 +222,7 @@ mod tests {
         assert_eq!(app.activity_state, ActivityLifecycleState::Resumed);
         assert_eq!(app.package_name, "org.whispersystems.signal");
         assert_eq!(app.uid, 10000);
-        assert_eq!(app.task_id, 0x8000_0000_0000_03E8);
+        assert_eq!(app.task_id, 1000);
         assert_eq!(app.data_dir, "/data/data/org.whispersystems.signal");
 
         // Attach a root View with a button and text view

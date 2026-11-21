@@ -1853,7 +1853,7 @@ fn rank_search_results(state: &mut LauncherState) {
             if let Ok(st) = launcher::search::query_agent_propose_plan(tool_id, args) {
                 state.planned_status = st;
             } else {
-                state.planned_status = 1; // AwaitingConsent
+                state.planned_status = 4; // Failed: agent unavailable or unauthenticated
             }
         } else {
             state.planned_tool_id = 0;
@@ -5360,8 +5360,11 @@ pub extern "C" fn _start() -> ! {
                                 }
                                 if state.command_mode == launcher::search::CommandMode::Do && state.planned_status == 1 {
                                     if launcher::layout::SEARCH_DO_APPROVE_BTN.contains(x, y) {
-                                        let _ = launcher::search::query_agent_approve_plan();
-                                        state.planned_status = 3;
+                                        if let Ok(st) = launcher::search::query_agent_approve_plan() {
+                                            state.planned_status = st;
+                                        } else {
+                                            state.planned_status = 4; // Failed: no execution result from agentd
+                                        }
                                         present_dirty(surface, &state, Dirty::SearchMode);
                                         let mut drain = std::InputEvent {
                                             kind: 0,

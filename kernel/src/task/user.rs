@@ -989,6 +989,93 @@ pub fn load_user_elf_with_stack(elf_data: &[u8], stack_top_addr: usize) -> Resul
     load_user_elf_into_page_table(elf_data, &mut pt, stack_top_addr)
 }
 
+/// Spawns an isolated Android application task as an independent Ring-3 process.
+///
+/// Allocates a dedicated page table (CR3 frame), isolated capability table,
+/// assigns unique kernel TaskId, marks the process as an application subject
+/// to sandbox namespace `/data/data/<package_name>`, and binds an Android UID.
+pub fn spawn_android_app_process(
+    package_name: &str,
+    parent_id: TaskId,
+    memory_quota: usize,
+) -> Result<TaskId, &'static str> {
+    let mut caps = CapabilityTable::new(16);
+    // Scoped capabilities for isolated Android application:
+    // SerialOutput for diagnostics, EventPoll, IpcSend/Receive to acrd, FrameBufferDirect
+    caps.insert(Capability {
+        id: CapabilityId(0x8100),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).map_err(|_| "failed to insert serial cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x8101),
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE,
+        object_id: parent_id.0,
+    }).map_err(|_| "failed to insert ipc send cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x8102),
+        cap_type: CapabilityType::IpcReceive,
+        rights: Rights::READ,
+        object_id: 0,
+    }).map_err(|_| "failed to insert ipc recv cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x8103),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ | Rights::INVOKE,
+        object_id: 0,
+    }).map_err(|_| "failed to insert event poll cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x8104),
+        cap_type: CapabilityType::FrameBufferDirect,
+        rights: Rights::READ | Rights::WRITE,
+        object_id: 1,
+    }).map_err(|_| "failed to insert fb cap")?;
+
+    let mut limits = crate::task::process::ResourceLimits::default();
+    limits.max_address_space_bytes = memory_quota as u64;
+
+    let process_name: &'static str = intern_package_name(package_name);
+
+    let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
+    let stack_top = USER_STACK_TOP;
+    let (user_entry, user_stack_top) = load_user_elf_into_page_table(
+        crate::task::images::USER_INIT_ELF,
+        &mut pt,
+        stack_top,
+    )?;
+
+    let mut tcb = crate::task::TaskControlBlock::new(process_name, user_process_entry, caps, 6);
+    tcb.cr3_frame = Some(pt.frame());
+    tcb.page_table = Some(alloc::sync::Arc::new(spin::Mutex::new(pt)));
+    tcb.user_entry = user_entry;
+    tcb.user_stack_top = user_stack_top;
+    tcb.parent_id = parent_id;
+
+    let code_digest = crate::crypto::Sha256::digest(package_name.as_bytes());
+    tcb.security_identity = Some(crate::task::SecurityIdentity {
+        package_id: process_name,
+        code_digest,
+        is_system: false,
+    });
+
+    let spawned = SCHEDULER.lock().spawn_task(tcb);
+    if spawned == TaskId(0) {
+        return Err("process registration failed");
+    }
+
+    if let Some(process) = crate::task::process::process_for_task(spawned) {
+        let _ = crate::task::process::set_limits(process, limits);
+        let _ = crate::task::process::set_address_space_usage(process, memory_quota);
+        let _ = crate::task::process::mark_application_for_task(spawned);
+        let android_uid = 10000 + (spawned.0 as u32);
+        let _ = crate::task::process::bind_user_for_task(spawned, android_uid);
+    }
+
+    Ok(spawned)
+}
+
 /// Trampoline function running in Ring 0 that loads the userspace init ELF and drops into Ring 3.
 pub extern "C" fn user_task_trampoline() -> ! {
     user_process_entry()

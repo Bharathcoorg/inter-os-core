@@ -828,6 +828,40 @@ impl DynamicToolRegistry {
         None
     }
 
+    /// Dynamically matches a user action request against installed tool schemas.
+    ///
+    /// Checks registered tool names (e.g. `notes.create`), labels, and registered verbs.
+    /// Enables unknown future applications to register tools and be invoked without
+    /// recompiling the Launcher.
+    pub fn match_intent<'a>(&self, request: &'a [u8]) -> Option<(u32, &'a [u8])> {
+        let mut q = request;
+        while let Some((&b' ', rest)) = q.split_first() {
+            q = rest;
+        }
+        if q.is_empty() {
+            return None;
+        }
+
+        for slot in &self.tools {
+            if let Some(desc) = slot {
+                let name = desc.name_str().as_bytes();
+                if q.len() >= name.len() && q[..name.len()].eq_ignore_ascii_case(name) {
+                    let rest = &q[name.len()..];
+                    let args = if let Some((&b' ', r)) = rest.split_first() { r } else { rest };
+                    return Some((desc.tool_id, args));
+                }
+
+                let label = desc.label_str().as_bytes();
+                if q.len() >= label.len() && q[..label.len()].eq_ignore_ascii_case(label) {
+                    let rest = &q[label.len()..];
+                    let args = if let Some((&b' ', r)) = rest.split_first() { r } else { rest };
+                    return Some((desc.tool_id, args));
+                }
+            }
+        }
+        None
+    }
+
     /// Validates an authoritative handle against the current registry state.
     /// Checks:
     /// 1. `(handle.slot as usize) < MAX_DYNAMIC_TOOLS`.

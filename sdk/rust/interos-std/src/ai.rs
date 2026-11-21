@@ -176,6 +176,11 @@ pub const STATUS_ERROR: u32 = 2;
 pub const STATUS_UNSUPPORTED: u32 = 3;
 /// Status code: Generation cancelled or timed out.
 pub const STATUS_CANCELLED: u32 = 4;
+
+/// Semantic roles requested by client applications to decouple from physical model IDs:
+pub const MODEL_ROLE_UNSPECIFIED: u32 = 0;
+pub const MODEL_ROLE_EMBEDDING: u32 = 1;
+pub const MODEL_ROLE_GENERATIVE_TEXT: u32 = 2; // Decoupled GenerativeText semantic role
 /// Status code: the answer is the service's own, and it is not the model's.
 ///
 /// WHAT IT MEANS: an embedding came back, and it was produced by the lexical

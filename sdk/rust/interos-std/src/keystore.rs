@@ -35,6 +35,7 @@ pub const RIGHT_VERIFY: u32 = 1 << 3;
 pub const RIGHT_WRAP: u32 = 1 << 4;
 pub const RIGHT_UNWRAP: u32 = 1 << 5;
 pub const RIGHT_DERIVE: u32 = 1 << 6;
+pub const RIGHT_ALL: u32 = RIGHT_ENCRYPT | RIGHT_DECRYPT | RIGHT_SIGN | RIGHT_VERIFY | RIGHT_WRAP | RIGHT_UNWRAP | RIGHT_DERIVE;
 
 /// Cryptographic domain separation labels.
 pub const DOMAIN_COMPANION: u32 = 1;

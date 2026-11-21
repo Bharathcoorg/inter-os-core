@@ -475,7 +475,7 @@ fn build(state: &LauncherState) -> Plan {
         let hdr = if state.ai_answer_unavailable {
             b"AI Status: Model Weights Unavailable".as_slice()
         } else {
-            b"AI Answer - Gemma 4 2B".as_slice()
+            b"AI Answer".as_slice()
         };
         let hdr_ink = if state.ai_answer_unavailable {
             theme.error

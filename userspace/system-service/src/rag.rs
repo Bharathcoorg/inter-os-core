@@ -557,6 +557,7 @@ impl RagIndex {
     ///
     /// Checks `/storage/notes`, `/storage/downloads`, and `/storage`.
     /// Returns the total number of document chunks indexed.
+    #[deprecated = "Blanket /storage crawling is eliminated in favor of explicit ContentIndex registration"]
     pub fn discover_and_ingest_storage(&mut self) -> usize {
         let mut list_buf = [0u8; 1024];
         let mut file_buf = [0u8; 2048];
