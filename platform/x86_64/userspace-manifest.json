@@ -71,6 +71,16 @@
       "manifest": "userspace/system-service/Cargo.toml"
     },
     {
+      "name": "acrd",
+      "kind": "system-service",
+      "manifest": "userspace/system-service/Cargo.toml"
+    },
+    {
+      "name": "acr-app-runtime",
+      "kind": "system-service",
+      "manifest": "userspace/system-service/Cargo.toml"
+    },
+    {
       "name": "compositor",
       "kind": "application",
       "manifest": "apps/compositor/Cargo.toml"
