@@ -13,6 +13,7 @@ Audits APK packages against InterOS Core Zone 4 security invariants:
 """
 
 import argparse
+import hashlib
 import os
 import struct
 import sys
@@ -20,6 +21,13 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# APK Signing Block constants (AOSP v2/v3/v4)
+APK_SIG_BLOCK_MAGIC = b"APK Sig Block 42"
+APK_SIGNATURE_SCHEME_V2_BLOCK_ID = 0x7109871a
+APK_SIGNATURE_SCHEME_V3_BLOCK_ID = 0xf05368c0
+APK_SIGNATURE_SCHEME_V4_BLOCK_ID = 0x42726577
+CONTENT_DIGEST_CHUNK_SIZE = 1024 * 1024
 
 # Zone 4 Forbidden Ambient Authority Permissions
 FORBIDDEN_AMBIENT_PERMISSIONS = frozenset({
@@ -321,6 +329,118 @@ def audit_apk_security(manifest: dict, dex_info: dict | None, is_signed: bool) -
     }
 
 
+def find_apk_signing_block(data: bytes) -> dict | None:
+    """Locates the APK Signing Block immediately before the Central Directory."""
+    eocd_min = 22
+    if len(data) < eocd_min + 32:
+        return None
+
+    search_start = max(0, len(data) - (65535 + eocd_min))
+    eocd_pos = -1
+    for pos in range(len(data) - eocd_min, search_start - 1, -1):
+        if data[pos:pos + 4] == b"\x50\x4b\x05\x06":
+            eocd_pos = pos
+            break
+
+    if eocd_pos < 0:
+        return None
+
+    cd_offset = struct.unpack("<I", data[eocd_pos + 16:eocd_pos + 20])[0]
+    if cd_offset < 24 or cd_offset > eocd_pos:
+        return None
+
+    footer_start = cd_offset - 24
+    if data[footer_start + 8:cd_offset] != APK_SIG_BLOCK_MAGIC:
+        return None
+
+    size2 = struct.unpack("<Q", data[footer_start:footer_start + 8])[0]
+    if size2 < 24 or size2 > cd_offset:
+        return None
+
+    start_offset = cd_offset - (size2 + 8)
+    if start_offset < 0:
+        return None
+
+    size1 = struct.unpack("<Q", data[start_offset:start_offset + 8])[0]
+    if size1 != size2:
+        return None
+
+    return {
+        "start_offset": start_offset,
+        "size": size2 + 8,
+        "central_dir_offset": cd_offset,
+        "eocd_offset": eocd_pos,
+    }
+
+
+def parse_signing_block_pairs(data: bytes, bounds: dict) -> list[dict]:
+    """Parses ID-value pairs from the APK Signing Block."""
+    data_start = bounds["start_offset"] + 8
+    data_end = bounds["central_dir_offset"] - 24
+    pairs = []
+    cursor = data_start
+
+    while cursor < data_end:
+        if cursor + 8 > data_end:
+            break
+        pair_len = struct.unpack("<Q", data[cursor:cursor + 8])[0]
+        cursor += 8
+        if pair_len < 4 or cursor + pair_len > data_end:
+            break
+        pair_id = struct.unpack("<I", data[cursor:cursor + 4])[0]
+        pair_val = data[cursor + 4:cursor + pair_len]
+        pairs.append({"id": pair_id, "length": pair_len, "value": pair_val})
+        cursor += pair_len
+
+    return pairs
+
+
+def compute_apk_content_merkle_digest(data: bytes, bounds: dict) -> str:
+    """Computes the AOSP 1 MiB chunked Merkle-tree SHA-256 content digest."""
+    def hash_section(sec_data: bytes) -> list[bytes]:
+        hashes = []
+        for off in range(0, len(sec_data), CONTENT_DIGEST_CHUNK_SIZE):
+            chunk = sec_data[off:off + CONTENT_DIGEST_CHUNK_SIZE]
+            h = hashlib.sha256(b"\xa5" + struct.pack("<I", len(chunk)) + chunk).digest()
+            hashes.append(h)
+        return hashes
+
+    h1 = hash_section(data[:bounds["start_offset"]])
+    h2 = hash_section(data[bounds["central_dir_offset"]:bounds["eocd_offset"]])
+
+    eocd_copy = bytearray(data[bounds["eocd_offset"]:])
+    if len(eocd_copy) >= 20:
+        eocd_copy[16:20] = struct.pack("<I", bounds["start_offset"])
+    h3 = hash_section(bytes(eocd_copy))
+
+    all_chunks = h1 + h2 + h3
+    root_bytes = hashlib.sha256(
+        b"\x5a" + struct.pack("<I", len(all_chunks)) + b"".join(all_chunks)
+    ).digest()
+    return root_bytes.hex()
+
+
+def parse_resources_arsc_summary(data: bytes) -> dict | None:
+    """Extracts summary metrics from binary resources.arsc table."""
+    if len(data) < 12:
+        return None
+    chunk_type, header_size, chunk_size, pkg_count = struct.unpack("<HHII", data[:12])
+    if chunk_type != 0x0002:
+        return None
+
+    str_pool_count = 0
+    if header_size + 28 <= len(data):
+        sp_type, _, _, sp_count = struct.unpack("<HHII", data[header_size:header_size + 12])
+        if sp_type == 0x0001:
+            str_pool_count = sp_count
+
+    return {
+        "total_size": chunk_size,
+        "packages_count": pkg_count,
+        "string_pool_count": str_pool_count,
+    }
+
+
 def analyze_apk(apk_path: Path) -> dict:
     """Performs end-to-end inspection of an Android APK file."""
     if not apk_path.exists():
@@ -336,10 +456,44 @@ def analyze_apk(apk_path: Path) -> dict:
     manifest_bytes = extract_entry_payload(raw_data, entry_map["AndroidManifest.xml"])
     manifest = decode_axml_manifest(manifest_bytes)
 
-    dex_info = None
-    if "classes.dex" in entry_map:
-        dex_bytes = extract_entry_payload(raw_data, entry_map["classes.dex"])
-        dex_info = parse_dex_header(dex_bytes)
+    dex_entries = [e for e in container["entries"] if e["name"].startswith("classes") and e["name"].endswith(".dex")]
+    dex_entries.sort(key=lambda e: (len(e["name"]), e["name"]))
+
+    all_dex = []
+    for de in dex_entries:
+        dex_bytes = extract_entry_payload(raw_data, de)
+        d_info = parse_dex_header(dex_bytes)
+        d_info["name"] = de["name"]
+        all_dex.append(d_info)
+
+    dex_info = all_dex[0] if all_dex else None
+
+    # Inspect APK Signing Block
+    sig_block = None
+    sig_bounds = find_apk_signing_block(raw_data)
+    if sig_bounds:
+        pairs = parse_signing_block_pairs(raw_data, sig_bounds)
+        schemes = []
+        for p in pairs:
+            if p["id"] == APK_SIGNATURE_SCHEME_V2_BLOCK_ID:
+                schemes.append("v2")
+            elif p["id"] == APK_SIGNATURE_SCHEME_V3_BLOCK_ID:
+                schemes.append("v3")
+            elif p["id"] == APK_SIGNATURE_SCHEME_V4_BLOCK_ID:
+                schemes.append("v4")
+        merkle_root = compute_apk_content_merkle_digest(raw_data, sig_bounds)
+        sig_block = {
+            "bounds": sig_bounds,
+            "pairs_count": len(pairs),
+            "schemes": schemes,
+            "merkle_root_sha256": merkle_root,
+        }
+
+    # Inspect resources.arsc
+    arsc_summary = None
+    if "resources.arsc" in entry_map:
+        arsc_bytes = extract_entry_payload(raw_data, entry_map["resources.arsc"])
+        arsc_summary = parse_resources_arsc_summary(arsc_bytes)
 
     # In InterOS Core, third-party APK signatures fail closed unless signed by a trusted platform key
     is_signed = False
@@ -352,6 +506,9 @@ def analyze_apk(apk_path: Path) -> dict:
         "container": container,
         "manifest": manifest,
         "dex": dex_info,
+        "all_dex": all_dex,
+        "signing_block": sig_block,
+        "resources_arsc": arsc_summary,
         "audit": audit,
     }
 
@@ -389,8 +546,12 @@ def main():
     if len(report['manifest']['activities']) > 5:
         print(f"  ... (+{len(report['manifest']['activities']) - 5} more)")
 
-    print("\n--- 3. Dalvik Executable (classes.dex) ---")
-    if report["dex"]:
+    print("\n--- 3. Dalvik Executable (classes.dex / Multidex) ---")
+    if report["all_dex"]:
+        print(f"DEX Payload Files:    {len(report['all_dex'])}")
+        for idx, dex in enumerate(report["all_dex"]):
+            print(f"  [{idx}] {dex['name']}: {dex['classes_count']} classes, {dex['methods_count']} methods (Adler-32: {dex['checksum']}, Verified: {dex['adler32_verified']})")
+    elif report["dex"]:
         dex = report["dex"]
         print(f"DEX Format Magic:     {repr(dex['magic'])}")
         print(f"Adler-32 Integrity:   {dex['checksum']} (Verified: {dex['adler32_verified']})")
@@ -401,7 +562,26 @@ def main():
     else:
         print("classes.dex:          NOT PRESENT")
 
-    print("\n--- 4. Zero-Trust Security & Attestation Audit ---")
+    print("\n--- 4. APK Signing Block & Cryptographic Merkle Root ---")
+    if report["signing_block"]:
+        sb = report["signing_block"]
+        print(f"Signing Block:        PRESENT ({sb['bounds']['size']} bytes at offset {sb['bounds']['start_offset']})")
+        print(f"Schemes Detected:     {', '.join(sb['schemes']) if sb['schemes'] else 'None'}")
+        print(f"ID-Value Pairs:       {sb['pairs_count']}")
+        print(f"AOSP Merkle Digest:   {sb['merkle_root_sha256']}")
+    else:
+        print("Signing Block:        NOT PRESENT")
+
+    print("\n--- 5. Compiled Resources Table (resources.arsc) ---")
+    if report["resources_arsc"]:
+        arsc = report["resources_arsc"]
+        print(f"Resource Table:       PRESENT ({arsc['total_size']} bytes)")
+        print(f"Resource Packages:    {arsc['packages_count']}")
+        print(f"Global Strings:       {arsc['string_pool_count']}")
+    else:
+        print("Resource Table:       NOT PRESENT")
+
+    print("\n--- 6. Zero-Trust Security & Attestation Audit ---")
     audit = report["audit"]
     print(f"ACR Audit Decision:   {audit['status']}")
     print(f"Audit Rationale:      {audit['reason']}")
@@ -409,7 +589,7 @@ def main():
     for perm, cap in audit["granted_capabilities"]:
         print(f"  - {perm} -> {cap}")
 
-    print("\n--- 5. Platform Truth & Execution Boundary ---")
+    print("\n--- 7. Platform Truth & Execution Boundary ---")
     if audit["status"] == "AttestationFailed":
         print("[FAIL-CLOSED INVARIANT]")
         print("  Under the InterOS Platform Truth Contract, third-party APKs from the public web")
@@ -423,6 +603,7 @@ def main():
         print("  ambient authority, mediated microG Binder services, and VFS sandbox isolation.")
 
     print("\nInspection complete: PASS")
+
 
 
 if __name__ == "__main__":

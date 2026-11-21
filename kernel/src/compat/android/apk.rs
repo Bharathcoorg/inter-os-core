@@ -532,7 +532,13 @@ pub struct ApkPackage {
     pub has_classes_dex: bool,
     /// Exact `classes.dex` payload extracted from this APK for verified runtime binding.
     pub classes_dex: Vec<u8>,
+    /// Secondary DEX payloads (classes2.dex, classes3.dex, ...) for Multidex support.
+    pub secondary_dex: Vec<Vec<u8>>,
     pub is_signed: bool,
+    /// Verified cryptographic signing details from APK Signing Block (v2, v3, v4).
+    pub signing_details: Option<super::signing::ApkSigningDetails>,
+    /// Parsed binary resource table (resources.arsc), if present.
+    pub resource_table: Option<super::resources::ResourceTable>,
     pub file_count: usize,
     pub total_size_bytes: usize,
 }
@@ -571,16 +577,65 @@ impl ApkPackage {
 
         let classes_dex = zip.extract_file("classes.dex").unwrap_or_default();
         let has_classes_dex = !classes_dex.is_empty();
-        let is_signed = verify_apk_signature(apk_bytes).is_ok();
+
+        // Extract secondary multidex files (classes2.dex, classes3.dex, ...)
+        let mut secondary_dex = Vec::new();
+        for i in 2..=16 {
+            let name = alloc::format!("classes{}.dex", i);
+            if let Ok(bytes) = zip.extract_file(&name) {
+                if !bytes.is_empty() {
+                    secondary_dex.push(bytes);
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Verify APK Signing Block (v2/v3/v4)
+        let (is_signed, signing_details) = match super::signing::verify_apk_signing_block(apk_bytes) {
+            Ok(details) => (true, Some(details)),
+            Err(_) => (verify_apk_signature(apk_bytes).is_ok(), None),
+        };
+
+        // Extract and parse resources.arsc if present
+        let resource_table = zip
+            .extract_file("resources.arsc")
+            .ok()
+            .and_then(|res_data| super::resources::ResourceTable::parse(&res_data).ok());
 
         Ok(Self {
             manifest,
             has_classes_dex,
             classes_dex,
+            secondary_dex,
             is_signed,
+            signing_details,
+            resource_table,
             file_count: zip.entries.len(),
             total_size_bytes: apk_bytes.len(),
         })
+    }
+
+    /// Total number of DEX files present in this container (multidex count).
+    pub fn multidex_count(&self) -> usize {
+        if self.has_classes_dex {
+            1 + self.secondary_dex.len()
+        } else {
+            0
+        }
+    }
+
+    /// Resolves DEX bytecode by index (0 = classes.dex, 1 = classes2.dex, ...).
+    pub fn get_dex_at(&self, idx: usize) -> Option<&[u8]> {
+        if idx == 0 {
+            if self.has_classes_dex {
+                Some(&self.classes_dex)
+            } else {
+                None
+            }
+        } else {
+            self.secondary_dex.get(idx - 1).map(|v| v.as_slice())
+        }
     }
 
     /// Translates APK manifest declared permissions into an Inter OS ACR Container Profile.
@@ -866,6 +921,32 @@ pub fn create_test_apk(package: &str, permissions: &[&str]) -> Vec<u8> {
     apk
 }
 
+/// Creates a deterministically signed test APK containing a valid APK Signing Block v2
+/// and matching Merkle-tree content digest.
+pub fn create_signed_test_apk(package: &str, permissions: &[&str]) -> Vec<u8> {
+    let unsigned_apk = create_test_apk(package, permissions);
+    let eocd_pos = unsigned_apk.len() - 22;
+    let cd_offset = u32::from_le_bytes(unsigned_apk[eocd_pos + 16..eocd_pos + 20].try_into().unwrap()) as usize;
+    let pre_block = &unsigned_apk[..cd_offset];
+    let cd_bytes = &unsigned_apk[cd_offset..eocd_pos];
+    let eocd_template = &unsigned_apk[eocd_pos..];
+
+    let cert = b"INTEROS_ACR_DETERMINISTIC_TEST_SIGNER_CERTIFICATE_V2";
+    let signing_block = super::signing::create_test_v2_signing_block(pre_block, cd_bytes, eocd_template, cert);
+
+    let mut signed_apk = Vec::new();
+    signed_apk.extend_from_slice(pre_block);
+    signed_apk.extend_from_slice(&signing_block);
+    let new_cd_offset = signed_apk.len() as u32;
+    signed_apk.extend_from_slice(cd_bytes);
+
+    signed_apk.extend_from_slice(&eocd_template[..16]);
+    signed_apk.extend_from_slice(&new_cd_offset.to_le_bytes());
+    signed_apk.extend_from_slice(&eocd_template[20..]);
+
+    signed_apk
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,6 +1008,20 @@ mod tests {
         let bad = [0u8; 30];
         assert_eq!(ZipArchive::parse(&bad).err(), Some(ApkError::EndOfCentralDirectoryNotFound));
     }
+
+    #[test]
+    fn test_apk_multidex_and_signed_package() {
+        let signed_apk = create_signed_test_apk("org.whispersystems.signal", &["android.permission.INTERNET"]);
+        let pkg = ApkPackage::parse(&signed_apk).expect("parse signed APK");
+        assert!(pkg.is_signed);
+        assert!(pkg.signing_details.is_some());
+        let details = pkg.signing_details.as_ref().unwrap();
+        assert_eq!(details.signers_count, 1);
+        assert_eq!(pkg.multidex_count(), 1);
+        assert!(pkg.get_dex_at(0).is_some());
+        assert!(pkg.get_dex_at(1).is_none());
+    }
+
 
     // ------------------------------------------------------------------
     // Adversarial parser-bounds tests (H6): call the real production

@@ -28,6 +28,13 @@ use super::dex::{
     OP_INT_TO_FLOAT, OP_FLOAT_TO_INT, OP_INT_TO_BYTE, OP_INT_TO_CHAR, OP_INT_TO_SHORT,
     OP_ADD_INT, OP_SUB_INT, OP_MUL_INT, OP_DIV_INT, OP_REM_INT,
     OP_AND_INT, OP_OR_INT, OP_XOR_INT, OP_SHL_INT, OP_SHR_INT, OP_USHR_INT,
+    OP_MOVE_FROM16, OP_MOVE_16, OP_MOVE_WIDE, OP_MOVE_OBJECT, OP_MOVE_RESULT_WIDE, OP_MOVE_RESULT_OBJECT,
+    OP_MONITOR_ENTER, OP_MONITOR_EXIT, OP_CHECK_CAST, OP_INSTANCE_OF, OP_FILL_ARRAY_DATA, OP_THROW,
+    OP_PACKED_SWITCH, OP_SPARSE_SWITCH, OP_NEG_INT, OP_NOT_INT, OP_NEG_FLOAT,
+    OP_ADD_INT_LIT16, OP_RSUB_INT, OP_MUL_INT_LIT16, OP_DIV_INT_LIT16, OP_REM_INT_LIT16,
+    OP_AND_INT_LIT16, OP_OR_INT_LIT16, OP_XOR_INT_LIT16,
+    OP_ADD_INT_LIT8, OP_RSUB_INT_LIT8, OP_MUL_INT_LIT8, OP_DIV_INT_LIT8, OP_REM_INT_LIT8,
+    OP_AND_INT_LIT8, OP_OR_INT_LIT8, OP_XOR_INT_LIT8, OP_SHL_INT_LIT8, OP_SHR_INT_LIT8, OP_USHR_INT_LIT8,
 };
 
 /// Errors encountered during Dalvik bytecode execution.
@@ -44,6 +51,7 @@ pub enum DalvikVmError {
     DivideByZero,
     ArrayIndexOutOfBounds,
     NullPointerDereference,
+    UnhandledException(u32),
 }
 
 /// Decodes Dalvik format 35c's C/D/E/F/G register list and validates the count.
@@ -114,6 +122,8 @@ pub struct DalvikVmState {
     pub instructions_executed: u64,
     /// Last value returned by a return opcode or method invocation.
     pub last_return_value: u32,
+    /// High 32 bits for wide 64-bit returns.
+    pub last_return_wide_hi: u32,
     /// Shadow return string for methods returning String objects.
     pub last_return_string: Option<String>,
     /// Intercepted Android framework logging calls.
@@ -123,6 +133,9 @@ pub struct DalvikVmState {
     objects: Vec<DalvikObject>,
     next_object_id: u32,
     static_fields: Vec<(u16, u32)>,
+    pub gc_cycles: u64,
+    pub gc_reclaimed_objects: usize,
+    pub gc_total_pause_ticks: u64,
 }
 
 impl DalvikVmState {
@@ -134,13 +147,55 @@ impl DalvikVmState {
             string_registers: [INIT_STR; 32],
             instructions_executed: 0,
             last_return_value: 0,
+            last_return_wide_hi: 0,
             last_return_string: None,
             captured_logs: Vec::new(),
             call_depth: 0,
             objects: Vec::new(),
             next_object_id: 1,
             static_fields: Vec::new(),
+            gc_cycles: 0,
+            gc_reclaimed_objects: 0,
+            gc_total_pause_ticks: 0,
         }
+    }
+
+    /// Mark-and-sweep garbage collection over the managed Dalvik object heap.
+    /// Traces roots from active registers (v0..v31) and static fields.
+    pub fn gc_mark_and_sweep(&mut self) -> (usize, u64) {
+        let mut marked = alloc::collections::BTreeSet::new();
+        // Roots from registers
+        for reg in &self.registers {
+            if *reg > 0 && *reg < self.next_object_id {
+                marked.insert(*reg);
+            }
+        }
+        // Roots from static fields
+        for (_, val) in &self.static_fields {
+            if *val > 0 && *val < self.next_object_id {
+                marked.insert(*val);
+            }
+        }
+        // Traverse fields of marked objects
+        let mut queue: Vec<u32> = marked.iter().copied().collect();
+        while let Some(obj_id) = queue.pop() {
+            if let Some(obj) = self.objects.iter().find(|o| o.id == obj_id) {
+                for (_, f_val) in &obj.fields {
+                    if *f_val > 0 && *f_val < self.next_object_id && marked.insert(*f_val) {
+                        queue.push(*f_val);
+                    }
+                }
+            }
+        }
+
+        let initial_count = self.objects.len();
+        self.objects.retain(|o| marked.contains(&o.id));
+        let reclaimed = initial_count.saturating_sub(self.objects.len());
+        self.gc_cycles += 1;
+        self.gc_reclaimed_objects += reclaimed;
+        let pause_ticks = (reclaimed as u64) * 5 + 10;
+        self.gc_total_pause_ticks += pause_ticks;
+        (reclaimed, pause_ticks)
     }
 
     /// Reads a static field value, returning 0 if uninitialized.
@@ -1094,8 +1149,267 @@ impl DalvikVmState {
                     }
                     let ret_val = self.registers[v_src];
                     self.last_return_value = ret_val;
+                    if opcode == OP_RETURN_WIDE && v_src + 1 < 32 {
+                        self.last_return_wide_hi = self.registers[v_src + 1];
+                    } else {
+                        self.last_return_wide_hi = 0;
+                    }
                     self.last_return_string = self.string_registers[v_src].clone();
                     return Ok(ret_val);
+                }
+                OP_MOVE_FROM16 => {
+                    if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_src = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
+                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    self.registers[v_dest] = self.registers[v_src];
+                    self.string_registers[v_dest] = self.string_registers[v_src].clone();
+                    pc += 4;
+                }
+                OP_MOVE_16 => {
+                    if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
+                    let v_src = u16::from_le_bytes([insns[pc + 4], insns[pc + 5]]) as usize;
+                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    self.registers[v_dest] = self.registers[v_src];
+                    self.string_registers[v_dest] = self.string_registers[v_src].clone();
+                    pc += 6;
+                }
+                OP_MOVE_WIDE => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest + 1 >= 32 || v_src + 1 >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    self.registers[v_dest] = self.registers[v_src];
+                    self.registers[v_dest + 1] = self.registers[v_src + 1];
+                    self.string_registers[v_dest] = None;
+                    self.string_registers[v_dest + 1] = None;
+                    pc += 2;
+                }
+                OP_MOVE_OBJECT => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    self.registers[v_dest] = self.registers[v_src];
+                    self.string_registers[v_dest] = self.string_registers[v_src].clone();
+                    pc += 2;
+                }
+                OP_MOVE_RESULT_WIDE => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = insns[pc + 1] as usize;
+                    if v_dest + 1 >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    self.registers[v_dest] = self.last_return_value;
+                    self.registers[v_dest + 1] = self.last_return_wide_hi;
+                    self.string_registers[v_dest] = None;
+                    self.string_registers[v_dest + 1] = None;
+                    pc += 2;
+                }
+                OP_MOVE_RESULT_OBJECT => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = insns[pc + 1] as usize;
+                    if v_dest >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    self.registers[v_dest] = self.last_return_value;
+                    self.string_registers[v_dest] = self.last_return_string.clone();
+                    pc += 2;
+                }
+                OP_MONITOR_ENTER | OP_MONITOR_EXIT => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_src = insns[pc + 1] as usize;
+                    if v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    pc += 2;
+                }
+                OP_CHECK_CAST => {
+                    if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = insns[pc + 1] as usize;
+                    if v_dest >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    pc += 4;
+                }
+                OP_INSTANCE_OF => {
+                    if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let obj_id = self.registers[v_src];
+                    self.registers[v_dest] = if obj_id > 0 { 1 } else { 0 };
+                    self.string_registers[v_dest] = None;
+                    pc += 4;
+                }
+                OP_FILL_ARRAY_DATA => {
+                    if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_arr = insns[pc + 1] as usize;
+                    if v_arr >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let offset = (i32::from_le_bytes([insns[pc + 2], insns[pc + 3], insns[pc + 4], insns[pc + 5]]) as isize) * 2;
+                    let payload_pos = pc as isize + offset;
+                    if payload_pos >= 0 && (payload_pos as usize + 8) <= insns.len() {
+                        let p = payload_pos as usize;
+                        let elem_width = u16::from_le_bytes([insns[p + 2], insns[p + 3]]) as usize;
+                        let size = u32::from_le_bytes([insns[p + 4], insns[p + 5], insns[p + 6], insns[p + 7]]) as usize;
+                        let total_bytes = elem_width.saturating_mul(size);
+                        if p + 8 + total_bytes <= insns.len() {
+                            let arr_id = self.registers[v_arr];
+                            if let Ok(obj) = self.get_object_mut(arr_id) {
+                                if let Some(elements) = obj.array_elements.as_mut() {
+                                    for i in 0..size.min(elements.len()) {
+                                        let ep = p + 8 + i * elem_width;
+                                        elements[i] = match elem_width {
+                                            1 => insns[ep] as u32,
+                                            2 => u16::from_le_bytes([insns[ep], insns[ep + 1]]) as u32,
+                                            4 => u32::from_le_bytes([insns[ep], insns[ep + 1], insns[ep + 2], insns[ep + 3]]),
+                                            _ => 0,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    pc += 6;
+                }
+                OP_THROW => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_ex = insns[pc + 1] as usize;
+                    if v_ex >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let ex_id = self.registers[v_ex];
+                    if ex_id == 0 { return Err(DalvikVmError::NullPointerDereference); }
+                    return Err(DalvikVmError::UnhandledException(ex_id));
+                }
+                OP_PACKED_SWITCH => {
+                    if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_src = insns[pc + 1] as usize;
+                    if v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let test_val = self.registers[v_src] as i32;
+                    let offset = (i32::from_le_bytes([insns[pc + 2], insns[pc + 3], insns[pc + 4], insns[pc + 5]]) as isize) * 2;
+                    let payload_pos = pc as isize + offset;
+                    let mut matched = false;
+                    if payload_pos >= 0 && (payload_pos as usize + 8) <= insns.len() {
+                        let p = payload_pos as usize;
+                        let size = u16::from_le_bytes([insns[p + 2], insns[p + 3]]) as usize;
+                        let first_key = i32::from_le_bytes([insns[p + 4], insns[p + 5], insns[p + 6], insns[p + 7]]);
+                        if test_val >= first_key && (test_val as isize) < (first_key as isize + size as isize) {
+                            let idx = (test_val - first_key) as usize;
+                            let target_off_pos = p + 8 + idx * 4;
+                            if target_off_pos + 4 <= insns.len() {
+                                let target_offset = (i32::from_le_bytes([insns[target_off_pos], insns[target_off_pos + 1], insns[target_off_pos + 2], insns[target_off_pos + 3]]) as isize) * 2;
+                                let target_pc = pc as isize + target_offset;
+                                if target_pc >= 0 && (target_pc as usize) < insns.len() {
+                                    pc = target_pc as usize;
+                                    matched = true;
+                                }
+                            }
+                        }
+                    }
+                    if !matched { pc += 6; }
+                }
+                OP_SPARSE_SWITCH => {
+                    if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_src = insns[pc + 1] as usize;
+                    if v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let test_val = self.registers[v_src] as i32;
+                    let offset = (i32::from_le_bytes([insns[pc + 2], insns[pc + 3], insns[pc + 4], insns[pc + 5]]) as isize) * 2;
+                    let payload_pos = pc as isize + offset;
+                    let mut matched = false;
+                    if payload_pos >= 0 && (payload_pos as usize + 4) <= insns.len() {
+                        let p = payload_pos as usize;
+                        let size = u16::from_le_bytes([insns[p + 2], insns[p + 3]]) as usize;
+                        let keys_start = p + 4;
+                        let targets_start = keys_start + size * 4;
+                        if targets_start + size * 4 <= insns.len() {
+                            for i in 0..size {
+                                let kp = keys_start + i * 4;
+                                let key = i32::from_le_bytes([insns[kp], insns[kp + 1], insns[kp + 2], insns[kp + 3]]);
+                                if key == test_val {
+                                    let tp = targets_start + i * 4;
+                                    let target_offset = (i32::from_le_bytes([insns[tp], insns[tp + 1], insns[tp + 2], insns[tp + 3]]) as isize) * 2;
+                                    let target_pc = pc as isize + target_offset;
+                                    if target_pc >= 0 && (target_pc as usize) < insns.len() {
+                                        pc = target_pc as usize;
+                                        matched = true;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if !matched { pc += 6; }
+                }
+                OP_NEG_INT | OP_NOT_INT | OP_NEG_FLOAT => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let val = self.registers[v_src];
+                    self.registers[v_dest] = match opcode {
+                        OP_NEG_INT => (-(val as i32)) as u32,
+                        OP_NOT_INT => !val,
+                        OP_NEG_FLOAT => {
+                            let f = f32::from_bits(val);
+                            (-f).to_bits()
+                        }
+                        _ => 0,
+                    };
+                    self.string_registers[v_dest] = None;
+                    pc += 2;
+                }
+                OP_ADD_INT_LIT8 | OP_RSUB_INT_LIT8 | OP_MUL_INT_LIT8 | OP_DIV_INT_LIT8 | OP_REM_INT_LIT8
+                | OP_AND_INT_LIT8 | OP_OR_INT_LIT8 | OP_XOR_INT_LIT8 | OP_SHL_INT_LIT8 | OP_SHR_INT_LIT8 | OP_USHR_INT_LIT8 => {
+                    if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_src = insns[pc + 2] as usize;
+                    let lit8 = insns[pc + 3] as i8 as i32;
+                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let src_val = self.registers[v_src] as i32;
+                    let res: u32 = match opcode {
+                        OP_ADD_INT_LIT8 => src_val.wrapping_add(lit8) as u32,
+                        OP_RSUB_INT_LIT8 => lit8.wrapping_sub(src_val) as u32,
+                        OP_MUL_INT_LIT8 => src_val.wrapping_mul(lit8) as u32,
+                        OP_DIV_INT_LIT8 => {
+                            if lit8 == 0 { return Err(DalvikVmError::DivideByZero); }
+                            src_val.wrapping_div(lit8) as u32
+                        }
+                        OP_REM_INT_LIT8 => {
+                            if lit8 == 0 { return Err(DalvikVmError::DivideByZero); }
+                            src_val.wrapping_rem(lit8) as u32
+                        }
+                        OP_AND_INT_LIT8 => (src_val & lit8) as u32,
+                        OP_OR_INT_LIT8 => (src_val | lit8) as u32,
+                        OP_XOR_INT_LIT8 => (src_val ^ lit8) as u32,
+                        OP_SHL_INT_LIT8 => (src_val.wrapping_shl((lit8 & 0x1F) as u32)) as u32,
+                        OP_SHR_INT_LIT8 => (src_val.wrapping_shr((lit8 & 0x1F) as u32)) as u32,
+                        OP_USHR_INT_LIT8 => (src_val as u32).wrapping_shr((lit8 & 0x1F) as u32),
+                        _ => 0,
+                    };
+                    self.registers[v_dest] = res;
+                    self.string_registers[v_dest] = None;
+                    pc += 4;
+                }
+                OP_ADD_INT_LIT16 | OP_RSUB_INT | OP_MUL_INT_LIT16 | OP_DIV_INT_LIT16 | OP_REM_INT_LIT16
+                | OP_AND_INT_LIT16 | OP_OR_INT_LIT16 | OP_XOR_INT_LIT16 => {
+                    if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    let lit16 = (i16::from_le_bytes([insns[pc + 2], insns[pc + 3]])) as i32;
+                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let src_val = self.registers[v_src] as i32;
+                    let res: u32 = match opcode {
+                        OP_ADD_INT_LIT16 => src_val.wrapping_add(lit16) as u32,
+                        OP_RSUB_INT => lit16.wrapping_sub(src_val) as u32,
+                        OP_MUL_INT_LIT16 => src_val.wrapping_mul(lit16) as u32,
+                        OP_DIV_INT_LIT16 => {
+                            if lit16 == 0 { return Err(DalvikVmError::DivideByZero); }
+                            src_val.wrapping_div(lit16) as u32
+                        }
+                        OP_REM_INT_LIT16 => {
+                            if lit16 == 0 { return Err(DalvikVmError::DivideByZero); }
+                            src_val.wrapping_rem(lit16) as u32
+                        }
+                        OP_AND_INT_LIT16 => (src_val & lit16) as u32,
+                        OP_OR_INT_LIT16 => (src_val | lit16) as u32,
+                        OP_XOR_INT_LIT16 => (src_val ^ lit16) as u32,
+                        _ => 0,
+                    };
+                    self.registers[v_dest] = res;
+                    self.string_registers[v_dest] = None;
+                    pc += 4;
                 }
                 unknown_op => {
                     return Err(DalvikVmError::IllegalInstruction(unknown_op));
@@ -1498,5 +1812,46 @@ mod tests {
         let cmp_res2 = vm.interpret_insns(&dex, 3, &insns).unwrap();
         assert_eq!(cmp_res2 as i32, 1);
     }
+
+    #[test]
+    fn test_dalvik_literals_and_moves() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        vm.registers[1] = 10;
+        let insns = [OP_ADD_INT_LIT8, 0x00, 0x01, 0x05, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 2, &insns).unwrap(), 15);
+
+        let insns = [OP_RSUB_INT_LIT8, 0x00, 0x01, 0x32, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 2, &insns).unwrap(), 40);
+
+        let insns = [OP_MUL_INT_LIT16, 0x10, 0x64, 0x00, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 2, &insns).unwrap(), 1000);
+
+        vm.registers[1] = 999;
+        let insns = [OP_MOVE_FROM16, 0x00, 0x01, 0x00, OP_RETURN, 0x00];
+        assert_eq!(vm.interpret_insns(&dex, 2, &insns).unwrap(), 999);
+    }
+
+    #[test]
+    fn test_dalvik_gc_mark_and_sweep() {
+        let mut vm = DalvikVmState::new();
+        let obj1 = vm.allocate_object("Ljava/lang/Object;").expect("alloc 1");
+        let obj2 = vm.allocate_object("Ljava/lang/Object;").expect("alloc 2");
+        let _obj3 = vm.allocate_object("Ljava/lang/Object;").expect("alloc 3");
+        assert_eq!(vm.objects.len(), 3);
+
+        vm.registers[0] = obj1;
+        let _ = vm.set_static_field(10, obj2);
+
+        let (reclaimed, pause_ticks) = vm.gc_mark_and_sweep();
+        assert_eq!(reclaimed, 1);
+        assert!(pause_ticks > 0);
+        assert_eq!(vm.objects.len(), 2);
+        assert_eq!(vm.gc_cycles, 1);
+        assert_eq!(vm.gc_reclaimed_objects, 1);
+    }
 }
+
 

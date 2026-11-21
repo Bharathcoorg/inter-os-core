@@ -115,6 +115,48 @@ pub const OP_SHL_INT: u8 = 0x98;
 pub const OP_SHR_INT: u8 = 0x99;
 pub const OP_USHR_INT: u8 = 0x9A;
 
+pub const OP_MOVE_FROM16: u8 = 0x02;
+pub const OP_MOVE_16: u8 = 0x03;
+pub const OP_MOVE_WIDE: u8 = 0x04;
+pub const OP_MOVE_OBJECT: u8 = 0x07;
+pub const OP_MOVE_RESULT_WIDE: u8 = 0x0B;
+pub const OP_MOVE_RESULT_OBJECT: u8 = 0x0C;
+
+pub const OP_MONITOR_ENTER: u8 = 0x1D;
+pub const OP_MONITOR_EXIT: u8 = 0x1E;
+pub const OP_CHECK_CAST: u8 = 0x1F;
+pub const OP_INSTANCE_OF: u8 = 0x20;
+pub const OP_FILL_ARRAY_DATA: u8 = 0x26;
+pub const OP_THROW: u8 = 0x27;
+
+pub const OP_PACKED_SWITCH: u8 = 0x2B;
+pub const OP_SPARSE_SWITCH: u8 = 0x2C;
+
+pub const OP_NEG_INT: u8 = 0x7B;
+pub const OP_NOT_INT: u8 = 0x7C;
+pub const OP_NEG_FLOAT: u8 = 0x7D;
+
+pub const OP_ADD_INT_LIT16: u8 = 0xD0;
+pub const OP_RSUB_INT: u8 = 0xD1;
+pub const OP_MUL_INT_LIT16: u8 = 0xD2;
+pub const OP_DIV_INT_LIT16: u8 = 0xD3;
+pub const OP_REM_INT_LIT16: u8 = 0xD4;
+pub const OP_AND_INT_LIT16: u8 = 0xD5;
+pub const OP_OR_INT_LIT16: u8 = 0xD6;
+pub const OP_XOR_INT_LIT16: u8 = 0xD7;
+
+pub const OP_ADD_INT_LIT8: u8 = 0xD8;
+pub const OP_RSUB_INT_LIT8: u8 = 0xD9;
+pub const OP_MUL_INT_LIT8: u8 = 0xDA;
+pub const OP_DIV_INT_LIT8: u8 = 0xDB;
+pub const OP_REM_INT_LIT8: u8 = 0xDC;
+pub const OP_AND_INT_LIT8: u8 = 0xDD;
+pub const OP_OR_INT_LIT8: u8 = 0xDE;
+pub const OP_XOR_INT_LIT8: u8 = 0xDF;
+pub const OP_SHL_INT_LIT8: u8 = 0xE0;
+pub const OP_SHR_INT_LIT8: u8 = 0xE1;
+pub const OP_USHR_INT_LIT8: u8 = 0xE2;
+
 /// Raw DEX File Header (112 bytes).
 #[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]

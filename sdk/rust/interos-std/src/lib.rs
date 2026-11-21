@@ -30,6 +30,7 @@ pub mod webview;
 pub mod crypto;
 pub mod keystore;
 pub mod tls;
+pub mod android;
 
 // WHY std under test only: the guest build of this crate is `#![no_std]` and must
 // stay that way, but the unit tests want `Vec` and the other collections to

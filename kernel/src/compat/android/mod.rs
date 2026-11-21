@@ -10,22 +10,36 @@
 pub use interos_android_shared;
 pub mod apk;
 pub mod binder;
+pub mod bionic;
 pub mod bridge;
 pub mod dex;
 pub mod draw;
 pub mod framework;
 pub mod inflate;
+pub mod jni;
+pub mod looper;
 pub mod manifest;
+pub mod resources;
 pub mod runtime;
+pub mod signing;
 pub mod vfs;
+pub mod view;
 pub mod window;
+pub mod xml;
 
-pub use apk::{AcrAuditStatus, AcrContainerProfile, ApkError, ApkPackage, create_test_apk};
+pub use apk::{AcrAuditStatus, AcrContainerProfile, ApkError, ApkPackage, create_signed_test_apk, create_test_apk};
+pub use bionic::{BionicMediator, ElfError, LoadedElf, MemoryProtection};
 pub use bridge::{AndroidBridgeError, AndroidIntent, AndroidIntentBridge, SovereignIntent};
 pub use dex::{DexError, DexMethod, DexPackage, compute_adler32, create_test_dex};
 pub use draw::{DrawError, DrawList, DrawOp, render_draw_list, MAX_DRAW_OPS_PER_LIST, MAX_FRAME_AREA_PIXELS};
 pub use framework::{ActivityLifecycleState, AndroidFrameworkError, AndroidFrameworkResult, AndroidFrameworkService, LIFECYCLE_MANAGER};
+pub use jni::{JNINativeMethod, JavaVM, JniEnv};
+pub use looper::{ActivityRecord, Choreographer, Looper, Message, MessageQueue, TaskRecord};
+pub use resources::{ResourceError, ResourceTable, ResourceValue};
 pub use runtime::{DalvikVmError, DalvikVmState};
+pub use signing::{ApkSignatureScheme, ApkSigningDetails, verify_apk_signing_block};
+pub use view::{LayoutDimension, MeasureMode, MeasureSpec, MotionAction, MotionEvent, View, ViewGroupKind, ViewType, ViewVisibility};
+pub use xml::{AxmlDocument, AxmlElement, AxmlError};
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -338,6 +352,16 @@ pub fn init() {
         "[TEST] Android Dalvik Runtime VM: Executed 'Lorg/whispersystems/signal/MainActivity;->onCreate()', {} opcodes, register v0 bound (VERIFIED).",
         vm.instructions_executed
     );
+
+    // 12. Test Cryptographically Verified APK Signing Block (Scheme v2)
+    let signed_apk_data = create_signed_test_apk("org.whispersystems.signal", &["android.permission.INTERNET"]);
+    let parsed_signed_apk = ApkPackage::parse(&signed_apk_data).expect("Signed APK parsing must succeed");
+    assert!(parsed_signed_apk.is_signed, "Signed fixture must verify cryptographic signature");
+    assert!(parsed_signed_apk.signing_details.is_some(), "Must have signing details");
+    let signed_profile = parsed_signed_apk.audit_and_create_container(900);
+    assert_eq!(signed_profile.status, AcrAuditStatus::Approved, "Verified signed APK must be approved");
+    assert_eq!(signed_profile.granted_caps_count, 1);
+    serial_println!("[TEST] Android APK Signature Scheme v2: Cryptographic Merkle digest verified, signature APPROVED.");
 
     serial_println!("--- [Android isolation primitives verified; full Android framework/runtime compatibility is not yet implemented] ---\n");
 }
