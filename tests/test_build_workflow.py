@@ -107,13 +107,13 @@ Set-Location '{ROOT_DIR}'
 
         embedded = set(re.findall(
             r'include_bytes!\(concat!\(env!\("CARGO_MANIFEST_DIR"\), '
-            r'"/\.\./target/x86_64-unknown-none/debug/([a-z0-9_]+)"\)\)',
+            r'"/\.\./target/x86_64-unknown-none/debug/([a-z0-9_-]+)"\)\)',
             images_source,
         ))
         declaration = build_source[
             build_source.index("EMBEDDED_USER_IMAGES"):build_source.index("fn main")
         ]
-        declared = set(re.findall(r'"([a-z0-9_]+)"', declaration))
+        declared = set(re.findall(r'"([a-z0-9_-]+)"', declaration))
 
         self.assertTrue(embedded, "no embedded user image was found to check")
         self.assertEqual(

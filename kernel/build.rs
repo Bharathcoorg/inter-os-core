@@ -51,6 +51,8 @@ const EMBEDDED_USER_IMAGES: &[&str] = &[
     "aid",
     "searchd",
     "agentd",
+    "acrd",
+    "acr-app-runtime",
 ];
 
 fn main() {
