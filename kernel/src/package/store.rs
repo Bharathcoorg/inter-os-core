@@ -11,16 +11,28 @@ const MAX_BLOBS:usize=32;
 pub const MAX_BLOB_SIZE:usize=60000;
 
 #[derive(Clone)]
-pub struct PackageBlob { pub package_id:String, pub version:(u16,u16,u16), pub bytes:Vec<u8> }
+pub struct PackageBlob { pub package_id:String, pub version:(u16,u16,u16), pub code_digest:[u8; 32], pub bytes:Vec<u8> }
 
 pub struct PackageBlobStore { blobs:Vec<PackageBlob> }
 impl PackageBlobStore {
  pub const fn new()->Self{Self{blobs:Vec::new()}}
  pub fn put(&mut self,package_id:&str,version:(u16,u16,u16),bytes:&[u8])->Result<(),()>{
   if bytes.is_empty()||bytes.len()>MAX_BLOB_SIZE{return Err(());}
+  let code_digest = crate::crypto::Sha256::digest(bytes);
   let previous=self.blobs.clone();
-  if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){b.version=version;b.bytes.clear();b.bytes.extend_from_slice(bytes);}
-  else {if self.blobs.len()>=MAX_BLOBS{return Err(());}self.blobs.push(PackageBlob{package_id:package_id.to_string(),version,bytes:bytes.to_vec()});}
+  if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){b.version=version;b.code_digest=code_digest;b.bytes.clear();b.bytes.extend_from_slice(bytes);}
+  else {if self.blobs.len()>=MAX_BLOBS{return Err(());}self.blobs.push(PackageBlob{package_id:package_id.to_string(),version,code_digest,bytes:bytes.to_vec()});}
+  if self.persist().is_err() {
+   self.blobs=previous;
+   return Err(());
+  }
+  Ok(())
+ }
+ pub fn put_verified(&mut self,package_id:&str,version:(u16,u16,u16),code_digest:[u8;32],bytes:&[u8])->Result<(),()>{
+  if bytes.is_empty()||bytes.len()>MAX_BLOB_SIZE{return Err(());}
+  let previous=self.blobs.clone();
+  if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){b.version=version;b.code_digest=code_digest;b.bytes.clear();b.bytes.extend_from_slice(bytes);}
+  else {if self.blobs.len()>=MAX_BLOBS{return Err(());}self.blobs.push(PackageBlob{package_id:package_id.to_string(),version,code_digest,bytes:bytes.to_vec()});}
   if self.persist().is_err() {
    self.blobs=previous;
    return Err(());
@@ -29,13 +41,15 @@ impl PackageBlobStore {
  }
  pub fn put_runtime(&mut self,package_id:&str,version:(u16,u16,u16),bytes:&[u8])->Result<(),()>{
   if bytes.is_empty(){return Err(());}
+  let code_digest = crate::crypto::Sha256::digest(bytes);
   if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){
    b.version=version;
+   b.code_digest=code_digest;
    b.bytes.clear();
    b.bytes.extend_from_slice(bytes);
   } else {
    if self.blobs.len()>=MAX_BLOBS{return Err(());}
-   self.blobs.push(PackageBlob{package_id:package_id.to_string(),version,bytes:bytes.to_vec()});
+   self.blobs.push(PackageBlob{package_id:package_id.to_string(),version,code_digest,bytes:bytes.to_vec()});
   }
   if bytes.len()<=MAX_BLOB_SIZE {
    let _ = self.persist();
@@ -46,6 +60,7 @@ impl PackageBlobStore {
   if chunk.is_empty(){return Err(());}
   if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){
    b.bytes.extend_from_slice(chunk);
+   b.code_digest = crate::crypto::Sha256::digest(&b.bytes);
    if b.bytes.len()<=MAX_BLOB_SIZE {
     let _ = self.persist();
    }
@@ -72,10 +87,12 @@ impl PackageBlobStore {
 
  #[cfg(test)]
  pub fn insert_for_test(&mut self, package_id: &str, version: (u16, u16, u16), bytes: &[u8]) {
+     let code_digest = crate::crypto::Sha256::digest(bytes);
      self.blobs.retain(|b| b.package_id != package_id);
      self.blobs.push(PackageBlob {
          package_id: package_id.to_string(),
          version,
+         code_digest,
          bytes: bytes.to_vec(),
      });
  }
@@ -114,7 +131,9 @@ impl PackageBlobStore {
    let dl=u32::from_le_bytes([b[p],b[p+1],b[p+2],b[p+3]]) as usize; p+=4;
    if dl==0 || dl>MAX_BLOB_SIZE || p.checked_add(dl).map(|end|end>len).unwrap_or(true) { return; }
 
-   restored.push(PackageBlob{package_id:id.to_string(),version:v,bytes:b[p..p+dl].to_vec()});
+   let blob_bytes = b[p..p+dl].to_vec();
+   let code_digest = crate::crypto::Sha256::digest(&blob_bytes);
+   restored.push(PackageBlob{package_id:id.to_string(),version:v,code_digest,bytes:blob_bytes});
    p+=dl;
   }
 
@@ -123,3 +142,145 @@ impl PackageBlobStore {
  }
 }
 pub static PACKAGE_BLOB_STORE:Mutex<PackageBlobStore>=Mutex::new(PackageBlobStore::new());
+
+/// Temporary staged candidate package artifact awaiting verification by ACR.
+#[derive(Clone)]
+pub struct CandidateArtifact {
+    pub handle: u32,
+    pub caller_task_id: u64,
+    pub package_name: String,
+    pub expected_len: usize,
+    pub bytes: Vec<u8>,
+}
+
+impl CandidateArtifact {
+    pub fn compute_digest(&self) -> [u8; 32] {
+        crate::crypto::Sha256::digest(&self.bytes)
+    }
+}
+
+/// Out-of-band store for unverified candidate package artifacts.
+pub struct CandidateArtifactStore {
+    candidates: Vec<CandidateArtifact>,
+    next_handle: u32,
+}
+
+impl CandidateArtifactStore {
+    pub const fn new() -> Self {
+        Self {
+            candidates: Vec::new(),
+            next_handle: 1,
+        }
+    }
+
+    /// Allocates an out-of-band candidate staging session.
+    pub fn allocate_session(&mut self, package_name: &str, expected_len: usize) -> Result<u32, ()> {
+        if self.candidates.len() >= 8 || expected_len == 0 || expected_len > MAX_BLOB_SIZE {
+            return Err(());
+        }
+        let h = self.next_handle;
+        self.next_handle = self.next_handle.wrapping_add(1).max(1);
+        self.candidates.push(CandidateArtifact {
+            handle: h,
+            caller_task_id: 0,
+            package_name: String::from(package_name),
+            expected_len,
+            bytes: Vec::new(),
+        });
+        Ok(h)
+    }
+
+    /// Appends a raw chunk to an existing candidate staging session.
+    pub fn append_chunk(&mut self, handle: u32, chunk: &[u8]) -> Result<(), ()> {
+        let candidate = self.candidates.iter_mut().find(|c| c.handle == handle).ok_or(())?;
+        if candidate.bytes.len().saturating_add(chunk.len()) > MAX_BLOB_SIZE {
+            return Err(());
+        }
+        candidate.bytes.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    /// Returns a reference to a candidate artifact session by handle.
+    pub fn get_candidate(&self, handle: u32) -> Option<&CandidateArtifact> {
+        self.candidates.iter().find(|c| c.handle == handle)
+    }
+
+    /// Appends or writes a chunk into candidate storage.
+    pub fn stage_chunk(
+        &mut self,
+        handle: u32,
+        caller_task_id: u64,
+        chunk: &[u8],
+        append: bool,
+    ) -> Result<u32, ()> {
+        if chunk.is_empty() {
+            return Err(());
+        }
+        if handle == 0 {
+            if self.candidates.len() >= 8 {
+                return Err(());
+            }
+            if chunk.len() > MAX_BLOB_SIZE {
+                return Err(());
+            }
+            let h = self.next_handle;
+            self.next_handle = self.next_handle.wrapping_add(1).max(1);
+            self.candidates.push(CandidateArtifact {
+                handle: h,
+                caller_task_id,
+                package_name: String::new(),
+                expected_len: chunk.len(),
+                bytes: chunk.to_vec(),
+            });
+            Ok(h)
+        } else {
+            let candidate = self
+                .candidates
+                .iter_mut()
+                .find(|c| c.handle == handle)
+                .ok_or(())?;
+            if candidate.caller_task_id != caller_task_id && caller_task_id != 0 {
+                return Err(());
+            }
+            if append {
+                if candidate.bytes.len().saturating_add(chunk.len()) > MAX_BLOB_SIZE {
+                    return Err(());
+                }
+                candidate.bytes.extend_from_slice(chunk);
+            } else {
+                if chunk.len() > MAX_BLOB_SIZE {
+                    return Err(());
+                }
+                candidate.bytes.clear();
+                candidate.bytes.extend_from_slice(chunk);
+            }
+            Ok(handle)
+        }
+    }
+
+    /// Reads a chunk from a staged candidate artifact for userspace verification.
+    pub fn read_chunk(&self, handle: u32, offset: usize, out: &mut [u8]) -> Result<usize, ()> {
+        let candidate = self.candidates.iter().find(|c| c.handle == handle).ok_or(())?;
+        if offset >= candidate.bytes.len() {
+            return Ok(0);
+        }
+        let available = candidate.bytes.len() - offset;
+        let to_copy = core::cmp::min(available, out.len());
+        out[..to_copy].copy_from_slice(&candidate.bytes[offset..offset + to_copy]);
+        Ok(to_copy)
+    }
+
+    /// Consumes and removes a candidate artifact upon atomic registration promotion.
+    pub fn take_candidate(&mut self, handle: u32) -> Option<CandidateArtifact> {
+        let pos = self.candidates.iter().position(|c| c.handle == handle)?;
+        Some(self.candidates.remove(pos))
+    }
+
+    /// Discards a candidate artifact.
+    pub fn discard(&mut self, handle: u32) {
+        self.candidates.retain(|c| c.handle != handle);
+    }
+}
+
+pub static CANDIDATE_ARTIFACT_STORE: Mutex<CandidateArtifactStore> =
+    Mutex::new(CandidateArtifactStore::new());

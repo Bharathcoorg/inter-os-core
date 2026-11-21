@@ -57,6 +57,9 @@ impl PackageRegistry {
     }
 
     /// Allocates a durable, collision-free Android application UID in range 10000..19999.
+    /// UID unique among active/installed principals.
+    /// UID may eventually be recycled only after package removal according to policy upon wraparound.
+    /// Principal identity prevents cryptographic identity inheritance.
     pub fn allocate_android_uid(&mut self) -> Result<u32, ()> {
         let mut candidate = self.next_android_uid.max(10000);
         for _ in 0..10000 {

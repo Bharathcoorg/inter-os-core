@@ -98,12 +98,16 @@ pub struct IpcMessage {
 
 impl IpcMessage {
     /// Constructs a new IPC message from a byte slice with kernel-verified provenance.
-    pub fn new(sender: TaskId, msg_type: u32, data: &[u8]) -> Self {
-        let len = data.len().min(IPC_MAX_PAYLOAD);
+    /// Returns Err(IpcError::MessageTooLarge) if data exceeds IPC_MAX_PAYLOAD bound.
+    pub fn try_new(sender: TaskId, msg_type: u32, data: &[u8]) -> Result<Self, IpcError> {
+        if data.len() > IPC_MAX_PAYLOAD {
+            return Err(IpcError::MessageTooLarge);
+        }
+        let len = data.len();
         let mut payload = [0u8; IPC_MAX_PAYLOAD];
-        payload[..len].copy_from_slice(&data[..len]);
+        payload[..len].copy_from_slice(data);
         let provenance = MessageProvenance::derive(sender);
-        Self {
+        Ok(Self {
             sender,
             provenance,
             msg_type,
@@ -111,7 +115,24 @@ impl IpcMessage {
             shm_descriptor: None,
             payload,
             len,
-        }
+        })
+    }
+
+    /// Constructs a new IPC message, panicking on oversized data rather than silently truncating.
+    pub fn new(sender: TaskId, msg_type: u32, data: &[u8]) -> Self {
+        Self::try_new(sender, msg_type, data).expect("IPC payload exceeds IPC_MAX_PAYLOAD")
+    }
+
+    /// Constructs an IPC message with an in-band transferred capability.
+    pub fn try_with_capability(
+        sender: TaskId,
+        msg_type: u32,
+        data: &[u8],
+        cap: crate::capability::Capability,
+    ) -> Result<Self, IpcError> {
+        let mut msg = Self::try_new(sender, msg_type, data)?;
+        msg.transferred_cap = Some(cap);
+        Ok(msg)
     }
 
     /// Constructs an IPC message with an in-band transferred capability.
@@ -121,16 +142,19 @@ impl IpcMessage {
         data: &[u8],
         cap: crate::capability::Capability,
     ) -> Self {
-        let mut msg = Self::new(sender, msg_type, data);
-        msg.transferred_cap = Some(cap);
-        msg
+        Self::try_with_capability(sender, msg_type, data, cap).expect("IPC payload exceeds IPC_MAX_PAYLOAD")
+    }
+
+    /// Constructs an IPC message with an associated shared-memory pipe descriptor.
+    pub fn try_with_shm(sender: TaskId, msg_type: u32, data: &[u8], shm_desc: u32) -> Result<Self, IpcError> {
+        let mut msg = Self::try_new(sender, msg_type, data)?;
+        msg.shm_descriptor = Some(shm_desc);
+        Ok(msg)
     }
 
     /// Constructs an IPC message with an associated shared-memory pipe descriptor.
     pub fn with_shm(sender: TaskId, msg_type: u32, data: &[u8], shm_desc: u32) -> Self {
-        let mut msg = Self::new(sender, msg_type, data);
-        msg.shm_descriptor = Some(shm_desc);
-        msg
+        Self::try_with_shm(sender, msg_type, data, shm_desc).expect("IPC payload exceeds IPC_MAX_PAYLOAD")
     }
 }
 
@@ -297,7 +321,7 @@ impl IpcRouter {
                 .map_err(|_| IpcError::MailboxFull)?;
         }
 
-        let msg = IpcMessage::new(sender, msg_type, data);
+        let msg = IpcMessage::try_new(sender, msg_type, data)?;
         mailbox.queue.push_back(msg);
         crate::event::post_event(dest_task, crate::event::EVENT_IPC_MSG);
         Ok(())
@@ -390,7 +414,7 @@ impl IpcRouter {
             return Err(IpcError::MailboxFull);
         }
 
-        let msg = IpcMessage::new(sender, msg_type, data);
+        let msg = IpcMessage::try_new(sender, msg_type, data)?;
         mailbox.queue.push_back(msg);
         crate::event::post_event(dest_task, crate::event::EVENT_IPC_MSG);
         Ok(())

@@ -1033,7 +1033,7 @@ pub fn spawn_acrd(parent_id: TaskId) -> Result<TaskId, &'static str> {
     caps.insert(Capability {
         id: CapabilityId(0x7F05),
         cap_type: CapabilityType::PackageInstall,
-        rights: Rights::WRITE,
+        rights: Rights::READ | Rights::WRITE,
         object_id: 0,
     }).map_err(|_| "failed to insert package install cap")?;
     caps.insert(Capability {
@@ -1042,6 +1042,12 @@ pub fn spawn_acrd(parent_id: TaskId) -> Result<TaskId, &'static str> {
         rights: Rights::INVOKE,
         object_id: 0,
     }).map_err(|_| "failed to insert process spawn cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x7F07),
+        cap_type: CapabilityType::MemoryHeap,
+        rights: Rights::READ | Rights::WRITE,
+        object_id: 0,
+    }).map_err(|_| "failed to insert memory heap cap")?;
 
     let tid = spawn_user_process_with_parent(
         "acrd",
@@ -1051,8 +1057,12 @@ pub fn spawn_acrd(parent_id: TaskId) -> Result<TaskId, &'static str> {
         parent_id,
     )?;
 
-    if let Some(_process) = crate::task::process::process_for_task(tid) {
-        let _ = crate::task::process::mark_application_for_task(tid);
+    if let Some(tcb) = crate::task::SCHEDULER.lock().get_task_mut(tid) {
+        tcb.security_identity = Some(crate::task::SecurityIdentity {
+            package_id: "org.interos.acrd",
+            code_digest: crate::crypto::Sha256::digest(crate::task::images::ACRD_ELF),
+            is_system: true,
+        });
     }
 
     Ok(tid)
@@ -1105,6 +1115,15 @@ pub fn spawn_android_app_process(
         rights: Rights::WRITE,
         object_id: 0,
     }).map_err(|_| "failed to insert surface create cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x8106),
+        cap_type: CapabilityType::MemoryHeap,
+        rights: Rights::READ | Rights::WRITE,
+        object_id: 0,
+    }).map_err(|_| "failed to insert memory heap cap")?;
+
+    let mut caps = caps;
+    caps.rekey_all();
 
     let mut limits = crate::task::process::ResourceLimits::default();
     limits.max_address_space_bytes = memory_quota as u64;
@@ -1118,6 +1137,7 @@ pub fn spawn_android_app_process(
         &mut pt,
         stack_top,
     )?;
+    let address_space_bytes = pt.user_mapped_bytes();
 
     let cr3_val = pt.frame().start_address().as_u64();
     let mut tcb = crate::task::TaskControlBlock::new(process_name, user_process_entry, caps, 6);
@@ -1140,7 +1160,7 @@ pub fn spawn_android_app_process(
 
     if let Some(process) = crate::task::process::process_for_task(spawned) {
         let _ = crate::task::process::set_limits(process, limits);
-        let _ = crate::task::process::set_address_space_usage(process, memory_quota);
+        let _ = crate::task::process::set_address_space_usage(process, address_space_bytes);
         let _ = crate::task::process::mark_application_for_task(spawned);
         let _ = crate::task::process::bind_user_for_task(spawned, app_uid);
     }

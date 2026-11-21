@@ -905,6 +905,113 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
+    if verb.eq_ignore_ascii_case("APK_STAGE_BEGIN") {
+        let Some(id) = parts.next() else { return true; };
+        let Some(len) = parts.next().and_then(|v| v.parse::<usize>().ok()) else { return true; };
+        if id.is_empty() || id.len() > 128 || len == 0 || len > crate::package::store::MAX_BLOB_SIZE {
+            serial_println!("[APK_HOST] REJECT invalid package dimensions");
+            return true;
+        }
+        let handle = match crate::package::store::CANDIDATE_ARTIFACT_STORE.lock().allocate_session(id, len) {
+            Ok(h) => h,
+            Err(_) => {
+                serial_println!("[APK_HOST] REJECT candidate session allocation failed");
+                return true;
+            }
+        };
+        serial_println!("[APK_HOST] READY package={} bytes={} handle={}", id, len, handle);
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("APK_STAGE_CHUNK") {
+        let Some(handle) = parts.next().and_then(|v| v.parse::<u32>().ok()) else { return true; };
+        let Some(offset) = parts.next().and_then(|v| v.parse::<usize>().ok()) else { return true; };
+        let Some(hex) = parts.next() else { return true; };
+        if hex.is_empty() || hex.len() > 256 || hex.len() % 2 != 0 {
+            serial_println!("[APK_HOST] REJECT chunk format");
+            return true;
+        }
+        let chunk_len = hex.len() / 2;
+        let mut chunk = alloc::vec![0u8; chunk_len];
+        let raw = hex.as_bytes();
+        for i in 0..chunk_len {
+            let hi = hex_nibble(raw[i * 2]);
+            let lo = hex_nibble(raw[i * 2 + 1]);
+            let (Some(hi), Some(lo)) = (hi, lo) else {
+                serial_println!("[APK_HOST] REJECT hex");
+                return true;
+            };
+            chunk[i] = (hi << 4) | lo;
+        }
+        match crate::package::store::CANDIDATE_ARTIFACT_STORE.lock().append_chunk(handle, &chunk) {
+            Ok(()) => serial_println!("[APK_HOST] CHUNK handle={} offset={} len={}", handle, offset, chunk_len),
+            Err(_) => serial_println!("[APK_HOST] REJECT chunk append failed"),
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("APK_STAGE_COMMIT") {
+        let Some(handle) = parts.next().and_then(|v| v.parse::<u32>().ok()) else { return true; };
+        let candidate_info = {
+            let store = crate::package::store::CANDIDATE_ARTIFACT_STORE.lock();
+            let Some(cand) = store.get_candidate(handle) else {
+                serial_println!("[APK_HOST] REJECT handle not found");
+                return true;
+            };
+            if cand.bytes.len() < cand.expected_len {
+                serial_println!("[APK_HOST] REJECT incomplete transfer");
+                return true;
+            }
+            let digest = cand.compute_digest();
+            (cand.package_name.clone(), digest)
+        };
+        // Find acrd coordinator task
+        let acrd_tid = match crate::task::SCHEDULER.lock().find_live_task_named("acrd") {
+            Some(tid) => tid,
+            None => {
+                serial_println!("[APK_HOST] REJECT acrd coordinator not running");
+                return true;
+            }
+        };
+        // Construct 48-byte INST descriptor to acrd
+        let mut inst_msg = [0u8; 48];
+        inst_msg[0..4].copy_from_slice(b"INST");
+        inst_msg[4..8].copy_from_slice(&handle.to_le_bytes());
+        inst_msg[8..12].copy_from_slice(&0u32.to_le_bytes());
+        inst_msg[12..16].copy_from_slice(&0u32.to_le_bytes());
+        inst_msg[16..48].copy_from_slice(&candidate_info.1);
+
+        match crate::ipc::IPC_ROUTER.lock().send_direct(crate::task::TaskId(0), acrd_tid, 0x5453_4E49, &inst_msg) {
+            Ok(()) => serial_println!("[APK_HOST] COMMITTED handle={} package={}", handle, candidate_info.0),
+            Err(_) => serial_println!("[APK_HOST] REJECT ipc to acrd failed"),
+        }
+        return true;
+    }
+
+    if verb.eq_ignore_ascii_case("APK_FAULT") {
+        let Some(pkg) = parts.next() else { return true; };
+        let target = {
+            let sched = crate::task::SCHEDULER.lock();
+            let cid = sched.find_live_task_named(pkg);
+            let pid = cid.and_then(|id| sched.get_task(id)).map(|t| t.parent_id);
+            match (cid, pid) {
+                (Some(c), Some(p)) => Some((c, p)),
+                _ => None,
+            }
+        };
+        let Some((child_id, parent_id)) = target else {
+            serial_println!("[APK_HOST] REJECT package '{}' task not found", pkg);
+            return true;
+        };
+        let mut crsh_msg = [0u8; 4];
+        crsh_msg[0..4].copy_from_slice(b"CRSH");
+        match crate::ipc::IPC_ROUTER.lock().send_direct(parent_id, child_id, 0x4853_5243, &crsh_msg) {
+            Ok(()) => serial_println!("[APK_HOST] FAULT_INJECTED pkg={} child={} parent={}", pkg, child_id.0, parent_id.0),
+            Err(_) => serial_println!("[APK_HOST] REJECT crsh ipc failed"),
+        }
+        return true;
+    }
+
     if verb.eq_ignore_ascii_case("INTENT_RESOLVE") {
         let Some(kind_str) = parts.next() else {
             serial_println!("[INTENT] REJECT missing kind");
@@ -1519,8 +1626,11 @@ fn handle_serial_command(cmd: &[u8]) {
     // pressure that exposed the unbounded UART wait. The `CHUNK_OK`
     // acknowledgement still proves the chunk was received.
     let first_verb = s.split_ascii_whitespace().next();
+    #[allow(unused_mut)]
     let mut bulk = first_verb.is_some_and(|verb| {
-        verb.eq_ignore_ascii_case("STUDIO_FS_CHUNK") || verb.eq_ignore_ascii_case("RAPP_CHUNK")
+        verb.eq_ignore_ascii_case("STUDIO_FS_CHUNK")
+            || verb.eq_ignore_ascii_case("RAPP_CHUNK")
+            || verb.eq_ignore_ascii_case("APK_STAGE_CHUNK")
     });
     // The anchor-chunk verb only exists in a debug-control-plane build, so its
     // echo-suppression clause is compiled out with it; a production binary carries

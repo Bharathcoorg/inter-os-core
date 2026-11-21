@@ -295,6 +295,10 @@ pub enum SyscallNumber {
     PackageArtifactRead = 169,
     /// Stores or appends verified package artifact bytes into the kernel package repository.
     PackageArtifactStore = 170,
+    /// Stores or appends candidate unverified artifact bytes into the kernel candidate artifact store.
+    CandidateArtifactStore = 171,
+    /// Reads candidate unverified artifact bytes for coordinator inspection and verification.
+    CandidateArtifactRead = 172,
 }
 
 // -----------------------------------------------------------------------------
@@ -3705,6 +3709,7 @@ pub struct TaskIdentityInfo {
     pub package_id: [u8; 32],
     pub code_digest: [u8; 32],
     pub principal_id: u64,
+    pub parent_id: u64,
 }
 
 impl TaskIdentityInfo {
@@ -3730,6 +3735,7 @@ pub fn task_identity_query(task_id: u64) -> Result<TaskIdentityInfo, i64> {
         package_id: [0u8; 32],
         code_digest: [0u8; 32],
         principal_id: 0,
+        parent_id: 0,
     };
     let r = unsafe {
         syscall3(
@@ -3754,6 +3760,7 @@ pub struct AndroidPackageMetadata {
     pub min_sdk: u32,
     pub target_sdk: u32,
     pub signer_identity: [u8; 32],
+    pub candidate_handle: u32,
 }
 
 /// Registers a verified Android application package into the kernel package registry with complete security metadata.
@@ -3765,12 +3772,14 @@ pub fn package_register_apk_ext(
     target_sdk: u32,
     code_digest: &[u8; 32],
     signer_identity: &[u8; 32],
+    candidate_handle: u32,
 ) -> Result<u32, i64> {
     let meta = AndroidPackageMetadata {
         version_code,
         min_sdk,
         target_sdk,
         signer_identity: *signer_identity,
+        candidate_handle,
     };
     let ver_packed = ((version.0 as u64) << 32) | ((version.1 as u64) << 16) | (version.2 as u64);
     let r = unsafe {
@@ -3825,6 +3834,54 @@ pub fn package_artifact_store(
     };
     if r >= 0 {
         Ok(())
+    } else {
+        Err(r)
+    }
+}
+
+/// Stores or appends candidate unverified artifact chunk into candidate artifact store.
+///
+/// If handle is 0, allocates a new candidate artifact session and returns its non-zero handle.
+/// If handle > 0, appends chunk to existing candidate artifact session.
+pub fn candidate_artifact_store(
+    handle: u32,
+    chunk: &[u8],
+    append: bool,
+) -> Result<u32, i64> {
+    let r = unsafe {
+        syscall5(
+            SyscallNumber::CandidateArtifactStore,
+            handle as u64,
+            chunk.as_ptr() as u64,
+            chunk.len() as u64,
+            if append { 1 } else { 0 },
+            0,
+        )
+    };
+    if r >= 0 {
+        Ok(r as u32)
+    } else {
+        Err(r)
+    }
+}
+
+/// Reads candidate artifact bytes for verification by the package coordinator.
+pub fn candidate_artifact_read(
+    handle: u32,
+    offset: u32,
+    out_buf: &mut [u8],
+) -> Result<usize, i64> {
+    let r = unsafe {
+        syscall4(
+            SyscallNumber::CandidateArtifactRead,
+            handle as u64,
+            offset as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as usize)
     } else {
         Err(r)
     }

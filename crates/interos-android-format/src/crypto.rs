@@ -421,83 +421,157 @@ fn mod_inv(a: &BigUint, m: &BigUint) -> Option<BigUint> {
     a.mod_pow(&exp, m)
 }
 
-fn point_add(p1: &AffinePoint, p2: &AffinePoint, p: &BigUint) -> AffinePoint {
-    if p1.is_infinity {
-        return p2.clone();
-    }
-    if p2.is_infinity {
-        return p1.clone();
+#[derive(Clone)]
+struct JacobianPoint {
+    x: BigUint,
+    y: BigUint,
+    z: BigUint,
+}
+
+impl JacobianPoint {
+    fn infinity() -> Self {
+        Self {
+            x: BigUint::from_u64(1),
+            y: BigUint::from_u64(1),
+            z: BigUint::zero(),
+        }
     }
 
-    if p1.x == p2.x {
-        if p1.y != p2.y || p1.y.is_zero() {
+    fn from_affine(pt: &AffinePoint) -> Self {
+        if pt.is_infinity {
+            Self::infinity()
+        } else {
+            Self {
+                x: pt.x.clone(),
+                y: pt.y.clone(),
+                z: BigUint::from_u64(1),
+            }
+        }
+    }
+
+    fn to_affine(&self, p: &BigUint) -> AffinePoint {
+        if self.z.is_zero() {
             return AffinePoint::infinity();
         }
-        // Point doubling: lambda = (3 * x1^2 + a) / (2 * y1)
-        // For P-256, a = -3, so 3 * x1^2 - 3 = 3 * (x1^2 - 1)
-        let x_sq = mod_mul(&p1.x, &p1.x, p);
-        let three = BigUint::from_u64(3);
-        let num1 = mod_mul(&three, &x_sq, p);
-        let num = mod_sub(&num1, &three, p);
+        let z_inv = match mod_inv(&self.z, p) {
+            Some(inv) => inv,
+            None => return AffinePoint::infinity(),
+        };
+        let z2 = mod_mul(&z_inv, &z_inv, p);
+        let z3 = mod_mul(&z2, &z_inv, p);
+        let x = mod_mul(&self.x, &z2, p);
+        let y = mod_mul(&self.y, &z3, p);
+        AffinePoint {
+            x,
+            y,
+            is_infinity: false,
+        }
+    }
+
+    // Point doubling on y^2 = x^3 - 3x + b (NIST P-256)
+    fn double(&self, p: &BigUint) -> Self {
+        if self.z.is_zero() || self.y.is_zero() {
+            return Self::infinity();
+        }
+        // delta = Z^2
+        // gamma = Y^2
+        // beta = X * gamma
+        // alpha = 3 * (X - delta) * (X + delta)
+        let delta = mod_mul(&self.z, &self.z, p);
+        let gamma = mod_mul(&self.y, &self.y, p);
+        let beta = mod_mul(&self.x, &gamma, p);
+
+        let t1 = mod_sub(&self.x, &delta, p);
+        let t2 = mod_add(&self.x, &delta, p);
+        let t3 = mod_mul(&t1, &t2, p);
+        let alpha = mod_mul(&BigUint::from_u64(3), &t3, p);
+
+        let alpha_sq = mod_mul(&alpha, &alpha, p);
+        let eight_beta = mod_mul(&BigUint::from_u64(8), &beta, p);
+        let x3 = mod_sub(&alpha_sq, &eight_beta, p);
 
         let two = BigUint::from_u64(2);
-        let den = mod_mul(&two, &p1.y, p);
-        let den_inv = match mod_inv(&den, p) {
-            Some(inv) => inv,
-            None => return AffinePoint::infinity(),
-        };
-        let lambda = mod_mul(&num, &den_inv, p);
+        let z3 = mod_mul(&mod_mul(&two, &self.y, p), &self.z, p);
 
-        let lambda_sq = mod_mul(&lambda, &lambda, p);
-        let x3_temp = mod_sub(&lambda_sq, &p1.x, p);
-        let x3 = mod_sub(&x3_temp, &p2.x, p);
+        let four_beta = mod_mul(&BigUint::from_u64(4), &beta, p);
+        let diff = mod_sub(&four_beta, &x3, p);
+        let y3_term1 = mod_mul(&alpha, &diff, p);
+        let gamma_sq = mod_mul(&gamma, &gamma, p);
+        let eight_gamma_sq = mod_mul(&BigUint::from_u64(8), &gamma_sq, p);
+        let y3 = mod_sub(&y3_term1, &eight_gamma_sq, p);
 
-        let y_temp = mod_sub(&p1.x, &x3, p);
-        let y_temp2 = mod_mul(&lambda, &y_temp, p);
-        let y3 = mod_sub(&y_temp2, &p1.y, p);
+        Self { x: x3, y: y3, z: z3 }
+    }
 
-        AffinePoint {
-            x: x3,
-            y: y3,
-            is_infinity: false,
+    // Mixed addition: Jacobian + Affine
+    fn add_affine(&self, pt: &AffinePoint, p: &BigUint) -> Self {
+        if pt.is_infinity {
+            return self.clone();
         }
-    } else {
-        // Point addition: lambda = (y2 - y1) / (x2 - x1)
-        let num = mod_sub(&p2.y, &p1.y, p);
-        let den = mod_sub(&p2.x, &p1.x, p);
-        let den_inv = match mod_inv(&den, p) {
-            Some(inv) => inv,
-            None => return AffinePoint::infinity(),
-        };
-        let lambda = mod_mul(&num, &den_inv, p);
-
-        let lambda_sq = mod_mul(&lambda, &lambda, p);
-        let x3_temp = mod_sub(&lambda_sq, &p1.x, p);
-        let x3 = mod_sub(&x3_temp, &p2.x, p);
-
-        let y_temp = mod_sub(&p1.x, &x3, p);
-        let y_temp2 = mod_mul(&lambda, &y_temp, p);
-        let y3 = mod_sub(&y_temp2, &p1.y, p);
-
-        AffinePoint {
-            x: x3,
-            y: y3,
-            is_infinity: false,
+        if self.z.is_zero() {
+            return Self::from_affine(pt);
         }
+        // U1 = X1, S1 = Y1
+        // U2 = X2 * Z1^2
+        // S2 = Y2 * Z1^3
+        let z1_sq = mod_mul(&self.z, &self.z, p);
+        let z1_cu = mod_mul(&z1_sq, &self.z, p);
+        let u2 = mod_mul(&pt.x, &z1_sq, p);
+        let s2 = mod_mul(&pt.y, &z1_cu, p);
+
+        if self.x == u2 {
+            if self.y == s2 {
+                return self.double(p);
+            } else {
+                return Self::infinity();
+            }
+        }
+
+        // H = U2 - X1
+        // R = S2 - Y1
+        let h = mod_sub(&u2, &self.x, p);
+        let r = mod_sub(&s2, &self.y, p);
+
+        let h_sq = mod_mul(&h, &h, p);
+        let h_cu = mod_mul(&h_sq, &h, p);
+        let u1_h_sq = mod_mul(&self.x, &h_sq, p);
+
+        // X3 = R^2 - H^3 - 2 * U1 * H^2
+        let r_sq = mod_mul(&r, &r, p);
+        let two_u1_h_sq = mod_mul(&BigUint::from_u64(2), &u1_h_sq, p);
+        let x3_temp = mod_sub(&r_sq, &h_cu, p);
+        let x3 = mod_sub(&x3_temp, &two_u1_h_sq, p);
+
+        // Y3 = R * (U1 * H^2 - X3) - Y1 * H^3
+        let y3_diff = mod_sub(&u1_h_sq, &x3, p);
+        let y3_term1 = mod_mul(&r, &y3_diff, p);
+        let y3_term2 = mod_mul(&self.y, &h_cu, p);
+        let y3 = mod_sub(&y3_term1, &y3_term2, p);
+
+        // Z3 = Z1 * H
+        let z3 = mod_mul(&self.z, &h, p);
+
+        Self { x: x3, y: y3, z: z3 }
     }
 }
 
 fn point_mul(pt: &AffinePoint, scalar: &BigUint, p: &BigUint) -> AffinePoint {
-    let mut res = AffinePoint::infinity();
-    let mut base = pt.clone();
-    let bits = scalar.bit_len();
-    for bit in 0..bits {
-        if scalar.test_bit(bit) {
-            res = point_add(&res, &base, p);
-        }
-        base = point_add(&base, &base, p);
+    if pt.is_infinity || scalar.is_zero() {
+        return AffinePoint::infinity();
     }
-    res
+    let mut res = JacobianPoint::infinity();
+    let bits = scalar.bit_len();
+    for bit in (0..bits).rev() {
+        res = res.double(p);
+        if scalar.test_bit(bit) {
+            res = res.add_affine(pt, p);
+        }
+    }
+    res.to_affine(p)
+}
+
+fn point_add(p1: &AffinePoint, p2: &AffinePoint, p: &BigUint) -> AffinePoint {
+    JacobianPoint::from_affine(p1).add_affine(p2, p).to_affine(p)
 }
 
 /// Verifies an ECDSA signature (r, s) on NIST P-256 with SHA-256 digest.
