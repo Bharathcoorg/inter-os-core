@@ -43,7 +43,7 @@ ARCH_TARGET_MAP = {
 SERVICES = [
     "displayd", "inputd", "storaged", "netd", "powerd",
     "modemd", "audiod", "camerad", "sensord", "aid",
-    "searchd", "agentd"
+    "searchd", "agentd", "acrd", "acr-app-runtime"
 ]
 
 APPS = [

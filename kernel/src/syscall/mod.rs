@@ -334,6 +334,9 @@ pub enum SyscallNumber {
     /// Queries the kernel-authenticated identity (UserId, package identity,
     /// system status, code digest) of a target task.
     TaskIdentityQuery = 167,
+    /// Registers a verified Android application package into the kernel package registry,
+    /// allocating and preserving a stable Android application UID in 10000..19999.
+    PackageRegisterApk = 168,
 }
 
 /// 96-byte kernel-authenticated task security identity descriptor.
@@ -1703,6 +1706,35 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
                     }
                     bytes as i64
                 }
+                Err(e) => e as i64,
+            }
+        }
+        168 => {
+            // PackageRegisterApk: a1 = pkg_name_ptr, a2 = pkg_name_len, a3 = packed_version, a4 = code_digest_ptr, a5 = code_digest_len
+            let name_len = a2 as usize;
+            let digest_len = a5 as usize;
+            if name_len == 0 || name_len > 32 || digest_len != 32 || a1 == 0 || a4 == 0 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let mut name_buf = [0u8; 32];
+            if copy_from_user(&mut name_buf[..name_len], a1, name_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let pkg_name = match core::str::from_utf8(&name_buf[..name_len]) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+            let mut digest_buf = [0u8; 32];
+            if copy_from_user(&mut digest_buf, a4, 32).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+
+            let major = ((a3 >> 32) & 0xFFFF) as u16;
+            let minor = ((a3 >> 16) & 0xFFFF) as u16;
+            let patch = (a3 & 0xFFFF) as u16;
+
+            match sys_package_register_apk(pkg_name, (major, minor, patch), digest_buf) {
+                Ok(app_uid) => app_uid as i64,
                 Err(e) => e as i64,
             }
         }
@@ -6382,6 +6414,33 @@ pub fn sys_task_identity_query(
     Ok(required_len)
 }
 
+/// Registers an audited Android application package into the kernel package registry (syscall 168).
+///
+/// Binds the verified code digest and allocates a persistent stable Android UID in range 10000..19999.
+pub fn sys_package_register_apk(
+    package_id: &str,
+    version: (u16, u16, u16),
+    code_digest: [u8; 32],
+) -> Result<u32, SyscallResult> {
+    let sched = SCHEDULER.lock();
+    let caller_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
+    let caller_task = sched.get_task(caller_id).ok_or(SyscallResult::PermissionDenied)?;
+
+    let is_authorized = caller_task.security_identity.as_ref().map(|s| s.is_system).unwrap_or(false)
+        || caller_task.cap_table.holds_capability_type(CapabilityType::SystemControl, Rights::WRITE)
+        || caller_task.cap_table.holds_capability_type(CapabilityType::FileSystemWrite, Rights::WRITE);
+    if !is_authorized {
+        return Err(SyscallResult::PermissionDenied);
+    }
+    drop(sched);
+
+    crate::package::PACKAGE_REGISTRY.lock().seed();
+    crate::package::PACKAGE_REGISTRY
+        .lock()
+        .register_verified_apk(package_id, version, code_digest)
+        .map_err(|_| SyscallResult::DeviceError)
+}
+
 /// Advances or interacts with the Gravity Glass fluid inertial physics scroller.
 pub fn sys_surface_physics(
     action: u32,
@@ -8167,14 +8226,9 @@ fn launch_registered_package(app_id: &str, parent_id: TaskId) -> Result<crate::t
     let registry = crate::package::PACKAGE_REGISTRY.lock();
     let registered = registry.entries().iter().find(|e| e.package_id == app_id).cloned();
     drop(registry);
-    if let Some(registered) = registered {
-        if !matches!(registered.state, crate::package::PackageState::Active) {
-            return Err(SyscallResult::PermissionDenied);
-        }
-    } else if app_id.starts_with("com.") || app_id.starts_with("org.whispersystems.") || app_id.contains(".android.") {
-        // Verified Android application package launch
-    } else {
-        return Err(SyscallResult::FileNotFound);
+    let registered = match registered {
+        Some(r) if matches!(r.state, crate::package::PackageState::Active) => r,
+        _ => return Err(SyscallResult::FileNotFound),
     };
 
     // Launch is single-instance per device, not per caller: the same package
@@ -8187,9 +8241,14 @@ fn launch_registered_package(app_id: &str, parent_id: TaskId) -> Result<crate::t
         return Ok(existing);
     }
 
-    if app_id.starts_with("com.") || app_id.starts_with("org.whispersystems.") || app_id.contains(".android.") {
-        let tid = crate::task::user::spawn_android_app_process(app_id, parent_id, 8 * 1024 * 1024)
-            .map_err(|_| SyscallResult::DeviceError)?;
+    if registered.kind == crate::package::PackageKind::AndroidApk {
+        let tid = crate::task::user::spawn_android_app_process(
+            app_id,
+            parent_id,
+            8 * 1024 * 1024,
+            registered.app_uid,
+            registered.code_digest,
+        ).map_err(|_| SyscallResult::DeviceError)?;
         register_spawned_task_ipc(tid, parent_id)?;
         crate::drivers::display_kms::DRM_KMS.lock().raise_surfaces_for_task(tid.0);
         serial_println!("[ACR] Launched isolated Android app task '{}' as Task {}", app_id, tid.0);

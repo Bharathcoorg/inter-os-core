@@ -43,6 +43,8 @@ pub static APP_WEBVIEW_DEMO_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANI
 pub static AID_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/aid"));
 pub static SEARCHD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/searchd"));
 pub static AGENTD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/agentd"));
+pub static ACRD_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/acrd"));
+pub static ACR_APP_RUNTIME_ELF: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../target/x86_64-unknown-none/debug/acr-app-runtime"));
 
 // WHY the app statics above are embedded rather than loaded from the VFS: every
 // first-party app already on the launch path (settings, browser, gallery, ...)

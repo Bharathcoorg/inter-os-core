@@ -991,17 +991,22 @@ pub fn load_user_elf_with_stack(elf_data: &[u8], stack_top_addr: usize) -> Resul
 
 /// Spawns an isolated Android application task as an independent Ring-3 process.
 ///
-/// Allocates a dedicated page table (CR3 frame), isolated capability table,
-/// assigns unique kernel TaskId, marks the process as an application subject
-/// to sandbox namespace `/data/data/<package_name>`, and binds an Android UID.
+/// Allocates a dedicated page table (CR3 frame), isolated capability table (strictly zero
+/// ambient graphics or physical authority), assigns unique kernel TaskId, loads the unprivileged
+/// generic Android runtime binary `acr-app-runtime`, binds the persistent registered Android application UID,
+/// sets cryptographic code digest, and marks the process as an application subject
+/// to sandbox namespace `/data/data/<package_name>`.
 pub fn spawn_android_app_process(
     package_name: &str,
     parent_id: TaskId,
     memory_quota: usize,
+    app_uid: u32,
+    code_digest: [u8; 32],
 ) -> Result<TaskId, &'static str> {
     let mut caps = CapabilityTable::new(16);
     // Scoped capabilities for isolated Android application:
-    // SerialOutput for diagnostics, EventPoll, IpcSend/Receive to acrd, FrameBufferDirect
+    // SerialOutput for diagnostics, EventPoll, IpcSend/Receive to acrd coordinator.
+    // Direct raw framebuffer access is STRICTLY REMOVED to prevent ambient graphics authority.
     caps.insert(Capability {
         id: CapabilityId(0x8100),
         cap_type: CapabilityType::SerialOutput,
@@ -1026,12 +1031,6 @@ pub fn spawn_android_app_process(
         rights: Rights::READ | Rights::INVOKE,
         object_id: 0,
     }).map_err(|_| "failed to insert event poll cap")?;
-    caps.insert(Capability {
-        id: CapabilityId(0x8104),
-        cap_type: CapabilityType::FrameBufferDirect,
-        rights: Rights::READ | Rights::WRITE,
-        object_id: 1,
-    }).map_err(|_| "failed to insert fb cap")?;
 
     let mut limits = crate::task::process::ResourceLimits::default();
     limits.max_address_space_bytes = memory_quota as u64;
@@ -1041,11 +1040,12 @@ pub fn spawn_android_app_process(
     let mut pt = crate::memory::TaskPageTable::create_user_page_table()?;
     let stack_top = USER_STACK_TOP;
     let (user_entry, user_stack_top) = load_user_elf_into_page_table(
-        crate::task::images::USER_INIT_ELF,
+        crate::task::images::ACR_APP_RUNTIME_ELF,
         &mut pt,
         stack_top,
     )?;
 
+    let cr3_val = pt.frame().start_address().as_u64();
     let mut tcb = crate::task::TaskControlBlock::new(process_name, user_process_entry, caps, 6);
     tcb.cr3_frame = Some(pt.frame());
     tcb.page_table = Some(alloc::sync::Arc::new(spin::Mutex::new(pt)));
@@ -1053,7 +1053,6 @@ pub fn spawn_android_app_process(
     tcb.user_stack_top = user_stack_top;
     tcb.parent_id = parent_id;
 
-    let code_digest = crate::crypto::Sha256::digest(package_name.as_bytes());
     tcb.security_identity = Some(crate::task::SecurityIdentity {
         package_id: process_name,
         code_digest,
@@ -1069,9 +1068,16 @@ pub fn spawn_android_app_process(
         let _ = crate::task::process::set_limits(process, limits);
         let _ = crate::task::process::set_address_space_usage(process, memory_quota);
         let _ = crate::task::process::mark_application_for_task(spawned);
-        let android_uid = 10000 + (spawned.0 as u32);
-        let _ = crate::task::process::bind_user_for_task(spawned, android_uid);
+        let _ = crate::task::process::bind_user_for_task(spawned, app_uid);
     }
+
+    crate::serial_println!(
+        "[ACR] Spawned Android process: pkg='{}' task_id={} cr3=0x{:x} uid={}",
+        package_name,
+        spawned.0,
+        cr3_val,
+        app_uid
+    );
 
     Ok(spawned)
 }

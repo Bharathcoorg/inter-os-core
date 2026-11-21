@@ -163,6 +163,25 @@ impl<const SLOTS: usize> KeystoreTable<SLOTS> {
         rights: u32,
         secret_root: &[u8; 32],
     ) -> Result<KeyHandle, KeystoreError> {
+        self.derive_key_with_package(caller_uid, caller_task, domain, b"", label, rights, secret_root)
+    }
+
+    /// Derives a new cryptographic key bound to the authenticated package identity.
+    ///
+    /// For DOMAIN_APP_STORAGE, binding `package_id` guarantees that App A and App B
+    /// under the same user UID (e.g. 100) requesting the identical label produce
+    /// cryptographically independent keys. Relaunching or updating App A recovers its key
+    /// because the kernel authenticates its immutable `package_id`.
+    pub fn derive_key_with_package(
+        &mut self,
+        caller_uid: u32,
+        caller_task: u64,
+        domain: u32,
+        package_id: &[u8],
+        label: &[u8],
+        rights: u32,
+        secret_root: &[u8; 32],
+    ) -> Result<KeyHandle, KeystoreError> {
         // Find an inactive slot
         let mut target_idx = None;
         for i in 0..SLOTS {
@@ -173,15 +192,19 @@ impl<const SLOTS: usize> KeystoreTable<SLOTS> {
         }
         let idx = target_idx.ok_or(KeystoreError::TableFull)?;
 
-        // Build HKDF info prefix binding domain, UID, and label
-        let mut info = [0u8; 64];
+        // Build HKDF info prefix binding domain, UID, package_id, and label
+        let mut info = [0u8; 128];
         info[0..4].copy_from_slice(&domain.to_le_bytes());
         info[4..8].copy_from_slice(&caller_uid.to_le_bytes());
-        let label_len = label.len().min(56);
-        info[8..8 + label_len].copy_from_slice(&label[..label_len]);
+        let pkg_len = package_id.len().min(32);
+        info[8..10].copy_from_slice(&(pkg_len as u16).to_le_bytes());
+        info[10..10 + pkg_len].copy_from_slice(&package_id[..pkg_len]);
+        let offset = 10 + pkg_len;
+        let label_len = label.len().min(128 - offset);
+        info[offset..offset + label_len].copy_from_slice(&label[..label_len]);
 
         let mut derived = [0u8; 32];
-        if hkdf_expand(secret_root, &info[..8 + label_len], &mut derived).is_err() {
+        if hkdf_expand(secret_root, &info[..offset + label_len], &mut derived).is_err() {
             return Err(KeystoreError::CryptoFailure);
         }
 
@@ -605,5 +628,58 @@ mod tests {
             table.encrypt(handle, 1000, 10, &nonce, b"", b"test", &mut ct),
             Err(KeystoreError::SlotNotFound)
         );
+    }
+
+    #[test]
+    fn test_package_scoped_key_isolation() {
+        let secret_root = [0x55u8; 32];
+        let mut table = KeystoreTable::<16>::new();
+
+        let uid = 100;
+        let label = b"default";
+
+        // App A (task 20) and App B (task 21) under same user 100 derive keys with same label
+        let handle_a = table
+            .derive_key_with_package(uid, 20, DOMAIN_APP_STORAGE, b"org.example.app_a", label, RIGHT_ALL, &secret_root)
+            .expect("derive A");
+        let handle_b = table
+            .derive_key_with_package(uid, 21, DOMAIN_APP_STORAGE, b"org.example.app_b", label, RIGHT_ALL, &secret_root)
+            .expect("derive B");
+
+        // Verify keys in slots are cryptographically distinct
+        let key_a = table.slots[handle_a.slot as usize].key;
+        let key_b = table.slots[handle_b.slot as usize].key;
+        assert_ne!(key_a, key_b, "App A and App B must produce distinct keys");
+
+        // Encrypt with App A
+        let nonce = [0x11u8; 12];
+        let plaintext = b"secret database record of App A";
+        let mut ciphertext_a = [0u8; 31];
+        let tag_a = table.encrypt(handle_a, uid, 20, &nonce, b"", plaintext, &mut ciphertext_a).expect("encrypt A");
+
+        // App B cannot decrypt with handle_a (task mismatch / permission denied)
+        let mut decrypt_buf = [0u8; 31];
+        assert_eq!(
+            table.decrypt(handle_a, uid, 21, &nonce, b"", &ciphertext_a, &tag_a, &mut decrypt_buf),
+            Err(KeystoreError::PermissionDenied)
+        );
+
+        // App B cannot decrypt ciphertext_a with handle_b (authentication failure / AEAD tag mismatch)
+        assert_eq!(
+            table.decrypt(handle_b, uid, 21, &nonce, b"", &ciphertext_a, &tag_a, &mut decrypt_buf),
+            Err(KeystoreError::AuthenticationFailed)
+        );
+
+        // App A relaunch (new task 25) recovers identical key material
+        let mut table_new = KeystoreTable::<16>::new();
+        let handle_a_relaunch = table_new
+            .derive_key_with_package(uid, 25, DOMAIN_APP_STORAGE, b"org.example.app_a", label, RIGHT_ALL, &secret_root)
+            .expect("derive A relaunch");
+        let key_a_relaunch = table_new.slots[handle_a_relaunch.slot as usize].key;
+        assert_eq!(key_a, key_a_relaunch, "App A relaunch must recover identical key");
+
+        // App A relaunch can decrypt ciphertext_a
+        table_new.decrypt(handle_a_relaunch, uid, 25, &nonce, b"", &ciphertext_a, &tag_a, &mut decrypt_buf).expect("decrypt relaunch");
+        assert_eq!(&decrypt_buf, plaintext);
     }
 }

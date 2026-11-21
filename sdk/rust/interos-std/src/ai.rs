@@ -181,6 +181,59 @@ pub const STATUS_CANCELLED: u32 = 4;
 pub const MODEL_ROLE_UNSPECIFIED: u32 = 0;
 pub const MODEL_ROLE_EMBEDDING: u32 = 1;
 pub const MODEL_ROLE_GENERATIVE_TEXT: u32 = 2; // Decoupled GenerativeText semantic role
+pub const MODEL_ROLE_SPEECH_RECOGNITION: u32 = 3;
+pub const MODEL_ROLE_SPEECH_SYNTHESIS: u32 = 4;
+pub const MODEL_ROLE_VISION: u32 = 5;
+pub const MODEL_ROLE_PLANNING: u32 = 6;
+
+/// Canonical semantic model roles for decoupling application requests from physical artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ModelRole {
+    Unspecified = MODEL_ROLE_UNSPECIFIED,
+    Embedding = MODEL_ROLE_EMBEDDING,
+    GenerativeText = MODEL_ROLE_GENERATIVE_TEXT,
+    SpeechRecognition = MODEL_ROLE_SPEECH_RECOGNITION,
+    SpeechSynthesis = MODEL_ROLE_SPEECH_SYNTHESIS,
+    Vision = MODEL_ROLE_VISION,
+    Planning = MODEL_ROLE_PLANNING,
+}
+
+impl ModelRole {
+    pub const ALL: [Self; 6] = [
+        Self::GenerativeText,
+        Self::Embedding,
+        Self::SpeechRecognition,
+        Self::SpeechSynthesis,
+        Self::Vision,
+        Self::Planning,
+    ];
+
+    pub const fn from_u32(val: u32) -> Option<Self> {
+        match val {
+            MODEL_ROLE_UNSPECIFIED => Some(Self::Unspecified),
+            MODEL_ROLE_EMBEDDING => Some(Self::Embedding),
+            MODEL_ROLE_GENERATIVE_TEXT => Some(Self::GenerativeText),
+            MODEL_ROLE_SPEECH_RECOGNITION => Some(Self::SpeechRecognition),
+            MODEL_ROLE_SPEECH_SYNTHESIS => Some(Self::SpeechSynthesis),
+            MODEL_ROLE_VISION => Some(Self::Vision),
+            MODEL_ROLE_PLANNING => Some(Self::Planning),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "Unspecified",
+            Self::GenerativeText => "Generative Text",
+            Self::Embedding => "Embedding",
+            Self::SpeechRecognition => "Speech Recognition",
+            Self::SpeechSynthesis => "Speech Synthesis",
+            Self::Vision => "Vision",
+            Self::Planning => "Planning",
+        }
+    }
+}
 /// Status code: the answer is the service's own, and it is not the model's.
 ///
 /// WHAT IT MEANS: an embedding came back, and it was produced by the lexical

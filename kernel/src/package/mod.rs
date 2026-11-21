@@ -20,7 +20,7 @@ pub use rapp::{
     build_rapp, parse_rapp, RappArch, RappError, RappManifest, RAPP_FORMAT_VERSION, RAPP_HEADER_SIZE,
     RAPP_MAGIC,
 };
-pub use registry::{PackageRegistry, PackageState, PACKAGE_REGISTRY};
+pub use registry::{PackageKind, PackageRegistry, PackageState, PACKAGE_REGISTRY};
 pub use store::{PackageBlobStore, PACKAGE_BLOB_STORE};
 pub use dependency::{Dependency, PackagePolicy, PackageVersion, Permission, VersionRequirement};
 pub use transaction::{InstallStage, InstallTransaction};

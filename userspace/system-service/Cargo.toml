@@ -88,6 +88,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "acr-app-runtime"
+path = "src/bin/acr_app_runtime.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "aid"
 path = "src/bin/aid.rs"
 test = false

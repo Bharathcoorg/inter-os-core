@@ -288,6 +288,9 @@ pub enum SyscallNumber {
     /// Queries the kernel-authenticated identity (UserId, package identity,
     /// system status, code digest) of a target task.
     TaskIdentityQuery = 167,
+    /// Registers a verified Android application package into the kernel package registry,
+    /// allocating and preserving a stable Android application UID in 10000..19999.
+    PackageRegisterApk = 168,
 }
 
 // -----------------------------------------------------------------------------
@@ -3719,6 +3722,32 @@ pub fn task_identity_query(task_id: u64) -> Result<TaskIdentityInfo, i64> {
     };
     if r >= 0 {
         Ok(info)
+    } else {
+        Err(r)
+    }
+}
+
+/// Registers a verified Android application package into the kernel package registry.
+///
+/// On success, returns the allocated stable Android application UID in range 10000..19999.
+pub fn package_register_apk(
+    package_id: &str,
+    version: (u16, u16, u16),
+    code_digest: &[u8; 32],
+) -> Result<u32, i64> {
+    let ver_packed = ((version.0 as u64) << 32) | ((version.1 as u64) << 16) | (version.2 as u64);
+    let r = unsafe {
+        syscall5(
+            SyscallNumber::PackageRegisterApk,
+            package_id.as_ptr() as u64,
+            package_id.len() as u64,
+            ver_packed,
+            code_digest.as_ptr() as u64,
+            code_digest.len() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as u32)
     } else {
         Err(r)
     }

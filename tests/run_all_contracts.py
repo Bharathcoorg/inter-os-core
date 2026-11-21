@@ -61,7 +61,7 @@ MIN_EXPECTED_CONTRACT_SUITES = 50
 # red run green -- the violation names the suite precisely so the question is
 # "which case went away", not "why is the number smaller".
 PINNED_FRAMEWORK_COLLECTED_CASES = {
-    "tests/test_acr_per_apk_isolation.py": 4,
+    "tests/test_acr_per_apk_isolation.py": 5,
     "tests/test_adversarial_security.py": 10,
     "tests/test_agent_manager_truth_contract.py": 39,
     "tests/test_android_apk_container_contract.py": 4,
@@ -104,6 +104,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_input_coordinate_contract.py": 26,
     "tests/test_kernel_test_diagnostics.py": 16,
     "tests/test_keystore_domain_authorization.py": 7,
+    "tests/test_keystore_package_isolation.py": 3,
     "tests/test_launcher_dirty_band_contract.py": 21,
     "tests/test_launcher_power_menu_contract.py": 9,
     "tests/test_launcher_present_truth_contract.py": 13,
@@ -119,6 +120,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_native_ui_truth_contract.py": 34,
     "tests/test_notes_truth_contract.py": 17,
     "tests/test_notification_contract.py": 6,
+    "tests/test_package_kind_registry.py": 4,
     "tests/test_permission_policy_contract.py": 6,
     "tests/test_platform_reality.py": 68,
     "tests/test_qemu_phone_profile_contract.py": 3,
