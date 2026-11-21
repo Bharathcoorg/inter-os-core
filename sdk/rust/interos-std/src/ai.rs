@@ -166,6 +166,9 @@ pub const MSG_TYPE_COMPANION_QUERY: u32 = 0x434F_4D50;
 /// IPC message type for executing an AppMCP dynamic tool through the capability broker: `0x544F_4F4C` (ASCII `b"TOOL"`).
 pub const MSG_TYPE_TOOL_EXEC: u32 = 0x544F_4F4C;
 
+/// IPC message type for resolving semantic ModelRole to configured model artifact: `0x524F_4C45` (ASCII `b"ROLE"`).
+pub const MSG_TYPE_ROLE_RESOLVE: u32 = 0x524F_4C45;
+
 /// Status code: Success.
 pub const STATUS_SUCCESS: u32 = 0;
 /// Status code: Model weights unavailable or absent from storage.

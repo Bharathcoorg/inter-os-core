@@ -28,6 +28,8 @@ pub use images::{
 };
 pub use user::{
     spawn_user_init,
+    spawn_acrd,
+    spawn_android_app_process,
     spawn_app_settings,
     spawn_app_dialer,
     spawn_app_vault,

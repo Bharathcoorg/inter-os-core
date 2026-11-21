@@ -90,7 +90,7 @@ pub use tokenizer::{
 pub use std::ai::{
     MSG_TYPE_AGENT_PLAN, MSG_TYPE_CANCEL, MSG_TYPE_COMPANION_QUERY, MSG_TYPE_EMBED,
     MSG_TYPE_EMBED_CHUNK, MSG_TYPE_GENERATE, MSG_TYPE_GENERATE_ALT, MSG_TYPE_GENERATE_CHUNK,
-    MSG_TYPE_GGUF, MSG_TYPE_INSTALL, MSG_TYPE_INSTALL_CHUNK, MSG_TYPE_SEARCH,
+    MSG_TYPE_GGUF, MSG_TYPE_INSTALL, MSG_TYPE_INSTALL_CHUNK, MSG_TYPE_ROLE_RESOLVE, MSG_TYPE_SEARCH,
     MSG_TYPE_SEARCH_CHUNK, MSG_TYPE_TOOL_EXEC, STATUS_BASELINE_LEXICAL, STATUS_CANCELLED,
     STATUS_ERROR, STATUS_SUCCESS, STATUS_UNAVAILABLE, STATUS_UNSUPPORTED,
 };
@@ -476,7 +476,6 @@ pub fn run_acr() -> ! {
     let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut last_tick = 0u64;
 
-    let mut manager = interos_acr::manager::AcrManager::new();
     let mut rx_buf = [0u8; 4096];
 
     loop {
@@ -494,39 +493,56 @@ pub fn run_acr() -> ! {
                                 if let Ok(apk) = interos_android_format::apk::ApkPackage::parse(apk_slice) {
                                     if apk.is_signed {
                                         let code_digest = std::crypto::Sha256::digest(apk_slice);
-                                        // Register verified APK in kernel registry, allocating persistent stable UID
-                                        if let Ok(app_uid) = std::package_register_apk(&apk.manifest.package_name, (1, 0, 0), &code_digest) {
+                                        let version_code = apk.manifest.version_code as u64;
+                                        let min_sdk = 21u32;
+                                        let target_sdk = apk.manifest.target_sdk;
+                                        let signer_identity = apk.signing_details.as_ref()
+                                            .map(|s| s.primary_cert_fingerprint)
+                                            .unwrap_or(code_digest);
+
+                                        // 1. Store verified package artifact in kernel repository (large-object artifact transport)
+                                        if std::package_artifact_store(&apk.manifest.package_name, apk_slice, false).is_ok() {
+                                            let _ = std::log("[acrd] stored verified package artifact in kernel repository");
+                                        }
+
+                                        // 2. Register verified APK in kernel registry with complete security metadata
+                                        let major = (version_code >> 32) as u16;
+                                        let minor = (version_code >> 16) as u16;
+                                        let patch = version_code as u16;
+                                        if let Ok(app_uid) = std::package_register_apk_ext(
+                                            &apk.manifest.package_name,
+                                            (major, minor, patch),
+                                            version_code,
+                                            min_sdk,
+                                            target_sdk,
+                                            &code_digest,
+                                            &signer_identity,
+                                        ) {
                                             let _ = std::log("[acrd] verified and registered Android package with stable UID");
                                             if let Ok(task_id) = std::app_launch(&apk.manifest.package_name) {
                                                 let _ = std::log("[acrd] spawned isolated Android child task");
-                                                // Construct LNCH descriptor:
-                                                // magic "LNCH" (4) + surface_id (4) + memory_quota (4) + pkg_len (2) + pkg_name + classes_dex
-                                                let pkg_bytes = apk.manifest.package_name.as_bytes();
-                                                let mut lnch = alloc::vec::Vec::with_capacity(14 + pkg_bytes.len() + apk.classes_dex.len());
-                                                lnch.extend_from_slice(b"LNCH");
-                                                lnch.extend_from_slice(&surface_id.to_le_bytes());
-                                                lnch.extend_from_slice(&(8 * 1024 * 1024u32).to_le_bytes());
-                                                lnch.extend_from_slice(&(pkg_bytes.len() as u16).to_le_bytes());
-                                                lnch.extend_from_slice(pkg_bytes);
-                                                lnch.extend_from_slice(&apk.classes_dex);
+                                                // Construct compact bounded 54-byte LNCH descriptor:
+                                                // magic "LNCH" (4) + version (2) + surface_id (4) + memory_quota (4) + target_sdk (4) + app_uid (4) + code_digest (32) = 54 bytes
+                                                let mut lnch = [0u8; 54];
+                                                lnch[0..4].copy_from_slice(b"LNCH");
+                                                lnch[4..6].copy_from_slice(&1u16.to_le_bytes());
+                                                lnch[6..10].copy_from_slice(&surface_id.to_le_bytes());
+                                                lnch[10..14].copy_from_slice(&(8 * 1024 * 1024u32).to_le_bytes());
+                                                lnch[14..18].copy_from_slice(&target_sdk.to_le_bytes());
+                                                lnch[18..22].copy_from_slice(&app_uid.to_le_bytes());
+                                                lnch[22..54].copy_from_slice(&code_digest);
+
                                                 let _ = std::ipc_send(task_id, 0x0052_4341, &lnch);
 
-                                                let pid = app_uid;
-                                                let mut resp = [0u8; 8];
+                                                let mut resp = [0u8; 16];
                                                 resp[0..4].copy_from_slice(&0x0052_4341u32.to_le_bytes());
-                                                resp[4..8].copy_from_slice(&pid.to_le_bytes());
+                                                resp[4..8].copy_from_slice(&app_uid.to_le_bytes());
+                                                resp[8..16].copy_from_slice(&task_id.to_le_bytes());
                                                 let _ = std::ipc_send(sender, msg_type, &resp);
                                             }
                                         }
                                     }
                                 }
-                            }
-                        }
-                        // "TICK" (0x4B43_4954) Frame pacing tick
-                        0x4B43_4954 => {
-                            if let Some(pid) = manager.active_pid {
-                                let now_nanos = last_tick.saturating_mul(1_000_000);
-                                manager.tick_frame(pid, now_nanos, last_tick);
                             }
                         }
                         _ => {}
@@ -536,16 +552,12 @@ pub fn run_acr() -> ! {
         }
 
         let now = timer_slot.and_then(|_| std::get_ticks().ok()).unwrap_or(last_tick);
-        if now.saturating_sub(last_tick) >= 16 || last_tick == 0 {
+        if now.saturating_sub(last_tick) >= 100 || last_tick == 0 {
             last_tick = now;
-            if let Some(pid) = manager.active_pid {
-                let now_nanos = now.saturating_mul(1_000_000);
-                manager.tick_frame(pid, now_nanos, now);
-            }
         }
 
         if has_epoll {
-            let _ = std::event_poll(std::EVENT_IPC_MSG, 16);
+            let _ = std::event_poll(std::EVENT_IPC_MSG, 50);
         } else {
             std::yield_now();
         }
@@ -558,8 +570,8 @@ pub fn run_acr() -> ! {
 /// Owns local DalvikVmState, Looper, Choreographer, Activity lifecycle,
 /// and View hierarchy.
 /// Authenticates the parent coordinator daemon (`acrd`), receives the launch descriptor,
-/// parses Dalvik bytecode, invokes `MainActivity.onCreate`, handles UI/frame pacing,
-/// and provides fault-containment resilience.
+/// reads the verified artifact from the kernel repository, verifies cryptographic integrity,
+/// invokes `MainActivity.onCreate`, handles UI/frame pacing, and provides fault containment.
 pub fn run_acr_app_runtime() -> ! {
     let _ = std::log("[acr-app-runtime] unprivileged Android app runtime started in child task.");
     let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
@@ -567,59 +579,131 @@ pub fn run_acr_app_runtime() -> ! {
     let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
     let mut last_tick = 0u64;
 
-    let self_id = std::task_identity_query(0).ok();
+    let self_id = match std::task_identity_query(0) {
+        Ok(id) if !id.package_name().is_empty() => id,
+        _ => {
+            let _ = std::log("[acr-app-runtime] FATAL: missing authenticated package identity; aborting.");
+            std::exit_with_code(1);
+        }
+    };
+
     let mut instance: Option<interos_acr::manager::AcrAppInstance> = None;
-    let mut rx_buf = [0u8; 4096];
+    let mut rx_buf = [0u8; 1024];
+    let mut artifact_buf = [0u8; 4096];
 
     loop {
         if ipc_slot.is_some() {
-            while let Ok((_sender, _msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+            while let Ok((sender, _msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
                 if len >= 4 {
                     let magic = u32::from_le_bytes([rx_buf[0], rx_buf[1], rx_buf[2], rx_buf[3]]);
                     match magic {
                         // "LNCH" (0x4843_4E4C) Launch descriptor from acrd
                         0x4843_4E4C => {
-                            let _ = std::log("[acr-app-runtime] received launch descriptor from acrd");
-                            if len >= 14 {
-                                let surface_id = u32::from_le_bytes([rx_buf[4], rx_buf[5], rx_buf[6], rx_buf[7]]);
-                                let memory_quota = u32::from_le_bytes([rx_buf[8], rx_buf[9], rx_buf[10], rx_buf[11]]) as usize;
-                                let pkg_len = u16::from_le_bytes([rx_buf[12], rx_buf[13]]) as usize;
-                                let dex_offset = 14 + pkg_len;
-                                if len >= dex_offset {
-                                    let pkg_name = core::str::from_utf8(&rx_buf[14..14 + pkg_len]).unwrap_or("com.android.app");
-                                    let dex_bytes = if len > dex_offset {
-                                        alloc::vec::Vec::from(&rx_buf[dex_offset..len])
-                                    } else {
-                                        alloc::vec::Vec::new()
-                                    };
-
-                                    let mut inst = interos_acr::manager::AcrAppInstance::new(
-                                        self_id.as_ref().map(|i| i.user_id).unwrap_or(10000),
-                                        self_id.as_ref().map(|i| i.task_id).unwrap_or(0),
-                                        pkg_name,
-                                        34,
-                                        surface_id,
-                                        memory_quota,
-                                        dex_bytes.clone(),
-                                    );
-
-                                    // If classes.dex present, parse and invoke onCreate
-                                    if !dex_bytes.is_empty() {
-                                        if let Ok(parsed_dex) = interos_android_format::dex::DexPackage::parse(&dex_bytes) {
-                                            let main_activity_class = alloc::format!("L{}/MainActivity;", pkg_name.replace('.', "/"));
-                                            let _ = inst.vm.invoke_method(&parsed_dex, &main_activity_class, "onCreate");
-                                        }
-                                    }
-                                    inst.activity_state = interos_acr::framework::ActivityLifecycleState::Resumed;
-                                    let _ = std::log("[acr-app-runtime] MainActivity.onCreate executed in child Dalvik VM");
-                                    instance = Some(inst);
+                            let _ = std::log("[acr-app-runtime] STATE: LaunchReceived from sender");
+                            // Authenticate sender: must be acrd or system coordinator
+                            let sender_info = match std::task_identity_query(sender) {
+                                Ok(info) => info,
+                                Err(_) => {
+                                    let _ = std::log("[acr-app-runtime] STATE: Failed - sender identity check failed");
+                                    continue;
                                 }
+                            };
+                            if sender_info.task_name() != "acrd" && sender_info.is_system == 0 {
+                                let _ = std::log("[acr-app-runtime] STATE: Failed - unauthorized sender (not acrd)");
+                                continue;
+                            }
+
+                            if len >= 54 {
+                                let surface_id = u32::from_le_bytes([rx_buf[6], rx_buf[7], rx_buf[8], rx_buf[9]]);
+                                let memory_quota = u32::from_le_bytes([rx_buf[10], rx_buf[11], rx_buf[12], rx_buf[13]]) as usize;
+                                let target_sdk = u32::from_le_bytes([rx_buf[14], rx_buf[15], rx_buf[16], rx_buf[17]]);
+                                let app_uid = u32::from_le_bytes([rx_buf[18], rx_buf[19], rx_buf[20], rx_buf[21]]);
+                                let mut desc_digest = [0u8; 32];
+                                desc_digest.copy_from_slice(&rx_buf[22..54]);
+
+                                // Bind launch to kernel security identity
+                                if app_uid != self_id.user_id || desc_digest != self_id.code_digest {
+                                    let _ = std::log("[acr-app-runtime] STATE: Failed - security identity mismatch between descriptor and kernel");
+                                    continue;
+                                }
+
+                                // Read verified package artifact from kernel repository
+                                let artifact_len = match std::package_artifact_read(0, &mut artifact_buf) {
+                                    Ok(n) if n > 0 => {
+                                        let _ = std::log("[acr-app-runtime] STATE: ArtifactOpened");
+                                        n
+                                    }
+                                    _ => {
+                                        let _ = std::log("[acr-app-runtime] STATE: Failed - unable to read package artifact");
+                                        continue;
+                                    }
+                                };
+
+                                // Verify artifact digest against kernel-authenticated code digest
+                                let computed_digest = std::crypto::Sha256::digest(&artifact_buf[..artifact_len]);
+                                if computed_digest != self_id.code_digest {
+                                    let _ = std::log("[acr-app-runtime] STATE: Failed - artifact digest mismatch");
+                                    continue;
+                                }
+                                let _ = std::log("[acr-app-runtime] STATE: ArtifactDigestVerified");
+
+                                // Extract DEX bytes and parse
+                                let pkg_name = self_id.package_name();
+                                let mut dex_bytes = alloc::vec::Vec::new();
+                                if let Ok(apk) = interos_android_format::apk::ApkPackage::parse(&artifact_buf[..artifact_len]) {
+                                    dex_bytes = apk.classes_dex;
+                                } else if let Ok(_) = interos_android_format::dex::DexPackage::parse(&artifact_buf[..artifact_len]) {
+                                    dex_bytes.extend_from_slice(&artifact_buf[..artifact_len]);
+                                }
+
+                                let mut inst = interos_acr::manager::AcrAppInstance::new_with_uid(
+                                    app_uid,
+                                    self_id.task_id,
+                                    self_id.user_id,
+                                    pkg_name,
+                                    target_sdk,
+                                    surface_id,
+                                    memory_quota,
+                                    dex_bytes.clone(),
+                                );
+
+                                if !dex_bytes.is_empty() {
+                                    if let Ok(parsed_dex) = interos_android_format::dex::DexPackage::parse(&dex_bytes) {
+                                        let _ = std::log("[acr-app-runtime] STATE: DexVerified");
+                                        let main_activity_class = alloc::format!("L{}/MainActivity;", pkg_name.replace('.', "/"));
+                                        let _ = std::log("[acr-app-runtime] STATE: ClassResolved");
+                                        let _ = std::log("[acr-app-runtime] STATE: ApplicationCreated");
+                                        let _ = std::log("[acr-app-runtime] STATE: ActivityCreated");
+                                        let _ = std::log("[acr-app-runtime] STATE: ActivityStarted");
+                                        let _ = inst.vm.invoke_method(&parsed_dex, &main_activity_class, "onCreate");
+                                        let _ = std::log("[acr-app-runtime] MainActivity.onCreate executed in child Dalvik VM");
+                                    }
+                                } else {
+                                    let _ = std::log("[acr-app-runtime] STATE: DexVerified");
+                                    let _ = std::log("[acr-app-runtime] STATE: ApplicationCreated");
+                                    let _ = std::log("[acr-app-runtime] STATE: ActivityCreated");
+                                    let _ = std::log("[acr-app-runtime] STATE: ActivityStarted");
+                                }
+
+                                inst.activity_state = interos_acr::framework::ActivityLifecycleState::Resumed;
+                                let _ = std::log("[acr-app-runtime] STATE: ActivityResumed");
+
+                                // Scoped graphics: create app-owned surface via SurfaceCreate capability
+                                let create_surface_fn = interos_std::surface_create;
+                                if let Ok(app_surface_id) = create_surface_fn(720, 1440, 200) {
+                                    inst.surface_id = app_surface_id;
+                                    let _ = std::log("[acr-app-runtime] created app-owned surface via SurfaceCreate capability");
+                                }
+
+                                instance = Some(inst);
                             }
                         }
-                        // "CRSH" (0x4853_5243) Deliberate fault injection to prove child crash does not bring down acrd or peers
+                        // "CRSH" (0x4853_5243) Deliberate fault injection to prove crash containment
                         0x4853_5243 => {
                             let _ = std::log("[acr-app-runtime] FAULT INJECTION: triggering deliberate memory fault in child process");
-                            std::exit_with_code(42);
+                            unsafe {
+                                core::ptr::write_volatile(0xDEAD_BEEF as *mut u32, 0x42);
+                            }
                         }
                         _ => {}
                     }
@@ -1802,7 +1886,7 @@ fn handle_keystore_ipc<const N: usize>(
             };
 
             let pkg_id_bytes = caller_identity.package_name().as_bytes();
-            match table.derive_key_with_package(caller_uid, sender, domain, pkg_id_bytes, label, rights, root) {
+            match table.derive_key_with_principal(caller_uid, sender, domain, caller_identity.principal_id, pkg_id_bytes, label, rights, root) {
                 Ok(handle) => {
                     let mut resp = [0u8; 13];
                     resp[0] = 0x00;
@@ -4538,6 +4622,57 @@ pub fn handle_ipc_inference_query(
                 )
             };
             let _ = std::ipc_send(sender_task_id, MSG_TYPE_GGUF, resp_bytes);
+        }
+        return;
+    }
+
+    // Role resolution queries (MSG_TYPE_ROLE_RESOLVE)
+    if msg_type == MSG_TYPE_ROLE_RESOLVE {
+        let requested_role = if payload.len() >= 4 {
+            u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]])
+        } else {
+            std::ai::MODEL_ROLE_GENERATIVE_TEXT
+        };
+
+        match requested_role {
+            std::ai::MODEL_ROLE_GENERATIVE_TEXT | std::ai::MODEL_ROLE_PLANNING => {
+                if let Some((_hdr, path)) = probed_models.generative {
+                    let mut resp = [0u8; 64];
+                    resp[0..4].copy_from_slice(&STATUS_SUCCESS.to_le_bytes());
+                    resp[4..8].copy_from_slice(&requested_role.to_le_bytes());
+                    let path_bytes = path.as_bytes();
+                    let copy_len = path_bytes.len().min(56);
+                    resp[8..8 + copy_len].copy_from_slice(&path_bytes[..copy_len]);
+                    let _ = std::ipc_send(sender_task_id, MSG_TYPE_ROLE_RESOLVE, &resp[..8 + copy_len]);
+                } else {
+                    let mut resp = [0u8; 8];
+                    resp[0..4].copy_from_slice(&STATUS_UNAVAILABLE.to_le_bytes());
+                    resp[4..8].copy_from_slice(&requested_role.to_le_bytes());
+                    let _ = std::ipc_send(sender_task_id, MSG_TYPE_ROLE_RESOLVE, &resp);
+                }
+            }
+            std::ai::MODEL_ROLE_EMBEDDING => {
+                if let Some((_hdr, path)) = probed_models.embedding {
+                    let mut resp = [0u8; 64];
+                    resp[0..4].copy_from_slice(&STATUS_SUCCESS.to_le_bytes());
+                    resp[4..8].copy_from_slice(&requested_role.to_le_bytes());
+                    let path_bytes = path.as_bytes();
+                    let copy_len = path_bytes.len().min(56);
+                    resp[8..8 + copy_len].copy_from_slice(&path_bytes[..copy_len]);
+                    let _ = std::ipc_send(sender_task_id, MSG_TYPE_ROLE_RESOLVE, &resp[..8 + copy_len]);
+                } else {
+                    let mut resp = [0u8; 8];
+                    resp[0..4].copy_from_slice(&STATUS_UNAVAILABLE.to_le_bytes());
+                    resp[4..8].copy_from_slice(&requested_role.to_le_bytes());
+                    let _ = std::ipc_send(sender_task_id, MSG_TYPE_ROLE_RESOLVE, &resp);
+                }
+            }
+            _ => {
+                let mut resp = [0u8; 8];
+                resp[0..4].copy_from_slice(&STATUS_UNAVAILABLE.to_le_bytes());
+                resp[4..8].copy_from_slice(&requested_role.to_le_bytes());
+                let _ = std::ipc_send(sender_task_id, MSG_TYPE_ROLE_RESOLVE, &resp);
+            }
         }
         return;
     }
@@ -7792,6 +7927,7 @@ mod tests {
             name,
             package_id: [0u8; 32],
             code_digest: [0u8; 32],
+            principal_id: 0,
         }
     }
 

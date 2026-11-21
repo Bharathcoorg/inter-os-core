@@ -80,9 +80,11 @@ def test_acr_app_runtime_binary_and_child_execution():
 
 def test_acrd_is_coordinator_and_registers_package():
     service_lib = read_source("userspace/system-service/src/lib.rs")
-    # acrd registers verified APK into kernel registry
-    assert "std::package_register_apk(&apk.manifest.package_name" in service_lib
+    # acrd registers verified APK into kernel registry with complete security metadata
+    assert "std::package_register_apk_ext(" in service_lib
+    # acrd stores package artifact in kernel repository
+    assert "std::package_artifact_store(" in service_lib
     # acrd requests process spawn from kernel
     assert "std::app_launch(&apk.manifest.package_name)" in service_lib
     # acrd sends LNCH descriptor to child task
-    assert "lnch.extend_from_slice(b\"LNCH\");" in service_lib
+    assert 'lnch[0..4].copy_from_slice(b"LNCH");' in service_lib

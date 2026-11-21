@@ -452,6 +452,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         .expect("PID 1 service registration must succeed");
     assert_eq!(kernel::services::task_id(kernel::services::ServiceId::Init), Some(id_user_init));
 
+    if let Ok(acrd_tid) = kernel::task::spawn_acrd(TaskId(0)) {
+        IPC_ROUTER.lock().register_task(acrd_tid);
+        serial_println!("[OK] ACR coordinator daemon spawned (Task {}).", acrd_tid.0);
+    }
+
     serial_println!("[OK] PID1 userspace service manager spawned (Task {}).", id_user_init.0);
     serial_println!("[OK] Kernel service registry initialized; application startup delegated to userspace.");
 

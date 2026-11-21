@@ -337,6 +337,10 @@ pub enum SyscallNumber {
     /// Registers a verified Android application package into the kernel package registry,
     /// allocating and preserving a stable Android application UID in 10000..19999.
     PackageRegisterApk = 168,
+    /// Reads verified package artifact bytes for the calling task's authenticated package identity.
+    PackageArtifactRead = 169,
+    /// Stores or appends verified package artifact bytes into the kernel package repository.
+    PackageArtifactStore = 170,
 }
 
 /// 96-byte kernel-authenticated task security identity descriptor.
@@ -352,6 +356,17 @@ pub struct TaskIdentityInfo {
     pub name: [u8; 16],
     pub package_id: [u8; 32],
     pub code_digest: [u8; 32],
+    pub principal_id: u64,
+}
+
+/// Extended Android application package metadata passed during registration.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AndroidPackageMetadata {
+    pub version_code: u64,
+    pub min_sdk: u32,
+    pub target_sdk: u32,
+    pub signer_identity: [u8; 32],
 }
 
 /// System call result status codes.
@@ -978,6 +993,10 @@ pub fn sys_ipc_send(
         return SyscallResult::PermissionDenied;
     }
 
+    if data.len() > crate::ipc::IPC_MAX_PAYLOAD {
+        return SyscallResult::InvalidArguments;
+    }
+
     if crate::task::process::consume_background_ipc(sender_id).is_err() {
         return SyscallResult::NotReady;
     }
@@ -990,6 +1009,7 @@ pub fn sys_ipc_send(
         Err(IpcError::MailboxFull) => SyscallResult::MailboxFull,
         Err(IpcError::MailboxEmpty) => SyscallResult::MailboxEmpty,
         Err(IpcError::EndpointRevoked) => SyscallResult::PermissionDenied,
+        Err(IpcError::MessageTooLarge) => SyscallResult::InvalidArguments,
     }
 }
 
@@ -1502,10 +1522,10 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let dest = TaskId(a2);
             let msg_type = a3 as u32;
             let data_len = a5 as usize;
-            if data_len > 1024 {
+            if data_len > crate::ipc::IPC_MAX_PAYLOAD {
                 return SyscallResult::InvalidArguments as i64;
             }
-            let mut kbuf = [0u8; 1024];
+            let mut kbuf = [0u8; crate::ipc::IPC_MAX_PAYLOAD];
             if copy_from_user(&mut kbuf[..data_len], a4, data_len).is_err() {
                 return SyscallResult::InvalidArguments as i64;
             }
@@ -1710,10 +1730,9 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         }
         168 => {
-            // PackageRegisterApk: a1 = pkg_name_ptr, a2 = pkg_name_len, a3 = packed_version, a4 = code_digest_ptr, a5 = code_digest_len
+            // PackageRegisterApk: a1 = pkg_name_ptr, a2 = pkg_name_len, a3 = packed_version, a4 = code_digest_ptr, a5 = meta_ptr_or_legacy_len
             let name_len = a2 as usize;
-            let digest_len = a5 as usize;
-            if name_len == 0 || name_len > 32 || digest_len != 32 || a1 == 0 || a4 == 0 {
+            if name_len == 0 || name_len > 32 || a1 == 0 || a4 == 0 {
                 return SyscallResult::InvalidArguments as i64;
             }
             let mut name_buf = [0u8; 32];
@@ -1733,9 +1752,109 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             let minor = ((a3 >> 16) & 0xFFFF) as u16;
             let patch = (a3 & 0xFFFF) as u16;
 
-            match sys_package_register_apk(pkg_name, (major, minor, patch), digest_buf) {
+            let (version_code, min_sdk, target_sdk, signer_identity) = if a5 > 4096 {
+                match read_user_value::<AndroidPackageMetadata>(a5) {
+                    Ok(meta) => (meta.version_code, meta.min_sdk, meta.target_sdk, meta.signer_identity),
+                    Err(_) => return SyscallResult::InvalidArguments as i64,
+                }
+            } else {
+                let vc = ((major as u64) << 32) | ((minor as u64) << 16) | (patch as u64);
+                (vc, 21u32, 34u32, digest_buf)
+            };
+
+            match sys_package_register_apk(pkg_name, (major, minor, patch), version_code, min_sdk, target_sdk, digest_buf, signer_identity) {
                 Ok(app_uid) => app_uid as i64,
                 Err(e) => e as i64,
+            }
+        }
+        169 => {
+            // PackageArtifactRead: a1 = offset, a2 = out_buf_ptr, a3 = out_buf_len
+            let offset = a1 as usize;
+            let len = a3 as usize;
+            if len == 0 || len > 1024 * 1024 || a2 == 0 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let sched = SCHEDULER.lock();
+            let caller_id = match sched.current_task_id() {
+                Some(id) => id,
+                None => return SyscallResult::PermissionDenied as i64,
+            };
+            let caller_task = match sched.get_task(caller_id) {
+                Some(t) => t,
+                None => return SyscallResult::PermissionDenied as i64,
+            };
+            let pkg_id = match caller_task.security_identity.as_ref() {
+                Some(sec) => sec.package_id,
+                None => return SyscallResult::PermissionDenied as i64,
+            };
+            drop(sched);
+
+            let store = crate::package::PACKAGE_BLOB_STORE.lock();
+            let blob = match store.get(pkg_id) {
+                Some(b) => b,
+                None => return SyscallResult::FileNotFound as i64,
+            };
+            if offset >= blob.bytes.len() {
+                return 0; // EOF
+            }
+            let available = blob.bytes.len() - offset;
+            let to_copy = core::cmp::min(len, available);
+            if copy_to_user(a2, &blob.bytes[offset..offset + to_copy]).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            to_copy as i64
+        }
+        170 => {
+            // PackageArtifactStore: a1 = pkg_name_ptr, a2 = pkg_name_len, a3 = chunk_ptr, a4 = chunk_len, a5 = append
+            let name_len = a2 as usize;
+            let chunk_len = a4 as usize;
+            let append = a5 != 0;
+            if name_len == 0 || name_len > 32 || chunk_len > 65536 || a1 == 0 || a3 == 0 {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let sched = SCHEDULER.lock();
+            let caller_id = match sched.current_task_id() {
+                Some(id) => id,
+                None => return SyscallResult::PermissionDenied as i64,
+            };
+            let caller_task = match sched.get_task(caller_id) {
+                Some(t) => t,
+                None => return SyscallResult::PermissionDenied as i64,
+            };
+            let is_authorized = caller_task.security_identity.as_ref().map(|s| s.is_system).unwrap_or(false)
+                || caller_task.cap_table.holds_capability_type(CapabilityType::PackageInstall, Rights::WRITE)
+                || caller_task.cap_table.verify_object(0, CapabilityType::SystemControl, Rights::WRITE, 0x504B_4749).is_ok();
+            if !is_authorized {
+                return SyscallResult::PermissionDenied as i64;
+            }
+            drop(sched);
+
+            let mut name_buf = [0u8; 32];
+            if copy_from_user(&mut name_buf[..name_len], a1, name_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+            let pkg_name = match core::str::from_utf8(&name_buf[..name_len]) {
+                Ok(s) => s,
+                Err(_) => return SyscallResult::InvalidArguments as i64,
+            };
+
+            let mut chunk_buf = alloc::vec::Vec::with_capacity(chunk_len);
+            chunk_buf.resize(chunk_len, 0);
+            if copy_from_user(&mut chunk_buf, a3, chunk_len).is_err() {
+                return SyscallResult::InvalidArguments as i64;
+            }
+
+            let mut store = crate::package::PACKAGE_BLOB_STORE.lock();
+            if append {
+                match store.append_runtime(pkg_name, &chunk_buf) {
+                    Ok(()) => SyscallResult::Success as i64,
+                    Err(()) => SyscallResult::FileNotFound as i64,
+                }
+            } else {
+                match store.put_runtime(pkg_name, (1, 0, 0), &chunk_buf) {
+                    Ok(()) => SyscallResult::Success as i64,
+                    Err(()) => SyscallResult::DeviceError as i64,
+                }
             }
         }
         10 => {
@@ -4987,20 +5106,18 @@ pub fn sys_telephony_set_data(enabled: bool) -> Result<bool, SyscallResult> {
 
 /// Allocates a new hardware plane surface in the DRM/KMS compositor.
 /// Display-service authority is object-scoped: only the display service's
-/// framebuffer capability (object 1) can access the hardware display boundary.
+/// framebuffer capability (object 1) or an application's scoped SurfaceCreate capability
+/// can create and present app-owned surfaces.
 fn require_display_service(cap_slot: usize) -> Result<TaskId, SyscallResult> {
     let sched = SCHEDULER.lock();
     let task = sched.current_task().ok_or(SyscallResult::PermissionDenied)?;
-    let effective_slot = if task.cap_table.verify_object(cap_slot, CapabilityType::FrameBufferDirect, Rights::WRITE, 1).is_ok() {
-        cap_slot
-    } else if let Some(s) = task.cap_table.find_slot(CapabilityType::FrameBufferDirect, Rights::WRITE) {
-        s
-    } else {
-        cap_slot
-    };
-    task.cap_table
-        .verify_object(effective_slot, CapabilityType::FrameBufferDirect, Rights::WRITE, 1)
-        .map_err(|_| SyscallResult::PermissionDenied)?;
+    let has_fb = task.cap_table.verify_object(cap_slot, CapabilityType::FrameBufferDirect, Rights::WRITE, 1).is_ok()
+        || task.cap_table.find_slot(CapabilityType::FrameBufferDirect, Rights::WRITE).is_some();
+    let has_surface = task.cap_table.holds_capability_type(CapabilityType::SurfaceCreate, Rights::WRITE)
+        || task.cap_table.find_slot(CapabilityType::SurfaceCreate, Rights::WRITE).is_some();
+    if !has_fb && !has_surface {
+        return Err(SyscallResult::PermissionDenied);
+    }
     Ok(task.id)
 }
 
@@ -6356,9 +6473,10 @@ pub fn sys_task_identity_query(
         TaskId(target_task_id)
     };
 
-    // A task may query itself without special rights. Cross-task queries require
+    // A task may query itself or its spawning parent without special rights. Cross-task queries require
     // caller to be a verified system service or hold SystemControl or AgentTask.
     let is_authorized = target_id == caller_id
+        || target_id == caller_task.parent_id
         || caller_task.security_identity.as_ref().map(|s| s.is_system).unwrap_or(false)
         || caller_task.cap_table.holds_capability_type(CapabilityType::SystemControl, Rights::READ)
         || caller_task.cap_table.holds_capability_type(CapabilityType::AgentTask, Rights::READ);
@@ -6392,6 +6510,12 @@ pub fn sys_task_identity_query(
 
     let is_app = if crate::task::process::task_is_application(target.id).unwrap_or(false) { 1 } else { 0 };
 
+    let principal_id = if let Ok(s) = core::str::from_utf8(&pkg_buf[..pkg_len as usize]) {
+        crate::package::PACKAGE_REGISTRY.lock().entries().iter().find(|e| e.package_id == s).map(|e| e.principal_id).unwrap_or(0)
+    } else {
+        0
+    };
+
     let info = TaskIdentityInfo {
         task_id: target.id.0,
         user_id,
@@ -6402,6 +6526,7 @@ pub fn sys_task_identity_query(
         name: name_buf,
         package_id: pkg_buf,
         code_digest,
+        principal_id,
     };
 
     let info_bytes = unsafe {
@@ -6417,18 +6542,25 @@ pub fn sys_task_identity_query(
 /// Registers an audited Android application package into the kernel package registry (syscall 168).
 ///
 /// Binds the verified code digest and allocates a persistent stable Android UID in range 10000..19999.
+/// Enforces PackageInstall capability authority and strictly rejects FileSystemWrite ambient authority.
 pub fn sys_package_register_apk(
     package_id: &str,
     version: (u16, u16, u16),
+    version_code: u64,
+    min_sdk: u32,
+    target_sdk: u32,
     code_digest: [u8; 32],
+    signer_identity: [u8; 32],
 ) -> Result<u32, SyscallResult> {
     let sched = SCHEDULER.lock();
     let caller_id = sched.current_task_id().ok_or(SyscallResult::PermissionDenied)?;
     let caller_task = sched.get_task(caller_id).ok_or(SyscallResult::PermissionDenied)?;
 
+    // Zero ambient authority: Access to package registration strictly requires PackageInstall capability
+    // or scoped SystemControl token (0x504B_4749). FileSystemWrite is strictly removed.
     let is_authorized = caller_task.security_identity.as_ref().map(|s| s.is_system).unwrap_or(false)
-        || caller_task.cap_table.holds_capability_type(CapabilityType::SystemControl, Rights::WRITE)
-        || caller_task.cap_table.holds_capability_type(CapabilityType::FileSystemWrite, Rights::WRITE);
+        || caller_task.cap_table.holds_capability_type(CapabilityType::PackageInstall, Rights::WRITE)
+        || caller_task.cap_table.verify_object(0, CapabilityType::SystemControl, Rights::WRITE, 0x504B_4749).is_ok();
     if !is_authorized {
         return Err(SyscallResult::PermissionDenied);
     }
@@ -6437,7 +6569,15 @@ pub fn sys_package_register_apk(
     crate::package::PACKAGE_REGISTRY.lock().seed();
     crate::package::PACKAGE_REGISTRY
         .lock()
-        .register_verified_apk(package_id, version, code_digest)
+        .register_verified_apk(
+            package_id,
+            version,
+            version_code,
+            min_sdk,
+            target_sdk,
+            code_digest,
+            signer_identity,
+        )
         .map_err(|_| SyscallResult::DeviceError)
 }
 

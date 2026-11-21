@@ -996,6 +996,68 @@ pub fn load_user_elf_with_stack(elf_data: &[u8], stack_top_addr: usize) -> Resul
 /// generic Android runtime binary `acr-app-runtime`, binds the persistent registered Android application UID,
 /// sets cryptographic code digest, and marks the process as an application subject
 /// to sandbox namespace `/data/data/<package_name>`.
+/// Spawns the userspace Android Compatibility Runtime coordinator daemon (`acrd`).
+/// Runs in Ring-3 with explicit capabilities: PackageInstall, ProcessSpawn, IPC, Timer, EventPoll.
+pub fn spawn_acrd(parent_id: TaskId) -> Result<TaskId, &'static str> {
+    let mut caps = CapabilityTable::new(16);
+    caps.insert(Capability {
+        id: CapabilityId(0x7F00),
+        cap_type: CapabilityType::SerialOutput,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).map_err(|_| "failed to insert serial cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x7F01),
+        cap_type: CapabilityType::IpcSend,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).map_err(|_| "failed to insert ipc send cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x7F02),
+        cap_type: CapabilityType::IpcReceive,
+        rights: Rights::READ,
+        object_id: 0,
+    }).map_err(|_| "failed to insert ipc recv cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x7F03),
+        cap_type: CapabilityType::EventPoll,
+        rights: Rights::READ | Rights::INVOKE,
+        object_id: 0,
+    }).map_err(|_| "failed to insert event poll cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x7F04),
+        cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).map_err(|_| "failed to insert timer cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x7F05),
+        cap_type: CapabilityType::PackageInstall,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).map_err(|_| "failed to insert package install cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x7F06),
+        cap_type: CapabilityType::ProcessSpawn,
+        rights: Rights::INVOKE,
+        object_id: 0,
+    }).map_err(|_| "failed to insert process spawn cap")?;
+
+    let tid = spawn_user_process_with_parent(
+        "acrd",
+        crate::task::images::ACRD_ELF,
+        caps,
+        5,
+        parent_id,
+    )?;
+
+    if let Some(_process) = crate::task::process::process_for_task(tid) {
+        let _ = crate::task::process::mark_application_for_task(tid);
+    }
+
+    Ok(tid)
+}
+
 pub fn spawn_android_app_process(
     package_name: &str,
     parent_id: TaskId,
@@ -1031,6 +1093,18 @@ pub fn spawn_android_app_process(
         rights: Rights::READ | Rights::INVOKE,
         object_id: 0,
     }).map_err(|_| "failed to insert event poll cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x8104),
+        cap_type: CapabilityType::TimerTickRead,
+        rights: Rights::READ,
+        object_id: 0,
+    }).map_err(|_| "failed to insert timer tick cap")?;
+    caps.insert(Capability {
+        id: CapabilityId(0x8105),
+        cap_type: CapabilityType::SurfaceCreate,
+        rights: Rights::WRITE,
+        object_id: 0,
+    }).map_err(|_| "failed to insert surface create cap")?;
 
     let mut limits = crate::task::process::ResourceLimits::default();
     limits.max_address_space_bytes = memory_quota as u64;

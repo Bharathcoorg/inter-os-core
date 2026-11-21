@@ -80,6 +80,36 @@ impl AcrAppInstance {
         }
     }
 
+    pub fn new_with_uid(
+        pid: u32,
+        task_id: u64,
+        uid: u32,
+        package_name: &str,
+        target_sdk: u32,
+        surface_id: u32,
+        memory_quota_bytes: usize,
+        classes_dex: Vec<u8>,
+    ) -> Self {
+        let data_dir = alloc::format!("/data/data/{}", package_name);
+        Self {
+            pid,
+            task_id,
+            uid,
+            package_name: String::from(package_name),
+            target_sdk,
+            activity_state: ActivityLifecycleState::Created,
+            vm: DalvikVmState::new(),
+            looper: Looper::new(),
+            choreographer: Choreographer::new(),
+            task_record: TaskRecord::new(pid, package_name),
+            root_view: None,
+            memory_quota_bytes,
+            surface_id,
+            classes_dex,
+            data_dir,
+        }
+    }
+
     /// Renders the root view hierarchy to a frame buffer surface.
     pub fn render_to_surface(&self, buffer: &mut [u32], buf_w: u32, buf_h: u32) -> usize {
         let Some(root) = &self.root_view else {
