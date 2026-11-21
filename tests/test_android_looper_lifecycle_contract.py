@@ -46,3 +46,9 @@ def test_kernel_activity_back_stack_lifecycle():
     assert "pub fn finish_top_activity(&mut self) -> Option<ActivityRecord>" in source
     assert "prev.state = ActivityLifecycleState::Stopped;" in source
     assert "underneath.state = ActivityLifecycleState::Resumed;" in source
+
+    # Also verify Ring-3 ACR looper and task manager
+    acr_looper = read_source("crates/interos-acr/src/looper.rs")
+    assert "pub struct Looper" in acr_looper
+    assert "pub struct Choreographer" in acr_looper
+    assert "pub struct TaskRecord" in acr_looper

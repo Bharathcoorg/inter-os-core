@@ -32,17 +32,19 @@ pub const APK_SIGNATURE_SCHEME_V2_BLOCK_ID: u32 = 0x7109871a;
 /// ID for APK Signature Scheme v3 (Android 9.0+).
 pub const APK_SIGNATURE_SCHEME_V3_BLOCK_ID: u32 = 0xf05368c0;
 
-/// ID for APK Signature Scheme v4 (Android 11+).
-pub const APK_SIGNATURE_SCHEME_V4_BLOCK_ID: u32 = 0x42726577;
+/// AOSP fs-verity padding block ID (used to pad signing block to 4096-byte alignment).
+/// Note: In AOSP ApkSigningBlockUtils.java, 0x42726577 is VERITY_PADDING_BLOCK_ID, NOT Scheme v4.
+pub const VERITY_PADDING_BLOCK_ID: u32 = 0x42726577;
+pub const APK_SIGNATURE_SCHEME_V4_BLOCK_ID: u32 = VERITY_PADDING_BLOCK_ID;
 
 /// Signature algorithm IDs recognized by AOSP.
 pub const SIG_ALGO_RSA_PSS_WITH_SHA256: u32 = 0x0101;
-pub const SIG_ALGO_RSA_PKCS1_V1_5_WITH_SHA256: u32 = 0x0102;
-pub const SIG_ALGO_ECDSA_WITH_SHA256: u32 = 0x0103;
-pub const SIG_ALGO_DSA_WITH_SHA256: u32 = 0x0104;
-pub const SIG_ALGO_RSA_PSS_WITH_SHA512: u32 = 0x0201;
-pub const SIG_ALGO_RSA_PKCS1_V1_5_WITH_SHA512: u32 = 0x0202;
-pub const SIG_ALGO_ECDSA_WITH_SHA512: u32 = 0x0203;
+pub const SIG_ALGO_RSA_PSS_WITH_SHA512: u32 = 0x0102;
+pub const SIG_ALGO_RSA_PKCS1_V1_5_WITH_SHA256: u32 = 0x0103;
+pub const SIG_ALGO_RSA_PKCS1_V1_5_WITH_SHA512: u32 = 0x0104;
+pub const SIG_ALGO_ECDSA_WITH_SHA256: u32 = 0x0201;
+pub const SIG_ALGO_ECDSA_WITH_SHA512: u32 = 0x0202;
+pub const SIG_ALGO_DSA_WITH_SHA256: u32 = 0x0301;
 
 /// Chunk size for APK content digest calculation (1 MiB).
 pub const CONTENT_DIGEST_CHUNK_SIZE: usize = 1024 * 1024;

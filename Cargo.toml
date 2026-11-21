@@ -20,6 +20,8 @@ members = [
     "apps/agent_manager",
     "apps/video_player",
     "apps/webview_demo",
+    "crates/interos-android-format",
+    "crates/interos-acr",
 ]
 exclude = [
     "boot",

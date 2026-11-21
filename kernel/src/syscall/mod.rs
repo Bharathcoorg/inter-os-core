@@ -381,6 +381,8 @@ pub enum SyscallResult {
     ResourceExhausted = -34,
     /// Synchronous wait operation timed out before event was signaled.
     TimedOut = -35,
+    /// The requested operation or syscall is not supported by Ring 0 microkernel.
+    NotSupported = -36,
 }
 
 /// Dispatches a cooperative scheduling yield.
@@ -2262,65 +2264,12 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         }
         52 => {
-            // ApkInstallAudit: a1 = apk_ptr, a2 = apk_len, a3 = out_ptr, a4 = out_len
-            let sched = SCHEDULER.lock();
-            let current = match sched.current_task() {
-                Some(t) => t,
-                None => return SyscallResult::PermissionDenied as i64,
-            };
-            let authorized = current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::WRITE)
-                || current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::WRITE);
-            drop(sched);
-            if !authorized {
-                return SyscallResult::PermissionDenied as i64;
-            }
-            let apk_len = a2 as usize;
-            let out_len = a4 as usize;
-            if apk_len == 0 || apk_len > 64 * 1024 || out_len == 0 || out_len > 1024 {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let mut apk_buf = alloc::vec![0u8; apk_len];
-            if copy_from_user(&mut apk_buf, a1, apk_len).is_err() {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let mut out_buf = [0u8; 1024];
-            match sys_apk_install_audit(&apk_buf, &mut out_buf[..out_len]) {
-                Ok(n) => {
-                    if copy_to_user(a3, &out_buf[..n]).is_err() {
-                        return SyscallResult::InvalidArguments as i64;
-                    }
-                    n as i64
-                }
-                Err(e) => e as i64,
-            }
+            // ApkInstallAudit: historical privileged entry point retired; Android compatibility is Ring-3 userspace.
+            SyscallResult::NotSupported as i64
         }
         53 => {
-            // DexVerifyExec: a1 = dex_ptr, a2 = dex_len
-            let sched = SCHEDULER.lock();
-            let current = match sched.current_task() {
-                Some(t) => t,
-                None => return SyscallResult::PermissionDenied as i64,
-            };
-            let authorized = current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::INVOKE)
-                || current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::EXECUTE)
-                || current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::WRITE)
-                || current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::WRITE);
-            drop(sched);
-            if !authorized {
-                return SyscallResult::PermissionDenied as i64;
-            }
-            let dex_len = a2 as usize;
-            if dex_len == 0 || dex_len > 64 * 1024 {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let mut dex_buf = alloc::vec![0u8; dex_len];
-            if copy_from_user(&mut dex_buf, a1, dex_len).is_err() {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            match sys_dex_verify_exec(&dex_buf) {
-                Ok(n) => n as i64,
-                Err(e) => e as i64,
-            }
+            // DexVerifyExec: historical privileged entry point retired; Android compatibility is Ring-3 userspace.
+            SyscallResult::NotSupported as i64
         }
         54 => {
             // CameraCapture: a1 = action, a2 = out_buf_ptr, a3 = out_buf_len, a4 = out_meta_ptr
@@ -2352,38 +2301,8 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         }
         55 => {
-            // DexInvokeMethod: a1 = dex_ptr, a2 = dex_len, a3 = spec_ptr, a4 = spec_len
-            let sched = SCHEDULER.lock();
-            let current = match sched.current_task() {
-                Some(t) => t,
-                None => return SyscallResult::PermissionDenied as i64,
-            };
-            let authorized = current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::INVOKE)
-                || current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::EXECUTE)
-                || current.cap_table.authorize_capability(CapabilityType::ProcessSpawn, Rights::WRITE)
-                || current.cap_table.authorize_capability(CapabilityType::SystemControl, Rights::WRITE);
-            drop(sched);
-            if !authorized {
-                return SyscallResult::PermissionDenied as i64;
-            }
-            let dex_len = a2 as usize;
-            let spec_len = a4 as usize;
-            if dex_len == 0 || dex_len > 64 * 1024 || spec_len == 0 || spec_len > 256 {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let mut dex_buf = alloc::vec![0u8; dex_len];
-            if copy_from_user(&mut dex_buf, a1, dex_len).is_err() {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let mut spec_buf = [0u8; 256];
-            let spec_str = match read_user_string(a3, spec_len, &mut spec_buf) {
-                Ok(s) => s,
-                Err(_) => return SyscallResult::InvalidArguments as i64,
-            };
-            match sys_dex_invoke_method(&dex_buf, spec_str) {
-                Ok(n) => n as i64,
-                Err(e) => e as i64,
-            }
+            // DexInvokeMethod: historical privileged entry point retired; Android compatibility is Ring-3 userspace.
+            SyscallResult::NotSupported as i64
         }
         57 => {
             // CapRequestConsent: a1 = perm_val, a2 = app_name_ptr, a3 = app_name_len, a4 = auto_approve_flag
@@ -6397,42 +6316,17 @@ pub fn sys_surface_physics(
     Ok(scroller.scroll_y)
 }
 
-/// Audits an Android APK package, decodes its binary manifest, maps permissions to
-/// Inter OS capabilities, and outputs the audited ACR container profile.
+/// Historical privileged APK install audit entry point retired to Ring-3 userspace.
 pub fn sys_apk_install_audit(
-    apk_data: &[u8],
-    out_buf: &mut [u8],
+    _apk_data: &[u8],
+    _out_buf: &mut [u8],
 ) -> Result<usize, SyscallResult> {
-    use crate::compat::android::apk::ApkPackage;
-
-    let apk = ApkPackage::parse(apk_data).map_err(|_| SyscallResult::InvalidArguments)?;
-    let profile = apk.audit_and_create_container(900);
-
-    let desc = alloc::format!(
-        "PKG:{}|VER:{}|SDK:{}|STATUS:{}|CAPS:{}|DENIED:{}",
-        profile.package_name,
-        profile.version_code,
-        profile.target_sdk,
-        profile.status as u32,
-        profile.granted_caps_count,
-        profile.denied_perms_count,
-    );
-
-    let bytes = desc.as_bytes();
-    let to_copy = core::cmp::min(bytes.len(), out_buf.len());
-    out_buf[..to_copy].copy_from_slice(&bytes[..to_copy]);
-    Ok(to_copy)
+    Err(SyscallResult::NotSupported)
 }
 
-/// Audits and verifies an Android Dalvik Executable (classes.dex) bytecode payload.
-/// Validates the DEX binary structure, Adler-32 checksum, and verifies that no ambient
-/// process execution or reflection exploits exist in the instruction stream.
-pub fn sys_dex_verify_exec(dex_data: &[u8]) -> Result<u32, SyscallResult> {
-    use crate::compat::android::dex::DexPackage;
-
-    let dex = DexPackage::parse(dex_data).map_err(|_| SyscallResult::IntegrityViolation)?;
-    let verified_insns = dex.audit_bytecode().map_err(|_| SyscallResult::PermissionDenied)?;
-    Ok(verified_insns)
+/// Historical privileged DEX verification entry point retired to Ring-3 userspace.
+pub fn sys_dex_verify_exec(_dex_data: &[u8]) -> Result<u32, SyscallResult> {
+    Err(SyscallResult::NotSupported)
 }
 
 /// Captures a frame from the hardware camera sensor and runs the ISP & neural vision classifier.
@@ -6497,25 +6391,9 @@ pub fn sys_camera_capture(
     Ok(bytes_to_copy)
 }
 
-/// Invokes a verified Dalvik method inside the sandboxed ACR Virtual Machine runtime.
-/// Returns the number of Dalvik opcodes executed.
-pub fn sys_dex_invoke_method(dex_data: &[u8], method_spec: &str) -> Result<u32, SyscallResult> {
-    use crate::compat::android::dex::DexPackage;
-    use crate::compat::android::ANDROID_RUNTIME;
-
-    let dex = DexPackage::parse(dex_data).map_err(|_| SyscallResult::IntegrityViolation)?;
-    let _ = dex.audit_bytecode().map_err(|_| SyscallResult::PermissionDenied)?;
-    let mut parts = method_spec.split("->");
-    let class_name = parts.next().filter(|value| !value.is_empty()).ok_or(SyscallResult::InvalidArguments)?;
-    let method_name = parts.next().filter(|value| !value.is_empty()).ok_or(SyscallResult::InvalidArguments)?;
-    if parts.next().is_some() { return Err(SyscallResult::InvalidArguments); }
-
-    let task_id = sys_get_task_id();
-    if task_id.0 == 0 { return Err(SyscallResult::PermissionDenied); }
-    let mut runtime = ANDROID_RUNTIME.lock();
-    let pid = runtime.pid_for_task(task_id).ok_or(SyscallResult::PermissionDenied)?;
-    runtime.invoke_verified_method_count(pid, &dex, class_name, method_name)
-        .map_err(|_| SyscallResult::PermissionDenied)
+/// Historical privileged Dalvik invocation entry point retired to Ring-3 userspace.
+pub fn sys_dex_invoke_method(_dex_data: &[u8], _method_spec: &str) -> Result<u32, SyscallResult> {
+    Err(SyscallResult::NotSupported)
 }
 
 

@@ -9,6 +9,8 @@ ci-fault-injection = []
 
 [dependencies]
 interos-std = { path = "../../sdk/rust/interos-std" }
+interos-acr = { path = "../../crates/interos-acr" }
+interos-android-format = { path = "../../crates/interos-android-format" }
 
 
 # WHY: this no_std library owns the single #[panic_handler] shared by
@@ -76,6 +78,12 @@ bench = false
 [[bin]]
 name = "wasmd"
 path = "src/bin/wasmd.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "acrd"
+path = "src/bin/acrd.rs"
 test = false
 bench = false
 

@@ -24,6 +24,7 @@ from tools.test_android_app import (
     APK_SIGNATURE_SCHEME_V2_BLOCK_ID,
     APK_SIGNATURE_SCHEME_V3_BLOCK_ID,
     APK_SIGNATURE_SCHEME_V4_BLOCK_ID,
+    VERITY_PADDING_BLOCK_ID,
 )
 
 
@@ -36,13 +37,21 @@ def test_kernel_signing_module_invariants():
     assert 'pub const APK_SIG_BLOCK_MAGIC: &[u8; 16] = b"APK Sig Block 42";' in source
     assert "pub const APK_SIGNATURE_SCHEME_V2_BLOCK_ID: u32 = 0x7109871a;" in source
     assert "pub const APK_SIGNATURE_SCHEME_V3_BLOCK_ID: u32 = 0xf05368c0;" in source
-    assert "pub const APK_SIGNATURE_SCHEME_V4_BLOCK_ID: u32 = 0x42726577;" in source
+    assert "pub const VERITY_PADDING_BLOCK_ID: u32 = 0x42726577;" in source
+    assert "pub const APK_SIGNATURE_SCHEME_V4_BLOCK_ID: u32 = VERITY_PADDING_BLOCK_ID;" in source
     assert "pub const CONTENT_DIGEST_CHUNK_SIZE: usize = 1024 * 1024;" in source
     assert "pub fn find_apk_signing_block" in source
     assert "pub fn parse_signing_block_pairs" in source
     assert "pub fn compute_apk_content_digest" in source
     assert "pub fn verify_apk_signing_block" in source
     assert "Err(ApkError::InvalidSignature)" in source
+
+    # Also verify pure-format userspace signing invariants
+    format_source = read_source("crates/interos-android-format/src/signing.rs")
+    assert "pub const VERITY_PADDING_BLOCK_ID: u32 = 0x42726577;" in format_source
+    assert "pub const SIG_ALGO_RSA_PKCS1_V1_5_WITH_SHA256: u32 = 0x0103;" in format_source
+    assert "pub const SIG_ALGO_ECDSA_WITH_SHA256: u32 = 0x0201;" in format_source
+    assert "pub fn verify_v4_signature" in format_source
 
 
 def test_real_apk_signing_block_detection():
@@ -73,6 +82,7 @@ def test_real_apk_signing_block_scheme_pairs():
 
     pair_ids = [p["id"] for p in pairs]
     assert APK_SIGNATURE_SCHEME_V2_BLOCK_ID in pair_ids
+    assert VERITY_PADDING_BLOCK_ID in pair_ids
     assert APK_SIGNATURE_SCHEME_V4_BLOCK_ID in pair_ids
 
 

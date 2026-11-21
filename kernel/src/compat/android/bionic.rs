@@ -228,8 +228,8 @@ impl BionicMediator {
     /// Mediates `__system_property_get(name, out_buf)` returning truthful sovereign properties.
     pub fn get_system_property(&self, name: &str) -> Option<&'static str> {
         match name {
-            "ro.build.version.release" => Some("14"),
-            "ro.build.version.sdk" => Some("34"),
+            "ro.build.version.release" => Some("9"),
+            "ro.build.version.sdk" => Some("28"),
             "ro.product.model" => Some("InterOS Sovereign Phone"),
             "ro.product.manufacturer" => Some("InterOS Core"),
             "ro.product.brand" => Some("InterOS"),
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn test_bionic_mediator_properties_and_memory() {
         let mut bionic = BionicMediator::new(1024 * 1024);
-        assert_eq!(bionic.get_system_property("ro.build.version.sdk"), Some("34"));
+        assert_eq!(bionic.get_system_property("ro.build.version.sdk"), Some("28"));
         assert_eq!(bionic.get_system_property("ro.product.model"), Some("InterOS Sovereign Phone"));
         assert_eq!(bionic.get_system_property("ro.fake.property"), None);
 

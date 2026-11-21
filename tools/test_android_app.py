@@ -22,11 +22,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# APK Signing Block constants (AOSP v2/v3/v4)
+# APK Signing Block constants (AOSP v2/v3 & fs-verity padding)
 APK_SIG_BLOCK_MAGIC = b"APK Sig Block 42"
 APK_SIGNATURE_SCHEME_V2_BLOCK_ID = 0x7109871a
 APK_SIGNATURE_SCHEME_V3_BLOCK_ID = 0xf05368c0
-APK_SIGNATURE_SCHEME_V4_BLOCK_ID = 0x42726577
+VERITY_PADDING_BLOCK_ID = 0x42726577
+APK_SIGNATURE_SCHEME_V4_BLOCK_ID = VERITY_PADDING_BLOCK_ID
 CONTENT_DIGEST_CHUNK_SIZE = 1024 * 1024
 
 # Zone 4 Forbidden Ambient Authority Permissions
@@ -479,8 +480,8 @@ def analyze_apk(apk_path: Path) -> dict:
                 schemes.append("v2")
             elif p["id"] == APK_SIGNATURE_SCHEME_V3_BLOCK_ID:
                 schemes.append("v3")
-            elif p["id"] == APK_SIGNATURE_SCHEME_V4_BLOCK_ID:
-                schemes.append("v4")
+            elif p["id"] == VERITY_PADDING_BLOCK_ID:
+                schemes.append("verity_padding")
         merkle_root = compute_apk_content_merkle_digest(raw_data, sig_bounds)
         sig_block = {
             "bounds": sig_bounds,

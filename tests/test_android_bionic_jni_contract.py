@@ -35,10 +35,15 @@ def test_bionic_mediator_system_properties_and_memory():
     assert "pub struct BionicMediator" in source
     assert "pub fn log_print(&mut self, prio: i32, tag: &str, text: &str)" in source
     assert 'pub fn get_system_property(&self, name: &str) -> Option<&\'static str>' in source
-    assert '"ro.build.version.sdk" => Some("34")' in source
+    assert '"ro.build.version.sdk" => Some("28")' in source
     assert '"ro.product.model" => Some("InterOS Sovereign Phone")' in source
     assert "pub fn malloc(&mut self, size: usize) -> Result<usize, ()>" in source
     assert "pub fn free(&mut self, size: usize)" in source
+
+    # Also verify unprivileged Ring-3 ACR bionic module
+    acr_bionic = read_source("crates/interos-acr/src/bionic.rs")
+    assert '"ro.build.version.sdk" => Some("28")' in acr_bionic
+    assert "pub struct BionicMediator" in acr_bionic
 
 
 def test_jni_env_and_javavm_interface_contracts():

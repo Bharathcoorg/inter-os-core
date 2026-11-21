@@ -464,6 +464,71 @@ pub fn run_wasm() -> ! {
     }
 }
 
+/// Android Compatibility Runtime daemon execution path (`acrd`).
+///
+/// Designated as userspace compatibility service.
+/// Coordinates Ring-3 Android app domains, DEX VM interpretation, Activity lifecycle,
+/// Choreographer vsync pacing, and View hierarchy rendering outside Ring 0.
+pub fn run_acr() -> ! {
+    let _ = std::log("[acrd] userspace Android Compatibility Runtime daemon online (Ring 3 isolation).");
+    let timer_slot = std::cap_lookup(std::cap_type::TIMER_TICK_READ, 0).ok();
+    let ipc_slot = std::cap_lookup(std::cap_type::IPC_RECEIVE, 0).ok();
+    let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
+    let mut last_tick = 0u64;
+
+    let mut manager = interos_acr::manager::AcrManager::new();
+    let mut rx_buf = [0u8; 4096];
+
+    loop {
+        if let Some(_) = ipc_slot {
+            if let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                if len >= 4 {
+                    let msg_magic = u32::from_le_bytes([rx_buf[0], rx_buf[1], rx_buf[2], rx_buf[3]]);
+                    match msg_magic {
+                        // "ACR\0" (0x0052_4341) APK install/launch request
+                        0x0052_4341 => {
+                            let _ = std::log("[acrd] processing APK launch request in Ring-3");
+                            if len > 8 {
+                                let surface_id = u32::from_le_bytes([rx_buf[4], rx_buf[5], rx_buf[6], rx_buf[7]]);
+                                let apk_slice = &rx_buf[8..len];
+                                if let Ok(pid) = manager.install_and_launch(apk_slice, surface_id, 8 * 1024 * 1024) {
+                                    let mut resp = [0u8; 8];
+                                    resp[0..4].copy_from_slice(&0x0052_4341u32.to_le_bytes());
+                                    resp[4..8].copy_from_slice(&pid.to_le_bytes());
+                                    let _ = std::ipc_send(sender, msg_type, &resp);
+                                }
+                            }
+                        }
+                        // "TICK" (0x4B43_4954) Frame pacing tick
+                        0x4B43_4954 => {
+                            if let Some(pid) = manager.active_pid {
+                                let now_nanos = last_tick.saturating_mul(1_000_000);
+                                manager.tick_frame(pid, now_nanos, last_tick);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let now = timer_slot.and_then(|_| std::get_ticks().ok()).unwrap_or(last_tick);
+        if now.saturating_sub(last_tick) >= 16 || last_tick == 0 {
+            last_tick = now;
+            if let Some(pid) = manager.active_pid {
+                let now_nanos = now.saturating_mul(1_000_000);
+                manager.tick_frame(pid, now_nanos, now);
+            }
+        }
+
+        if has_epoll {
+            let _ = std::event_poll(std::EVENT_IPC_MSG, 16);
+        } else {
+            std::yield_now();
+        }
+    }
+}
+
 /// Semantic Search & RAG daemon execution path (`searchd`).
 ///
 /// Designated as service id 13 (`SERVICE_SEARCH`) in the system service ABI.

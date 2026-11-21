@@ -44,7 +44,6 @@ pub use xml::{AxmlDocument, AxmlElement, AxmlError};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use spin::Mutex;
 
 pub use binder::{BinderCommand, BinderMediator, BinderReturn, BinderTransaction, BINDER_MEDIATOR};
 pub use manifest::AndroidManifest;
@@ -226,9 +225,6 @@ impl AndroidRuntime {
         self.active_apps.len()
     }
 }
-
-/// Global system-wide Android container runtime.
-pub static ANDROID_RUNTIME: Mutex<AndroidRuntime> = Mutex::new(AndroidRuntime::new());
 
 /// Initializes the Android compatibility runtime and executes self-tests.
 pub fn init() {

@@ -48,6 +48,13 @@ def test_kernel_view_draw_list_bounded_emission():
     assert "draw_list.push(DrawOp::FillRect" in source
     assert "pub const MAX_DRAW_OPS_PER_LIST: usize = 256" in draw_source
 
+    # Also verify sovereign typography stack in Ring-3 ACR
+    acr_view = read_source("crates/interos-acr/src/view.rs")
+    acr_draw = read_source("crates/interos-acr/src/draw.rs")
+    assert "DrawOp::DrawText" in acr_view
+    assert "render_draw_list_to_buffer" in acr_draw
+    assert "get_glyph_bitmap" in acr_draw
+
 
 def test_kernel_view_touch_event_handling_contract():
     source = read_source("kernel/src/compat/android/view.rs")

@@ -1,0 +1,14 @@
+[package]
+license = "AGPL-3.0-only"
+name = "interos-acr"
+version = "0.1.0"
+edition = "2021"
+authors = ["Inter OS Contributors"]
+description = "Unprivileged Ring-3 Android Compatibility Runtime for Inter OS"
+
+[dependencies]
+interos-android-format = { path = "../interos-android-format" }
+spin = "0.9.8"
+
+[features]
+default = []

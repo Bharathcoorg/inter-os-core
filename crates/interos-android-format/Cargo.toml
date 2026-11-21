@@ -1,0 +1,13 @@
+[package]
+license = "AGPL-3.0-only"
+name = "interos-android-format"
+version = "0.1.0"
+edition = "2021"
+authors = ["Inter OS Contributors"]
+description = "Pure no_std format parsers for Android APK, Signing Block, AXML, DEX, ELF, and ARSC"
+
+[dependencies]
+sha2 = { version = "0.10.9", default-features = false, features = ["force-soft"] }
+
+[features]
+default = []

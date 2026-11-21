@@ -334,11 +334,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[TEST] Ambient VFS file access: REJECTED (TypeMismatch - Zero Ambient Authority).");
     serial_println!("--- [Capability Subsystem 100% Attested & Enforced] ---\n");
 
-    // 12. Initialize Android Compatibility Runtime (Zone 4 Isolation)
-    kernel::compat::android::init();
-
-
-
     // 15. Initialize persistent resource/recovery/update state after storage is mounted.
     kernel::resource::init();
     kernel::diagnostics::init();
