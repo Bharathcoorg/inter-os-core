@@ -2069,32 +2069,8 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             }
         }
         37 => {
-            // AndroidBridgeIntent: a1 = act_ptr, a2 = act_len, a3 = uri_ptr, a4 = uri_len, a5 = out_ptr
-            let act_len = a2 as usize;
-            let uri_len = a4 as usize;
-            if act_len == 0 || act_len > 128 || uri_len == 0 || uri_len > 256 {
-                return SyscallResult::InvalidArguments as i64;
-            }
-            let mut act_buf = [0u8; 128];
-            let mut uri_buf = [0u8; 256];
-            let act_str = match read_user_string(a1, act_len, &mut act_buf) {
-                Ok(s) => s,
-                Err(_) => return SyscallResult::InvalidArguments as i64,
-            };
-            let uri_str = match read_user_string(a3, uri_len, &mut uri_buf) {
-                Ok(s) => s,
-                Err(_) => return SyscallResult::InvalidArguments as i64,
-            };
-            let mut out_kbuf = [0u8; 64];
-            match sys_android_bridge_intent(act_str, uri_str, &mut out_kbuf) {
-                Ok(n) => {
-                    if copy_to_user(a5, &out_kbuf[..n]).is_err() {
-                        return SyscallResult::InvalidArguments as i64;
-                    }
-                    n as i64
-                }
-                Err(e) => e as i64,
-            }
+            // AndroidBridgeIntent: historical privileged entry point retired; Android compatibility is Ring-3 userspace.
+            SyscallResult::NotSupported as i64
         }
         38 => {
             // RtcGetTime: a1 = out_buf_ptr, a2 = out_buf_len
@@ -5993,21 +5969,9 @@ pub fn sys_battery_query(out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
 }
 
 /// Dispatches an Android cross-zone intent into the host sovereign intent router.
-pub fn sys_android_bridge_intent(action: &str, data_uri: &str, out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
-    require_system_control()?;
-    let intent = crate::compat::android::AndroidIntent::new(action, data_uri);
-    match crate::compat::android::AndroidIntentBridge::translate_intent(&intent) {
-        Ok(sovereign_act) => {
-            let bytes = sovereign_act.as_bytes();
-            let len = bytes.len().min(out_buf.len());
-            out_buf[..len].copy_from_slice(&bytes[..len]);
-            Ok(len)
-        }
-        Err(crate::compat::android::AndroidBridgeError::SecurityViolation) => {
-            Err(SyscallResult::PermissionDenied)
-        }
-        Err(_) => Err(SyscallResult::InvalidArguments),
-    }
+/// Historical privileged entry point retired; Android compatibility is Ring-3 userspace.
+pub fn sys_android_bridge_intent(_action: &str, _data_uri: &str, _out_buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    Err(SyscallResult::NotSupported)
 }
 
 /// Queries the active hardware real-time clock (RTC / CMOS) into `out_buf` JSON string.

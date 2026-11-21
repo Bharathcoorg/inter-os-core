@@ -1006,6 +1006,190 @@ impl RagIndex {
         let _ = std::fs_close(fd);
         Ok(self.count)
     }
+
+    /// Serializes and writes the vector index encrypted using opaque keystore custody.
+    ///
+    /// Raw cryptographic keys never enter this process.
+    pub fn save_to_disk_with_handle(
+        &self,
+        path: &str,
+        handle: std::keystore::KeyHandle,
+        keystored_task: u64,
+    ) -> Result<(), ()> {
+        let chunk_size = core::mem::size_of::<RagChunk>();
+        let rec_size = 12 + 16 + chunk_size;
+        let total_size = 16 + self.count * rec_size;
+        if total_size > SEARCH_STORAGE_BUDGET_BYTES {
+            return Err(());
+        }
+
+        let mut tmp_path_buf = [0u8; 80];
+        let p_len = path.len().min(75);
+        tmp_path_buf[..p_len].copy_from_slice(&path.as_bytes()[..p_len]);
+        tmp_path_buf[p_len..p_len + 4].copy_from_slice(b".tmp");
+        let tmp_path = core::str::from_utf8(&tmp_path_buf[..p_len + 4]).map_err(|_| ())?;
+
+        let fd = std::fs_open(tmp_path, std::FS_WRITE).map_err(|_| ())?;
+
+        let mut hdr = [0u8; 16];
+        hdr[0..4].copy_from_slice(&RAG_INDEX_ENCRYPTED_MAGIC.to_le_bytes());
+        hdr[4..8].copy_from_slice(&RAG_INDEX_VERSION.to_le_bytes());
+        hdr[8..12].copy_from_slice(&(self.count as u32).to_le_bytes());
+        hdr[12..16].copy_from_slice(&(RAG_VECTOR_DIM as u32).to_le_bytes());
+        if std::fs_write(fd, &hdr).is_err() {
+            let _ = std::fs_close(fd);
+            let _ = std::fs_unlink(tmp_path);
+            return Err(());
+        }
+
+        let mut ct_chunk = [0u8; core::mem::size_of::<RagChunk>()];
+        for i in 0..self.count {
+            let chunk_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &self.chunks[i] as *const _ as *const u8,
+                    chunk_size,
+                )
+            };
+            let nonce = std::companion::generate_crypto_nonce()?;
+            let tag = std::keystore::keystore_encrypt(
+                keystored_task,
+                handle,
+                &nonce,
+                &hdr,
+                chunk_bytes,
+                &mut ct_chunk,
+            ).map_err(|_| {
+                let _ = std::fs_close(fd);
+                let _ = std::fs_unlink(tmp_path);
+                ()
+            })?;
+
+            if std::fs_write(fd, &nonce).is_err()
+                || std::fs_write(fd, &tag).is_err()
+                || std::fs_write(fd, &ct_chunk).is_err()
+            {
+                let _ = std::fs_close(fd);
+                let _ = std::fs_unlink(tmp_path);
+                return Err(());
+            }
+        }
+
+        let _ = std::fs_fsync(fd);
+        let _ = std::fs_close(fd);
+
+        if let Ok(dst_fd) = std::fs_open(path, std::FS_WRITE) {
+            if std::fs_write(dst_fd, &hdr).is_ok() {
+                for i in 0..self.count {
+                    let chunk_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            &self.chunks[i] as *const _ as *const u8,
+                            chunk_size,
+                        )
+                    };
+                    if let Ok(nonce) = std::companion::generate_crypto_nonce() {
+                        if let Ok(tag) = std::keystore::keystore_encrypt(
+                            keystored_task,
+                            handle,
+                            &nonce,
+                            &hdr,
+                            chunk_bytes,
+                            &mut ct_chunk,
+                        ) {
+                            let _ = std::fs_write(dst_fd, &nonce);
+                            let _ = std::fs_write(dst_fd, &tag);
+                            let _ = std::fs_write(dst_fd, &ct_chunk);
+                        }
+                    }
+                }
+                let _ = std::fs_fsync(dst_fd);
+            }
+            let _ = std::fs_close(dst_fd);
+        }
+        let _ = std::fs_unlink(tmp_path);
+
+        Ok(())
+    }
+
+    /// Loads and decrypts the vector index from disk using opaque keystore custody.
+    ///
+    /// Raw cryptographic keys never enter this process.
+    pub fn load_from_disk_with_handle(
+        &mut self,
+        path: &str,
+        handle: std::keystore::KeyHandle,
+        keystored_task: u64,
+    ) -> Result<usize, ()> {
+        let fd = std::fs_open(path, std::FS_READ).map_err(|_| ())?;
+
+        let mut hdr = [0u8; 16];
+        let n = std::fs_read(fd, &mut hdr).map_err(|_| {
+            let _ = std::fs_close(fd);
+            ()
+        })?;
+        if n < 16 {
+            let _ = std::fs_close(fd);
+            return Err(());
+        }
+
+        let magic = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+        let version = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+        let count = u32::from_le_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]) as usize;
+        let dim = u32::from_le_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]) as usize;
+
+        if magic != RAG_INDEX_ENCRYPTED_MAGIC || version != RAG_INDEX_VERSION || dim != RAG_VECTOR_DIM {
+            let _ = std::fs_close(fd);
+            return Err(());
+        }
+
+        self.clear();
+        let load_count = count.min(MAX_RAG_CHUNKS);
+        let chunk_size = core::mem::size_of::<RagChunk>();
+
+        let mut nonce = [0u8; 12];
+        let mut tag = [0u8; 16];
+        let mut ct_buf = [0u8; core::mem::size_of::<RagChunk>()];
+        let mut chunk_buf = [0u8; core::mem::size_of::<RagChunk>()];
+
+        for _ in 0..load_count {
+            if std::fs_read(fd, &mut nonce).map_err(|_| { let _ = std::fs_close(fd); () })? != 12 {
+                break;
+            }
+            if std::fs_read(fd, &mut tag).map_err(|_| { let _ = std::fs_close(fd); () })? != 16 {
+                break;
+            }
+            if std::fs_read(fd, &mut ct_buf).map_err(|_| { let _ = std::fs_close(fd); () })? != chunk_size {
+                break;
+            }
+
+            let pt_len = std::keystore::keystore_decrypt(
+                keystored_task,
+                handle,
+                &nonce,
+                &hdr,
+                &ct_buf,
+                &tag,
+                &mut chunk_buf,
+            ).map_err(|_| {
+                self.clear();
+                let _ = std::fs_close(fd);
+                ()
+            })?;
+
+            if pt_len != chunk_size {
+                self.clear();
+                let _ = std::fs_close(fd);
+                return Err(());
+            }
+
+            let chunk = unsafe {
+                core::ptr::read_unaligned(chunk_buf.as_ptr() as *const RagChunk)
+            };
+            self.add_chunk(chunk);
+        }
+
+        let _ = std::fs_close(fd);
+        Ok(self.count)
+    }
 }
 
 /// Formats retrieved document context and query into a RAG generative prompt with exact citations.

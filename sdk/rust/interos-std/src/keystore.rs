@@ -399,8 +399,9 @@ pub fn keystore_encrypt(
     req[13..25].copy_from_slice(nonce);
     let aad_len = aad.len().min(64);
     req[25..27].copy_from_slice(&(aad_len as u16).to_le_bytes());
-    req[27..27 + aad_len].copy_from_slice(&aad[..aad_len]);
-    let pt_offset = 27 + aad_len;
+    req[27..29].copy_from_slice(&(plaintext.len() as u16).to_le_bytes());
+    req[29..29 + aad_len].copy_from_slice(&aad[..aad_len]);
+    let pt_offset = 29 + aad_len;
     req[pt_offset..pt_offset + plaintext.len()].copy_from_slice(plaintext);
 
     crate::ipc_send(keystored_task, SERVICE_KEYSTORE_MSG, &req[..pt_offset + plaintext.len()])
@@ -440,12 +441,12 @@ pub fn keystore_decrypt(
     req[0] = KEYSTORE_OP_DECRYPT;
     req[1..13].copy_from_slice(&handle.to_bytes());
     req[13..25].copy_from_slice(nonce);
+    req[25..41].copy_from_slice(tag);
     let aad_len = aad.len().min(64);
-    req[25..27].copy_from_slice(&(aad_len as u16).to_le_bytes());
-    req[27..27 + aad_len].copy_from_slice(&aad[..aad_len]);
-    let tag_offset = 27 + aad_len;
-    req[tag_offset..tag_offset + 16].copy_from_slice(tag);
-    let ct_offset = tag_offset + 16;
+    req[41..43].copy_from_slice(&(aad_len as u16).to_le_bytes());
+    req[43..45].copy_from_slice(&(ciphertext.len() as u16).to_le_bytes());
+    req[45..45 + aad_len].copy_from_slice(&aad[..aad_len]);
+    let ct_offset = 45 + aad_len;
     req[ct_offset..ct_offset + ciphertext.len()].copy_from_slice(ciphertext);
 
     crate::ipc_send(keystored_task, SERVICE_KEYSTORE_MSG, &req[..ct_offset + ciphertext.len()])

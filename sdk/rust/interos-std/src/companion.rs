@@ -1339,116 +1339,8 @@ impl CompanionState {
 
         // Pack plaintext records into scratch buffer
         let mut scratch = [0u8; 4096];
-        let mut pt_cursor = 0usize;
-        let mut total_records = 0u16;
-        let mut record_type_mask = 0u16;
+        let (pt_len, total_records, record_type_mask) = self.pack_records(&mut scratch);
 
-        // 1. Preferences (allowed in Adaptive, ExplicitOnly, Custom)
-        for i in 0..self.pref_count {
-            let p = &self.preferences[i];
-            let rec_len = 1 + 1 + 32 + 1 + 64 + 1 + 8; // 108
-            if pt_cursor + 2 + rec_len > scratch.len() {
-                break;
-            }
-            scratch[pt_cursor] = REC_TAG_PREFERENCE;
-            scratch[pt_cursor + 1] = rec_len as u8;
-            scratch[pt_cursor + 2] = p.category as u8;
-            scratch[pt_cursor + 3] = p.key_len;
-            scratch[pt_cursor + 4..pt_cursor + 36].copy_from_slice(&p.key);
-            scratch[pt_cursor + 36] = p.value_len;
-            scratch[pt_cursor + 37..pt_cursor + 101].copy_from_slice(&p.value);
-            scratch[pt_cursor + 101] = p.confidence;
-            scratch[pt_cursor + 102..pt_cursor + 110].copy_from_slice(&p.updated_at.to_le_bytes());
-            pt_cursor += 2 + rec_len;
-            total_records += 1;
-            record_type_mask |= 1 << 0;
-        }
-
-        // 2. Corrections (Adaptive only)
-        if self.learning_mode == LearningMode::Adaptive {
-            for i in 0..self.corr_count {
-                let c = &self.corrections[i];
-                let rec_len = 1 + 64 + 1 + 64 + 1 + 64 + 8; // 203
-                if pt_cursor + 2 + rec_len > scratch.len() {
-                    break;
-                }
-                scratch[pt_cursor] = REC_TAG_CORRECTION;
-                scratch[pt_cursor + 1] = rec_len as u8;
-                scratch[pt_cursor + 2] = c.query_len;
-                scratch[pt_cursor + 3..pt_cursor + 67].copy_from_slice(&c.query);
-                scratch[pt_cursor + 67] = c.action_len;
-                scratch[pt_cursor + 68..pt_cursor + 132].copy_from_slice(&c.system_action);
-                scratch[pt_cursor + 132] = c.fix_len;
-                scratch[pt_cursor + 133..pt_cursor + 197].copy_from_slice(&c.user_fix);
-                scratch[pt_cursor + 197..pt_cursor + 205].copy_from_slice(&c.timestamp.to_le_bytes());
-                pt_cursor += 2 + rec_len;
-                total_records += 1;
-                record_type_mask |= 1 << 1;
-            }
-        }
-
-        // 3. Routines (Adaptive and ExplicitOnly)
-        for i in 0..self.routine_count {
-            let r = &self.routines[i];
-            let rec_len = 1 + 32 + 1 + 64 + 4 + 8; // 110
-            if pt_cursor + 2 + rec_len > scratch.len() {
-                break;
-            }
-            scratch[pt_cursor] = REC_TAG_ROUTINE;
-            scratch[pt_cursor + 1] = rec_len as u8;
-            scratch[pt_cursor + 2] = r.trigger_len;
-            scratch[pt_cursor + 3..pt_cursor + 35].copy_from_slice(&r.trigger_name);
-            scratch[pt_cursor + 35] = r.action_len;
-            scratch[pt_cursor + 36..pt_cursor + 100].copy_from_slice(&r.action);
-            scratch[pt_cursor + 100..pt_cursor + 104].copy_from_slice(&r.count.to_le_bytes());
-            scratch[pt_cursor + 104..pt_cursor + 112].copy_from_slice(&r.last_executed.to_le_bytes());
-            pt_cursor += 2 + rec_len;
-            total_records += 1;
-            record_type_mask |= 1 << 2;
-        }
-
-        // 4. Intent Patterns (Adaptive only)
-        if self.learning_mode == LearningMode::Adaptive {
-            for i in 0..self.pattern_count {
-                let pat = &self.patterns[i];
-                let rec_len = 1 + 48 + 4 + 1; // 54
-                if pt_cursor + 2 + rec_len > scratch.len() {
-                    break;
-                }
-                scratch[pt_cursor] = REC_TAG_PATTERN;
-                scratch[pt_cursor + 1] = rec_len as u8;
-                scratch[pt_cursor + 2] = pat.pattern_len;
-                scratch[pt_cursor + 3..pt_cursor + 51].copy_from_slice(&pat.pattern);
-                scratch[pt_cursor + 51..pt_cursor + 55].copy_from_slice(&pat.tool_id.to_le_bytes());
-                scratch[pt_cursor + 55] = pat.confidence;
-                pt_cursor += 2 + rec_len;
-                total_records += 1;
-                record_type_mask |= 1 << 3;
-            }
-        }
-
-        // 5. Tool Success Records (Adaptive only)
-        if self.learning_mode == LearningMode::Adaptive {
-            for i in 0..self.tool_stat_count {
-                let ts = &self.tool_stats[i];
-                let rec_len = 4 + 4 + 4 + 4 + 4; // 20
-                if pt_cursor + 2 + rec_len > scratch.len() {
-                    break;
-                }
-                scratch[pt_cursor] = REC_TAG_TOOL_STAT;
-                scratch[pt_cursor + 1] = rec_len as u8;
-                scratch[pt_cursor + 2..pt_cursor + 6].copy_from_slice(&ts.tool_id.to_le_bytes());
-                scratch[pt_cursor + 6..pt_cursor + 10].copy_from_slice(&ts.invocations.to_le_bytes());
-                scratch[pt_cursor + 10..pt_cursor + 14].copy_from_slice(&ts.successes.to_le_bytes());
-                scratch[pt_cursor + 14..pt_cursor + 18].copy_from_slice(&ts.failures.to_le_bytes());
-                scratch[pt_cursor + 18..pt_cursor + 22].copy_from_slice(&ts.last_failure_code.to_le_bytes());
-                pt_cursor += 2 + rec_len;
-                total_records += 1;
-                record_type_mask |= 1 << 4;
-            }
-        }
-
-        let pt_len = pt_cursor;
         if hdr_len + pt_len + 16 > out_buf.len() {
             return Err(());
         }
@@ -1490,6 +1382,73 @@ impl CompanionState {
         // Zeroize scratch buffer
         secure_zero(&mut scratch[..pt_len]);
 
+        Ok(hdr_len + pt_len)
+    }
+
+    /// Serializes and encrypts state via opaque `KeyHandle` custody in `keystored`.
+    ///
+    /// Raw cryptographic keys never enter this process.
+    pub fn serialize_encrypted_with_handle(
+        &self,
+        handle: crate::keystore::KeyHandle,
+        nonce: &[u8; 12],
+        out_buf: &mut [u8],
+        keystored_task: u64,
+    ) -> Result<usize, ()> {
+        if self.is_private_session {
+            return Err(());
+        }
+        if nonce == &[0u8; 12] {
+            return Err(());
+        }
+        if self.learning_mode == LearningMode::Off {
+            return Ok(0);
+        }
+
+        let hdr_len = COMPANION_HEADER_SIZE;
+        if out_buf.len() < hdr_len + 16 {
+            return Err(());
+        }
+
+        let mut scratch = [0u8; 1024];
+        let (pt_len, total_records, record_type_mask) = self.pack_records(&mut scratch);
+        if hdr_len + pt_len + 16 > out_buf.len() {
+            return Err(());
+        }
+
+        // Header construction (64 bytes)
+        out_buf[0..4].copy_from_slice(&COMPANION_FORMAT_MAGIC);
+        out_buf[4..6].copy_from_slice(&COMPANION_FORMAT_VERSION.to_le_bytes());
+        out_buf[6..14].copy_from_slice(&self.generation.to_le_bytes());
+        out_buf[14..18].copy_from_slice(&self.user_id.to_le_bytes());
+        out_buf[18] = self.learning_mode as u8;
+        let mut priv_flags = 0u8;
+        if self.is_private_session { priv_flags |= 1 << 0; }
+        if self.is_locked { priv_flags |= 1 << 1; }
+        out_buf[19] = priv_flags;
+        out_buf[20..22].copy_from_slice(&total_records.to_le_bytes());
+        out_buf[22..24].copy_from_slice(&record_type_mask.to_le_bytes());
+        out_buf[24..28].copy_from_slice(&(pt_len as u32).to_le_bytes());
+        out_buf[28..32].copy_from_slice(&CIPHER_CHACHA20_POLY1305.to_le_bytes());
+        out_buf[32..44].copy_from_slice(nonce);
+
+        // Encrypt scratch plaintext into out_buf[64..64+pt_len] via keystored
+        let (header_part, rest) = out_buf.split_at_mut(hdr_len);
+        let (ct_part, _tag_part) = rest.split_at_mut(pt_len);
+        let tag = crate::keystore::keystore_encrypt(
+            keystored_task,
+            handle,
+            nonce,
+            &header_part[..44],
+            &scratch[..pt_len],
+            ct_part,
+        ).map_err(|_| ())?;
+        header_part[44..60].copy_from_slice(&tag);
+
+        let crc = crc32(&header_part[..60]);
+        header_part[60..64].copy_from_slice(&crc.to_le_bytes());
+
+        secure_zero(&mut scratch[..pt_len]);
         Ok(hdr_len + pt_len)
     }
 
@@ -1604,7 +1563,222 @@ impl CompanionState {
         self.is_private_session = (privacy_flags & (1 << 0)) != 0;
         self.is_locked = (privacy_flags & (1 << 1)) != 0;
 
-        // Unpack plaintext records
+        self.unpack_records_from_scratch(&scratch, record_length, total_records);
+
+        secure_zero(&mut scratch[..record_length]);
+        Ok(())
+    }
+
+    /// Decrypts and deserializes state via opaque `KeyHandle` custody in `keystored`.
+    ///
+    /// Raw cryptographic keys never enter this process.
+    pub fn deserialize_encrypted_for_user_with_handle(
+        &mut self,
+        handle: crate::keystore::KeyHandle,
+        in_buf: &[u8],
+        expected_uid: u32,
+        min_expected_generation: u64,
+        keystored_task: u64,
+    ) -> Result<(), ()> {
+        let hdr_len = COMPANION_HEADER_SIZE;
+        if in_buf.len() < hdr_len {
+            return Err(());
+        }
+
+        let magic = [in_buf[0], in_buf[1], in_buf[2], in_buf[3]];
+        if magic != COMPANION_FORMAT_MAGIC {
+            return Err(());
+        }
+
+        let want_crc = u32::from_le_bytes([in_buf[60], in_buf[61], in_buf[62], in_buf[63]]);
+        if crc32(&in_buf[..60]) != want_crc {
+            return Err(());
+        }
+
+        let version = u16::from_le_bytes([in_buf[4], in_buf[5]]);
+        if version != COMPANION_FORMAT_VERSION {
+            return Err(());
+        }
+
+        let generation = u64::from_le_bytes([
+            in_buf[6], in_buf[7], in_buf[8], in_buf[9],
+            in_buf[10], in_buf[11], in_buf[12], in_buf[13],
+        ]);
+        if min_expected_generation > 0 && generation < min_expected_generation {
+            return Err(());
+        }
+
+        let user_binding = u32::from_le_bytes([in_buf[14], in_buf[15], in_buf[16], in_buf[17]]);
+        if expected_uid != 0 && user_binding != expected_uid {
+            return Err(());
+        }
+        let learning_mode = LearningMode::from_u8(in_buf[18]);
+        let privacy_flags = in_buf[19];
+        let total_records = u16::from_le_bytes([in_buf[20], in_buf[21]]);
+        let record_length = u32::from_le_bytes([in_buf[24], in_buf[25], in_buf[26], in_buf[27]]) as usize;
+        let cipher_id = u32::from_le_bytes([in_buf[28], in_buf[29], in_buf[30], in_buf[31]]);
+
+        if cipher_id != CIPHER_CHACHA20_POLY1305 {
+            return Err(());
+        }
+
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&in_buf[32..44]);
+
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(&in_buf[44..60]);
+
+        if in_buf.len() < hdr_len + record_length {
+            return Err(());
+        }
+
+        let ct = &in_buf[hdr_len..hdr_len + record_length];
+        let mut scratch = [0u8; 1024];
+        if record_length > scratch.len() {
+            return Err(());
+        }
+
+        if record_length > 0 {
+            let n = crate::keystore::keystore_decrypt(
+                keystored_task,
+                handle,
+                &nonce,
+                &in_buf[..44],
+                ct,
+                &tag,
+                &mut scratch[..record_length],
+            ).map_err(|_| ())?;
+            if n != record_length {
+                return Err(());
+            }
+        }
+
+        self.clear_memory();
+        self.generation = generation;
+        self.user_id = user_binding;
+        self.learning_mode = learning_mode;
+        self.is_private_session = (privacy_flags & (1 << 0)) != 0;
+        self.is_locked = (privacy_flags & (1 << 1)) != 0;
+
+        self.unpack_records_from_scratch(&scratch, record_length, total_records);
+        secure_zero(&mut scratch[..record_length]);
+        Ok(())
+    }
+
+    fn pack_records(&self, scratch: &mut [u8]) -> (usize, u16, u16) {
+        let mut pt_cursor = 0usize;
+        let mut total_records = 0u16;
+        let mut record_type_mask = 0u16;
+
+        // 1. Preferences (allowed in Adaptive, ExplicitOnly, Custom)
+        for i in 0..self.pref_count {
+            let p = &self.preferences[i];
+            let rec_len = 1 + 1 + 32 + 1 + 64 + 1 + 8; // 108
+            if pt_cursor + 2 + rec_len > scratch.len() {
+                break;
+            }
+            scratch[pt_cursor] = REC_TAG_PREFERENCE;
+            scratch[pt_cursor + 1] = rec_len as u8;
+            scratch[pt_cursor + 2] = p.category as u8;
+            scratch[pt_cursor + 3] = p.key_len;
+            scratch[pt_cursor + 4..pt_cursor + 36].copy_from_slice(&p.key);
+            scratch[pt_cursor + 36] = p.value_len;
+            scratch[pt_cursor + 37..pt_cursor + 101].copy_from_slice(&p.value);
+            scratch[pt_cursor + 101] = p.confidence;
+            scratch[pt_cursor + 102..pt_cursor + 110].copy_from_slice(&p.updated_at.to_le_bytes());
+            pt_cursor += 2 + rec_len;
+            total_records += 1;
+            record_type_mask |= 1 << 0;
+        }
+
+        // 2. Corrections (Adaptive only)
+        if self.learning_mode == LearningMode::Adaptive {
+            for i in 0..self.corr_count {
+                let c = &self.corrections[i];
+                let rec_len = 1 + 64 + 1 + 64 + 1 + 64 + 8; // 203
+                if pt_cursor + 2 + rec_len > scratch.len() {
+                    break;
+                }
+                scratch[pt_cursor] = REC_TAG_CORRECTION;
+                scratch[pt_cursor + 1] = rec_len as u8;
+                scratch[pt_cursor + 2] = c.query_len;
+                scratch[pt_cursor + 3..pt_cursor + 67].copy_from_slice(&c.query);
+                scratch[pt_cursor + 67] = c.action_len;
+                scratch[pt_cursor + 68..pt_cursor + 132].copy_from_slice(&c.system_action);
+                scratch[pt_cursor + 132] = c.fix_len;
+                scratch[pt_cursor + 133..pt_cursor + 197].copy_from_slice(&c.user_fix);
+                scratch[pt_cursor + 197..pt_cursor + 205].copy_from_slice(&c.timestamp.to_le_bytes());
+                pt_cursor += 2 + rec_len;
+                total_records += 1;
+                record_type_mask |= 1 << 1;
+            }
+        }
+
+        // 3. Routines (Adaptive and ExplicitOnly)
+        for i in 0..self.routine_count {
+            let r = &self.routines[i];
+            let rec_len = 1 + 32 + 1 + 64 + 4 + 8; // 110
+            if pt_cursor + 2 + rec_len > scratch.len() {
+                break;
+            }
+            scratch[pt_cursor] = REC_TAG_ROUTINE;
+            scratch[pt_cursor + 1] = rec_len as u8;
+            scratch[pt_cursor + 2] = r.trigger_len;
+            scratch[pt_cursor + 3..pt_cursor + 35].copy_from_slice(&r.trigger_name);
+            scratch[pt_cursor + 35] = r.action_len;
+            scratch[pt_cursor + 36..pt_cursor + 100].copy_from_slice(&r.action);
+            scratch[pt_cursor + 100..pt_cursor + 104].copy_from_slice(&r.count.to_le_bytes());
+            scratch[pt_cursor + 104..pt_cursor + 112].copy_from_slice(&r.last_executed.to_le_bytes());
+            pt_cursor += 2 + rec_len;
+            total_records += 1;
+            record_type_mask |= 1 << 2;
+        }
+
+        // 4. Intent Patterns (Adaptive only)
+        if self.learning_mode == LearningMode::Adaptive {
+            for i in 0..self.pattern_count {
+                let pat = &self.patterns[i];
+                let rec_len = 1 + 48 + 4 + 1; // 54
+                if pt_cursor + 2 + rec_len > scratch.len() {
+                    break;
+                }
+                scratch[pt_cursor] = REC_TAG_PATTERN;
+                scratch[pt_cursor + 1] = rec_len as u8;
+                scratch[pt_cursor + 2] = pat.pattern_len;
+                scratch[pt_cursor + 3..pt_cursor + 51].copy_from_slice(&pat.pattern);
+                scratch[pt_cursor + 51..pt_cursor + 55].copy_from_slice(&pat.tool_id.to_le_bytes());
+                scratch[pt_cursor + 55] = pat.confidence;
+                pt_cursor += 2 + rec_len;
+                total_records += 1;
+                record_type_mask |= 1 << 3;
+            }
+        }
+
+        // 5. Tool Success Records (Adaptive only)
+        if self.learning_mode == LearningMode::Adaptive {
+            for i in 0..self.tool_stat_count {
+                let ts = &self.tool_stats[i];
+                let rec_len = 4 + 4 + 4 + 4 + 4; // 20
+                if pt_cursor + 2 + rec_len > scratch.len() {
+                    break;
+                }
+                scratch[pt_cursor] = REC_TAG_TOOL_STAT;
+                scratch[pt_cursor + 1] = rec_len as u8;
+                scratch[pt_cursor + 2..pt_cursor + 6].copy_from_slice(&ts.tool_id.to_le_bytes());
+                scratch[pt_cursor + 6..pt_cursor + 10].copy_from_slice(&ts.invocations.to_le_bytes());
+                scratch[pt_cursor + 10..pt_cursor + 14].copy_from_slice(&ts.successes.to_le_bytes());
+                scratch[pt_cursor + 14..pt_cursor + 18].copy_from_slice(&ts.failures.to_le_bytes());
+                scratch[pt_cursor + 18..pt_cursor + 22].copy_from_slice(&ts.last_failure_code.to_le_bytes());
+                pt_cursor += 2 + rec_len;
+                total_records += 1;
+                record_type_mask |= 1 << 4;
+            }
+        }
+
+        (pt_cursor, total_records, record_type_mask)
+    }
+
+    fn unpack_records_from_scratch(&mut self, scratch: &[u8], record_length: usize, total_records: u16) {
         let mut cursor = 0usize;
         let mut records_read = 0u16;
 
@@ -1747,9 +1921,6 @@ impl CompanionState {
             cursor += rec_len;
             records_read += 1;
         }
-
-        secure_zero(&mut scratch[..record_length]);
-        Ok(())
     }
 
     fn deserialize_legacy(&mut self, key: &[u8; 32], in_buf: &[u8]) -> Result<(), ()> {

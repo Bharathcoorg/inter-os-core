@@ -33,6 +33,8 @@ pub enum AcrError {
 /// An isolated Android application instance managed by the Ring-3 ACR manager.
 pub struct AcrAppInstance {
     pub pid: u32,
+    pub task_id: u64,
+    pub uid: u32,
     pub package_name: String,
     pub target_sdk: u32,
     pub activity_state: ActivityLifecycleState,
@@ -44,6 +46,7 @@ pub struct AcrAppInstance {
     pub memory_quota_bytes: usize,
     pub surface_id: u32,
     pub classes_dex: Vec<u8>,
+    pub data_dir: String,
 }
 
 impl AcrAppInstance {
@@ -55,8 +58,13 @@ impl AcrAppInstance {
         memory_quota_bytes: usize,
         classes_dex: Vec<u8>,
     ) -> Self {
+        let uid = 10000 + (pid.saturating_sub(1000));
+        let task_id = 0x8000_0000_0000_0000 | (pid as u64);
+        let data_dir = alloc::format!("/data/data/{}", package_name);
         Self {
             pid,
+            task_id,
+            uid,
             package_name: String::from(package_name),
             target_sdk,
             activity_state: ActivityLifecycleState::Created,
@@ -68,6 +76,7 @@ impl AcrAppInstance {
             memory_quota_bytes,
             surface_id,
             classes_dex,
+            data_dir,
         }
     }
 
@@ -197,6 +206,9 @@ mod tests {
         let app = manager.apps.get_mut(&pid).expect("app instance");
         assert_eq!(app.activity_state, ActivityLifecycleState::Resumed);
         assert_eq!(app.package_name, "org.whispersystems.signal");
+        assert_eq!(app.uid, 10000);
+        assert_eq!(app.task_id, 0x8000_0000_0000_03E8);
+        assert_eq!(app.data_dir, "/data/data/org.whispersystems.signal");
 
         // Attach a root View with a button and text view
         let mut root = View::linear_layout(1, true);

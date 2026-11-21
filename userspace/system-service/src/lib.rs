@@ -543,11 +543,12 @@ pub fn run_search() -> ! {
 
     let uid = std::user_get_current();
     // Sole custody of master secret root belongs to keystored. Ordinary services query keystored.
-    let search_key = if uid > 0 {
-        std::keystore::keystore_derive_service_key(
+    let search_handle = if uid > 0 {
+        std::keystore::keystore_derive_key(
             std::ai::SERVICE_KEYSTORE_TASK_ID,
             std::keystore::DOMAIN_SEMANTIC_SEARCH,
-            uid,
+            std::keystore::RIGHT_ENCRYPT | std::keystore::RIGHT_DECRYPT,
+            b"rag_index",
         ).ok()
     } else {
         None
@@ -556,17 +557,17 @@ pub fn run_search() -> ! {
     let mut index = rag::RagIndex::new(false);
     // Section 40: Zero Plaintext Fallback. If a valid user search key cannot be obtained,
     // the daemon MUST run in-memory only. It MUST NOT fall back to writing or reading unencrypted vector indices.
-    let loaded = if let Some(ref key) = search_key {
-        index.load_from_disk_encrypted(rag::PATH_SEARCH_INDEX_DATA, key).is_ok()
-            || index.load_from_disk_encrypted(rag::PATH_SEARCH_INDEX_STORAGE, key).is_ok()
+    let loaded = if let Some(handle) = search_handle {
+        index.load_from_disk_with_handle(rag::PATH_SEARCH_INDEX_DATA, handle, std::ai::SERVICE_KEYSTORE_TASK_ID).is_ok()
+            || index.load_from_disk_with_handle(rag::PATH_SEARCH_INDEX_STORAGE, handle, std::ai::SERVICE_KEYSTORE_TASK_ID).is_ok()
     } else {
         false
     };
 
     if !loaded {
         // Section 39: Blanket directory crawling is eliminated in favor of explicit ContentIndex registration.
-        if let Some(ref key) = search_key {
-            let _ = index.save_to_disk_encrypted(rag::PATH_SEARCH_INDEX_STORAGE, key);
+        if let Some(handle) = search_handle {
+            let _ = index.save_to_disk_with_handle(rag::PATH_SEARCH_INDEX_STORAGE, handle, std::ai::SERVICE_KEYSTORE_TASK_ID);
             let _ = std::log("[searchd] initialized encrypted vector index.");
         } else {
             let _ = std::log("[searchd] search key unavailable: running in-memory index only (zero plaintext disk fallback).");
@@ -792,16 +793,17 @@ pub fn run_agent() -> ! {
     }
 
     // Sole custody of master secret root belongs to keystored. Ordinary services query keystored.
-    let enc_key = if uid > 0 {
-        std::keystore::keystore_derive_service_key(
+    let enc_handle = if uid > 0 {
+        std::keystore::keystore_derive_key(
             std::ai::SERVICE_KEYSTORE_TASK_ID,
             std::keystore::DOMAIN_COMPANION,
-            uid,
+            std::keystore::RIGHT_ENCRYPT | std::keystore::RIGHT_DECRYPT,
+            b"companion_state",
         ).ok()
     } else {
         None
     };
-    if enc_key.is_none() {
+    if enc_handle.is_none() {
         state.set_locked(true);
     }
 
@@ -833,8 +835,8 @@ pub fn run_agent() -> ! {
         }
     }
 
-    // 1. Two-Slot Journal: check marker first if authenticated and key is present
-    if let (Some(key), true) = (enc_key.as_ref(), uid > 0) {
+    // 1. Two-Slot Journal: check marker first if authenticated and handle is present
+    if let (Some(handle), true) = (enc_handle.as_ref(), uid > 0) {
         if let Some(mpath) = marker_path {
             let mut mraw = [0u8; 32];
             if let Ok(h) = std::fs_open(mpath, std::FS_READ) {
@@ -851,10 +853,10 @@ pub fn run_agent() -> ! {
                                     if bytes > 0 && bytes == marker.record_len as usize {
                                         let crc = unsafe { std::companion::crc32(&AGENT_FILE_BUF[..bytes]) };
                                         if crc == marker.payload_crc32 {
-                                            if unsafe { state.deserialize_encrypted_for_user(key, &AGENT_FILE_BUF[..bytes], uid, marker.generation).is_ok() } {
+                                            if unsafe { state.deserialize_encrypted_for_user_with_handle(*handle, &AGENT_FILE_BUF[..bytes], uid, marker.generation, std::ai::SERVICE_KEYSTORE_TASK_ID).is_ok() } {
                                                 active_slot = marker.active_slot;
                                                 loaded = true;
-                                                let _ = std::log("[agentd] companion two-slot journal state loaded and verified.");
+                                                let _ = std::log("[agentd] companion two-slot journal state loaded and verified via keystore.");
                                             }
                                         }
                                     }
@@ -876,7 +878,7 @@ pub fn run_agent() -> ! {
                     let _ = std::fs_close(h);
                     if bytes > 0 {
                         let mut test_state = std::companion::CompanionState::new();
-                        if unsafe { test_state.deserialize_encrypted_for_user(key, &AGENT_FILE_BUF[..bytes], uid, min_expected_gen).is_ok() } {
+                        if unsafe { test_state.deserialize_encrypted_for_user_with_handle(*handle, &AGENT_FILE_BUF[..bytes], uid, min_expected_gen, std::ai::SERVICE_KEYSTORE_TASK_ID).is_ok() } {
                             best_gen = test_state.generation;
                             best_slot = Some(b'A');
                         }
@@ -889,7 +891,7 @@ pub fn run_agent() -> ! {
                     let _ = std::fs_close(h);
                     if bytes > 0 {
                         let mut test_state = std::companion::CompanionState::new();
-                        if unsafe { test_state.deserialize_encrypted_for_user(key, &AGENT_SLOT_B_BUF[..bytes], uid, min_expected_gen).is_ok() } {
+                        if unsafe { test_state.deserialize_encrypted_for_user_with_handle(*handle, &AGENT_SLOT_B_BUF[..bytes], uid, min_expected_gen, std::ai::SERVICE_KEYSTORE_TASK_ID).is_ok() } {
                             if test_state.generation > best_gen || best_slot.is_none() {
                                 best_gen = test_state.generation;
                                 best_slot = Some(b'B');
@@ -901,7 +903,7 @@ pub fn run_agent() -> ! {
             if let Some(slot) = best_slot {
                 active_slot = slot;
                 let src = if slot == b'B' { unsafe { &AGENT_SLOT_B_BUF } } else { unsafe { &AGENT_FILE_BUF } };
-                let _ = state.deserialize_encrypted_for_user(key, src, uid, best_gen);
+                let _ = state.deserialize_encrypted_for_user_with_handle(*handle, src, uid, best_gen, std::ai::SERVICE_KEYSTORE_TASK_ID);
                 loaded = true;
             }
         }
@@ -910,11 +912,11 @@ pub fn run_agent() -> ! {
             // 3. Legacy path fallback
             let mut path_buf = [0u8; 64];
             if let Ok(user_path) = std::companion::companion_user_storage_path(uid, &mut path_buf) {
-                if let Ok(handle) = std::fs_open(user_path, std::FS_READ) {
-                    let bytes = unsafe { std::fs_read(handle, &mut AGENT_FILE_BUF).unwrap_or(0) };
-                    let _ = std::fs_close(handle);
+                if let Ok(handle_fd) = std::fs_open(user_path, std::FS_READ) {
+                    let bytes = unsafe { std::fs_read(handle_fd, &mut AGENT_FILE_BUF).unwrap_or(0) };
+                    let _ = std::fs_close(handle_fd);
                     if bytes > 0 {
-                        let _ = state.deserialize_encrypted_for_user(key, unsafe { &AGENT_FILE_BUF[..bytes] }, uid, min_expected_gen);
+                        let _ = state.deserialize_encrypted_for_user_with_handle(*handle, unsafe { &AGENT_FILE_BUF[..bytes] }, uid, min_expected_gen, std::ai::SERVICE_KEYSTORE_TASK_ID);
                     }
                 }
             }
@@ -962,7 +964,7 @@ pub fn run_agent() -> ! {
             if let Ok(ticks) = std::get_ticks() {
                 if ticks.saturating_sub(last_save_tick) >= 30_000 {
                     last_save_tick = ticks;
-                    if let (Some(key), true) = (enc_key.as_ref(), uid > 0) {
+                    if let (Some(handle), true) = (enc_handle.as_ref(), uid > 0) {
                         if !state.is_locked
                             && !state.is_private_session
                             && state.learning_mode != std::companion::LearningMode::Disabled
@@ -973,7 +975,7 @@ pub fn run_agent() -> ! {
                             if let Some(tpath) = target_path {
                                 state.generation = state.generation.saturating_add(1);
                                 if let Ok(nonce) = nonce_gen.next_nonce() {
-                                    if let Ok(enc_len) = unsafe { state.serialize_encrypted(key, &nonce, &mut AGENT_FILE_BUF) } {
+                                    if let Ok(enc_len) = unsafe { state.serialize_encrypted_with_handle(*handle, &nonce, &mut AGENT_FILE_BUF, std::ai::SERVICE_KEYSTORE_TASK_ID) } {
                                         if enc_len <= std::companion::COMPANION_STORAGE_BUDGET_MAX as usize {
                                             if let Ok(handle) = std::fs_open(tpath, std::FS_WRITE) {
                                                 let _ = unsafe { std::fs_write(handle, &AGENT_FILE_BUF[..enc_len]) };
@@ -1774,75 +1776,10 @@ fn handle_keystore_ipc<const N: usize>(
             }
         }
         std::keystore::KEYSTORE_OP_DERIVE_SERVICE_KEY => {
-            // Strict zero-ambient-authority check: ordinary applications can NEVER request raw keys!
-            if caller_identity.is_system == 0 {
-                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 0x12]);
-                return;
-            }
-            if req.len() < 9 {
-                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 1]);
-                return;
-            }
-            let domain = u32::from_le_bytes([req[1], req[2], req[3], req[4]]);
-            let target_uid = u32::from_le_bytes([req[5], req[6], req[7], req[8]]);
-
-            // Domain-scoped authorization check: domain must match caller service identity!
-            let domain_authorized = match domain {
-                std::keystore::DOMAIN_COMPANION => {
-                    sender == std::ai::SERVICE_AGENT_TASK_ID
-                        || std::service_peer_matches(std::ai::SERVICE_AGENT, sender)
-                        || caller_identity.package_name() == "org.interos.agentmanager"
-                }
-                std::keystore::DOMAIN_SEMANTIC_SEARCH => {
-                    sender == std::ai::SERVICE_SEARCH_TASK_ID
-                        || std::service_peer_matches(std::ai::SERVICE_SEARCH, sender)
-                }
-                std::keystore::DOMAIN_CONVERSATION_HISTORY => {
-                    sender == std::ai::SERVICE_AGENT_TASK_ID
-                        || std::service_peer_matches(std::ai::SERVICE_AGENT, sender)
-                        || sender == std::ai::SERVICE_INFERENCE_TASK_ID
-                        || std::service_peer_matches(std::ai::SERVICE_INFERENCE, sender)
-                }
-                _ => false,
-            };
-
-            if !domain_authorized {
-                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 0x13]);
-                return;
-            }
-
-            if target_uid != caller_uid && caller_uid != 0 {
-                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 0x14]);
-                return;
-            }
-
-            let root = match secret_root {
-                Some(r) => r,
-                None => {
-                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 3]);
-                    return;
-                }
-            };
-            let domain_bytes: &[u8] = match domain {
-                std::keystore::DOMAIN_COMPANION => std::companion::DOMAIN_COMPANION_STATE,
-                std::keystore::DOMAIN_SEMANTIC_SEARCH => std::companion::DOMAIN_SEMANTIC_SEARCH,
-                std::keystore::DOMAIN_CONVERSATION_HISTORY => std::companion::DOMAIN_CONVERSATION_HISTORY,
-                _ => {
-                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 4]);
-                    return;
-                }
-            };
-            match std::companion::derive_service_user_key(root, target_uid, domain_bytes) {
-                Ok(key) => {
-                    let mut resp = [0u8; 33];
-                    resp[0] = 0x00;
-                    resp[1..33].copy_from_slice(&key);
-                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &resp);
-                }
-                Err(_) => {
-                    let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 5]);
-                }
-            }
+            // Opaque Key Custody Policy: Raw master or derived cryptographic keys
+            // must NEVER leave keystored into any userspace process. All callers
+            // (including system services) must interact exclusively via opaque KeyHandles.
+            let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 0x12]);
         }
         _ => {
             let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 0xEE]);

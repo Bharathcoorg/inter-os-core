@@ -43,6 +43,7 @@ def test_historical_syscalls_not_supported():
     assert "Err(SyscallResult::NotSupported)" in syscall_mod_rs
     assert "pub fn sys_dex_verify_exec" in syscall_mod_rs
     assert "pub fn sys_dex_invoke_method" in syscall_mod_rs
+    assert "pub fn sys_android_bridge_intent" in syscall_mod_rs
 
 
 def test_ring3_acrd_daemon_registered():
