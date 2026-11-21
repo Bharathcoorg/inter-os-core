@@ -304,6 +304,14 @@ pub fn command_chip_row() -> CommandChipRow {
 /// The headline's box top: "Type to search" / "Results" / "No results".
 pub const SEARCH_HEADLINE_TOP: usize = 186;
 
+/// AI Answer card above search rows in Ask mode
+pub const SEARCH_AI_CARD: Rect = Rect::new(32, 186, 656, 120);
+
+/// Action execution & consent card in Do mode
+pub const SEARCH_DO_CARD: Rect = Rect::new(32, 186, 656, 136);
+pub const SEARCH_DO_APPROVE_BTN: Rect = Rect::new(48, 266, 296, 44);
+pub const SEARCH_DO_CANCEL_BTN: Rect = Rect::new(376, 266, 296, 44);
+
 /// The first result row's top, one row's height, and how many rows the list shows.
 pub const SEARCH_ROWS_TOP: usize = 216;
 pub const SEARCH_ROW_H: usize = 96;

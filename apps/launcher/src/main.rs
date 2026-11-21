@@ -461,6 +461,13 @@ pub struct LauncherState {
     pub search_query_len: usize,
     pub command_mode: launcher::search::CommandMode,
     pub command_mode_explicit: bool,
+    pub ai_answer_text: [u8; 192],
+    pub ai_answer_len: usize,
+    pub ai_answer_unavailable: bool,
+    pub planned_tool_id: u32,
+    pub planned_args: [u8; 64],
+    pub planned_args_len: usize,
+    pub planned_status: u32,
     /// The one index the search runs against.
     ///
     /// WHY the index is in the state and not rebuilt per keystroke: the index
@@ -592,6 +599,13 @@ impl LauncherState {
             search_query_len: 0,
             command_mode: launcher::search::CommandMode::Find,
             command_mode_explicit: false,
+            ai_answer_text: [0u8; 192],
+            ai_answer_len: 0,
+            ai_answer_unavailable: false,
+            planned_tool_id: 0,
+            planned_args: [0u8; 64],
+            planned_args_len: 0,
+            planned_status: 0,
             search_index: launcher::search::Index::new(),
             search_results: launcher::search::Results::new(),
             recents_cards: [launcher::recents::Card::EMPTY; launcher::recents::MAX_CARDS],
@@ -1814,6 +1828,45 @@ fn rank_search_results(state: &mut LauncherState) {
         search_ranker(ai_status)
     };
     state.search_results = state.search_index.search(query, &ranker);
+
+    // Command Space dispatch for Ask and Do modes
+    if state.command_mode == launcher::search::CommandMode::Ask && !query.is_empty() {
+        let mut gen_buf = [0u8; 192];
+        match launcher::search::query_service_generate(query, &mut gen_buf) {
+            Ok(n) => {
+                state.ai_answer_len = n.min(state.ai_answer_text.len());
+                state.ai_answer_text[..state.ai_answer_len].copy_from_slice(&gen_buf[..state.ai_answer_len]);
+                state.ai_answer_unavailable = false;
+            }
+            Err((_, reason)) => {
+                let r_bytes = reason.as_bytes();
+                state.ai_answer_len = r_bytes.len().min(state.ai_answer_text.len());
+                state.ai_answer_text[..state.ai_answer_len].copy_from_slice(&r_bytes[..state.ai_answer_len]);
+                state.ai_answer_unavailable = true;
+            }
+        }
+    } else if state.command_mode == launcher::search::CommandMode::Do && !query.is_empty() {
+        if let Some((tool_id, args)) = launcher::search::parse_action_query(query) {
+            state.planned_tool_id = tool_id;
+            state.planned_args_len = args.len().min(state.planned_args.len());
+            state.planned_args[..state.planned_args_len].copy_from_slice(&args[..state.planned_args_len]);
+            if let Ok(st) = launcher::search::query_agent_propose_plan(tool_id, args) {
+                state.planned_status = st;
+            } else {
+                state.planned_status = 1; // AwaitingConsent
+            }
+        } else {
+            state.planned_tool_id = 0;
+            state.planned_args_len = 0;
+            state.planned_status = 0;
+        }
+    } else {
+        state.ai_answer_len = 0;
+        state.ai_answer_unavailable = false;
+        state.planned_tool_id = 0;
+        state.planned_args_len = 0;
+        state.planned_status = 0;
+    }
 }
 
 /// Whether a package is one of the shell's own parts.
@@ -5304,6 +5357,37 @@ pub extern "C" fn _start() -> ! {
                                     };
                                     while std::input_event_poll(&mut drain).is_ok() {}
                                     break;
+                                }
+                                if state.command_mode == launcher::search::CommandMode::Do && state.planned_status == 1 {
+                                    if launcher::layout::SEARCH_DO_APPROVE_BTN.contains(x, y) {
+                                        let _ = launcher::search::query_agent_approve_plan();
+                                        state.planned_status = 3;
+                                        present_dirty(surface, &state, Dirty::SearchMode);
+                                        let mut drain = std::InputEvent {
+                                            kind: 0,
+                                            x: 0,
+                                            y: 0,
+                                            dx: 0,
+                                            dy: 0,
+                                            scale_milli: 1000,
+                                        };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    } else if launcher::layout::SEARCH_DO_CANCEL_BTN.contains(x, y) {
+                                        let _ = launcher::search::query_agent_cancel_plan();
+                                        state.planned_status = 4;
+                                        present_dirty(surface, &state, Dirty::SearchMode);
+                                        let mut drain = std::InputEvent {
+                                            kind: 0,
+                                            x: 0,
+                                            y: 0,
+                                            dx: 0,
+                                            dy: 0,
+                                            scale_milli: 1000,
+                                        };
+                                        while std::input_event_poll(&mut drain).is_ok() {}
+                                        break;
+                                    }
                                 }
                                 // WHY the row comes from the list this surface would ink and
                                 // not from the ranking's count: see `screens::search::result_at`.

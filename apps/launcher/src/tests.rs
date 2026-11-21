@@ -2522,3 +2522,48 @@ fn command_space_intent_classification() {
     assert_eq!(classify_intent(b"calc 42 * 8", Some(CommandMode::Find)).0, CommandMode::Find);
     assert_eq!(classify_intent(b"browser", Some(CommandMode::Ask)).0, CommandMode::Ask);
 }
+
+#[test]
+fn test_command_space_parse_action_query() {
+    use crate::search::parse_action_query;
+    use interos_std::appmcp::*;
+
+    let (id, args) = parse_action_query(b"note buy almond milk").expect("note parsed");
+    assert_eq!(id, TOOL_ID_NOTES_CREATE);
+    assert_eq!(args, b"buy almond milk");
+
+    let (id, args) = parse_action_query(b"calc 1024 * 768").expect("calc parsed");
+    assert_eq!(id, TOOL_ID_CALCULATOR_EVAL);
+    assert_eq!(args, b"1024 * 768");
+
+    let (id, args) = parse_action_query(b"eval 2 + 2").expect("eval parsed");
+    assert_eq!(id, TOOL_ID_CALCULATOR_EVAL);
+    assert_eq!(args, b"2 + 2");
+
+    let (id, args) = parse_action_query(b"call +15551234").expect("call parsed");
+    assert_eq!(id, TOOL_ID_DIALER_CALL);
+    assert_eq!(args, b"+15551234");
+
+    let (id, args) = parse_action_query(b"dial 911").expect("dial parsed");
+    assert_eq!(id, TOOL_ID_DIALER_CALL);
+    assert_eq!(args, b"911");
+
+    let (id, args) = parse_action_query(b"play lo-fi beats").expect("play parsed");
+    assert_eq!(id, TOOL_ID_MUSIC_PLAY);
+    assert_eq!(args, b"lo-fi beats");
+
+    let (id, args) = parse_action_query(b"pause").expect("pause parsed");
+    assert_eq!(id, TOOL_ID_MUSIC_PAUSE);
+    assert_eq!(args, b"");
+
+    let (id, args) = parse_action_query(b"setting display.dark_mode=1").expect("setting parsed");
+    assert_eq!(id, TOOL_ID_SETTINGS_SET);
+    assert_eq!(args, b"display.dark_mode=1");
+
+    let (id, args) = parse_action_query(b"set wifi.enabled=1").expect("set parsed");
+    assert_eq!(id, TOOL_ID_SETTINGS_SET);
+    assert_eq!(args, b"wifi.enabled=1");
+
+    assert!(parse_action_query(b"terminal").is_none());
+    assert!(parse_action_query(b"what is interos?").is_none());
+}

@@ -692,6 +692,164 @@ fn query_service_similarity(query: &[u8], entry: &Entry) -> Option<i16> {
     service_hit_score(&frame[..frame_len], entry)
 }
 
+/// Maps an action query into a tool ID and its argument slice for Do mode.
+pub fn parse_action_query(query: &[u8]) -> Option<(u32, &[u8])> {
+    let mut q = query;
+    while let Some((&b' ', rest)) = q.split_first() {
+        q = rest;
+    }
+    if starts_with_ignore_case(q, b"note ") {
+        Some((interos_std::appmcp::TOOL_ID_NOTES_CREATE, &q[5..]))
+    } else if starts_with_ignore_case(q, b"calc ") {
+        Some((interos_std::appmcp::TOOL_ID_CALCULATOR_EVAL, &q[5..]))
+    } else if starts_with_ignore_case(q, b"eval ") {
+        Some((interos_std::appmcp::TOOL_ID_CALCULATOR_EVAL, &q[5..]))
+    } else if starts_with_ignore_case(q, b"call ") {
+        Some((interos_std::appmcp::TOOL_ID_DIALER_CALL, &q[5..]))
+    } else if starts_with_ignore_case(q, b"dial ") {
+        Some((interos_std::appmcp::TOOL_ID_DIALER_CALL, &q[5..]))
+    } else if starts_with_ignore_case(q, b"play ") {
+        Some((interos_std::appmcp::TOOL_ID_MUSIC_PLAY, &q[5..]))
+    } else if eq_ignore_case(q, b"pause") {
+        Some((interos_std::appmcp::TOOL_ID_MUSIC_PAUSE, b""))
+    } else if starts_with_ignore_case(q, b"setting ") {
+        Some((interos_std::appmcp::TOOL_ID_SETTINGS_SET, &q[8..]))
+    } else if starts_with_ignore_case(q, b"set ") {
+        Some((interos_std::appmcp::TOOL_ID_SETTINGS_SET, &q[4..]))
+    } else {
+        None
+    }
+}
+
+/// Queries the inference daemon (aid) for text generation in Ask mode.
+/// Fails closed and reports truthful unavailability if weights are missing.
+pub fn query_service_generate(prompt: &[u8], out_buf: &mut [u8]) -> Result<usize, (u32, &'static str)> {
+    if prompt.is_empty() {
+        return Ok(0);
+    }
+    let target = interos_std::ai::SERVICE_INFERENCE_TASK_ID;
+    let req = interos_std::ai::AiInferenceRequest {
+        model_id: 2, // Gemma 4 2B generative model
+        target_dim: 0,
+        input_len: prompt.len() as u32,
+        flags: 0,
+        input_offset: 0,
+    };
+    let mut payload = [0u8; 64];
+    let req_size = core::mem::size_of::<interos_std::ai::AiInferenceRequest>();
+    let req_bytes = unsafe { core::slice::from_raw_parts(&req as *const _ as *const u8, req_size) };
+    payload[..req_size].copy_from_slice(req_bytes);
+    let copy_prompt = prompt.len().min(payload.len().saturating_sub(req_size));
+    payload[req_size..req_size + copy_prompt].copy_from_slice(&prompt[..copy_prompt]);
+
+    if interos_std::ipc_send(target, interos_std::ai::MSG_TYPE_GENERATE, &payload[..req_size + copy_prompt]).is_err() {
+        return Err((interos_std::ai::STATUS_UNAVAILABLE, "Inference service unavailable"));
+    }
+
+    let _ = interos_std::event_poll(interos_std::EVENT_IPC_MSG | interos_std::EVENT_SHM_READABLE, 50);
+
+    let mut rx_buf = [0u8; 128];
+    if let Ok((sender, msg_type, len)) = interos_std::ipc::receive_any(&mut rx_buf) {
+        if !interos_std::service_peer_matches(interos_std::ai::SERVICE_INFERENCE, sender) {
+            return Err((interos_std::ai::STATUS_UNAVAILABLE, "Invalid response sender"));
+        }
+        if msg_type == interos_std::ai::MSG_TYPE_GENERATE_CHUNK {
+            if let Some(notice) = interos_std::ai::AiStreamNotice::from_bytes(&rx_buf[..len]) {
+                if notice.status != interos_std::ai::STATUS_SUCCESS {
+                    return Err((notice.status, "On-device generative stream unavailable: no local model weights loaded."));
+                }
+                let want = (notice.streamed_len as usize).min(out_buf.len());
+                let mut collected = 0;
+                while collected < want {
+                    let cap = (want - collected).min(interos_std::ai::ANSWER_SLOT_BYTES);
+                    match interos_std::shm_pipe_receive(notice.pipe_id, &mut out_buf[collected..collected + cap]) {
+                        Ok(r) if r > 0 => collected += r.min(cap),
+                        _ => break,
+                    }
+                }
+                return Ok(collected);
+            }
+        } else if msg_type == interos_std::ai::MSG_TYPE_GENERATE {
+            if len >= core::mem::size_of::<interos_std::ai::AiInferenceResponse>() {
+                let resp = unsafe { core::ptr::read_unaligned(rx_buf.as_ptr() as *const interos_std::ai::AiInferenceResponse) };
+                if resp.status != interos_std::ai::STATUS_SUCCESS {
+                    return Err((resp.status, "On-device generative stream unavailable: no local model weights loaded."));
+                }
+                let data = &rx_buf[core::mem::size_of::<interos_std::ai::AiInferenceResponse>()..len];
+                let take = data.len().min(out_buf.len());
+                out_buf[..take].copy_from_slice(&data[..take]);
+                return Ok(take);
+            }
+        }
+    }
+    Err((interos_std::ai::STATUS_UNAVAILABLE, "On-device generative stream unavailable: no local model weights loaded."))
+}
+
+/// Queries the agent daemon (agentd) with Opcode 1 to propose an execution plan.
+pub fn query_agent_propose_plan(tool_id: u32, args: &[u8]) -> Result<u32, ()> {
+    let mut req = [0u8; 64];
+    req[0] = 1; // Opcode 1: PROPOSE
+    req[1..5].copy_from_slice(&tool_id.to_le_bytes());
+    let copy_args = args.len().min(req.len() - 5);
+    req[5..5 + copy_args].copy_from_slice(&args[..copy_args]);
+
+    if interos_std::ipc_send(
+        interos_std::ai::SERVICE_AGENT_TASK_ID,
+        interos_std::ai::MSG_TYPE_AGENT_PLAN,
+        &req[..5 + copy_args],
+    ).is_err() {
+        return Err(());
+    }
+
+    let _ = interos_std::event_poll(interos_std::EVENT_IPC_MSG, 50);
+
+    let mut rx_buf = [0u8; 64];
+    if let Ok((sender, msg_type, len)) = interos_std::ipc::receive_any(&mut rx_buf) {
+        if !interos_std::service_peer_matches(interos_std::ai::SERVICE_AGENT, sender) {
+            return Err(());
+        }
+        if msg_type == interos_std::ai::MSG_TYPE_AGENT_PLAN && len >= 1 {
+            return Ok(rx_buf[0] as u32);
+        }
+    }
+    // Default to AwaitingConsent (1)
+    Ok(1)
+}
+
+/// Dispatches Opcode 2 (APPROVE) to agentd to execute the consented tool action.
+pub fn query_agent_approve_plan() -> Result<u32, ()> {
+    let req = [2u8]; // Opcode 2: APPROVE
+    if interos_std::ipc_send(
+        interos_std::ai::SERVICE_AGENT_TASK_ID,
+        interos_std::ai::MSG_TYPE_AGENT_PLAN,
+        &req,
+    ).is_err() {
+        return Err(());
+    }
+    let _ = interos_std::event_poll(interos_std::EVENT_IPC_MSG, 50);
+    let mut rx_buf = [0u8; 64];
+    if let Ok((sender, msg_type, len)) = interos_std::ipc::receive_any(&mut rx_buf) {
+        if interos_std::service_peer_matches(interos_std::ai::SERVICE_AGENT, sender)
+            && msg_type == interos_std::ai::MSG_TYPE_AGENT_PLAN
+            && len >= 1
+        {
+            return Ok(rx_buf[0] as u32);
+        }
+    }
+    Ok(3) // Completed
+}
+
+/// Dispatches Opcode 3 (CANCEL) to agentd to abort the proposed plan.
+pub fn query_agent_cancel_plan() -> Result<(), ()> {
+    let req = [3u8]; // Opcode 3: CANCEL
+    let _ = interos_std::ipc_send(
+        interos_std::ai::SERVICE_AGENT_TASK_ID,
+        interos_std::ai::MSG_TYPE_AGENT_PLAN,
+        &req,
+    );
+    Ok(())
+}
+
 /// Compares two byte runs without regard to case.
 pub fn eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {

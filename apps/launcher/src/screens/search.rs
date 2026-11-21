@@ -110,6 +110,18 @@ struct Plan {
     status_card: Rect,
     status: [StatusPlan; 4],
     hint: Label,
+    ai_card: Rect,
+    ai_header: Label,
+    ai_body: Label,
+    ai_active: bool,
+    do_card: Rect,
+    do_header: Label,
+    do_body: Label,
+    do_approve_btn: Rect,
+    do_approve_label: Label,
+    do_cancel_btn: Rect,
+    do_cancel_label: Label,
+    do_active: bool,
     /// The state this plan was built from.
     cached_command_mode: launcher::search::CommandMode,
     cached_query_len: usize,
@@ -235,6 +247,18 @@ fn build(state: &LauncherState) -> Plan {
             },
         ],
         hint: Label::EMPTY,
+        ai_card: Rect::new(0, 0, 0, 0),
+        ai_header: Label::EMPTY,
+        ai_body: Label::EMPTY,
+        ai_active: false,
+        do_card: Rect::new(0, 0, 0, 0),
+        do_header: Label::EMPTY,
+        do_body: Label::EMPTY,
+        do_approve_btn: Rect::new(0, 0, 0, 0),
+        do_approve_label: Label::EMPTY,
+        do_cancel_btn: Rect::new(0, 0, 0, 0),
+        do_cancel_label: Label::EMPTY,
+        do_active: false,
         cached_command_mode: state.command_mode,
         cached_query_len: state.search_query_len,
         cached_query: state.search_query,
@@ -444,6 +468,74 @@ fn build(state: &LauncherState) -> Plan {
     } else {
         Label::EMPTY
     };
+
+    if state.command_mode == launcher::search::CommandMode::Ask && state.search_query_len > 0 {
+        plan.ai_active = true;
+        plan.ai_card = launcher::layout::SEARCH_AI_CARD;
+        let hdr = if state.ai_answer_unavailable {
+            b"AI Status: Model Weights Unavailable".as_slice()
+        } else {
+            b"AI Answer - Gemma 4 2B".as_slice()
+        };
+        let hdr_ink = if state.ai_answer_unavailable {
+            theme.error
+        } else {
+            theme.on_surface
+        };
+        plan.ai_header = Label::at(
+            launcher::layout::SEARCH_AI_CARD.x + space::MD,
+            launcher::layout::SEARCH_AI_CARD.y + space::SM,
+            type_scale::CAPTION,
+            hdr,
+            hdr_ink,
+        );
+        plan.ai_body = Label::at(
+            launcher::layout::SEARCH_AI_CARD.x + space::MD,
+            launcher::layout::SEARCH_AI_CARD.y + space::SM + 24,
+            type_scale::BODY,
+            &state.ai_answer_text[..state.ai_answer_len],
+            theme.on_surface_variant,
+        );
+    } else if state.command_mode == launcher::search::CommandMode::Do && state.search_query_len > 0 {
+        plan.do_active = true;
+        plan.do_card = launcher::layout::SEARCH_DO_CARD;
+        plan.do_header = Label::at(
+            launcher::layout::SEARCH_DO_CARD.x + space::MD,
+            launcher::layout::SEARCH_DO_CARD.y + space::SM,
+            type_scale::CAPTION,
+            b"AppMCP Action Proposal",
+            theme.on_surface,
+        );
+        let body_text: &[u8] = match state.planned_status {
+            1 => b"Awaiting user consent to execute tool action",
+            3 => b"Action completed successfully",
+            4 => b"Action cancelled by user",
+            _ => b"Proposing tool action for execution",
+        };
+        plan.do_body = Label::at(
+            launcher::layout::SEARCH_DO_CARD.x + space::MD,
+            launcher::layout::SEARCH_DO_CARD.y + space::SM + 24,
+            type_scale::BODY,
+            body_text,
+            theme.on_surface_variant,
+        );
+        plan.do_approve_btn = launcher::layout::SEARCH_DO_APPROVE_BTN;
+        plan.do_approve_label = Label::at(
+            launcher::layout::SEARCH_DO_APPROVE_BTN.x + 80,
+            launcher::layout::SEARCH_DO_APPROVE_BTN.y + 12,
+            type_scale::CAPTION,
+            b"Approve & Run",
+            theme.surface,
+        );
+        plan.do_cancel_btn = launcher::layout::SEARCH_DO_CANCEL_BTN;
+        plan.do_cancel_label = Label::at(
+            launcher::layout::SEARCH_DO_CANCEL_BTN.x + 110,
+            launcher::layout::SEARCH_DO_CANCEL_BTN.y + 12,
+            type_scale::CAPTION,
+            b"Cancel",
+            theme.on_surface,
+        );
+    }
 
     plan
 }
@@ -660,6 +752,53 @@ pub fn get_search_color(x: usize, y: usize, state: &LauncherState) -> u32 {
             }
             return fill;
         }
+    }
+
+    // The Command Space AI Answer card in Ask mode
+    if p.ai_active && inside_rounded(p.ai_card, radius::CARD, x, y) {
+        let fill = theme.surface_container;
+        if !inside_rounded(p.ai_card.inset(1), radius::CARD.saturating_sub(1), x, y) {
+            return theme.border;
+        }
+        if let Some(c) = p.ai_header.pixel(x, y, fill) {
+            return c;
+        }
+        if let Some(c) = p.ai_body.pixel(x, y, fill) {
+            return c;
+        }
+        return fill;
+    }
+
+    // The Command Space Action Consent card in Do mode
+    if p.do_active && inside_rounded(p.do_card, radius::CARD, x, y) {
+        let fill = theme.surface_container;
+        if inside_rounded(p.do_approve_btn, radius::CONTROL, x, y) {
+            let btn_fill = theme.on_surface;
+            if let Some(c) = p.do_approve_label.pixel(x, y, btn_fill) {
+                return c;
+            }
+            return btn_fill;
+        }
+        if inside_rounded(p.do_cancel_btn, radius::CONTROL, x, y) {
+            let btn_fill = theme.surface_container_high;
+            if !inside_rounded(p.do_cancel_btn.inset(1), radius::CONTROL.saturating_sub(1), x, y) {
+                return theme.border;
+            }
+            if let Some(c) = p.do_cancel_label.pixel(x, y, btn_fill) {
+                return c;
+            }
+            return btn_fill;
+        }
+        if !inside_rounded(p.do_card.inset(1), radius::CARD.saturating_sub(1), x, y) {
+            return theme.border;
+        }
+        if let Some(c) = p.do_header.pixel(x, y, fill) {
+            return c;
+        }
+        if let Some(c) = p.do_body.pixel(x, y, fill) {
+            return c;
+        }
+        return fill;
     }
 
     if let Some(c) = p.headline.pixel(x, y, theme.surface) {

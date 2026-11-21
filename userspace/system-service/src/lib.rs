@@ -554,24 +554,25 @@ pub fn run_search() -> ! {
     };
 
     let mut index = rag::RagIndex::new(false);
+    // Section 40: Zero Plaintext Fallback. If a valid user search key cannot be obtained,
+    // the daemon MUST run in-memory only. It MUST NOT fall back to writing or reading unencrypted vector indices.
     let loaded = if let Some(ref key) = search_key {
         index.load_from_disk_encrypted(rag::PATH_SEARCH_INDEX_DATA, key).is_ok()
             || index.load_from_disk_encrypted(rag::PATH_SEARCH_INDEX_STORAGE, key).is_ok()
     } else {
         false
-    } || index.load_from_disk(rag::PATH_SEARCH_INDEX_DATA).is_ok()
-      || index.load_from_disk(rag::PATH_SEARCH_INDEX_STORAGE).is_ok();
+    };
 
     if !loaded {
-        let _count = index.discover_and_ingest_storage();
+        // Section 39: Blanket directory crawling is eliminated in favor of explicit ContentIndex registration.
         if let Some(ref key) = search_key {
             let _ = index.save_to_disk_encrypted(rag::PATH_SEARCH_INDEX_STORAGE, key);
+            let _ = std::log("[searchd] initialized encrypted vector index.");
         } else {
-            let _ = index.save_to_disk(rag::PATH_SEARCH_INDEX_STORAGE);
+            let _ = std::log("[searchd] search key unavailable: running in-memory index only (zero plaintext disk fallback).");
         }
-        let _ = std::log("[searchd] initialized vector index from storage documents.");
     } else {
-        let _ = std::log("[searchd] loaded existing vector index from persistent storage.");
+        let _ = std::log("[searchd] loaded existing encrypted vector index from persistent storage.");
     }
 
     let mut rx_buf = [0u8; 1024];
@@ -581,13 +582,9 @@ pub fn run_search() -> ! {
         let _ = std::service_heartbeat(std::ai::SERVICE_SEARCH);
 
         if let Some(_) = ipc_slot {
-            if let Ok((sender_task_id, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
-                if len > 0 {
+            while let Ok((sender_task_id, msg_type, len)) = std::ipc::receive_any(&mut rx_buf) {
+                if len > 0 && sender_task_id != 0 {
                     handle_search_ipc(sender_task_id, msg_type, &rx_buf[..len], &mut index, &mut tx_buf);
-                }
-            } else if let Ok(len) = std::ipc_recv(&mut rx_buf) {
-                if len > 0 {
-                    handle_search_ipc(0, 0, &rx_buf[..len], &mut index, &mut tx_buf);
                 }
             }
         }
@@ -596,14 +593,7 @@ pub fn run_search() -> ! {
             if let Ok(ticks) = std::get_ticks() {
                 if ticks.saturating_sub(last_tick) >= 60_000 {
                     last_tick = ticks;
-                    let added = index.discover_and_ingest_storage();
-                    if added > 0 {
-                        if let Some(ref key) = search_key {
-                            let _ = index.save_to_disk_encrypted(rag::PATH_SEARCH_INDEX_STORAGE, key);
-                        } else {
-                            let _ = index.save_to_disk(rag::PATH_SEARCH_INDEX_STORAGE);
-                        }
-                    }
+                    // Periodic blanket storage crawl removed per Section 39!
                 }
             }
         }
@@ -623,6 +613,9 @@ fn handle_search_ipc(
     index: &mut rag::RagIndex,
     tx_buf: &mut [u8; 1024],
 ) {
+    if sender_task_id == 0 {
+        return;
+    }
     if msg_type != MSG_TYPE_SEARCH && msg_type != 0 {
         return;
     }
@@ -716,11 +709,60 @@ fn is_authorized_agent_admin(sender_task_id: u64) -> bool {
     if sender_task_id == 0 {
         return false;
     }
-    sender_task_id == 0xFFFF_000A // Launcher virtual task
-        || sender_task_id == 0xFFFF_000B // Settings virtual task
-        || sender_task_id == std::ai::SERVICE_AGENT_TASK_ID
+    if sender_task_id == std::ai::SERVICE_AGENT_TASK_ID
         || std::service_peer_matches(10, sender_task_id) // ServiceId::Launcher
         || std::service_peer_matches(14, sender_task_id) // ServiceId::Agent
+    {
+        return true;
+    }
+    if let Ok(info) = std::task_identity_query(sender_task_id) {
+        if info.is_system != 0 {
+            return true;
+        }
+        let pkg = info.package_name();
+        if pkg == "org.interos.launcher"
+            || pkg == "org.interos.settings"
+            || pkg == "org.interos.agentmanager"
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn populate_default_installed_tools(registry: &mut std::appmcp::DynamicToolRegistry) {
+    let tools: &[(u32, &[u8], &[u8], &[u8], &[u8], std::appmcp::ToolRiskClass, std::appmcp::ToolConsentClass)] = &[
+        (std::appmcp::TOOL_ID_NOTES_CREATE, b"notes.create", b"Create Note", b"Append text to user notes", b"org.interos.notes", std::appmcp::ToolRiskClass::PersonalMutation, std::appmcp::ToolConsentClass::AlwaysAsk),
+        (std::appmcp::TOOL_ID_NOTES_LIST, b"notes.list", b"List Notes", b"List existing note summaries", b"org.interos.notes", std::appmcp::ToolRiskClass::Observe, std::appmcp::ToolConsentClass::AlwaysAllow),
+        (std::appmcp::TOOL_ID_NOTES_READ, b"notes.read", b"Read Note", b"Read full text of a note by id", b"org.interos.notes", std::appmcp::ToolRiskClass::Observe, std::appmcp::ToolConsentClass::AlwaysAllow),
+        (std::appmcp::TOOL_ID_NOTES_DELETE, b"notes.delete", b"Delete Note", b"Remove a note permanently", b"org.interos.notes", std::appmcp::ToolRiskClass::PersonalMutation, std::appmcp::ToolConsentClass::AlwaysAsk),
+        (std::appmcp::TOOL_ID_CALCULATOR_EVAL, b"calculator.eval", b"Calculate", b"Evaluate arithmetic expression", b"org.interos.calculator", std::appmcp::ToolRiskClass::Observe, std::appmcp::ToolConsentClass::AlwaysAllow),
+        (std::appmcp::TOOL_ID_CALENDAR_SCHEDULE, b"calendar.schedule", b"Schedule Event", b"Create calendar appointment", b"org.interos.calendar", std::appmcp::ToolRiskClass::PersonalMutation, std::appmcp::ToolConsentClass::AlwaysAsk),
+        (std::appmcp::TOOL_ID_CALENDAR_LIST, b"calendar.list", b"List Events", b"List scheduled calendar events", b"org.interos.calendar", std::appmcp::ToolRiskClass::Observe, std::appmcp::ToolConsentClass::AlwaysAllow),
+        (std::appmcp::TOOL_ID_CALENDAR_GET_DATE, b"calendar.date", b"Get Date", b"Read current system date and time", b"org.interos.calendar", std::appmcp::ToolRiskClass::Observe, std::appmcp::ToolConsentClass::AlwaysAllow),
+        (std::appmcp::TOOL_ID_MESSAGES_SEND_SMS, b"messages.send", b"Send SMS", b"Send text message to contact", b"org.interos.messages", std::appmcp::ToolRiskClass::ExternalConsequence, std::appmcp::ToolConsentClass::AlwaysAsk),
+        (std::appmcp::TOOL_ID_MESSAGES_LIST, b"messages.list", b"List Messages", b"List conversation threads", b"org.interos.messages", std::appmcp::ToolRiskClass::Observe, std::appmcp::ToolConsentClass::AlwaysAllow),
+        (std::appmcp::TOOL_ID_MESSAGES_READ, b"messages.read", b"Read Thread", b"Read messages in thread", b"org.interos.messages", std::appmcp::ToolRiskClass::Observe, std::appmcp::ToolConsentClass::AlwaysAllow),
+        (std::appmcp::TOOL_ID_SETTINGS_GET, b"settings.get", b"Get Setting", b"Read configuration value", b"org.interos.settings", std::appmcp::ToolRiskClass::Observe, std::appmcp::ToolConsentClass::AlwaysAllow),
+        (std::appmcp::TOOL_ID_SETTINGS_SET, b"settings.set", b"Update Setting", b"Modify system configuration", b"org.interos.settings", std::appmcp::ToolRiskClass::PersonalMutation, std::appmcp::ToolConsentClass::AlwaysAsk),
+        (std::appmcp::TOOL_ID_DIALER_CALL, b"dialer.call", b"Place Call", b"Initiate telephony voice call", b"org.interos.dialer", std::appmcp::ToolRiskClass::ExternalConsequence, std::appmcp::ToolConsentClass::AlwaysAsk),
+        (std::appmcp::TOOL_ID_MUSIC_PLAY, b"music.play", b"Play Music", b"Start audio playback", b"org.interos.music", std::appmcp::ToolRiskClass::Reversible, std::appmcp::ToolConsentClass::AlwaysAllow),
+        (std::appmcp::TOOL_ID_MUSIC_PAUSE, b"music.pause", b"Pause Music", b"Pause active playback", b"org.interos.music", std::appmcp::ToolRiskClass::Reversible, std::appmcp::ToolConsentClass::AlwaysAllow),
+    ];
+    for &(id, name, label, desc, pkg, risk, consent) in tools {
+        let descriptor = std::appmcp::DynamicToolDescriptor::new(
+            id,
+            name,
+            label,
+            desc,
+            pkg,
+            1,
+            risk,
+            consent,
+            std::appmcp::TOOL_CAP_TYPE,
+        );
+        let _ = registry.register(descriptor);
+    }
 }
 
 /// Companion & Autonomous Agent runtime daemon execution path (`agentd`).
@@ -737,7 +779,8 @@ pub fn run_agent() -> ! {
     let has_epoll = std::cap_lookup(std::cap_type::EVENT_POLL, 0).is_ok();
 
     let mut state = std::companion::CompanionState::new();
-    let mut tool_registry = std::appmcp::DynamicToolRegistry::canonical();
+    let mut tool_registry = std::appmcp::DynamicToolRegistry::new();
+    populate_default_installed_tools(&mut tool_registry);
 
     // Authenticated user resolution - fails closed if unauthenticated
     let uid = std::user_get_current();
@@ -1742,6 +1785,37 @@ fn handle_keystore_ipc<const N: usize>(
             }
             let domain = u32::from_le_bytes([req[1], req[2], req[3], req[4]]);
             let target_uid = u32::from_le_bytes([req[5], req[6], req[7], req[8]]);
+
+            // Domain-scoped authorization check: domain must match caller service identity!
+            let domain_authorized = match domain {
+                std::keystore::DOMAIN_COMPANION => {
+                    sender == std::ai::SERVICE_AGENT_TASK_ID
+                        || std::service_peer_matches(std::ai::SERVICE_AGENT, sender)
+                        || caller_identity.package_name() == "org.interos.agentmanager"
+                }
+                std::keystore::DOMAIN_SEMANTIC_SEARCH => {
+                    sender == std::ai::SERVICE_SEARCH_TASK_ID
+                        || std::service_peer_matches(std::ai::SERVICE_SEARCH, sender)
+                }
+                std::keystore::DOMAIN_CONVERSATION_HISTORY => {
+                    sender == std::ai::SERVICE_AGENT_TASK_ID
+                        || std::service_peer_matches(std::ai::SERVICE_AGENT, sender)
+                        || sender == std::ai::SERVICE_INFERENCE_TASK_ID
+                        || std::service_peer_matches(std::ai::SERVICE_INFERENCE, sender)
+                }
+                _ => false,
+            };
+
+            if !domain_authorized {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 0x13]);
+                return;
+            }
+
+            if target_uid != caller_uid && caller_uid != 0 {
+                let _ = std::ipc_send(sender, std::keystore::SERVICE_KEYSTORE_MSG, &[0xFF, 0x14]);
+                return;
+            }
+
             let root = match secret_root {
                 Some(r) => r,
                 None => {
@@ -3957,7 +4031,8 @@ fn run_installed_generation(
         let mut poll_buf = [0u8; 1024];
         while let Ok((sender, msg_type, len)) = std::ipc::receive_any(&mut poll_buf) {
             if msg_type == std::ai::MSG_TYPE_CANCEL {
-                if sender == sender_task_id || sender == 1 {
+                let is_admin = sender == 1 || std::task_identity_query(sender).map(|id| id.is_system != 0).unwrap_or(false);
+                if sender == sender_task_id || is_admin {
                     ACTIVE_SESSION_CANCELLED.store(session_id, core::sync::atomic::Ordering::SeqCst);
                     with_broker_ledger(|ledger| {
                         let _ = ledger.cancel(sender_task_id, ledger_session_id);
@@ -4262,7 +4337,7 @@ pub fn handle_ipc_inference_query(
                 b"[No active inference session to cancel]",
                 tx_buf,
             );
-        } else if sender_task_id == active || sender_task_id == 1 {
+        } else if sender_task_id == active || sender_task_id == 1 || std::task_identity_query(sender_task_id).map(|id| id.is_system != 0).unwrap_or(false) {
             ACTIVE_SESSION_CANCELLED.store(active_sess, core::sync::atomic::Ordering::SeqCst);
             with_broker_ledger(|ledger| {
                 let _ = ledger.cancel(sender_task_id, active_sess);
