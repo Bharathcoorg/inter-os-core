@@ -203,6 +203,17 @@ pub enum ModelRole {
 }
 
 impl ModelRole {
+    #[allow(non_upper_case_globals)]
+    pub const TextGeneration: Self = Self::GenerativeText;
+    #[allow(non_upper_case_globals)]
+    pub const TextEmbedding: Self = Self::Embedding;
+    #[allow(non_upper_case_globals)]
+    pub const SpeechToText: Self = Self::SpeechRecognition;
+    #[allow(non_upper_case_globals)]
+    pub const TextToSpeech: Self = Self::SpeechSynthesis;
+    #[allow(non_upper_case_globals)]
+    pub const VisionUnderstanding: Self = Self::Vision;
+
     pub const ALL: [Self; 6] = [
         Self::GenerativeText,
         Self::Embedding,

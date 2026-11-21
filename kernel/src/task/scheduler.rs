@@ -158,6 +158,7 @@ pub fn run_deferred_cleanup() {
 /// Releases everything a departed task owned outside the scheduler.
 fn reclaim_task(entry: DeferredCleanup) {
     crate::ipc::cleanup_task(entry.id);
+    crate::memory::cleanup_loans_for_task(entry.id);
     crate::fs::cleanup_task(entry.id);
     crate::event::cleanup_task(entry.id);
     crate::net::cleanup_task(entry.id);

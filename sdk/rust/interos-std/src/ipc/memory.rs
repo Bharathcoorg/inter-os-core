@@ -152,6 +152,27 @@ impl<'a> BorrowedReadOnlyBuffer<'a> {
     pub fn loan_id(&self) -> u64 {
         self.loan_id
     }
+
+    /// Lends an MMU-page-aligned slice to a target task backed by hardware page table protection (`sys_mem_lend`).
+    pub fn lend_mmu(data: &'a [u8], target_task: u64) -> Result<(Self, u64, u64), IpcMemoryError> {
+        let addr = data.as_ptr() as u64;
+        let len = data.len();
+        if addr % 4096 != 0 || len % 4096 != 0 || len == 0 {
+            return Err(IpcMemoryError::InvalidLength);
+        }
+        let mut borrower_vaddr = 0u64;
+        let handle = crate::mem_lend(target_task, addr, len, 0, &mut borrower_vaddr)
+            .map_err(|_| IpcMemoryError::PermissionDenied)?;
+        Ok((
+            Self {
+                data,
+                target_task,
+                loan_id: handle,
+            },
+            handle,
+            borrower_vaddr,
+        ))
+    }
 }
 
 /// Lifetime-bound exclusive mutable lent memory buffer.
@@ -175,6 +196,28 @@ impl<'a> BorrowedMutableBuffer<'a> {
             loan_id,
             written_len: 0,
         }
+    }
+
+    /// Lends an MMU-page-aligned mutable slice to a target task backed by hardware exclusive borrow (`sys_mem_lend`).
+    pub fn lend_mmu(data: &'a mut [u8], target_task: u64) -> Result<(Self, u64, u64), IpcMemoryError> {
+        let addr = data.as_ptr() as u64;
+        let len = data.len();
+        if addr % 4096 != 0 || len % 4096 != 0 || len == 0 {
+            return Err(IpcMemoryError::InvalidLength);
+        }
+        let mut borrower_vaddr = 0u64;
+        let handle = crate::mem_lend(target_task, addr, len, 1, &mut borrower_vaddr)
+            .map_err(|_| IpcMemoryError::PermissionDenied)?;
+        Ok((
+            Self {
+                data,
+                target_task,
+                loan_id: handle,
+                written_len: 0,
+            },
+            handle,
+            borrower_vaddr,
+        ))
     }
 
     /// Returns the full underlying byte slice.
@@ -297,6 +340,17 @@ impl<const N: usize> TransferredBuffer<N> {
         let mut out = [0u8; N];
         out.copy_from_slice(&self.data);
         Ok((out, self.valid_len))
+    }
+
+    /// Performs zero-copy ownership transfer of an MMU-page-aligned buffer region using `sys_mem_transfer`.
+    pub fn transfer_mmu(sender_vaddr: u64, len: usize, target_task: u64) -> Result<u64, IpcMemoryError> {
+        if sender_vaddr % 4096 != 0 || len % 4096 != 0 || len == 0 {
+            return Err(IpcMemoryError::InvalidLength);
+        }
+        let mut receiver_vaddr = 0u64;
+        crate::mem_transfer(target_task, sender_vaddr, len, &mut receiver_vaddr)
+            .map_err(|_| IpcMemoryError::PermissionDenied)?;
+        Ok(receiver_vaddr)
     }
 }
 

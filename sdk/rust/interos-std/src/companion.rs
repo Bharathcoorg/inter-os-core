@@ -450,6 +450,24 @@ impl PreferenceCategory {
     }
 }
 
+/// Memory provenance hierarchy ensuring model inference alone is never persisted to durable storage.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemoryProvenance {
+    ModelInference = 0,         // Transient only: NEVER committed to durable storage!
+    SingleObservation = 1,      // Low confidence, evicted first
+    RepeatedBehavior = 2,       // Empirical observation (count >= 3)
+    ApprovedRoutine = 3,        // User approved suggestion
+    ExplicitCorrection = 4,     // User overturned an action
+    ExplicitUserInstruction = 5,// Highest priority, immune to automatic eviction
+}
+
+impl Default for MemoryProvenance {
+    fn default() -> Self {
+        Self::ExplicitUserInstruction
+    }
+}
+
 /// A structured preference record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreferenceRecord {
@@ -460,6 +478,7 @@ pub struct PreferenceRecord {
     pub value_len: u8,
     pub confidence: u8,
     pub updated_at: u64,
+    pub provenance: MemoryProvenance,
 }
 
 impl Default for PreferenceRecord {
@@ -472,12 +491,24 @@ impl Default for PreferenceRecord {
             value_len: 0,
             confidence: 0,
             updated_at: 0,
+            provenance: MemoryProvenance::ExplicitUserInstruction,
         }
     }
 }
 
 impl PreferenceRecord {
     pub fn new(cat: PreferenceCategory, key: &[u8], val: &[u8], confidence: u8, now: u64) -> Self {
+        Self::with_provenance(cat, key, val, confidence, now, MemoryProvenance::ExplicitUserInstruction)
+    }
+
+    pub fn with_provenance(
+        cat: PreferenceCategory,
+        key: &[u8],
+        val: &[u8],
+        confidence: u8,
+        now: u64,
+        provenance: MemoryProvenance,
+    ) -> Self {
         let mut rec = Self {
             category: cat,
             key: [0u8; 32],
@@ -486,6 +517,7 @@ impl PreferenceRecord {
             value_len: val.len().min(64) as u8,
             confidence: confidence.min(100),
             updated_at: now,
+            provenance,
         };
         rec.key[..rec.key_len as usize].copy_from_slice(&key[..rec.key_len as usize]);
         rec.value[..rec.value_len as usize].copy_from_slice(&val[..rec.value_len as usize]);
@@ -856,6 +888,7 @@ impl CompanionState {
                 value_len: 0,
                 confidence: 0,
                 updated_at: 0,
+                provenance: MemoryProvenance::ExplicitUserInstruction,
             }; MAX_PREFERENCES],
             pref_count: 0,
             corrections: [UserCorrection {
@@ -1088,6 +1121,25 @@ impl CompanionState {
         confidence: u8,
         now: u64,
     ) -> bool {
+        self.add_preference_with_provenance(
+            category,
+            key,
+            val,
+            confidence,
+            now,
+            MemoryProvenance::ExplicitUserInstruction,
+        )
+    }
+
+    pub fn add_preference_with_provenance(
+        &mut self,
+        category: PreferenceCategory,
+        key: &[u8],
+        val: &[u8],
+        confidence: u8,
+        now: u64,
+        provenance: MemoryProvenance,
+    ) -> bool {
         if self.is_locked || self.is_private_session || self.learning_mode == LearningMode::Off {
             return false;
         }
@@ -1102,6 +1154,7 @@ impl CompanionState {
                 self.preferences[i].value_len = vlen as u8;
                 self.preferences[i].confidence = confidence.min(100);
                 self.preferences[i].updated_at = now;
+                self.preferences[i].provenance = provenance;
                 return true;
             }
         }
@@ -1128,7 +1181,7 @@ impl CompanionState {
         }
 
         self.preferences[self.pref_count] =
-            PreferenceRecord::new(category, key, val, confidence, now);
+            PreferenceRecord::with_provenance(category, key, val, confidence, now, provenance);
         self.pref_count += 1;
         true
     }
@@ -1673,6 +1726,10 @@ impl CompanionState {
         // 1. Preferences (allowed in Adaptive, ExplicitOnly, Custom)
         for i in 0..self.pref_count {
             let p = &self.preferences[i];
+            if p.provenance == MemoryProvenance::ModelInference {
+                // Transient only: NEVER committed to durable storage!
+                continue;
+            }
             let rec_len = 1 + 1 + 32 + 1 + 64 + 1 + 8; // 108
             if pt_cursor + 2 + rec_len > scratch.len() {
                 break;
@@ -1813,6 +1870,7 @@ impl CompanionState {
                             value_len: vlen,
                             confidence: conf,
                             updated_at: upd,
+                            provenance: MemoryProvenance::ExplicitUserInstruction,
                         };
                         self.pref_count += 1;
                     }
@@ -1974,6 +2032,7 @@ impl CompanionState {
                 value_len: vlen,
                 confidence: conf,
                 updated_at: updated,
+                provenance: MemoryProvenance::ExplicitUserInstruction,
             };
             self.pref_count += 1;
             cursor += rec_size;
@@ -1983,36 +2042,8 @@ impl CompanionState {
     }
 }
 
-/// Generic model role defaults and replacement routing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum ModelRole {
-    TextGeneration = 0,
-    TextEmbedding = 1,
-    SpeechToText = 2,
-    TextToSpeech = 3,
-    VisionUnderstanding = 4,
-}
-
-impl ModelRole {
-    pub const ALL: [Self; 5] = [
-        Self::TextGeneration,
-        Self::TextEmbedding,
-        Self::SpeechToText,
-        Self::TextToSpeech,
-        Self::VisionUnderstanding,
-    ];
-
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::TextGeneration => "Text Generation",
-            Self::TextEmbedding => "Text Embedding",
-            Self::SpeechToText => "Speech to Text",
-            Self::TextToSpeech => "Text to Speech",
-            Self::VisionUnderstanding => "Vision Understanding",
-        }
-    }
-}
+/// Generic model role defaults and replacement routing, unified with system AI definitions.
+pub use crate::ai::ModelRole;
 
 /// A binding between a ModelRole and a configured model identity/provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2059,7 +2090,7 @@ impl ModelRoleBinding {
 
 /// Registry of default model bindings for all system AI roles.
 pub struct ModelRegistryDefaults {
-    pub bindings: [ModelRoleBinding; 5],
+    pub bindings: [ModelRoleBinding; 6],
 }
 
 impl Default for ModelRegistryDefaults {
@@ -2115,6 +2146,14 @@ impl ModelRegistryDefaults {
                     is_custom: false,
                     enabled: false,
                 },
+                ModelRoleBinding {
+                    role: ModelRole::Planning,
+                    model_id: [0u8; 32],
+                    model_id_len: 0,
+                    provider_type: 0,
+                    is_custom: false,
+                    enabled: false,
+                },
             ],
         }
     }
@@ -2127,6 +2166,7 @@ impl ModelRegistryDefaults {
         reg.set_binding(ModelRole::SpeechToText, b"whisper-tiny-en", 1, false);
         reg.set_binding(ModelRole::TextToSpeech, b"piper-en-low", 1, false);
         reg.set_binding(ModelRole::VisionUnderstanding, b"paligemma-3b", 0, false);
+        reg.set_binding(ModelRole::Planning, b"gemma-2-2b-it", 0, false);
         reg
     }
 
@@ -2154,13 +2194,14 @@ impl ModelRegistryDefaults {
 
     /// Serializes model role bindings to a compact binary format for persistence.
     pub fn serialize(&self, out: &mut [u8]) -> Result<usize, ()> {
-        if out.len() < 4 + 5 * 36 {
+        let required_len = 4 + self.bindings.len() * 36;
+        if out.len() < required_len {
             return Err(());
         }
         out[0..4].copy_from_slice(b"MRDF");
         let mut cursor = 4;
         for b in &self.bindings {
-            out[cursor] = b.role as u8;
+            out[cursor] = (b.role as u32) as u8;
             out[cursor + 1] = b.model_id_len;
             out[cursor + 2..cursor + 34].copy_from_slice(&b.model_id);
             out[cursor + 34] = b.provider_type;
@@ -2176,8 +2217,9 @@ impl ModelRegistryDefaults {
         if in_buf.len() < 4 + 5 * 36 || &in_buf[0..4] != b"MRDF" {
             return Err(());
         }
+        let count = if in_buf.len() >= 4 + 6 * 36 { 6 } else { 5 };
         let mut cursor = 4;
-        for i in 0..5 {
+        for i in 0..count {
             let role_u8 = in_buf[cursor];
             let id_len = in_buf[cursor + 1].min(32);
             let mut id = [0u8; 32];
@@ -2187,11 +2229,15 @@ impl ModelRegistryDefaults {
             cursor += 36;
 
             let role = match role_u8 {
-                0 => ModelRole::TextGeneration,
                 1 => ModelRole::TextEmbedding,
-                2 => ModelRole::SpeechToText,
-                3 => ModelRole::TextToSpeech,
-                _ => ModelRole::VisionUnderstanding,
+                2 => ModelRole::TextGeneration,
+                3 => ModelRole::SpeechToText,
+                4 => ModelRole::TextToSpeech,
+                5 => ModelRole::VisionUnderstanding,
+                6 => ModelRole::Planning,
+                // Legacy fallback: 0 was TextGeneration in legacy enum
+                0 => ModelRole::TextGeneration,
+                _ => ModelRole::Planning,
             };
 
             self.bindings[i] = ModelRoleBinding {
@@ -2592,6 +2638,27 @@ mod tests {
         restored.deserialize(&ser_buf[..bytes]).unwrap();
         let gen = restored.get_binding(ModelRole::TextGeneration).unwrap();
         assert_eq!(gen.model_id_str(), "gemma-2-2b-it");
+    }
+
+    #[test]
+    fn test_memory_provenance_model_inference_filtered_from_persistence() {
+        let mut state = CompanionState::new();
+        state.add_preference(PreferenceCategory::Theme, b"theme", b"dark", 90, 100);
+        state.add_preference_with_provenance(
+            PreferenceCategory::Custom,
+            b"inferred_hobby",
+            b"gardening",
+            50,
+            101,
+            MemoryProvenance::ModelInference,
+        );
+        assert_eq!(state.pref_count, 2);
+
+        let mut scratch = [0u8; 4096];
+        let (pt_len, count, _mask) = state.pack_records(&mut scratch);
+        // Only 1 record (the ExplicitUserInstruction) should be packed; ModelInference is strictly filtered out!
+        assert_eq!(count, 1);
+        assert!(pt_len > 0);
     }
 
     #[test]

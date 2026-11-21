@@ -299,6 +299,12 @@ pub enum SyscallNumber {
     CandidateArtifactStore = 171,
     /// Reads candidate unverified artifact bytes for coordinator inspection and verification.
     CandidateArtifactRead = 172,
+    /// Lends an exclusive mutable or shared read-only memory region to a target task.
+    MemLend = 173,
+    /// Returns or revokes an active memory loan, restoring lender access.
+    MemReturn = 174,
+    /// Permanently transfers ownership of memory pages to a recipient task.
+    MemTransfer = 175,
 }
 
 // -----------------------------------------------------------------------------
@@ -4287,6 +4293,58 @@ pub fn mem_unmap(addr: *mut u8, len: u64) -> Result<(), i64> {
     };
     if ret == 0 {
         Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Lends memory pages to a target task. Requires CapType::MemoryHeap.
+pub fn mem_lend(receiver_task_id: u64, start_addr: u64, len: usize, rights: u32, out_borrower_vaddr: &mut u64) -> Result<u64, i64> {
+    let ret = unsafe {
+        syscall5(
+            SyscallNumber::MemLend,
+            receiver_task_id,
+            start_addr,
+            len as u64,
+            rights as u64,
+            out_borrower_vaddr as *mut u64 as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u64)
+    } else {
+        Err(ret)
+    }
+}
+
+/// Returns or revokes an active memory loan, restoring lender access.
+pub fn mem_return(lend_handle: u64) -> Result<(), i64> {
+    let ret = unsafe {
+        syscall1(
+            SyscallNumber::MemReturn,
+            lend_handle,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(ret)
+    }
+}
+
+/// Permanently transfers ownership of memory pages to a recipient task. Requires CapType::MemoryHeap.
+pub fn mem_transfer(receiver_task_id: u64, start_addr: u64, len: usize, out_receiver_vaddr: &mut u64) -> Result<u64, i64> {
+    let ret = unsafe {
+        syscall4(
+            SyscallNumber::MemTransfer,
+            receiver_task_id,
+            start_addr,
+            len as u64,
+            out_receiver_vaddr as *mut u64 as u64,
+        )
+    };
+    if ret >= 0 {
+        Ok(ret as u64)
     } else {
         Err(ret)
     }

@@ -680,6 +680,7 @@ mod tests {
             ),
             allocated_frames: alloc::vec::Vec::new(),
             shared_mappings: alloc::vec::Vec::new(),
+            borrowed_mappings: alloc::vec::Vec::new(),
             user_mapped_bytes: 0,
         }
     }

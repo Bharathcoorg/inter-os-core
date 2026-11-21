@@ -765,11 +765,12 @@ impl DynamicToolRegistry {
     ///    clamped by platform security policy to `AlwaysAsk`.
     pub fn register(&mut self, mut descriptor: DynamicToolDescriptor) -> Result<u32, ()> {
         // Enforce platform risk policy: external consequences or security-sensitive tools
-        // cannot claim autonomous AlwaysAllow
-        if matches!(
-            descriptor.risk_class,
-            ToolRiskClass::ExternalConsequence | ToolRiskClass::SecuritySensitive
-        ) && descriptor.consent_class == ToolConsentClass::AlwaysAllow {
+        // cannot claim autonomous AlwaysAllow; security-sensitive tools cannot claim AllowSession either
+        if descriptor.risk_class == ToolRiskClass::SecuritySensitive {
+            if descriptor.consent_class == ToolConsentClass::AlwaysAllow || descriptor.consent_class == ToolConsentClass::AllowSession {
+                descriptor.consent_class = ToolConsentClass::AlwaysAsk;
+            }
+        } else if descriptor.risk_class == ToolRiskClass::ExternalConsequence && descriptor.consent_class == ToolConsentClass::AlwaysAllow {
             descriptor.consent_class = ToolConsentClass::AlwaysAsk;
         }
 
@@ -1159,12 +1160,27 @@ impl DynamicToolRegistry {
         None
     }
 
-    /// Updates the user consent class for a specific tool.
+    /// Updates the user consent class for a specific tool, clamping high-risk operations per platform policy.
     pub fn set_consent(&mut self, tool_id: u32, consent: ToolConsentClass) -> bool {
         for slot in &mut self.tools {
             if let Some(desc) = slot {
                 if desc.tool_id == tool_id {
-                    desc.consent_class = consent;
+                    let clamped = if desc.risk_class == ToolRiskClass::SecuritySensitive {
+                        if consent == ToolConsentClass::AlwaysAllow || consent == ToolConsentClass::AllowSession {
+                            ToolConsentClass::AlwaysAsk
+                        } else {
+                            consent
+                        }
+                    } else if desc.risk_class == ToolRiskClass::ExternalConsequence {
+                        if consent == ToolConsentClass::AlwaysAllow {
+                            ToolConsentClass::AlwaysAsk
+                        } else {
+                            consent
+                        }
+                    } else {
+                        consent
+                    };
+                    desc.consent_class = clamped;
                     return true;
                 }
             }

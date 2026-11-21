@@ -85,6 +85,57 @@ impl Default for VectorSpace {
     }
 }
 
+/// Model-neutral vector space identity describing embedding geometry, normalization, and quantization.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VectorSpaceIdentity {
+    pub artifact_digest: [u8; 32],
+    pub backend_version: u32,
+    pub dimension: u16,
+    pub norm: u8,   // 1 = L2 Normalized, 0 = Unnormalized
+    pub format: u8, // 1 = Q7 fixed-point, 2 = Q4, 3 = F32
+}
+
+impl Default for VectorSpaceIdentity {
+    fn default() -> Self {
+        Self::lexical_baseline()
+    }
+}
+
+impl VectorSpaceIdentity {
+    pub const fn lexical_baseline() -> Self {
+        let mut digest = [0u8; 32];
+        let tag = b"INTEROS_LEXICAL_BASELINE_V1";
+        let mut i = 0;
+        while i < tag.len() {
+            digest[i] = tag[i];
+            i += 1;
+        }
+        Self {
+            artifact_digest: digest,
+            backend_version: 1,
+            dimension: RAG_VECTOR_DIM as u16,
+            norm: 1,
+            format: 1,
+        }
+    }
+}
+
+/// Evaluates whether a filesystem path must be excluded from indexing to preserve system and credential privacy.
+pub fn is_path_excluded(path: &[u8]) -> bool {
+    let s = match core::str::from_utf8(path) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    s.starts_with("/vault")
+        || s.contains("vault")
+        || s.contains(".keystore")
+        || s.contains(".device_secret")
+        || s.starts_with("/data/system")
+        || s.starts_with("/proc")
+        || s.starts_with("/dev")
+}
+
 /// A single parsed document chunk with stable ID and source attribution.
 #[derive(Clone, Copy)]
 pub struct RagChunk {
@@ -257,7 +308,7 @@ impl RagIndex {
     ///
     /// Returns the number of chunks added.
     pub fn ingest_document(&mut self, path: &[u8], content: &[u8]) -> usize {
-        if content.is_empty() || path.is_empty() {
+        if content.is_empty() || path.is_empty() || is_path_excluded(path) {
             return 0;
         }
 
@@ -325,7 +376,7 @@ impl RagIndex {
         backend: &mut B,
         session: u64,
     ) -> usize {
-        if content.is_empty() || path.is_empty() {
+        if content.is_empty() || path.is_empty() || is_path_excluded(path) {
             return 0;
         }
 
@@ -1528,5 +1579,20 @@ memory.runtime_overhead=1000000\n";
         tampered[30] ^= 0x01; // flip bit in tag or ciphertext
         let mut fail_tamper = RagIndex::new(false);
         assert!(fail_tamper.deserialize_encrypted(&search_key, &tampered[..len]).is_err());
+    }
+
+    #[test]
+    fn test_rag_path_exclusion_and_privacy() {
+        let mut index = RagIndex::new(false);
+        assert_eq!(index.ingest_document(b"/vault/secret.txt", b"secret data"), 0);
+        assert_eq!(index.ingest_document(b"/storage/vault_keys.txt", b"secret keys"), 0);
+        assert_eq!(index.ingest_document(b"/data/system/.keystore", b"system keystore"), 0);
+        assert_eq!(index.ingest_document(b"/storage/.device_secret", b"device secret"), 0);
+        assert_eq!(index.ingest_document(b"/proc/kcore", b"proc info"), 0);
+        assert_eq!(index.count, 0);
+
+        let added = index.ingest_document(b"/storage/notes/safe.txt", b"safe public note content");
+        assert_eq!(added, 1);
+        assert_eq!(index.count, 1);
     }
 }
