@@ -28,15 +28,18 @@ def read_source(rel_path: str) -> str:
 def test_keystore_table_binds_package_id():
     keystore_rs = read_source("sdk/rust/interos-std/src/keystore.rs")
     assert "pub fn derive_key_with_package(" in keystore_rs
+    assert "pub fn derive_key_with_principal(" in keystore_rs
     assert "package_id: &[u8]" in keystore_rs
-    assert "info[10..10 + pkg_len].copy_from_slice(&package_id[..pkg_len]);" in keystore_rs
+    assert "principal_id: u64" in keystore_rs
+    assert "copy_from_slice(&package_id[..pkg_len]);" in keystore_rs
 
 
 def test_keystored_ipc_passes_authenticated_package_name():
     service_lib = read_source("userspace/system-service/src/lib.rs")
     assert "let caller_identity = match std::task_identity_query(sender)" in service_lib
     assert "let pkg_id_bytes = caller_identity.package_name().as_bytes();" in service_lib
-    assert "table.derive_key_with_package(caller_uid, sender, domain, pkg_id_bytes, label, rights, root)" in service_lib
+    assert "caller_identity.principal_id" in service_lib
+    assert "derive_key_with_principal(" in service_lib
 
 
 def test_package_scoped_key_isolation_unit_test_present():

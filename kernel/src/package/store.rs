@@ -27,6 +27,33 @@ impl PackageBlobStore {
   }
   Ok(())
  }
+ pub fn put_runtime(&mut self,package_id:&str,version:(u16,u16,u16),bytes:&[u8])->Result<(),()>{
+  if bytes.is_empty(){return Err(());}
+  if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){
+   b.version=version;
+   b.bytes.clear();
+   b.bytes.extend_from_slice(bytes);
+  } else {
+   if self.blobs.len()>=MAX_BLOBS{return Err(());}
+   self.blobs.push(PackageBlob{package_id:package_id.to_string(),version,bytes:bytes.to_vec()});
+  }
+  if bytes.len()<=MAX_BLOB_SIZE {
+   let _ = self.persist();
+  }
+  Ok(())
+ }
+ pub fn append_runtime(&mut self,package_id:&str,chunk:&[u8])->Result<(),()>{
+  if chunk.is_empty(){return Err(());}
+  if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){
+   b.bytes.extend_from_slice(chunk);
+   if b.bytes.len()<=MAX_BLOB_SIZE {
+    let _ = self.persist();
+   }
+   Ok(())
+  } else {
+   Err(())
+  }
+ }
  pub fn get(&self,id:&str)->Option<&PackageBlob>{self.blobs.iter().find(|b|b.package_id==id)} pub fn remove(&mut self,id:&str)->Result<bool,()>{
   let Some(pos)=self.blobs.iter().position(|b|b.package_id==id) else {return Ok(false);};
   let previous=self.blobs.clone();

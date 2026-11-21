@@ -13,6 +13,9 @@ pub use memory::{
     StreamingSharedMemory, TransferredBuffer,
 };
 
+/// Maximum bounded payload size for microkernel scalar IPC.
+pub const IPC_MAX_PAYLOAD: usize = crate::IPC_MAX_PAYLOAD;
+
 /// A copy of a dispatched input event the kernel also posts to the focused task.
 pub const MSG_INPUT_EVENT: u32 = 0x494E_5054;
 

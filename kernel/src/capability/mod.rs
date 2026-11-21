@@ -181,6 +181,10 @@ pub enum CapabilityType {
     TlsTrustRead,
     /// Permission to register or request AI model resource budgets.
     AiResourceDiscovery,
+    /// Permission to register and install packages into the system package registry.
+    PackageInstall,
+    /// Permission to create and present application-owned surfaces to the compositor.
+    SurfaceCreate,
 }
 
 /// Convenience alias matching system architecture specifications.
@@ -224,6 +228,8 @@ impl CapabilityType {
             CapabilityType::CryptoEntropyRead => 38,
             CapabilityType::TlsTrustRead => 39,
             CapabilityType::AiResourceDiscovery => 40,
+            CapabilityType::PackageInstall => 41,
+            CapabilityType::SurfaceCreate => 42,
         }
     }
 
@@ -264,6 +270,8 @@ impl CapabilityType {
             38 => Some(CapabilityType::CryptoEntropyRead),
             39 => Some(CapabilityType::TlsTrustRead),
             40 => Some(CapabilityType::AiResourceDiscovery),
+            41 => Some(CapabilityType::PackageInstall),
+            42 => Some(CapabilityType::SurfaceCreate),
             _ => None,
         }
     }
@@ -306,6 +314,8 @@ impl CapabilityType {
             CapabilityType::CryptoEntropyRead => "crypto.entropy",
             CapabilityType::TlsTrustRead => "tls.trust.read",
             CapabilityType::AiResourceDiscovery => "ai.resource_discovery",
+            CapabilityType::PackageInstall => "package.install",
+            CapabilityType::SurfaceCreate => "surface.create",
         }
     }
 
@@ -347,6 +357,8 @@ impl CapabilityType {
             "crypto.entropy" => Some(CapabilityType::CryptoEntropyRead),
             "tls.trust.read" => Some(CapabilityType::TlsTrustRead),
             "ai.resource_discovery" => Some(CapabilityType::AiResourceDiscovery),
+            "package.install" => Some(CapabilityType::PackageInstall),
+            "surface.create" => Some(CapabilityType::SurfaceCreate),
             _ => None,
         }
     }

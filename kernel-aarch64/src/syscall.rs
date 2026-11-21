@@ -188,7 +188,11 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             let recipient = a0 as u32;
             let msg_type = a1 as u32;
             let addr = a2 as u64;
-            let len = (a3 as usize).min(IPC_MAX_PAYLOAD);
+            let raw_len = a3 as usize;
+            if raw_len > IPC_MAX_PAYLOAD {
+                return -22;
+            }
+            let len = raw_len;
 
             let (sender, caps) = match get_caller_identity_and_caps() {
                 Ok(pair) => pair,

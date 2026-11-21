@@ -182,6 +182,26 @@ impl<const SLOTS: usize> KeystoreTable<SLOTS> {
         rights: u32,
         secret_root: &[u8; 32],
     ) -> Result<KeyHandle, KeystoreError> {
+        self.derive_key_with_principal(caller_uid, caller_task, domain, 0, package_id, label, rights, secret_root)
+    }
+
+    /// Derives a new cryptographic key bound to the authenticated package identity and stable principal.
+    ///
+    /// For DOMAIN_APP_STORAGE, binding `principal_id` and `package_id` guarantees that App A and App B
+    /// under the same user UID requesting the identical label produce cryptographically independent keys.
+    /// Monotonically updated versions of App A retain their durable `principal_id`, preserving access
+    /// to persistent app storage.
+    pub fn derive_key_with_principal(
+        &mut self,
+        caller_uid: u32,
+        caller_task: u64,
+        domain: u32,
+        principal_id: u64,
+        package_id: &[u8],
+        label: &[u8],
+        rights: u32,
+        secret_root: &[u8; 32],
+    ) -> Result<KeyHandle, KeystoreError> {
         // Find an inactive slot
         let mut target_idx = None;
         for i in 0..SLOTS {
@@ -192,14 +212,15 @@ impl<const SLOTS: usize> KeystoreTable<SLOTS> {
         }
         let idx = target_idx.ok_or(KeystoreError::TableFull)?;
 
-        // Build HKDF info prefix binding domain, UID, package_id, and label
+        // Build HKDF info prefix binding domain, human UID, principal_id, package_id, and label
         let mut info = [0u8; 128];
         info[0..4].copy_from_slice(&domain.to_le_bytes());
         info[4..8].copy_from_slice(&caller_uid.to_le_bytes());
+        info[8..16].copy_from_slice(&principal_id.to_le_bytes());
         let pkg_len = package_id.len().min(32);
-        info[8..10].copy_from_slice(&(pkg_len as u16).to_le_bytes());
-        info[10..10 + pkg_len].copy_from_slice(&package_id[..pkg_len]);
-        let offset = 10 + pkg_len;
+        info[16..18].copy_from_slice(&(pkg_len as u16).to_le_bytes());
+        info[18..18 + pkg_len].copy_from_slice(&package_id[..pkg_len]);
+        let offset = 18 + pkg_len;
         let label_len = label.len().min(128 - offset);
         info[offset..offset + label_len].copy_from_slice(&label[..label_len]);
 

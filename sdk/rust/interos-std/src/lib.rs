@@ -291,6 +291,10 @@ pub enum SyscallNumber {
     /// Registers a verified Android application package into the kernel package registry,
     /// allocating and preserving a stable Android application UID in 10000..19999.
     PackageRegisterApk = 168,
+    /// Reads verified package artifact bytes for the calling task's authenticated package identity.
+    PackageArtifactRead = 169,
+    /// Stores or appends verified package artifact bytes into the kernel package repository.
+    PackageArtifactStore = 170,
 }
 
 // -----------------------------------------------------------------------------
@@ -792,12 +796,18 @@ pub fn get_task_id() -> u64 {
     unsafe { syscall0(SyscallNumber::GetTaskId) as u64 }
 }
 
+/// Maximum payload bytes for high-speed microkernel scalar IPC.
+pub const IPC_MAX_PAYLOAD: usize = 64;
+
 /// Transmits a message through zero-trust IPC.
 pub fn ipc_send(
     target_task_id: u64,
     msg_type: u32,
     payload: &[u8],
 ) -> Result<(), i64> {
+    if payload.len() > IPC_MAX_PAYLOAD {
+        return Err(-3);
+    }
     let ret = unsafe {
         syscall5(
             SyscallNumber::IpcSend,
@@ -1994,6 +2004,13 @@ pub mod cap_type {
     pub const AGENT_TASK: u64 = 33;
     pub const VOICE_SERVICE: u64 = 34;
     pub const AUDIO_CAPTURE: u64 = 35;
+    pub const WEBVIEW_BRIDGE: u64 = 36;
+    pub const WEBVIEW_SERVICE: u64 = 37;
+    pub const CRYPTO_ENTROPY_READ: u64 = 38;
+    pub const TLS_TRUST_READ: u64 = 39;
+    pub const AI_RESOURCE_DISCOVERY: u64 = 40;
+    pub const PACKAGE_INSTALL: u64 = 41;
+    pub const SURFACE_CREATE: u64 = 42;
 }
 
 /// Dynamically discovers the slot index of an active capability matching `cap_type`
@@ -3687,6 +3704,7 @@ pub struct TaskIdentityInfo {
     pub name: [u8; 16],
     pub package_id: [u8; 32],
     pub code_digest: [u8; 32],
+    pub principal_id: u64,
 }
 
 impl TaskIdentityInfo {
@@ -3711,6 +3729,7 @@ pub fn task_identity_query(task_id: u64) -> Result<TaskIdentityInfo, i64> {
         name: [0u8; 16],
         package_id: [0u8; 32],
         code_digest: [0u8; 32],
+        principal_id: 0,
     };
     let r = unsafe {
         syscall3(
@@ -3722,6 +3741,90 @@ pub fn task_identity_query(task_id: u64) -> Result<TaskIdentityInfo, i64> {
     };
     if r >= 0 {
         Ok(info)
+    } else {
+        Err(r)
+    }
+}
+
+/// Extended Android application package metadata for kernel verification.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AndroidPackageMetadata {
+    pub version_code: u64,
+    pub min_sdk: u32,
+    pub target_sdk: u32,
+    pub signer_identity: [u8; 32],
+}
+
+/// Registers a verified Android application package into the kernel package registry with complete security metadata.
+pub fn package_register_apk_ext(
+    package_id: &str,
+    version: (u16, u16, u16),
+    version_code: u64,
+    min_sdk: u32,
+    target_sdk: u32,
+    code_digest: &[u8; 32],
+    signer_identity: &[u8; 32],
+) -> Result<u32, i64> {
+    let meta = AndroidPackageMetadata {
+        version_code,
+        min_sdk,
+        target_sdk,
+        signer_identity: *signer_identity,
+    };
+    let ver_packed = ((version.0 as u64) << 32) | ((version.1 as u64) << 16) | (version.2 as u64);
+    let r = unsafe {
+        syscall5(
+            SyscallNumber::PackageRegisterApk,
+            package_id.as_ptr() as u64,
+            package_id.len() as u64,
+            ver_packed,
+            code_digest.as_ptr() as u64,
+            core::ptr::addr_of!(meta) as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as u32)
+    } else {
+        Err(r)
+    }
+}
+
+/// Reads verified package artifact bytes for the calling task's authenticated package identity.
+pub fn package_artifact_read(offset: u32, out_buf: &mut [u8]) -> Result<usize, i64> {
+    let r = unsafe {
+        syscall3(
+            SyscallNumber::PackageArtifactRead,
+            offset as u64,
+            out_buf.as_mut_ptr() as u64,
+            out_buf.len() as u64,
+        )
+    };
+    if r >= 0 {
+        Ok(r as usize)
+    } else {
+        Err(r)
+    }
+}
+
+/// Stores or appends verified package artifact bytes into the kernel package repository.
+pub fn package_artifact_store(
+    package_name: &str,
+    chunk: &[u8],
+    append: bool,
+) -> Result<(), i64> {
+    let r = unsafe {
+        syscall5(
+            SyscallNumber::PackageArtifactStore,
+            package_name.as_ptr() as u64,
+            package_name.len() as u64,
+            chunk.as_ptr() as u64,
+            chunk.len() as u64,
+            if append { 1 } else { 0 },
+        )
+    };
+    if r >= 0 {
+        Ok(())
     } else {
         Err(r)
     }

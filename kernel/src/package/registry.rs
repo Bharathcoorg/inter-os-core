@@ -10,6 +10,7 @@ use spin::Mutex;
 const MAX_ENTRIES: usize = 32;
 const RECORD_SIZE_V1: usize = 48;
 const RECORD_SIZE_V2: usize = 84;
+const RECORD_SIZE_V3: usize = 140;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageState { Staged, Active, RolledBack }
@@ -29,24 +30,68 @@ pub struct PackageEntry {
     pub kind: PackageKind,
     pub app_uid: u32,
     pub code_digest: [u8; 32],
+    pub version_code: u64,
+    pub min_sdk: u32,
+    pub target_sdk: u32,
+    pub signer_identity: [u8; 32],
+    pub principal_id: u64,
 }
 
 pub struct PackageRegistry {
     entries: Vec<PackageEntry>,
     generation: u64,
+    next_android_uid: u32,
+    next_principal_id: u64,
     restored: bool,
 }
 
 impl PackageRegistry {
     pub const fn new() -> Self {
-        Self { entries: Vec::new(), generation: 0, restored: false }
+        Self {
+            entries: Vec::new(),
+            generation: 0,
+            next_android_uid: 10000,
+            next_principal_id: 10000,
+            restored: false,
+        }
+    }
+
+    /// Allocates a durable, collision-free Android application UID in range 10000..19999.
+    pub fn allocate_android_uid(&mut self) -> Result<u32, ()> {
+        let mut candidate = self.next_android_uid.max(10000);
+        for _ in 0..10000 {
+            if candidate > 19999 {
+                candidate = 10000;
+            }
+            if !self.entries.iter().any(|e| e.app_uid == candidate) {
+                self.next_android_uid = candidate.saturating_add(1);
+                if self.next_android_uid > 19999 {
+                    self.next_android_uid = 10000;
+                }
+                return Ok(candidate);
+            }
+            candidate = candidate.saturating_add(1);
+        }
+        Err(())
+    }
+
+    /// Allocates a stable principal identifier across application lifecycles.
+    pub fn allocate_principal_id(&mut self) -> u64 {
+        let mut candidate = self.next_principal_id.max(10000);
+        while self.entries.iter().any(|e| e.principal_id == candidate) {
+            candidate = candidate.saturating_add(1);
+        }
+        self.next_principal_id = candidate.saturating_add(1);
+        candidate
     }
 
     fn encode(&self, out: &mut [u8]) -> usize {
         let count = self.entries.len().min(MAX_ENTRIES);
-        out[0..4].copy_from_slice(b"PRG2");
+        out[0..4].copy_from_slice(b"PRG3");
         out[4] = count as u8;
-        let mut pos = 5usize;
+        out[5..9].copy_from_slice(&self.next_android_uid.to_le_bytes());
+        out[9..17].copy_from_slice(&self.next_principal_id.to_le_bytes());
+        let mut pos = 17usize;
         for e in self.entries.iter().take(count) {
             let id = e.package_id.as_bytes();
             let take = id.len().min(32);
@@ -73,25 +118,53 @@ impl PackageRegistry {
             pos += 4;
             out[pos..pos + 32].copy_from_slice(&e.code_digest);
             pos += 32;
+            out[pos..pos + 8].copy_from_slice(&e.version_code.to_le_bytes());
+            pos += 8;
+            out[pos..pos + 4].copy_from_slice(&e.min_sdk.to_le_bytes());
+            pos += 4;
+            out[pos..pos + 4].copy_from_slice(&e.target_sdk.to_le_bytes());
+            pos += 4;
+            out[pos..pos + 32].copy_from_slice(&e.signer_identity);
+            pos += 32;
+            out[pos..pos + 8].copy_from_slice(&e.principal_id.to_le_bytes());
+            pos += 8;
         }
         pos
     }
 
     fn restore(&mut self) -> bool {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 8192];
         let loaded = crate::storage::persistent::load_latest_kind(&mut buf, 1);
         let Ok(Some((_generation, len))) = loaded else { return false; };
         if len < 5 { return false; }
+        let is_v3 = len >= 17 && &buf[..4] == b"PRG3";
         let is_v2 = &buf[..4] == b"PRG2";
         let is_v1 = &buf[..4] == b"PRG1";
-        if !is_v1 && !is_v2 { return false; }
+        if !is_v1 && !is_v2 && !is_v3 { return false; }
 
         let count = (buf[4] as usize).min(MAX_ENTRIES);
-        let mut pos = 5usize;
+        let mut pos = if is_v3 {
+            self.next_android_uid = u32::from_le_bytes([buf[5], buf[6], buf[7], buf[8]]);
+            self.next_principal_id = u64::from_le_bytes([
+                buf[9], buf[10], buf[11], buf[12],
+                buf[13], buf[14], buf[15], buf[16],
+            ]);
+            17usize
+        } else {
+            self.next_android_uid = 10000;
+            self.next_principal_id = 10000;
+            5usize
+        };
         self.entries.clear();
         self.generation = 0;
 
-        let record_size = if is_v2 { RECORD_SIZE_V2 } else { RECORD_SIZE_V1 };
+        let record_size = if is_v3 {
+            RECORD_SIZE_V3
+        } else if is_v2 {
+            RECORD_SIZE_V2
+        } else {
+            RECORD_SIZE_V1
+        };
 
         for i in 0..count {
             if pos + record_size > len { self.entries.clear(); return false; }
@@ -126,7 +199,7 @@ impl PackageRegistry {
             let minor = u16::from_le_bytes([buf[pos],buf[pos+1]]); pos += 2;
             let patch = u16::from_le_bytes([buf[pos],buf[pos+1]]); pos += 2;
 
-            let (kind, app_uid, code_digest) = if is_v2 {
+            let (kind, app_uid, code_digest, version_code, min_sdk, target_sdk, signer_identity, principal_id) = if is_v3 {
                 let k = match buf[pos] {
                     1 => PackageKind::AndroidApk,
                     _ => PackageKind::NativeRapp,
@@ -137,16 +210,54 @@ impl PackageRegistry {
                 let mut cd = [0u8; 32];
                 cd.copy_from_slice(&buf[pos..pos+32]);
                 pos += 32;
-                (k, uid, cd)
+                let vc = u64::from_le_bytes([
+                    buf[pos], buf[pos+1], buf[pos+2], buf[pos+3],
+                    buf[pos+4], buf[pos+5], buf[pos+6], buf[pos+7],
+                ]);
+                pos += 8;
+                let msdk = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]]);
+                pos += 4;
+                let tsdk = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]]);
+                pos += 4;
+                let mut signer = [0u8; 32];
+                signer.copy_from_slice(&buf[pos..pos+32]);
+                pos += 32;
+                let pid = u64::from_le_bytes([
+                    buf[pos], buf[pos+1], buf[pos+2], buf[pos+3],
+                    buf[pos+4], buf[pos+5], buf[pos+6], buf[pos+7],
+                ]);
+                pos += 8;
+                (k, uid, cd, vc, msdk, tsdk, signer, pid)
+            } else if is_v2 {
+                let k = match buf[pos] {
+                    1 => PackageKind::AndroidApk,
+                    _ => PackageKind::NativeRapp,
+                };
+                pos += 1;
+                let uid = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]]);
+                pos += 4;
+                let mut cd = [0u8; 32];
+                cd.copy_from_slice(&buf[pos..pos+32]);
+                pos += 32;
+                (k, uid, cd, 1u64, 21u32, 34u32, cd, uid as u64)
             } else {
                 (
                     PackageKind::NativeRapp,
                     1000 + (i as u32),
                     crate::crypto::Sha256::digest(id.as_bytes()),
+                    1u64,
+                    0u32,
+                    0u32,
+                    crate::crypto::Sha256::digest(id.as_bytes()),
+                    1000 + (i as u64),
                 )
             };
 
             self.generation = self.generation.max(generation);
+            if app_uid >= 10000 && app_uid < 20000 {
+                self.next_android_uid = self.next_android_uid.max(app_uid + 1);
+            }
+            self.next_principal_id = self.next_principal_id.max(principal_id + 1);
             self.entries.push(PackageEntry {
                 package_id: id.to_string(),
                 generation,
@@ -155,6 +266,11 @@ impl PackageRegistry {
                 kind,
                 app_uid,
                 code_digest,
+                version_code,
+                min_sdk,
+                target_sdk,
+                signer_identity,
+                principal_id,
             });
         }
         if pos != len {
@@ -166,7 +282,7 @@ impl PackageRegistry {
     }
 
     fn persist(&self) -> Result<(), ()> {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 8192];
         let len = self.encode(&mut buf);
         crate::storage::persistent::commit_kind(&buf[..len], 1).map(|_| ()).map_err(|_| ())
     }
@@ -187,14 +303,20 @@ impl PackageRegistry {
             }
             for (idx, pkg) in crate::package::FIRST_PARTY_PACKAGES.iter().enumerate() {
                 if !self.entries.iter().any(|e| e.package_id == pkg.package_id) {
+                    let uid = 1000 + (idx as u32);
                     self.entries.push(PackageEntry {
                         package_id: String::from(pkg.package_id),
                         generation: 0,
                         state: PackageState::Active,
                         version: (1, 0, 0),
                         kind: PackageKind::NativeRapp,
-                        app_uid: 1000 + (idx as u32),
+                        app_uid: uid,
                         code_digest: crate::crypto::Sha256::digest(pkg.package_id.as_bytes()),
+                        version_code: 1,
+                        min_sdk: 0,
+                        target_sdk: 0,
+                        signer_identity: [0u8; 32],
+                        principal_id: uid as u64,
                     });
                     migrated = true;
                 }
@@ -209,14 +331,20 @@ impl PackageRegistry {
         if !self.entries.is_empty() { return; }
 
         for (idx, pkg) in crate::package::FIRST_PARTY_PACKAGES.iter().enumerate() {
+            let uid = 1000 + (idx as u32);
             self.entries.push(PackageEntry {
                 package_id: String::from(pkg.package_id),
                 generation: 0,
                 state: PackageState::Active,
                 version: (1, 0, 0),
                 kind: PackageKind::NativeRapp,
-                app_uid: 1000 + (idx as u32),
+                app_uid: uid,
                 code_digest: crate::crypto::Sha256::digest(pkg.package_id.as_bytes()),
+                version_code: 1,
+                min_sdk: 0,
+                target_sdk: 0,
+                signer_identity: [0u8; 32],
+                principal_id: uid as u64,
             });
         }
 
@@ -269,6 +397,8 @@ impl PackageRegistry {
             }
             self.generation = self.generation.saturating_add(1);
             let uid = self.entries[idx].app_uid;
+            let pid = self.entries[idx].principal_id;
+            let ver_code = ((manifest.version.0 as u64) << 32) | ((manifest.version.1 as u64) << 16) | (manifest.version.2 as u64);
             self.entries[idx] = PackageEntry {
                 package_id: manifest.package_id.clone(),
                 generation: self.generation,
@@ -277,10 +407,17 @@ impl PackageRegistry {
                 kind: PackageKind::NativeRapp,
                 app_uid: uid,
                 code_digest: manifest.payload_digest,
+                version_code: ver_code,
+                min_sdk: 0,
+                target_sdk: 0,
+                signer_identity: manifest.publisher_key,
+                principal_id: pid,
             };
         } else {
             self.generation = self.generation.saturating_add(1);
             let uid = 2000 + (self.entries.len() as u32) + 1;
+            let pid = self.allocate_principal_id();
+            let ver_code = ((manifest.version.0 as u64) << 32) | ((manifest.version.1 as u64) << 16) | (manifest.version.2 as u64);
             self.entries.push(PackageEntry {
                 package_id: manifest.package_id.clone(),
                 generation: self.generation,
@@ -289,6 +426,11 @@ impl PackageRegistry {
                 kind: PackageKind::NativeRapp,
                 app_uid: uid,
                 code_digest: manifest.payload_digest,
+                version_code: ver_code,
+                min_sdk: 0,
+                target_sdk: 0,
+                signer_identity: manifest.publisher_key,
+                principal_id: pid,
             });
         }
 
@@ -453,45 +595,88 @@ impl PackageRegistry {
     /// Atomically registers a verified Android application package into the registry.
     /// Allocates and preserves a stable Android application UID in range 10000..19999.
     /// Stores the cryptographic code digest bound to the actual verified installed APK artifact.
+    /// Enforces signer continuity, monotonic version progression, and transactional persistence.
     pub fn register_verified_apk(
+        &mut self,
+        package_id: &str,
+        version: (u16, u16, u16),
+        version_code: u64,
+        min_sdk: u32,
+        target_sdk: u32,
+        code_digest: [u8; 32],
+        signer_identity: [u8; 32],
+    ) -> Result<u32, ()> {
+        let old_entries = self.entries.clone();
+        let old_gen = self.generation;
+        let old_uid = self.next_android_uid;
+        let old_pid = self.next_principal_id;
+
+        let existing = self.entries.iter().position(|e| e.package_id == package_id);
+        let (app_uid, principal_id) = if let Some(idx) = existing {
+            let prev = &self.entries[idx];
+            // Signer continuity check: unrelated signers cannot overwrite existing packages
+            if prev.signer_identity != [0u8; 32] && signer_identity != [0u8; 32] && prev.signer_identity != signer_identity {
+                crate::serial_println!("[PACKAGE] update rejected: signer identity mismatch for '{}'", package_id);
+                return Err(());
+            }
+            // Anti-rollback check: monotonic version progression
+            if version_code < prev.version_code {
+                crate::serial_println!("[PACKAGE] update rejected: version downgrade ({} < {}) for '{}'", version_code, prev.version_code, package_id);
+                return Err(());
+            }
+            (prev.app_uid, prev.principal_id)
+        } else {
+            if self.entries.len() >= MAX_ENTRIES {
+                return Err(());
+            }
+            // Durable stable UID allocator replacing the legacy heuristic 10000 + (self.entries.len() as u32) + 1
+            let uid = self.allocate_android_uid()?;
+            let pid = self.allocate_principal_id();
+            (uid, pid)
+        };
+
+        self.generation = self.generation.saturating_add(1);
+        let new_entry = PackageEntry {
+            package_id: package_id.to_string(),
+            generation: self.generation,
+            state: PackageState::Active,
+            version,
+            kind: PackageKind::AndroidApk,
+            app_uid,
+            code_digest,
+            version_code,
+            min_sdk,
+            target_sdk,
+            signer_identity,
+            principal_id,
+        };
+
+        if let Some(idx) = existing {
+            self.entries[idx] = new_entry;
+        } else {
+            self.entries.push(new_entry);
+        }
+
+        if self.persist().is_err() {
+            // Restore snapshot on persistence error (transactional rollback)
+            self.entries = old_entries;
+            self.generation = old_gen;
+            self.next_android_uid = old_uid;
+            self.next_principal_id = old_pid;
+            return Err(());
+        }
+        Ok(app_uid)
+    }
+
+    /// Convenience wrapper for 3-argument legacy callers.
+    pub fn register_verified_apk_simple(
         &mut self,
         package_id: &str,
         version: (u16, u16, u16),
         code_digest: [u8; 32],
     ) -> Result<u32, ()> {
-        let existing = self.entries.iter().position(|e| e.package_id == package_id);
-        let app_uid = if let Some(idx) = existing {
-            let prev_uid = self.entries[idx].app_uid;
-            self.generation = self.generation.saturating_add(1);
-            self.entries[idx] = PackageEntry {
-                package_id: package_id.to_string(),
-                generation: self.generation,
-                state: PackageState::Active,
-                version,
-                kind: PackageKind::AndroidApk,
-                app_uid: prev_uid,
-                code_digest,
-            };
-            prev_uid
-        } else {
-            if self.entries.len() >= MAX_ENTRIES {
-                return Err(());
-            }
-            let uid = 10000 + (self.entries.len() as u32) + 1;
-            self.generation = self.generation.saturating_add(1);
-            self.entries.push(PackageEntry {
-                package_id: package_id.to_string(),
-                generation: self.generation,
-                state: PackageState::Active,
-                version,
-                kind: PackageKind::AndroidApk,
-                app_uid: uid,
-                code_digest,
-            });
-            uid
-        };
-        let _ = self.persist();
-        Ok(app_uid)
+        let ver_code = ((version.0 as u64) << 32) | ((version.1 as u64) << 16) | (version.2 as u64);
+        self.register_verified_apk(package_id, version, ver_code, 21, 34, code_digest, code_digest)
     }
 
     pub fn entries(&self) -> &[PackageEntry] { &self.entries }
@@ -506,20 +691,26 @@ impl PackageRegistry {
     #[cfg(test)]
     pub fn insert_active_for_test(&mut self, package_id: &str, version: (u16, u16, u16)) {
         self.entries.retain(|e| e.package_id != package_id);
+        let uid = 1000 + (self.entries.len() as u32);
         self.entries.push(PackageEntry {
             package_id: package_id.to_string(),
             generation: 1,
             state: PackageState::Active,
             version,
             kind: PackageKind::NativeRapp,
-            app_uid: 1000 + (self.entries.len() as u32),
+            app_uid: uid,
             code_digest: crate::crypto::Sha256::digest(package_id.as_bytes()),
+            version_code: 1,
+            min_sdk: 0,
+            target_sdk: 0,
+            signer_identity: [0u8; 32],
+            principal_id: uid as u64,
         });
     }
 
     #[cfg(test)]
     pub fn insert_active_apk_for_test(&mut self, package_id: &str, version: (u16, u16, u16), code_digest: [u8; 32]) -> u32 {
-        self.register_verified_apk(package_id, version, code_digest).unwrap_or(10000)
+        self.register_verified_apk_simple(package_id, version, code_digest).unwrap_or(10000)
     }
 
     #[cfg(test)]

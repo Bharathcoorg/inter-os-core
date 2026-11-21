@@ -147,6 +147,8 @@ pub enum IpcError {
     MailboxEmpty,
     /// The communication endpoint has been revoked or closed.
     EndpointRevoked,
+    /// Message payload exceeds IPC_MAX_PAYLOAD bound.
+    MessageTooLarge,
 }
 
 impl From<CapError> for IpcError {
@@ -278,6 +280,10 @@ impl IpcRouter {
         sender_caps
             .verify_object(cap_slot, CapabilityType::IpcSend, Rights::WRITE, dest_task.0)?;
 
+        if data.len() > IPC_MAX_PAYLOAD {
+            return Err(IpcError::MessageTooLarge);
+        }
+
         let mailbox = self.writable_mailbox(dest_task)?;
 
         if mailbox.queue.len() >= MAILBOX_CAPACITY {
@@ -314,6 +320,10 @@ impl IpcRouter {
         mut msg: IpcMessage,
     ) -> Result<(), IpcError> {
         sender_caps.verify_object(cap_slot, CapabilityType::IpcSend, Rights::WRITE, dest.0)?;
+
+        if msg.len > IPC_MAX_PAYLOAD {
+            return Err(IpcError::MessageTooLarge);
+        }
 
         let mailbox = self.writable_mailbox(dest)?;
         if mailbox.queue.len() >= MAILBOX_CAPACITY {
@@ -371,6 +381,10 @@ impl IpcRouter {
         msg_type: u32,
         data: &[u8],
     ) -> Result<(), IpcError> {
+        if data.len() > IPC_MAX_PAYLOAD {
+            return Err(IpcError::MessageTooLarge);
+        }
+
         let mailbox = self.writable_mailbox(dest_task)?;
         if mailbox.queue.len() >= MAILBOX_CAPACITY {
             return Err(IpcError::MailboxFull);
@@ -600,6 +614,36 @@ mod tests {
         assert_eq!(
             router.receive(peer, &caps, recv_slot).unwrap_err(),
             IpcError::EndpointRevoked
+        );
+    }
+
+    #[test]
+    fn oversized_payload_rejected_with_message_too_large() {
+        let mut router = IpcRouter::new();
+        let peer = TaskId(8801);
+        let sender = TaskId(8802);
+        assert!(router.register_task(peer));
+        assert!(router.register_task(sender));
+
+        let oversized = [0xAAu8; IPC_MAX_PAYLOAD + 1];
+        assert_eq!(
+            router.send_direct(sender, peer, 0x1111, &oversized),
+            Err(IpcError::MessageTooLarge)
+        );
+
+        let mut caps = CapabilityTable::new_for_task(sender, 4);
+        let send_slot = caps
+            .insert(Capability {
+                id: CapabilityId(8803),
+                cap_type: CapabilityType::IpcSend,
+                rights: Rights::WRITE,
+                object_id: peer.0,
+            })
+            .unwrap();
+
+        assert_eq!(
+            router.send(sender, &caps, send_slot, peer, 0x1111, &oversized),
+            Err(IpcError::MessageTooLarge)
         );
     }
 }

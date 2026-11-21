@@ -214,7 +214,11 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             let recipient = a0 as u32;
             let msg_type = a1 as u32;
             let addr = a2;
-            let len = (_a3 as usize).min(crate::ipc::IPC_MAX_PAYLOAD);
+            let raw_len = _a3 as usize;
+            if raw_len > crate::ipc::IPC_MAX_PAYLOAD {
+                return -22;
+            }
+            let len = raw_len;
 
             match get_caller_identity_and_caps() {
                 Err(err) => err,

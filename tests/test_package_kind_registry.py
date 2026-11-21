@@ -37,7 +37,7 @@ def test_package_kind_and_entry_fields():
 def test_register_verified_apk_allocates_stable_uid():
     registry_rs = read_source("kernel/src/package/registry.rs")
     assert "pub fn register_verified_apk(" in registry_rs
-    assert "10000 + (self.entries.len() as u32) + 1" in registry_rs
+    assert "self.allocate_android_uid" in registry_rs
     assert "PackageKind::AndroidApk" in registry_rs
 
 
