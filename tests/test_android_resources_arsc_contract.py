@@ -26,14 +26,18 @@ from tools.test_android_app import (
 
 
 def require_fossify_apk() -> Path:
-    """Returns the pinned acceptance APK, provisioning it on first use."""
+    """External-artifact acceptance: return the pinned acceptance APK.
+
+    Provision explicitly with `python tools/interos.py provision android-apk`
+    (network once, SHA-256 verified, git-ignored). Fails closed with that
+    instruction instead of fabricating results.
+    """
     apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.is_file():
-        script = ROOT / "tools/provision_android_apk.sh"
-        subprocess.run([str(script)], check=True, capture_output=True, text=True)
     assert apk_path.is_file(), (
-        "Fossify File Manager APK is required in emulator/data/apps; "
-        "provision it with tools/provision_android_apk.sh"
+        "Fossify File Manager APK not provisioned. This external-artifact "
+        "acceptance suite requires the genuine upstream release: run "
+        "`python tools/interos.py provision android-apk` once (network), "
+        "then rerun; the artifact is SHA-256 verified and git-ignored."
     )
     return apk_path
 

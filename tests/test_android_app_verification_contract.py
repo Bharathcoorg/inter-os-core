@@ -19,19 +19,22 @@ from tools.test_android_app import (
 
 
 def require_fossify_apk() -> Path:
-    """Returns the pinned acceptance APK, provisioning it on first use.
+    """External-artifact acceptance: return the pinned acceptance APK.
 
-    The binary is an upstream release artifact and is never committed; a
-    fresh clone pulls it once via the pinned-digest script so the battery
-    runs with real bytes instead of failing on an absent ignored file.
+    These tests are NOT part of the hermetic unit/contract battery: they prove
+    behaviour against genuine upstream release bytes. The binary is never
+    committed. Provision it explicitly, offline afterwards, with:
+
+        python tools/interos.py provision android-apk
+
+    Fail closed with that instruction instead of fabricating results.
     """
     apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.is_file():
-        script = ROOT / "tools/provision_android_apk.sh"
-        subprocess.run([str(script)], check=True, capture_output=True, text=True)
     assert apk_path.is_file(), (
-        "Fossify File Manager APK is required in emulator/data/apps; "
-        "provision it with tools/provision_android_apk.sh"
+        "Fossify File Manager APK not provisioned. This external-artifact "
+        "acceptance suite requires the genuine upstream release: run "
+        "`python tools/interos.py provision android-apk` once (network), "
+        "then rerun; the artifact is SHA-256 verified and git-ignored."
     )
     return apk_path
 

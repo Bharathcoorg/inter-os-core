@@ -2086,6 +2086,21 @@ def cmd_trace(args):
         return 1
 
 
+def cmd_provision(args):
+    """Fetch an external test artifact once and verify it fail-closed.
+
+    Normal unit/contract runs never touch the network; this is the explicit,
+    cross-platform provisioning step (replaces platform-specific scripts).
+    """
+    import provisioning
+
+    if args.artifact == "android-apk":
+        path = provisioning.provision_android_apk()
+        return 0 if path.is_file() else 1
+    log_error(f"Unknown artifact: {args.artifact}")
+    return 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="InterOS Core Developer CLI (interos)",
@@ -2127,6 +2142,11 @@ def main():
     p_ver = subparsers.add_parser("verify", help="Cryptographically verify a .rapp package")
     p_ver.add_argument("package_path", help="Path to .rapp package")
     p_ver.set_defaults(func=cmd_verify)
+
+    # provision
+    p_prov = subparsers.add_parser("provision", help="Provision an external test artifact (one-time, network required)")
+    p_prov.add_argument("artifact", choices=["android-apk"], help="External artifact to provision")
+    p_prov.set_defaults(func=cmd_provision)
 
     # contracts
     p_contracts = subparsers.add_parser("contracts", help="Run fast static system contract checks")

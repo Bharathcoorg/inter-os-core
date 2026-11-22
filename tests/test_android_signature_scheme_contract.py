@@ -56,8 +56,12 @@ def test_kernel_signing_module_invariants():
 
 def test_real_apk_signing_block_detection():
     apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.exists():
-        pytest.skip("Fossify File Manager APK not found")
+    assert apk_path.exists(), (
+        "Fossify File Manager APK not provisioned. This external-artifact "
+        "acceptance suite requires the genuine upstream release: run "
+        "`python tools/interos.py provision android-apk` once (network), "
+        "then rerun; the artifact is SHA-256 verified and git-ignored."
+    )
     data = apk_path.read_bytes()
 
     bounds = find_apk_signing_block(data)
@@ -71,8 +75,12 @@ def test_real_apk_signing_block_detection():
 
 def test_real_apk_signing_block_scheme_pairs():
     apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.exists():
-        pytest.skip("Fossify File Manager APK not found")
+    assert apk_path.exists(), (
+        "Fossify File Manager APK not provisioned. This external-artifact "
+        "acceptance suite requires the genuine upstream release: run "
+        "`python tools/interos.py provision android-apk` once (network), "
+        "then rerun; the artifact is SHA-256 verified and git-ignored."
+    )
     data = apk_path.read_bytes()
 
     bounds = find_apk_signing_block(data)
@@ -88,8 +96,12 @@ def test_real_apk_signing_block_scheme_pairs():
 
 def test_real_apk_merkle_tree_content_digest():
     apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.exists():
-        pytest.skip("Fossify File Manager APK not found")
+    assert apk_path.exists(), (
+        "Fossify File Manager APK not provisioned. This external-artifact "
+        "acceptance suite requires the genuine upstream release: run "
+        "`python tools/interos.py provision android-apk` once (network), "
+        "then rerun; the artifact is SHA-256 verified and git-ignored."
+    )
     data = apk_path.read_bytes()
 
     bounds = find_apk_signing_block(data)
@@ -100,8 +112,12 @@ def test_real_apk_merkle_tree_content_digest():
 
 def test_signing_block_tamper_detection():
     apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.exists():
-        pytest.skip("Fossify File Manager APK not found")
+    assert apk_path.exists(), (
+        "Fossify File Manager APK not provisioned. This external-artifact "
+        "acceptance suite requires the genuine upstream release: run "
+        "`python tools/interos.py provision android-apk` once (network), "
+        "then rerun; the artifact is SHA-256 verified and git-ignored."
+    )
     data = bytearray(apk_path.read_bytes())
 
     bounds = find_apk_signing_block(bytes(data))
