@@ -445,12 +445,13 @@ fn handle_sync(frame: &mut ExceptionFrame, context_name: &str) {
         crate::kprintln!("  FAR_EL1: 0x{:016X}", far);
         crate::kprintln!("  SPSR_EL1: 0x{:016X}", frame.spsr);
         crate::kprintln!("============================================================");
-        loop {
-            #[cfg(target_arch = "aarch64")]
-            unsafe {
-                core::arch::asm!("wfe");
-            }
-        }
+        // Fail closed, loudly: an EL1 fault is a kernel bug. Halt the CPU in
+        // the panic path rather than a silent wfe loop, which is invisible
+        // to watchdogs and QEMU test timeouts alike.
+        panic!(
+            "fatal synchronous exception at EL1 ({}): ESR=0x{:016X} ELR=0x{:016X} FAR=0x{:016X}",
+            context_name, frame.esr, frame.elr, far
+        );
     }
 }
 

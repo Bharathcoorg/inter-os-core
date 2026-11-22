@@ -14,6 +14,33 @@ use crate::capability::{CapabilityType, Rights};
 use crate::ipc::{IPC_ROUTER, IPC_MAX_PAYLOAD};
 use crate::task::{SCHEDULER, yield_now};
 
+/// Masks interrupts for the guard's lifetime. Used to keep a user-pointer
+/// validation and its raw copy in one epoch of the address space: the task
+/// cannot be descheduled between the two, so the aspace cannot be torn down
+/// underneath the copy.
+struct IrqMaskGuard {
+    saved: u64,
+}
+
+impl IrqMaskGuard {
+    fn new() -> Self {
+        let saved: u64;
+        unsafe {
+            core::arch::asm!("mrs {0}, daif", out(reg) saved, options(nomem, nostack));
+            core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for IrqMaskGuard {
+    fn drop(&mut self) {
+        unsafe {
+            core::arch::asm!("msr daif, {0}", in(reg) self.saved, options(nomem, nostack));
+        }
+    }
+}
+
 pub const SYS_YIELD: u64 = 1;
 pub const SYS_EXIT: u64 = 2;
 pub const SYS_LOG: u64 = 3;
@@ -116,6 +143,11 @@ pub(crate) fn copy_from_user(dst: &mut [u8], addr: u64, len: usize) -> Result<()
     if len > dst.len() {
         return Err(-22);
     }
+    // Validation and the copy must observe one epoch of the address space.
+    // Preemption is pinned across both: a task descheduled in between loses
+    // its "active on this cpu" lifecycle bit, so a concurrent destroy could
+    // detach and recycle the page tables this raw copy is about to walk.
+    let _no_preempt = IrqMaskGuard::new();
     validate_user_range(addr, len, false)?;
     if len > 0 {
         unsafe {
@@ -126,6 +158,7 @@ pub(crate) fn copy_from_user(dst: &mut [u8], addr: u64, len: usize) -> Result<()
 }
 
 fn copy_to_user(addr: u64, src: &[u8]) -> Result<(), i64> {
+    let _no_preempt = IrqMaskGuard::new();
     validate_user_range(addr, src.len(), true)?;
     if !src.is_empty() {
         unsafe {
