@@ -18,6 +18,12 @@ pub const MAX_AST_NODES: usize = 256;
 pub const MAX_ARGS: usize = 8;
 /// Maximum string byte length for variables and literals.
 pub const MAX_STR_LEN: usize = 64;
+/// Maximum arrays allocated per script execution.
+pub const MAX_ARRAYS: usize = 16;
+/// Maximum elements per array.
+pub const MAX_ARRAY_ELEMS: usize = 16;
+/// Maximum functions declared in script scope.
+pub const MAX_FUNCTIONS: usize = 16;
 /// Default execution step budget before halting with StepBudgetExhausted.
 pub const DEFAULT_STEP_BUDGET: usize = 2000;
 
@@ -30,6 +36,8 @@ pub enum JsValue {
     Number(i64),
     String([u8; MAX_STR_LEN], u8),
     Element(NodeId),
+    Array(u8),
+    Function(u8),
 }
 
 impl JsValue {
@@ -52,6 +60,8 @@ impl JsValue {
             JsValue::Boolean(false) => "false",
             JsValue::Null => "null",
             JsValue::Undefined => "undefined",
+            JsValue::Array(_) => "[array]",
+            JsValue::Function(_) => "[function]",
             _ => "",
         }
     }
@@ -62,7 +72,7 @@ impl JsValue {
             JsValue::Boolean(b) => *b,
             JsValue::Number(n) => *n != 0,
             JsValue::String(_, len) => *len > 0,
-            JsValue::Element(_) => true,
+            JsValue::Element(_) | JsValue::Array(_) | JsValue::Function(_) => true,
         }
     }
 
@@ -75,7 +85,7 @@ impl JsValue {
                 let s = core::str::from_utf8(&buf[..*len as usize]).unwrap_or("");
                 parse_i64(s.trim()).unwrap_or(0)
             }
-            JsValue::Element(_) => 0,
+            JsValue::Element(_) | JsValue::Array(_) | JsValue::Function(_) => 0,
         }
     }
 }
@@ -136,6 +146,9 @@ pub enum TokenKind {
     RParen,
     LBrace,
     RBrace,
+    LBracket,
+    RBracket,
+    Function,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -192,6 +205,8 @@ impl<'a> Lexer<'a> {
             b')' => { self.pos += 1; return Ok(Token { kind: TokenKind::RParen, slice: &self.src[start..self.pos] }); }
             b'{' => { self.pos += 1; return Ok(Token { kind: TokenKind::LBrace, slice: &self.src[start..self.pos] }); }
             b'}' => { self.pos += 1; return Ok(Token { kind: TokenKind::RBrace, slice: &self.src[start..self.pos] }); }
+            b'[' => { self.pos += 1; return Ok(Token { kind: TokenKind::LBracket, slice: &self.src[start..self.pos] }); }
+            b']' => { self.pos += 1; return Ok(Token { kind: TokenKind::RBracket, slice: &self.src[start..self.pos] }); }
             b'+' => { self.pos += 1; return Ok(Token { kind: TokenKind::Plus, slice: &self.src[start..self.pos] }); }
             b'-' => { self.pos += 1; return Ok(Token { kind: TokenKind::Minus, slice: &self.src[start..self.pos] }); }
             b'*' => { self.pos += 1; return Ok(Token { kind: TokenKind::Star, slice: &self.src[start..self.pos] }); }
@@ -290,6 +305,7 @@ impl<'a> Lexer<'a> {
                 b"else" => TokenKind::Else,
                 b"while" => TokenKind::While,
                 b"return" => TokenKind::Return,
+                b"function" => TokenKind::Function,
                 b"true" => TokenKind::True,
                 b"false" => TokenKind::False,
                 b"null" => TokenKind::Null,
@@ -355,6 +371,8 @@ pub enum ExprKind {
     Unary { op: UnOp, expr: usize },
     Call { callee: usize, args_start: usize, args_count: u8 },
     Member { object: usize, prop: [u8; 32], prop_len: u8 },
+    Index { object: usize, index: usize },
+    Array { elements_start: usize, elements_count: u8 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -366,6 +384,13 @@ pub enum StmtKind {
     Expr(usize),
     Block { stmts_start: usize, stmts_count: usize },
     Return(Option<usize>),
+    FunctionDecl {
+        name: [u8; 32],
+        name_len: u8,
+        params_start: usize,
+        params_count: u8,
+        body: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -387,6 +412,9 @@ pub struct Parser<'a> {
     args_count: usize,
     stmts_pool: [usize; 128],
     stmts_count: usize,
+    params_pool: [[u8; 32]; 32],
+    params_lens: [u8; 32],
+    params_count: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -401,6 +429,9 @@ impl<'a> Parser<'a> {
             args_count: 0,
             stmts_pool: [0; 128],
             stmts_count: 0,
+            params_pool: [[0; 32]; 32],
+            params_lens: [0; 32],
+            params_count: 0,
         })
     }
 
@@ -431,17 +462,23 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_program(&mut self) -> Result<usize, JsError> {
-        let start = self.stmts_count;
+        let mut local = [0usize; 64];
+        let mut lcount = 0;
         while self.curr.kind != TokenKind::Eof {
             let stmt = self.parse_stmt()?;
-            if self.stmts_count >= self.stmts_pool.len() {
+            if lcount >= local.len() {
                 return Err(JsError::CapacityExceeded);
             }
-            self.stmts_pool[self.stmts_count] = stmt;
-            self.stmts_count += 1;
+            local[lcount] = stmt;
+            lcount += 1;
         }
-        let count = self.stmts_count - start;
-        self.alloc_stmt(StmtKind::Block { stmts_start: start, stmts_count: count })
+        let start = self.stmts_count;
+        if self.stmts_count + lcount > self.stmts_pool.len() {
+            return Err(JsError::CapacityExceeded);
+        }
+        self.stmts_pool[start..start + lcount].copy_from_slice(&local[..lcount]);
+        self.stmts_count += lcount;
+        self.alloc_stmt(StmtKind::Block { stmts_start: start, stmts_count: lcount })
     }
 
     fn parse_stmt(&mut self) -> Result<usize, JsError> {
@@ -496,19 +533,25 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LBrace => {
                 self.advance()?;
-                let start = self.stmts_count;
+                let mut local = [0usize; 32];
+                let mut lcount = 0;
                 while self.curr.kind != TokenKind::RBrace && self.curr.kind != TokenKind::Eof {
                     let s = self.parse_stmt()?;
-                    if self.stmts_count >= self.stmts_pool.len() {
+                    if lcount >= local.len() {
                         return Err(JsError::CapacityExceeded);
                     }
-                    self.stmts_pool[self.stmts_count] = s;
-                    self.stmts_count += 1;
+                    local[lcount] = s;
+                    lcount += 1;
                 }
                 if self.curr.kind != TokenKind::RBrace { return Err(JsError::UnexpectedToken); }
                 self.advance()?;
-                let count = self.stmts_count - start;
-                self.alloc_stmt(StmtKind::Block { stmts_start: start, stmts_count: count })
+                let start = self.stmts_count;
+                if self.stmts_count + lcount > self.stmts_pool.len() {
+                    return Err(JsError::CapacityExceeded);
+                }
+                self.stmts_pool[start..start + lcount].copy_from_slice(&local[..lcount]);
+                self.stmts_count += lcount;
+                self.alloc_stmt(StmtKind::Block { stmts_start: start, stmts_count: lcount })
             }
             TokenKind::Return => {
                 self.advance()?;
@@ -521,6 +564,59 @@ impl<'a> Parser<'a> {
                     self.advance()?;
                 }
                 self.alloc_stmt(StmtKind::Return(val))
+            }
+            TokenKind::Function => {
+                self.advance()?;
+                let tok = self.advance()?;
+                if tok.kind != TokenKind::Ident {
+                    return Err(JsError::UnexpectedToken);
+                }
+                let mut name = [0u8; 32];
+                let nlen = tok.slice.len().min(32);
+                name[..nlen].copy_from_slice(&tok.slice[..nlen]);
+
+                if self.curr.kind != TokenKind::LParen {
+                    return Err(JsError::UnexpectedToken);
+                }
+                self.advance()?;
+                let params_start = self.params_count;
+                let mut pcount = 0u8;
+                while self.curr.kind != TokenKind::RParen && self.curr.kind != TokenKind::Eof {
+                    let ptok = self.advance()?;
+                    if ptok.kind != TokenKind::Ident {
+                        return Err(JsError::UnexpectedToken);
+                    }
+                    if self.params_count >= self.params_pool.len() {
+                        return Err(JsError::CapacityExceeded);
+                    }
+                    let mut pname = [0u8; 32];
+                    let plen = ptok.slice.len().min(32);
+                    pname[..plen].copy_from_slice(&ptok.slice[..plen]);
+                    self.params_pool[self.params_count] = pname;
+                    self.params_lens[self.params_count] = plen as u8;
+                    self.params_count += 1;
+                    pcount += 1;
+                    if self.curr.kind == TokenKind::Comma {
+                        self.advance()?;
+                    } else {
+                        break;
+                    }
+                }
+                if self.curr.kind != TokenKind::RParen {
+                    return Err(JsError::UnexpectedToken);
+                }
+                self.advance()?;
+                if self.curr.kind != TokenKind::LBrace {
+                    return Err(JsError::UnexpectedToken);
+                }
+                let body = self.parse_stmt()?;
+                self.alloc_stmt(StmtKind::FunctionDecl {
+                    name,
+                    name_len: nlen as u8,
+                    params_start,
+                    params_count: pcount,
+                    body,
+                })
             }
             _ => {
                 let expr = self.parse_expr()?;
@@ -664,6 +760,12 @@ impl<'a> Parser<'a> {
                 if self.curr.kind != TokenKind::RParen { return Err(JsError::UnexpectedToken); }
                 self.advance()?;
                 expr = self.alloc_expr(ExprKind::Call { callee: expr, args_start, args_count: count })?;
+            } else if self.curr.kind == TokenKind::LBracket {
+                self.advance()?;
+                let index = self.parse_expr()?;
+                if self.curr.kind != TokenKind::RBracket { return Err(JsError::UnexpectedToken); }
+                self.advance()?;
+                expr = self.alloc_expr(ExprKind::Index { object: expr, index })?;
             } else {
                 break;
             }
@@ -711,6 +813,28 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(expr)
             }
+            TokenKind::LBracket => {
+                self.advance()?;
+                let start = self.args_count;
+                let mut count = 0u8;
+                while self.curr.kind != TokenKind::RBracket && self.curr.kind != TokenKind::Eof {
+                    let elem = self.parse_expr()?;
+                    if self.args_count >= self.args_pool.len() || count >= MAX_ARGS as u8 {
+                        return Err(JsError::CapacityExceeded);
+                    }
+                    self.args_pool[self.args_count] = elem;
+                    self.args_count += 1;
+                    count += 1;
+                    if self.curr.kind == TokenKind::Comma {
+                        self.advance()?;
+                    } else {
+                        break;
+                    }
+                }
+                if self.curr.kind != TokenKind::RBracket { return Err(JsError::UnexpectedToken); }
+                self.advance()?;
+                self.alloc_expr(ExprKind::Array { elements_start: start, elements_count: count })
+            }
             _ => Err(JsError::UnexpectedToken),
         }
     }
@@ -730,12 +854,28 @@ enum StmtResult {
     Return(JsValue),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct JsFunctionDef {
+    pub name: [u8; 32],
+    pub name_len: u8,
+    pub params_start: usize,
+    pub params_count: u8,
+    pub body: usize,
+}
+
 /// Runtime Execution Environment.
 pub struct JsRuntime<'a> {
     vars: [JsVar; MAX_VARS],
     var_count: usize,
+    arrays: [[JsValue; MAX_ARRAY_ELEMS]; MAX_ARRAYS],
+    array_lens: [u8; MAX_ARRAYS],
+    array_count: usize,
+    functions: [JsFunctionDef; MAX_FUNCTIONS],
+    function_count: usize,
+    call_depth: usize,
     dom: &'a mut Dom,
     remaining_steps: usize,
+    mutated: bool,
 }
 
 impl<'a> JsRuntime<'a> {
@@ -743,9 +883,20 @@ impl<'a> JsRuntime<'a> {
         Self {
             vars: [JsVar { name: [0; 32], name_len: 0, val: JsValue::Undefined }; MAX_VARS],
             var_count: 0,
+            arrays: [[JsValue::Undefined; MAX_ARRAY_ELEMS]; MAX_ARRAYS],
+            array_lens: [0; MAX_ARRAYS],
+            array_count: 0,
+            functions: [JsFunctionDef { name: [0; 32], name_len: 0, params_start: 0, params_count: 0, body: 0 }; MAX_FUNCTIONS],
+            function_count: 0,
+            call_depth: 0,
             dom,
             remaining_steps: step_budget,
+            mutated: false,
         }
+    }
+
+    pub fn dom_mutated(&self) -> bool {
+        self.mutated
     }
 
     fn tick_step(&mut self) -> Result<(), JsError> {
@@ -874,6 +1025,22 @@ impl<'a> JsRuntime<'a> {
                 };
                 Ok(StmtResult::Return(val))
             }
+            StmtKind::FunctionDecl { name, name_len, params_start, params_count, body } => {
+                if self.function_count >= MAX_FUNCTIONS {
+                    return Err(JsError::CapacityExceeded);
+                }
+                let fn_id = self.function_count;
+                self.functions[fn_id] = JsFunctionDef {
+                    name: *name,
+                    name_len: *name_len,
+                    params_start: *params_start,
+                    params_count: *params_count,
+                    body: *body,
+                };
+                self.function_count += 1;
+                self.set_var(&name[..*name_len as usize], JsValue::Function(fn_id as u8))?;
+                Ok(StmtResult::Normal(JsValue::Function(fn_id as u8)))
+            }
         }
     }
 
@@ -959,10 +1126,28 @@ impl<'a> JsRuntime<'a> {
             ExprKind::Member { object, prop, prop_len } => {
                 let obj = self.eval_expr(parser, *object)?;
                 let prop_slice = &prop[..*prop_len as usize];
-                if let JsValue::Element(node_id) = obj {
-                    self.get_element_prop(node_id, prop_slice)
-                } else {
-                    Err(JsError::TypeError)
+                match obj {
+                    JsValue::Element(node_id) => self.get_element_prop(node_id, prop_slice),
+                    JsValue::Array(aid) => {
+                        if prop_slice == b"length" {
+                            let aid_usize = aid as usize;
+                            if aid_usize < self.array_count {
+                                Ok(JsValue::Number(self.array_lens[aid_usize] as i64))
+                            } else {
+                                Ok(JsValue::Number(0))
+                            }
+                        } else {
+                            Err(JsError::UnsupportedSyntax("unsupported array property"))
+                        }
+                    }
+                    JsValue::String(_, len) => {
+                        if prop_slice == b"length" {
+                            Ok(JsValue::Number(len as i64))
+                        } else {
+                            Err(JsError::UnsupportedSyntax("unsupported string property"))
+                        }
+                    }
+                    _ => Err(JsError::TypeError),
                 }
             }
             ExprKind::Call { callee, args_start, args_count } => {
@@ -988,8 +1173,86 @@ impl<'a> JsRuntime<'a> {
 
                         Err(JsError::UnsupportedSyntax("unsupported object method"))
                     }
-                    _ => Err(JsError::UnsupportedSyntax("unsupported function call")),
+                    _ => {
+                        let callee_val = self.eval_expr(parser, *callee)?;
+                        if let JsValue::Function(fn_id) = callee_val {
+                            let fn_idx = fn_id as usize;
+                            if fn_idx >= self.function_count {
+                                return Err(JsError::ReferenceError);
+                            }
+                            if self.call_depth >= 8 {
+                                return Err(JsError::CapacityExceeded);
+                            }
+                            self.call_depth += 1;
+                            let fndef = self.functions[fn_idx];
+
+                            let mut evaled_args = [JsValue::Undefined; MAX_ARGS];
+                            let arg_take = (*args_count as usize).min(MAX_ARGS);
+                            for i in 0..arg_take {
+                                let arg_expr = parser.args_pool[*args_start + i];
+                                evaled_args[i] = self.eval_expr(parser, arg_expr)?;
+                            }
+
+                            let saved_var_count = self.var_count;
+
+                            for i in 0..fndef.params_count as usize {
+                                let pidx = fndef.params_start + i;
+                                let pname = &parser.params_pool[pidx][..parser.params_lens[pidx] as usize];
+                                let pval = if i < arg_take { evaled_args[i] } else { JsValue::Undefined };
+                                self.set_var(pname, pval)?;
+                            }
+
+                            let res = self.eval_stmt(parser, fndef.body);
+                            self.var_count = saved_var_count;
+                            self.call_depth -= 1;
+
+                            match res? {
+                                StmtResult::Return(v) | StmtResult::Normal(v) => Ok(v),
+                            }
+                        } else {
+                            Err(JsError::UnsupportedSyntax("unsupported function call"))
+                        }
+                    }
                 }
+            }
+            ExprKind::Index { object, index } => {
+                let obj = self.eval_expr(parser, *object)?;
+                let idx_val = self.eval_expr(parser, *index)?;
+                let i = idx_val.to_number();
+                match obj {
+                    JsValue::Array(aid) => {
+                        let aid_usize = aid as usize;
+                        if aid_usize < self.array_count && i >= 0 && (i as usize) < self.array_lens[aid_usize] as usize {
+                            Ok(self.arrays[aid_usize][i as usize])
+                        } else {
+                            Ok(JsValue::Undefined)
+                        }
+                    }
+                    JsValue::String(buf, len) => {
+                        if i >= 0 && (i as usize) < len as usize {
+                            let pos = i as usize;
+                            Ok(JsValue::string_from_slice(&buf[pos..pos + 1]))
+                        } else {
+                            Ok(JsValue::Undefined)
+                        }
+                    }
+                    _ => Err(JsError::TypeError),
+                }
+            }
+            ExprKind::Array { elements_start, elements_count } => {
+                if self.array_count >= MAX_ARRAYS {
+                    return Err(JsError::CapacityExceeded);
+                }
+                let aid = self.array_count;
+                let count = (*elements_count as usize).min(MAX_ARRAY_ELEMS);
+                for i in 0..count {
+                    let elem_id = parser.args_pool[*elements_start + i];
+                    let val = self.eval_expr(parser, elem_id)?;
+                    self.arrays[aid][i] = val;
+                }
+                self.array_lens[aid] = count as u8;
+                self.array_count += 1;
+                Ok(JsValue::Array(aid as u8))
             }
         }
     }
@@ -1047,22 +1310,39 @@ impl<'a> JsRuntime<'a> {
             b"value" => {
                 let bytes = val.as_str().as_bytes();
                 self.dom.set_attr(node_id, b"value", bytes);
+                self.mutated = true;
                 Ok(())
             }
             b"checked" => {
                 if val.to_bool() {
                     self.dom.set_attr(node_id, b"checked", b"checked");
                 }
+                self.mutated = true;
                 Ok(())
             }
             b"textContent" | b"innerText" => {
                 let bytes = val.as_str().as_bytes();
                 self.dom.set_text(node_id, bytes);
+                self.mutated = true;
                 Ok(())
             }
             _ => Err(JsError::UnsupportedSyntax("unsupported DOM property setter")),
         }
     }
+}
+
+/// Executes an inline JavaScript snippet against the browser's DOM and returns whether DOM was mutated.
+pub fn execute_script_with_mutations(
+    script: &[u8],
+    dom: &mut Dom,
+    step_budget: usize,
+) -> Result<(JsValue, bool), JsError> {
+    let lexer = Lexer::new(script);
+    let mut parser = Parser::new(lexer)?;
+    let root = parser.parse_program()?;
+    let mut runtime = JsRuntime::new(dom, step_budget);
+    let val = runtime.eval_program(&parser, root)?;
+    Ok((val, runtime.dom_mutated()))
 }
 
 /// Executes an inline JavaScript snippet against the browser's DOM.
@@ -1071,11 +1351,7 @@ pub fn execute_script(
     dom: &mut Dom,
     step_budget: usize,
 ) -> Result<JsValue, JsError> {
-    let lexer = Lexer::new(script);
-    let mut parser = Parser::new(lexer)?;
-    let root = parser.parse_program()?;
-    let mut runtime = JsRuntime::new(dom, step_budget);
-    runtime.eval_program(&parser, root)
+    execute_script_with_mutations(script, dom, step_budget).map(|(v, _)| v)
 }
 
 #[cfg(test)]
@@ -1173,5 +1449,31 @@ mod tests {
         let src = b"let greeting = 'Hello ' + 'World';";
         let res = execute_script(src, &mut dom, 1000).expect("string cat succeeds");
         assert_eq!(res.as_str(), "Hello World");
+    }
+
+    #[test]
+    fn test_function_declaration_and_call() {
+        let mut dom = Dom::new();
+        let src = b"function add(x, y) { return x + y; } let sum = add(15, 27);";
+        let res = execute_script(src, &mut dom, 1000).expect("function execution succeeds");
+        assert_eq!(res, JsValue::Number(42));
+    }
+
+    #[test]
+    fn test_array_literal_indexing_and_length() {
+        let mut dom = Dom::new();
+        let src = b"let arr = [10, 20, 30]; let first = arr[0]; let len = arr.length; let sum = first + len;";
+        let res = execute_script(src, &mut dom, 1000).expect("array operations succeed");
+        assert_eq!(res, JsValue::Number(13));
+    }
+
+    #[test]
+    fn test_mutation_detection() {
+        let mut dom = Dom::new();
+        dom.parse(b"<div><p id=\"msg\">hello</p></div>");
+        let src = b"let p = document.getElementById('msg'); p.textContent = 'world';";
+        let (res, mutated) = execute_script_with_mutations(src, &mut dom, 1000).expect("script succeeds");
+        let _ = res;
+        assert!(mutated);
     }
 }

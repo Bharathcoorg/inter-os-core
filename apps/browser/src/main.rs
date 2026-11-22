@@ -4801,20 +4801,24 @@ impl BrowserApp {
 
     /// Executes an inline script or event handler with deterministic step and memory budgets,
     /// and logs clear diagnostic messages for unsupported syntax and budget overruns.
-    pub fn run_script(code: &[u8], dom: &mut layout::Dom, context: &str) {
+    /// Returns true if the DOM was mutated by script execution.
+    pub fn run_script(code: &[u8], dom: &mut layout::Dom, context: &str) -> bool {
         if code.is_empty() {
-            return;
+            return false;
         }
         let _ = context;
-        match browser::js::execute_script(code, dom, browser::js::DEFAULT_STEP_BUDGET) {
-            Ok(_) => {
+        match browser::js::execute_script_with_mutations(code, dom, browser::js::DEFAULT_STEP_BUDGET) {
+            Ok((_, mutated)) => {
                 std::log("[BROWSER APP] JS script executed successfully.").ok();
+                mutated
             }
             Err(browser::js::JsError::StepBudgetExhausted) => {
                 std::log("[BROWSER APP] JS execution halted: step budget exhausted (infinite loop prevention).").ok();
+                false
             }
             Err(browser::js::JsError::CapacityExceeded) => {
                 std::log("[BROWSER APP] JS execution halted: memory budget exceeded (AST/variable capacity limit).").ok();
+                false
             }
             Err(browser::js::JsError::UnsupportedSyntax(feature)) => {
                 let mut log_buf = [0u8; 128];
@@ -4827,17 +4831,38 @@ impl BrowserApp {
                 if let Ok(msg) = core::str::from_utf8(&log_buf[..plen + flen]) {
                     std::log(msg).ok();
                 }
+                false
             }
             Err(browser::js::JsError::UnexpectedToken) => {
                 std::log("[BROWSER APP] JS syntax error: unexpected token.").ok();
+                false
             }
             Err(browser::js::JsError::ReferenceError) => {
                 std::log("[BROWSER APP] JS runtime error: reference error (undeclared variable).").ok();
+                false
             }
             Err(browser::js::JsError::TypeError) => {
                 std::log("[BROWSER APP] JS runtime error: type error.").ok();
+                false
             }
         }
+    }
+
+    /// Dynamically re-lays out the current HTML page after script DOM mutations.
+    pub fn relayout_page(&mut self) {
+        if !self.html_view {
+            return;
+        }
+        let dom = unsafe { &*core::ptr::addr_of!(PAGE_DOM) };
+        let out = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_LAYOUT) };
+        let sheet = css::parse_stylesheet(dom.css(), dom.token_store());
+        layout::build(dom, &sheet, browser::CONTENT_WIDTH, out);
+        let height = out.height as usize;
+        let note = if out.truncated { out.note_reserve() } else { 0 };
+        self.scroll = browser::reader_scroll(
+            height + browser::CONTENT_PADDING + note,
+            READER_VIEWPORT_H,
+        );
     }
 
     /// Finds captured script tags in the DOM and executes them in order.
@@ -12333,7 +12358,9 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                         let mut buf = [0u8; 512];
                         let n = onclick.len().min(buf.len());
                         buf[..n].copy_from_slice(&onclick[..n]);
-                        BrowserApp::run_script(&buf[..n], dom_mut, "field onclick");
+                        if BrowserApp::run_script(&buf[..n], dom_mut, "field onclick") {
+                            app.relayout_page();
+                        }
                     }
                 }
                 match field.kind {
@@ -12373,7 +12400,9 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                             let mut buf = [0u8; 512];
                             let n = onclick.len().min(buf.len());
                             buf[..n].copy_from_slice(&onclick[..n]);
-                            BrowserApp::run_script(&buf[..n], dom_mut, "link onclick");
+                            if BrowserApp::run_script(&buf[..n], dom_mut, "link onclick") {
+                                app.relayout_page();
+                            }
                         }
                         break;
                     }

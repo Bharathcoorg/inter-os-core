@@ -33,6 +33,30 @@ pub enum Display {
     TableRow,
     TableCell,
     Field,
+    Flex,
+}
+
+/// Direction of flex items.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FlexDirection {
+    Row,
+    Column,
+}
+
+/// Alignment along the main axis in flex layout.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JustifyContent {
+    FlexStart,
+    Center,
+    FlexEnd,
+    SpaceBetween,
+}
+
+/// CSS box sizing model.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BoxSizing {
+    ContentBox,
+    BorderBox,
 }
 
 /// The form control an element is, if any.
@@ -158,6 +182,12 @@ pub struct BoxStyle {
     pub has_left: bool,
     pub has_right: bool,
     pub has_bottom: bool,
+    pub flex_direction: FlexDirection,
+    pub justify_content: JustifyContent,
+    pub gap: u16,
+    pub box_sizing: BoxSizing,
+    pub has_width: bool,
+    pub has_height: bool,
     pub unsupported: [UnsupportedStyleNotice; MAX_UNSUPPORTED_NOTICES],
     pub unsupported_count: u8,
 }
@@ -201,6 +231,12 @@ impl BoxStyle {
         has_left: false,
         has_right: false,
         has_bottom: false,
+        flex_direction: FlexDirection::Row,
+        justify_content: JustifyContent::FlexStart,
+        gap: 0,
+        box_sizing: BoxSizing::ContentBox,
+        has_width: false,
+        has_height: false,
         unsupported: [UnsupportedStyleNotice::EMPTY; MAX_UNSUPPORTED_NOTICES],
         unsupported_count: 0,
     };
@@ -752,6 +788,67 @@ fn apply_single_declaration(style: &mut BoxStyle, prop: &[u8], val: &[u8]) {
             style.right = n;
             style.has_right = true;
         }
+    } else if prop.eq_ignore_ascii_case(b"display") {
+        if val.eq_ignore_ascii_case(b"flex") {
+            style.display = Display::Flex;
+        } else if val.eq_ignore_ascii_case(b"block") {
+            style.display = Display::Block;
+        } else if val.eq_ignore_ascii_case(b"inline") {
+            style.display = Display::Inline;
+        } else if val.eq_ignore_ascii_case(b"none") {
+            style.display = Display::None;
+            style.hidden = true;
+        } else {
+            style.record_unsupported(prop);
+        }
+    } else if prop.eq_ignore_ascii_case(b"width") {
+        if let Some(n) = parse_css_length(val) {
+            if n > 0 {
+                style.width = n as u16;
+                style.has_width = true;
+            }
+        }
+    } else if prop.eq_ignore_ascii_case(b"height") {
+        if let Some(n) = parse_css_length(val) {
+            if n > 0 {
+                style.height = n as u16;
+                style.has_height = true;
+            }
+        }
+    } else if prop.eq_ignore_ascii_case(b"flex-direction") {
+        if val.eq_ignore_ascii_case(b"column") {
+            style.flex_direction = FlexDirection::Column;
+        } else if val.eq_ignore_ascii_case(b"row") {
+            style.flex_direction = FlexDirection::Row;
+        } else {
+            style.record_unsupported(prop);
+        }
+    } else if prop.eq_ignore_ascii_case(b"gap") {
+        if let Some(n) = parse_css_length(val) {
+            if n >= 0 {
+                style.gap = n as u16;
+            }
+        }
+    } else if prop.eq_ignore_ascii_case(b"justify-content") {
+        if val.eq_ignore_ascii_case(b"center") {
+            style.justify_content = JustifyContent::Center;
+        } else if val.eq_ignore_ascii_case(b"flex-end") {
+            style.justify_content = JustifyContent::FlexEnd;
+        } else if val.eq_ignore_ascii_case(b"space-between") {
+            style.justify_content = JustifyContent::SpaceBetween;
+        } else if val.eq_ignore_ascii_case(b"flex-start") {
+            style.justify_content = JustifyContent::FlexStart;
+        } else {
+            style.record_unsupported(prop);
+        }
+    } else if prop.eq_ignore_ascii_case(b"box-sizing") {
+        if val.eq_ignore_ascii_case(b"border-box") {
+            style.box_sizing = BoxSizing::BorderBox;
+        } else if val.eq_ignore_ascii_case(b"content-box") {
+            style.box_sizing = BoxSizing::ContentBox;
+        } else {
+            style.record_unsupported(prop);
+        }
     } else if is_known_css_property(prop) {
         // Standard core properties are cascaded by css::cascade or handled at the element level.
     } else {
@@ -781,6 +878,10 @@ fn is_known_css_property(prop: &[u8]) -> bool {
         || prop.eq_ignore_ascii_case(b"display")
         || prop.eq_ignore_ascii_case(b"width")
         || prop.eq_ignore_ascii_case(b"height")
+        || prop.eq_ignore_ascii_case(b"gap")
+        || prop.eq_ignore_ascii_case(b"flex-direction")
+        || prop.eq_ignore_ascii_case(b"justify-content")
+        || prop.eq_ignore_ascii_case(b"box-sizing")
 }
 
 fn parse_css_length(val: &[u8]) -> Option<i16> {

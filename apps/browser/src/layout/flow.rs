@@ -833,13 +833,22 @@ impl<'a, 's> Builder<'a, 's> {
         let margin_right = style.margin_right.max(0) as i32;
         let border = style.border as i32;
         let box_x = x + margin_left;
-        let inner_w = (width as i32
+        let mut inner_w = (width as i32
             - margin_left
             - margin_right
             - style.padding_left as i32
             - style.padding_right as i32
             - border * 2)
             .max(32) as usize;
+        if style.has_width && style.width > 0 {
+            let specified = style.width as usize;
+            if style.box_sizing == super::style::BoxSizing::BorderBox {
+                let pad_border = style.padding_left as usize + style.padding_right as usize + (border as usize) * 2;
+                inner_w = specified.saturating_sub(pad_border).max(16);
+            } else {
+                inner_w = specified.max(16);
+            }
+        }
         let pos_offset_x = match style.position {
             super::style::Position::Relative if style.has_left => style.left as i32,
             super::style::Position::Relative if style.has_right => -(style.right as i32),
@@ -882,6 +891,45 @@ impl<'a, 's> Builder<'a, 's> {
             return bottom + margin_bottom;
         }
 
+        if style.display == Display::Flex {
+            let bottom = self.layout_flex(node, &style, content_x, top, inner_w, depth + 1);
+            let mut final_bottom = bottom + style.padding_bottom as i32 + border;
+            if style.has_height && style.height > 0 {
+                final_bottom = final_bottom.max(top + style.height as i32);
+            }
+            if style.css.has_background {
+                self.push_rect(
+                    box_x,
+                    top,
+                    (inner_w as i32
+                        + style.padding_left as i32
+                        + style.padding_right as i32
+                        + border * 2) as u16,
+                    (final_bottom - top).max(1) as u16,
+                    style.css.background,
+                    RectKind::Fill,
+                );
+            }
+            if border > 0 {
+                if let Some(color) = style.border_color() {
+                    self.push_rect(
+                        box_x,
+                        top,
+                        (inner_w as i32
+                            + style.padding_left as i32
+                            + style.padding_right as i32
+                            + border * 2) as u16,
+                        (final_bottom - top).max(1) as u16,
+                        color,
+                        RectKind::Outline,
+                    );
+                }
+            }
+            let result = final_bottom + margin_bottom;
+            self.bump(result);
+            return result;
+        }
+
         let top_pad = top + style.padding_top as i32 + border;
         if marker != Marker::None {
             self.push_marker(marker, content_x, top_pad, &style);
@@ -892,6 +940,9 @@ impl<'a, 's> Builder<'a, 's> {
             self.layout_children(node, content_x, top_pad, inner_w, &style, depth + 1)
         };
         bottom += style.padding_bottom as i32 + border;
+        if style.has_height && style.height > 0 {
+            bottom = bottom.max(top + style.height as i32);
+        }
         if style.css.has_background {
             self.push_rect(
                 box_x,
@@ -987,6 +1038,85 @@ impl<'a, 's> Builder<'a, 's> {
             self.push_rect(x, y, w as u16, h as u16, color, RectKind::Outline);
         }
         y + h as i32 + style.margin_bottom as i32
+    }
+
+    fn layout_flex(
+        &mut self,
+        node: NodeId,
+        parent_style: &BoxStyle,
+        content_x: i32,
+        top: i32,
+        inner_w: usize,
+        depth: usize,
+    ) -> i32 {
+        if depth > MAX_LAYOUT_DEPTH {
+            self.note(OVERFLOW_BLOCK_DEPTH);
+            return top;
+        }
+        let mut children = [super::dom::NO_NODE; 64];
+        let mut child_count = 0usize;
+        let mut child = self.dom.first_child(node);
+        while let Some(c) = child {
+            if self.dom.node(c).is_element() {
+                let s = style::compute(self.dom, c, self.sheet, Some(parent_style));
+                if s.display != Display::None {
+                    if child_count < children.len() {
+                        children[child_count] = c;
+                        child_count += 1;
+                    }
+                }
+            }
+            child = self.dom.next_sibling(c);
+        }
+
+        if child_count == 0 {
+            return top;
+        }
+
+        let gap = parent_style.gap as i32;
+
+        match parent_style.flex_direction {
+            super::style::FlexDirection::Column => {
+                let mut curr_y = top;
+                for (i, &c) in children[..child_count].iter().enumerate() {
+                    if i > 0 {
+                        curr_y += gap;
+                    }
+                    curr_y = self.layout_block(c, content_x, curr_y, inner_w, parent_style, depth, Marker::None);
+                }
+                curr_y
+            }
+            super::style::FlexDirection::Row => {
+                let total_gaps = (child_count.saturating_sub(1) as i32) * gap;
+                let avail_w = (inner_w as i32).saturating_sub(total_gaps).max(16) as usize;
+                let per_child_w = (avail_w / child_count).max(16);
+
+                let total_content_w = (per_child_w as i32 * child_count as i32) + total_gaps;
+                let free_space = (inner_w as i32).saturating_sub(total_content_w).max(0);
+
+                let start_offset = match parent_style.justify_content {
+                    super::style::JustifyContent::Center => free_space / 2,
+                    super::style::JustifyContent::FlexEnd => free_space,
+                    _ => 0,
+                };
+
+                let extra_gap = if parent_style.justify_content == super::style::JustifyContent::SpaceBetween && child_count > 1 {
+                    free_space / (child_count as i32 - 1)
+                } else {
+                    0
+                };
+
+                let mut max_bottom = top;
+                let mut curr_x = content_x + start_offset;
+
+                for &c in &children[..child_count] {
+                    let child_bottom = self.layout_block(c, curr_x, top, per_child_w, parent_style, depth, Marker::None);
+                    max_bottom = max_bottom.max(child_bottom);
+                    curr_x += per_child_w as i32 + gap + extra_gap;
+                }
+                max_bottom
+            }
+        }
     }
 
     fn layout_table(
