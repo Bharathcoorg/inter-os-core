@@ -793,6 +793,11 @@ def resolve_import_folder(target, extra_roots=None):
     resolving first and checking containment on the real path.
     """
     src = Path(target).expanduser().resolve()
+    # WHY the sensitive check precedes the existence check: the refusal of
+    # repository key material (packages/) must not depend on whether that
+    # directory happens to exist on this host — a missing directory must
+    # answer ImportRefusedError, not FileNotFoundError.
+    _reject_sensitive_path(src)
     if not src.exists():
         raise FileNotFoundError(f"Input path does not exist: {target}")
     src_dir = src.parent if src.is_file() else src
