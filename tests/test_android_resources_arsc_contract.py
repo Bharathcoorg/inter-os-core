@@ -13,6 +13,7 @@ Verifies:
 from pathlib import Path
 import pytest
 import struct
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,6 +23,19 @@ from tools.test_android_app import (
     parse_pkzip_container,
     parse_resources_arsc_summary,
 )
+
+
+def require_fossify_apk() -> Path:
+    """Returns the pinned acceptance APK, provisioning it on first use."""
+    apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
+    if not apk_path.is_file():
+        script = ROOT / "tools/provision_android_apk.sh"
+        subprocess.run([str(script)], check=True, capture_output=True, text=True)
+    assert apk_path.is_file(), (
+        "Fossify File Manager APK is required in emulator/data/apps; "
+        "provision it with tools/provision_android_apk.sh"
+    )
+    return apk_path
 
 
 def read_source(rel_path: str) -> str:
@@ -43,9 +57,7 @@ def test_kernel_resources_arsc_constants_and_types():
 
 
 def test_real_apk_resources_arsc_parsing():
-    apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.is_file():
-        pytest.skip("Fossify APK not provisioned; run tools/provision_android_apk.sh (pinned SHA-256)")
+    apk_path = require_fossify_apk()
 
     report = analyze_apk(apk_path)
     arsc = report["resources_arsc"]
