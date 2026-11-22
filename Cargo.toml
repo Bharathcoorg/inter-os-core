@@ -38,6 +38,14 @@ resolver = "2"
 opt-level = 3
 panic = "abort"
 incremental = false
+# The kernel embeds every userspace daemon ELF into its .rodata
+# (kernel/src/task/images.rs). Without this, ~20 debug ELFs of ~15MB each put
+# ~300MB of debuginfo into the kernel image: the BIOS image grows to 314MB and
+# the bootloader's second stage spends many minutes reading it through BIOS
+# int13h under TCG, which looks like a boot hang. Measured with
+# `strip --strip-debug`: launcher 15.1MB -> 1.4MB.
+debug = false
+strip = "debuginfo"
 
 [profile.release]
 panic = "abort"
