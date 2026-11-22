@@ -179,6 +179,10 @@ def analyze_ppm(ppm_path):
 
 
 def main():
+    if sys.platform != "win32":
+        print("SKIP: this audit boots qemu-system-x86_64.exe and reads a COM port; "
+              "it is a Windows-host contract.")
+        return
     print("=" * 72)
     print("  InterOS Core Native 1080x2400 Scanout & Framebuffer Safety Audit")
     print("=" * 72)

@@ -117,6 +117,10 @@ def find_bash():
 # Assertions
 # --------------------------------------------------------------------------
 def main() -> None:
+    if sys.platform != "win32":
+        print("SKIP: flash_phone.ps1 contract drives the Windows flasher; "
+              "run tools/flash_phone.sh on this platform.")
+        return
     tmp = os.path.join(ROOT, "target")
     os.makedirs(tmp, exist_ok=True)
     fake = os.path.join(tmp, "contract-fake-boot.img")

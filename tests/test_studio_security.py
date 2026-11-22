@@ -596,6 +596,7 @@ class StudioSecurityTests(unittest.TestCase):
         finally:
             s_over.close()
 
+    @unittest.skipUnless(sys.platform == "win32", "drives the Windows PowerShell launcher")
     def test_17_launch_studio_powershell_websockify_execution(self):
         """Verify the real launch_studio.ps1 parses cleanly and starts websockify with hardened origins.
 

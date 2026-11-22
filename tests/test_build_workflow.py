@@ -61,6 +61,7 @@ def synthetic_elf_with_sections(section_names):
     return bytes(header) + shstrtab + bytes(table)
 
 
+@unittest.skipUnless(sys.platform == "win32", "drives the Windows PowerShell build; cannot run elsewhere")
 class TestBuildWorkflow(unittest.TestCase):
     def run_ps(self, script_text: str):
         """Helper to run a PowerShell script snippet in repository root with build_env.ps1 imported."""
