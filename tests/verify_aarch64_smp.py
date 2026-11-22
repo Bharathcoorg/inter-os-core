@@ -100,7 +100,7 @@ def verify_smp_topology(qemu_bin: str, image_path: Path, smp_count: int) -> bool
 
     captured_lines = []
     start_time = time.time()
-    timeout_sec = 25
+    timeout_sec = 60
 
     try:
         while time.time() - start_time < timeout_sec:

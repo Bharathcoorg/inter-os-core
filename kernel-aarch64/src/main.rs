@@ -58,6 +58,7 @@ pub mod nfc;
 pub mod sensors;
 pub mod bluetooth;
 pub mod wifi;
+pub mod vfs;
 pub mod gps;
 pub mod haptics;
 pub mod biometrics;
@@ -2041,8 +2042,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
         // Allocate stack frame: sub sp, sp, #64
         insns[n] = 0xD101_03FF; n += 1;
-        // 1) SYS_VERIFY_PACKAGE (14) -> -38 (fail 0 -> code 11)
-        insns[n] = 0xD280_01C8; n += 1; // mov x8, #14
+        // 1) Unknown syscall (999) -> -38 (fail 0 -> code 11)
+        insns[n] = 0xD280_7CE8; n += 1; // mov x8, #999
         insns[n] = 0xD400_0001; n += 1; // svc #0
         insns[n] = 0xB100_981F; n += 1; // cmn x0, #38
         insns[n] = bne_to_fail(pc(n), 0); n += 1;

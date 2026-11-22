@@ -25,6 +25,7 @@ pub mod allocator;
 pub mod display;
 pub mod pcie;
 pub mod settings;
+pub mod vfs;
 
 use core::panic::PanicInfo;
 
@@ -370,8 +371,8 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
 
         // addi sp, sp, -64
         insns[n] = 0xFC01_0113; n += 1;
-        // 1) SYS_VERIFY_PACKAGE (14) == -38 (fail 0)
-        insns[n] = rv_li(17, 14); n += 1;
+        // 1) Unknown syscall (999) == -38 (fail 0)
+        insns[n] = rv_li(17, 999); n += 1;
         insns[n] = 0x0000_0073; n += 1;
         insns[n] = rv_li(5, -38); n += 1;
         insns[n] = bne_fail(pc(n), 10, 5, 0); n += 1;

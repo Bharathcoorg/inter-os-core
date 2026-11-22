@@ -51,6 +51,7 @@ pub enum CapabilityType {
     FileSystemWrite,
     EventPoll,
     SystemResource,
+    MemoryHeap,
 }
 
 impl CapabilityType {
@@ -67,6 +68,7 @@ impl CapabilityType {
             17 => Some(CapabilityType::EventPoll),
             18 => Some(CapabilityType::SystemResource),
             28 => Some(CapabilityType::AudioStreamDirect),
+            29 => Some(CapabilityType::MemoryHeap),
             33 => Some(CapabilityType::DisplayServer),
             _ => None,
         }
@@ -189,5 +191,13 @@ impl CapabilityTable {
             }
         }
         Err(CapError::TargetMismatch)
+    }
+
+    pub fn authorize_capability(&self, expected_type: CapabilityType, required_rights: Rights) -> bool {
+        self.check(expected_type, required_rights).is_ok()
+    }
+
+    pub fn authorize_object(&self, expected_type: CapabilityType, required_rights: Rights, expected_object_id: u64) -> bool {
+        self.check_targeted(expected_type, required_rights, expected_object_id as u32).is_ok()
     }
 }

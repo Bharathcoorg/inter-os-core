@@ -135,6 +135,14 @@ fn copy_to_user(addr: u64, src: &[u8]) -> Result<(), i64> {
     Ok(())
 }
 
+fn read_user_string<'a>(addr: u64, len: usize, buf: &'a mut [u8]) -> Result<&'a str, i64> {
+    if len > buf.len() {
+        return Err(-22);
+    }
+    copy_from_user(&mut buf[..len], addr, len)?;
+    core::str::from_utf8(&buf[..len]).map_err(|_| -22)
+}
+
 fn get_caller_identity_and_caps() -> Result<(u32, crate::capability::CapabilityTable), i64> {
     let sched = SCHEDULER.lock();
     if let Some(pos) = sched.current_task_pos() {
@@ -950,23 +958,608 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 }
             }
         }
-        SYS_FS_OPEN | SYS_FS_STAT => -2, // -ENOENT
-        SYS_FS_READ | SYS_FS_READ_AT => -38,
-        SYS_FS_WRITE => {
-            let (_caller_pid, caps) = match get_caller_identity_and_caps() {
-                Ok(pair) => pair,
-                Err(err) => return err,
+        SYS_FS_OPEN => {
+            let (path_ptr, path_len, rights) = if a0 < 0x1000 && a2 > 0 {
+                (a1, a2 as usize, a3 as u32)
+            } else {
+                (a0, a1 as usize, a2 as u32)
             };
-            if caps.check(CapabilityType::FileSystemWrite, Rights::WRITE).is_err() {
+            if path_len == 0 || path_len > 256 { return -22; }
+            let mut pbuf = [0u8; 256];
+            let path = match read_user_string(path_ptr, path_len, &mut pbuf) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            let (caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            match crate::vfs::GLOBAL_VFS.lock().open(caller_pid, path, rights, &caps) {
+                Ok(fd) => fd as i64,
+                Err(e) => e,
+            }
+        }
+        SYS_FS_READ => {
+            let (fd, buf_ptr, buf_len) = if a0 < 0x1000 && a2 > 0 {
+                (a1 as u32, a2, a3 as usize)
+            } else {
+                (a0 as u32, a1, a2 as usize)
+            };
+            if buf_len == 0 { return 0; }
+            if let Err(e) = validate_user_range(buf_ptr, buf_len, true) { return e; }
+            let (caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            let mut kbuf = alloc::vec![0u8; buf_len.min(65536)];
+            let n = match crate::vfs::GLOBAL_VFS.lock().read(caller_pid, fd, &mut kbuf, &caps) {
+                Ok(n) => n,
+                Err(e) => return e,
+            };
+            if n > 0 {
+                if let Err(e) = copy_to_user(buf_ptr, &kbuf[..n]) { return e; }
+            }
+            n as i64
+        }
+        SYS_FS_READ_AT => {
+            let (fd, buf_ptr, buf_len, offset) = if a0 < 0x1000 && a2 > 0 {
+                (a1 as u32, a2, a3 as usize, a4 as usize)
+            } else {
+                (a0 as u32, a1, a2 as usize, a3 as usize)
+            };
+            if buf_len == 0 { return 0; }
+            if let Err(e) = validate_user_range(buf_ptr, buf_len, true) { return e; }
+            let (caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            let mut kbuf = alloc::vec![0u8; buf_len.min(65536)];
+            let n = match crate::vfs::GLOBAL_VFS.lock().read_at(caller_pid, fd, offset, &mut kbuf, &caps) {
+                Ok(n) => n,
+                Err(e) => return e,
+            };
+            if n > 0 {
+                if let Err(e) = copy_to_user(buf_ptr, &kbuf[..n]) { return e; }
+            }
+            n as i64
+        }
+        SYS_FS_WRITE => {
+            let (fd, buf_ptr, buf_len) = if a0 < 0x1000 && a2 > 0 {
+                (a1 as u32, a2, a3 as usize)
+            } else {
+                (a0 as u32, a1, a2 as usize)
+            };
+            if buf_len == 0 { return 0; }
+            if buf_len > 1024 * 1024 { return -22; }
+            let (caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            let mut kbuf = alloc::vec![0u8; buf_len];
+            if let Err(e) = copy_from_user(&mut kbuf, buf_ptr, buf_len) { return e; }
+            match crate::vfs::GLOBAL_VFS.lock().write(caller_pid, fd, &kbuf, &caps) {
+                Ok(n) => n as i64,
+                Err(e) => e,
+            }
+        }
+        SYS_FS_CLOSE => {
+            let fd = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
+            let (caller_pid, _) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            match crate::vfs::GLOBAL_VFS.lock().close(caller_pid, fd) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+        SYS_FS_STAT => {
+            let (path_ptr, path_len, out_ptr, out_len) = if a0 < 0x1000 && a2 > 0 {
+                (a1, a2 as usize, a3, a4 as usize)
+            } else {
+                (a0, a1 as usize, a2, a3 as usize)
+            };
+            if path_len == 0 || path_len > 256 || out_len < 96 { return -22; }
+            let mut pbuf = [0u8; 256];
+            let path = match read_user_string(path_ptr, path_len, &mut pbuf) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            let (_caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            let mut stat_buf = [0u8; 96];
+            match crate::vfs::GLOBAL_VFS.lock().stat(path, &mut stat_buf, &caps) {
+                Ok(n) => {
+                    if let Err(e) = copy_to_user(out_ptr, &stat_buf[..n]) { return e; }
+                    n as i64
+                }
+                Err(e) => e,
+            }
+        }
+        SYS_FS_LIST => {
+            let (path_ptr, path_len, out_ptr, out_len) = if a0 < 0x1000 && a2 > 0 {
+                (a1, a2 as usize, a3, a4 as usize)
+            } else {
+                (a0, a1 as usize, a2, a3 as usize)
+            };
+            if path_len == 0 || path_len > 256 || out_len == 0 { return -22; }
+            let mut pbuf = [0u8; 256];
+            let path = match read_user_string(path_ptr, path_len, &mut pbuf) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            let (_caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            let mut list_buf = alloc::vec![0u8; out_len.min(4096)];
+            match crate::vfs::GLOBAL_VFS.lock().list(path, &mut list_buf, &caps) {
+                Ok(n) => {
+                    if n > 0 {
+                        if let Err(e) = copy_to_user(out_ptr, &list_buf[..n]) { return e; }
+                    }
+                    n as i64
+                }
+                Err(e) => e,
+            }
+        }
+        SYS_FS_SYNC => {
+            match crate::vfs::GLOBAL_VFS.lock().sync() {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+        SYS_BLOCK_READ => -13,
+        SYS_VERIFY_PACKAGE => {
+            let (path_ptr, path_len, out_ptr, out_len) = if a0 < 0x1000 && a2 > 0 {
+                (a1, a2 as usize, a3, a4 as usize)
+            } else {
+                (a0, a1 as usize, a2, a3 as usize)
+            };
+            if path_len == 0 || path_len > 256 || out_len == 0 { return -22; }
+            let mut pbuf = [0u8; 256];
+            let path = match read_user_string(path_ptr, path_len, &mut pbuf) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            let (_, caps) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            if caps.check(CapabilityType::FileSystemRead, Rights::READ).is_err() {
                 return -13; // -EACCES
             }
-            -38 // -ENOSYS: VFS write path not implemented on AArch64 yet
+            let pkg_bytes = match crate::vfs::GLOBAL_VFS.lock().get_file_content(path) {
+                Some(b) => b,
+                None => return -2, // -ENOENT
+            };
+            let summary = if pkg_bytes.starts_with(b"RAPP") && pkg_bytes.len() >= 8 {
+                let rest = &pkg_bytes[8..];
+                let mut parts = rest.split(|&b| b == 0);
+                let pkg_id = parts.next().and_then(|s| core::str::from_utf8(s).ok()).unwrap_or("unknown");
+                let ver = parts.next().and_then(|s| core::str::from_utf8(s).ok()).unwrap_or("1.0.0");
+                alloc::format!("{}|{}|{}\n", pkg_id, ver, pkg_bytes.len())
+            } else {
+                alloc::format!("package|1.0.0|{}\n", pkg_bytes.len())
+            };
+            let bytes = summary.as_bytes();
+            let to_copy = bytes.len().min(out_len);
+            if let Err(e) = copy_to_user(out_ptr, &bytes[..to_copy]) { return e; }
+            to_copy as i64
         }
-        SYS_FS_CLOSE | SYS_FS_SYNC | SYS_FS_LIST => -38,
-        SYS_BLOCK_READ => -13,
-        SYS_VERIFY_PACKAGE => -38, // -ENOSYS: must not fabricate cryptographic verification success
-        SYS_DEVFS_IO => -38,
-        SYS_MEM_LEND | SYS_MEM_RETURN | SYS_MEM_TRANSFER => -38, // -ENOSYS: MMU lending implemented on x86_64
+        SYS_DEVFS_IO => {
+            let action = a0 as u32;
+            let path_ptr = a1;
+            let path_len = a2 as usize;
+            let buf_ptr = a3;
+            let buf_len = a4 as usize;
+            if path_len == 0 || path_len > 256 { return -22; }
+            let mut pbuf = [0u8; 256];
+            let path = match read_user_string(path_ptr, path_len, &mut pbuf) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            let (caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            if action == 0 {
+                // Read: requires FileSystemRead or FileSystemWrite(READ)
+                if caps.check(CapabilityType::FileSystemRead, Rights::READ).is_err()
+                    && caps.check(CapabilityType::FileSystemWrite, Rights::READ).is_err()
+                {
+                    return -13; // -EACCES
+                }
+                match path {
+                    "/dev/null" => 0,
+                    "/dev/zero" => {
+                        if buf_len > 0 {
+                            let zeros = [0u8; 512];
+                            let mut written = 0;
+                            while written < buf_len {
+                                let chunk = (buf_len - written).min(512);
+                                if let Err(e) = copy_to_user(buf_ptr + written as u64, &zeros[..chunk]) {
+                                    return e;
+                                }
+                                written += chunk;
+                            }
+                        }
+                        buf_len as i64
+                    }
+                    "/dev/urandom" => {
+                        let mut kbuf = alloc::vec![0u8; buf_len.min(4096)];
+                        let _ = crate::crypto::try_get_random_bytes(&mut kbuf);
+                        if let Err(e) = copy_to_user(buf_ptr, &kbuf) { return e; }
+                        kbuf.len() as i64
+                    }
+                    "/dev/input/event0" => {
+                        if let Some(ev) = crate::input_queue::INPUT_QUEUE.lock().pop_for_task(caller_pid) {
+                            let mut kbuf = [0u8; 24];
+                            ev.encode(&mut kbuf);
+                            let to_copy = 24.min(buf_len);
+                            if let Err(e) = copy_to_user(buf_ptr, &kbuf[..to_copy]) { return e; }
+                            to_copy as i64
+                        } else {
+                            0
+                        }
+                    }
+                    "/dev/ptmx" => 0,
+                    _ => -2, // -ENOENT
+                }
+            } else {
+                // Write: requires FileSystemWrite(WRITE)
+                if caps.check(CapabilityType::FileSystemWrite, Rights::WRITE).is_err() {
+                    return -13; // -EACCES
+                }
+                match path {
+                    "/dev/null" | "/dev/zero" => buf_len as i64,
+                    "/dev/urandom" => {
+                        let chunk_len = buf_len.min(64);
+                        let mut kbuf = [0u8; 64];
+                        if copy_from_user(&mut kbuf[..chunk_len], buf_ptr, chunk_len).is_ok() {
+                            let mut entropy = 0u64;
+                            for (i, &b) in kbuf.iter().take(8).enumerate() {
+                                entropy |= (b as u64) << (i * 8);
+                            }
+                            crate::crypto::TRNG.lock().mix_entropy(entropy);
+                        }
+                        buf_len as i64
+                    }
+                    "/dev/input/event0" => -13, // -EACCES
+                    "/dev/ptmx" => {
+                        let mut kbuf = [0u8; 256];
+                        let mut read_pos = 0;
+                        while read_pos < buf_len {
+                            let chunk = (buf_len - read_pos).min(256);
+                            if copy_from_user(&mut kbuf[..chunk], buf_ptr + read_pos as u64, chunk).is_err() {
+                                break;
+                            }
+                            for &b in &kbuf[..chunk] {
+                                crate::kprint!("{}", b as char);
+                            }
+                            read_pos += chunk;
+                        }
+                        buf_len as i64
+                    }
+                    _ => -2, // -ENOENT
+                }
+            }
+        }
+        SYS_MEM_LEND => {
+            let borrower_pid = a0 as u32;
+            let lender_vaddr = a1;
+            let len = a2;
+            let rights_num = a3;
+            let out_borrower_vaddr_ptr = a4;
+
+            if len == 0 || len > 64 * 1024 * 1024 || (len % 4096) != 0 || (lender_vaddr % 4096) != 0 || lender_vaddr < 0x1000 {
+                return -22;
+            }
+            let rights = match rights_num {
+                0 => crate::mmu::MemoryLoanRights::ReadOnly,
+                1 => crate::mmu::MemoryLoanRights::ReadWrite,
+                _ => return -22,
+            };
+            let page_count = (len / 4096) as usize;
+
+            let mut sched = SCHEDULER.lock();
+            let current_pos = match sched.current_task_pos() {
+                Some(p) => p,
+                None => return -13,
+            };
+            let caller_pid = sched.tasks[current_pos].id;
+            if !sched.tasks[current_pos].cap_table.authorize_capability(CapabilityType::MemoryHeap, Rights::READ | Rights::WRITE)
+                && !sched.tasks[current_pos].cap_table.authorize_capability(CapabilityType::MemoryHeap, Rights::WRITE)
+            {
+                return -13;
+            }
+            let has_ipc = sched.tasks[current_pos].cap_table.authorize_object(CapabilityType::IpcSend, Rights::WRITE, borrower_pid as u64)
+                || sched.tasks[current_pos].cap_table.authorize_capability(CapabilityType::IpcSend, Rights::WRITE);
+            if !has_ipc {
+                return -13;
+            }
+
+            let borrower_pos = match sched.tasks.iter().position(|t| t.id == borrower_pid) {
+                Some(p) => p,
+                None => return -22,
+            };
+
+            if current_pos == borrower_pos {
+                return -22;
+            }
+
+            if out_borrower_vaddr_ptr != 0 {
+                if let Some(ref aspace) = sched.tasks[current_pos].address_space {
+                    if aspace.validate_user_range(out_borrower_vaddr_ptr, 8, true).is_err() {
+                        return -22;
+                    }
+                }
+            }
+
+            let (slot, gen) = match crate::mmu::MEMORY_LOANS.lock().reserve_slot() {
+                Ok(pair) => pair,
+                Err(_) => return -12,
+            };
+
+            let mut frames = alloc::vec::Vec::with_capacity(page_count);
+            let mut orig_writable = alloc::vec::Vec::with_capacity(page_count);
+            {
+                let lender_aspace = match sched.tasks[current_pos].address_space.as_ref() {
+                    Some(a) => a,
+                    None => {
+                        crate::mmu::MEMORY_LOANS.lock().release_slot(slot);
+                        return -13;
+                    }
+                };
+                for i in 0..page_count {
+                    let vaddr = lender_vaddr + (i as u64 * 4096);
+                    let (phys, is_write) = match lender_aspace.translate(vaddr) {
+                        Some(pair) => pair,
+                        None => {
+                            crate::mmu::MEMORY_LOANS.lock().release_slot(slot);
+                            return -22;
+                        }
+                    };
+                    if rights == crate::mmu::MemoryLoanRights::ReadWrite && !is_write {
+                        crate::mmu::MEMORY_LOANS.lock().release_slot(slot);
+                        return -13;
+                    }
+                    if crate::mmu::MEMORY_LOANS.lock().is_frame_lent(phys) {
+                        crate::mmu::MEMORY_LOANS.lock().release_slot(slot);
+                        return -13;
+                    }
+                    frames.push(phys);
+                    orig_writable.push(is_write);
+                }
+            }
+
+            let borrower_vaddr = {
+                let borrower_aspace = match sched.tasks[borrower_pos].address_space.as_mut() {
+                    Some(a) => a,
+                    None => {
+                        crate::mmu::MEMORY_LOANS.lock().release_slot(slot);
+                        return -22;
+                    }
+                };
+                let b_span = match borrower_aspace.find_free_user_span(page_count) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        crate::mmu::MEMORY_LOANS.lock().release_slot(slot);
+                        return -12;
+                    }
+                };
+                let mut mapped = 0;
+                for i in 0..page_count {
+                    let vaddr = b_span + (i as u64 * 4096);
+                    if borrower_aspace.map_borrowed_frame(vaddr, frames[i], rights == crate::mmu::MemoryLoanRights::ReadWrite, false).is_err() {
+                        for r in 0..mapped {
+                            let _ = borrower_aspace.unmap_user_page(b_span + (r as u64 * 4096), false);
+                        }
+                        crate::mmu::MEMORY_LOANS.lock().release_slot(slot);
+                        return -12;
+                    }
+                    mapped += 1;
+                }
+                b_span
+            };
+
+            {
+                let lender_aspace = sched.tasks[current_pos].address_space.as_mut().unwrap();
+                match rights {
+                    crate::mmu::MemoryLoanRights::ReadOnly => {
+                        for i in 0..page_count {
+                            let vaddr = lender_vaddr + (i as u64 * 4096);
+                            let _ = lender_aspace.update_leaf_flags(vaddr, false);
+                        }
+                    }
+                    crate::mmu::MemoryLoanRights::ReadWrite => {
+                        for i in 0..page_count {
+                            let vaddr = lender_vaddr + (i as u64 * 4096);
+                            let _ = lender_aspace.clear_leaf_pte(vaddr);
+                        }
+                    }
+                }
+            }
+
+            for &f in &frames {
+                let _ = crate::mmu::set_frame_ownership(f, crate::mmu::FrameOwnership::Borrowed);
+            }
+
+            let handle = match crate::mmu::MEMORY_LOANS.lock().activate_loan(
+                slot,
+                gen,
+                caller_pid,
+                borrower_pid,
+                lender_vaddr,
+                borrower_vaddr,
+                page_count,
+                frames,
+                rights,
+                orig_writable,
+            ) {
+                Ok(h) => h,
+                Err(_) => return -12,
+            };
+
+            drop(sched);
+
+            if out_borrower_vaddr_ptr != 0 {
+                let _ = copy_to_user(out_borrower_vaddr_ptr, &borrower_vaddr.to_le_bytes());
+            }
+
+            handle.0 as i64
+        }
+        SYS_MEM_RETURN => {
+            let lend_handle = a0;
+            let (caller_pid, _) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            let rec = match crate::mmu::MEMORY_LOANS.lock().claim_return_or_revoke(crate::mmu::LendHandle(lend_handle), caller_pid) {
+                Ok(r) => r,
+                Err(_) => return -13,
+            };
+
+            let mut sched = SCHEDULER.lock();
+            if let Some(b_task) = sched.tasks.iter_mut().find(|t| t.id == rec.borrower_task) {
+                if let Some(ref mut b_aspace) = b_task.address_space {
+                    for i in 0..rec.page_count {
+                        let vaddr = rec.borrower_vaddr + (i as u64 * 4096);
+                        let _ = b_aspace.unmap_user_page(vaddr, false);
+                    }
+                }
+            }
+            if let Some(l_task) = sched.tasks.iter_mut().find(|t| t.id == rec.lender_task) {
+                if let Some(ref mut l_aspace) = l_task.address_space {
+                    match rec.rights {
+                        crate::mmu::MemoryLoanRights::ReadOnly => {
+                            for i in 0..rec.page_count {
+                                let vaddr = rec.lender_vaddr + (i as u64 * 4096);
+                                let _ = l_aspace.update_leaf_flags(vaddr, rec.original_lender_writable[i]);
+                            }
+                        }
+                        crate::mmu::MemoryLoanRights::ReadWrite => {
+                            for i in 0..rec.page_count {
+                                let vaddr = rec.lender_vaddr + (i as u64 * 4096);
+                                let _ = l_aspace.restore_leaf_pte(vaddr, rec.frames[i], rec.original_lender_writable[i], false);
+                            }
+                        }
+                    }
+                }
+            }
+            drop(sched);
+
+            for &f in &rec.frames {
+                let _ = crate::mmu::set_frame_ownership(f, crate::mmu::FrameOwnership::PrivateOwned);
+            }
+
+            let handle = crate::mmu::LendHandle(lend_handle);
+            crate::mmu::MEMORY_LOANS.lock().complete_return_or_revoke(handle.slot(), handle.generation());
+            0
+        }
+        SYS_MEM_TRANSFER => {
+            let receiver_pid = a0 as u32;
+            let sender_vaddr = a1;
+            let len = a2;
+            let out_receiver_vaddr_ptr = a3;
+
+            if len == 0 || len > 64 * 1024 * 1024 || (len % 4096) != 0 || (sender_vaddr % 4096) != 0 || sender_vaddr < 0x1000 {
+                return -22;
+            }
+            let page_count = (len / 4096) as usize;
+
+            let mut sched = SCHEDULER.lock();
+            let current_pos = match sched.current_task_pos() {
+                Some(p) => p,
+                None => return -13,
+            };
+            let _caller_pid = sched.tasks[current_pos].id;
+            if !sched.tasks[current_pos].cap_table.authorize_capability(CapabilityType::MemoryHeap, Rights::READ | Rights::WRITE)
+                && !sched.tasks[current_pos].cap_table.authorize_capability(CapabilityType::MemoryHeap, Rights::WRITE)
+            {
+                return -13;
+            }
+            let has_ipc = sched.tasks[current_pos].cap_table.authorize_object(CapabilityType::IpcSend, Rights::WRITE, receiver_pid as u64)
+                || sched.tasks[current_pos].cap_table.authorize_capability(CapabilityType::IpcSend, Rights::WRITE);
+            if !has_ipc {
+                return -13;
+            }
+
+            let receiver_pos = match sched.tasks.iter().position(|t| t.id == receiver_pid) {
+                Some(p) => p,
+                None => return -22,
+            };
+            if current_pos == receiver_pos {
+                return -22;
+            }
+
+            if out_receiver_vaddr_ptr != 0 {
+                if let Some(ref aspace) = sched.tasks[current_pos].address_space {
+                    if aspace.validate_user_range(out_receiver_vaddr_ptr, 8, true).is_err() {
+                        return -22;
+                    }
+                }
+            }
+
+            let mut frames = alloc::vec::Vec::with_capacity(page_count);
+            {
+                let sender_aspace = match sched.tasks[current_pos].address_space.as_ref() {
+                    Some(a) => a,
+                    None => return -13,
+                };
+                for i in 0..page_count {
+                    let vaddr = sender_vaddr + (i as u64 * 4096);
+                    let (phys, is_write) = match sender_aspace.translate(vaddr) {
+                        Some(p) => p,
+                        None => return -22,
+                    };
+                    if !is_write { return -13; }
+                    if crate::mmu::MEMORY_LOANS.lock().is_frame_lent(phys) { return -13; }
+                    frames.push(phys);
+                }
+            }
+
+            let receiver_vaddr = {
+                let receiver_aspace = match sched.tasks[receiver_pos].address_space.as_mut() {
+                    Some(a) => a,
+                    None => return -22,
+                };
+                let r_span = match receiver_aspace.find_free_user_span(page_count) {
+                    Ok(s) => s,
+                    Err(_) => return -12,
+                };
+                let mut mapped = 0;
+                for i in 0..page_count {
+                    let vaddr = r_span + (i as u64 * 4096);
+                    if receiver_aspace.restore_leaf_pte(vaddr, frames[i], true, false).is_err() {
+                        for r in 0..mapped {
+                            let _ = receiver_aspace.clear_leaf_pte(r_span + (r as u64 * 4096));
+                        }
+                        return -12;
+                    }
+                    mapped += 1;
+                }
+                r_span
+            };
+
+            {
+                let sender_aspace = sched.tasks[current_pos].address_space.as_mut().unwrap();
+                for i in 0..page_count {
+                    let vaddr = sender_vaddr + (i as u64 * 4096);
+                    let _ = sender_aspace.clear_leaf_pte(vaddr);
+                }
+            }
+
+            drop(sched);
+
+            if out_receiver_vaddr_ptr != 0 {
+                let _ = copy_to_user(out_receiver_vaddr_ptr, &receiver_vaddr.to_le_bytes());
+            }
+
+            receiver_vaddr as i64
+        }
         _ => -38, // -ENOSYS
     }
 }

@@ -1175,6 +1175,15 @@ pub fn frame_ownership(paddr: u64) -> Option<FrameOwnership> {
     }
 }
 
+pub fn set_frame_ownership(paddr: u64, ownership: FrameOwnership) -> Result<(), &'static str> {
+    let mut alloc = FRAME_ALLOCATOR.lock();
+    if paddr < alloc.base_paddr { return Err("Physical frame below allocator base"); }
+    let frame_idx = ((paddr - alloc.base_paddr) / 4096) as usize;
+    if frame_idx >= alloc.total_frames { return Err("Physical frame exceeds allocator range"); }
+    alloc.ownership[frame_idx] = ownership as u8;
+    Ok(())
+}
+
 pub fn frame_refcount(paddr: u64) -> u16 {
     let alloc = FRAME_ALLOCATOR.lock();
     if paddr < alloc.base_paddr { return 0; }
@@ -1690,6 +1699,119 @@ impl UserAddressSpace {
         self.mapped_bytes
     }
 
+    pub fn translate(&self, vaddr: u64) -> Option<(u64, bool)> {
+        for m in &self.mappings {
+            if vaddr >= m.vaddr && vaddr < m.vaddr + 4096 {
+                let offset = vaddr - m.vaddr;
+                return Some((m.paddr + offset, m.is_write));
+            }
+        }
+        None
+    }
+
+    pub fn find_free_user_span(&self, page_count: usize) -> Result<u64, &'static str> {
+        let span_bytes = (page_count as u64).checked_mul(4096).ok_or("Overflow in span bytes")?;
+        let mut candidate = 0x2000_0000u64;
+        'outer: while candidate.checked_add(span_bytes).unwrap_or(u64::MAX) < 0x3F00_0000 {
+            let end_cand = candidate + span_bytes;
+            for m in &self.mappings {
+                let m_start = m.vaddr;
+                let m_end = m_start + 4096;
+                if candidate < m_end && end_cand > m_start {
+                    candidate = (m_end + 0x1FFFFF) & !0x1FFFFF;
+                    continue 'outer;
+                }
+            }
+            return Ok(candidate);
+        }
+        Err("No free user virtual address span found")
+    }
+
+    pub fn update_leaf_flags(&mut self, vaddr: u64, is_write: bool) -> Result<(), &'static str> {
+        let l1 = unsafe { &mut *(self.ttbr0 as *mut PageTable) };
+        let l1_idx = ((vaddr >> 30) & 0x1FF) as usize;
+        if l1_idx != 0 || l1.entries[0] & DESC_VALID == 0 {
+            return Err("Invalid virtual address");
+        }
+        let l2_phys = l1.entries[0] & 0x0000_FFFF_FFFF_F000;
+        let l2 = unsafe { &mut *(l2_phys as *mut PageTable) };
+        let l2_idx = ((vaddr >> 21) & 0x1FF) as usize;
+        if l2.entries[l2_idx] & DESC_VALID == 0 || (l2.entries[l2_idx] & DESC_TABLE == 0) {
+            return Err("L2 entry missing");
+        }
+        let l3_phys = l2.entries[l2_idx] & 0x0000_FFFF_FFFF_F000;
+        let l3 = unsafe { &mut *(l3_phys as *mut PageTable) };
+        let l3_idx = ((vaddr >> 12) & 0x1FF) as usize;
+        if l3.entries[l3_idx] & DESC_VALID == 0 {
+            return Err("L3 entry not mapped");
+        }
+        let mut entry = l3.entries[l3_idx];
+        entry &= !(DESC_AP_RW_ALL | DESC_AP_RO_ALL);
+        if is_write {
+            entry |= DESC_AP_RW_ALL;
+        } else {
+            entry |= DESC_AP_RO_ALL;
+        }
+        l3.entries[l3_idx] = entry;
+
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("dsb ishst", options(nostack));
+            core::arch::asm!("tlbi vae1is, {0}", in(reg) (vaddr >> 12), options(nostack));
+            core::arch::asm!("dsb ish", options(nostack));
+            core::arch::asm!("isb", options(nostack));
+        }
+        if let Some(m) = self.mappings.iter_mut().find(|m| m.vaddr == vaddr) {
+            m.is_write = is_write;
+        }
+        Ok(())
+    }
+
+    pub fn clear_leaf_pte(&mut self, vaddr: u64) -> Result<u64, &'static str> {
+        let l1 = unsafe { &mut *(self.ttbr0 as *mut PageTable) };
+        let l1_idx = ((vaddr >> 30) & 0x1FF) as usize;
+        if l1_idx != 0 || l1.entries[0] & DESC_VALID == 0 {
+            return Err("Invalid virtual address");
+        }
+        let l2_phys = l1.entries[0] & 0x0000_FFFF_FFFF_F000;
+        let l2 = unsafe { &mut *(l2_phys as *mut PageTable) };
+        let l2_idx = ((vaddr >> 21) & 0x1FF) as usize;
+        if l2.entries[l2_idx] & DESC_VALID == 0 || (l2.entries[l2_idx] & DESC_TABLE == 0) {
+            return Err("L2 entry missing");
+        }
+        let l3_phys = l2.entries[l2_idx] & 0x0000_FFFF_FFFF_F000;
+        let l3 = unsafe { &mut *(l3_phys as *mut PageTable) };
+        let l3_idx = ((vaddr >> 12) & 0x1FF) as usize;
+        if l3.entries[l3_idx] & DESC_VALID == 0 {
+            return Err("L3 entry not mapped");
+        }
+        let paddr = l3.entries[l3_idx] & 0x0000_FFFF_FFFF_F000;
+        l3.entries[l3_idx] = 0;
+
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("dsb ishst", options(nostack));
+            core::arch::asm!("tlbi vae1is, {0}", in(reg) (vaddr >> 12), options(nostack));
+            core::arch::asm!("dsb ish", options(nostack));
+            core::arch::asm!("isb", options(nostack));
+        }
+        self.mappings.retain(|m| m.vaddr != vaddr);
+        self.mapped_bytes = self.mapped_bytes.saturating_sub(4096);
+        Ok(paddr)
+    }
+
+    pub fn restore_leaf_pte(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+        self.map_leaf_entry(vaddr, paddr, is_write, is_exec)?;
+        self.mappings.push(UserMapping {
+            vaddr,
+            paddr,
+            kind: MappingKind::PrivateOwned,
+            is_write,
+            is_exec,
+        });
+        Ok(())
+    }
+
     /// Validates that `[addr, addr + len)` lies strictly within valid EL0-mapped,
     /// normal-memory pages of this address space (and is writable when `write == true`).
     pub fn validate_user_range(&self, addr: u64, len: usize, write: bool) -> Result<(), i64> {
@@ -1937,6 +2059,180 @@ impl Drop for UserAddressSpace {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum MemoryLoanRights {
+    ReadOnly = 0,
+    ReadWrite = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoanState {
+    Reserved,
+    Active,
+    Returning,
+    Revoking,
+    Returned,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LendHandle(pub u64);
+
+impl LendHandle {
+    pub const fn new(slot: u32, generation: u32) -> Self {
+        Self(((generation as u64) << 32) | (slot as u64))
+    }
+    pub const fn slot(&self) -> usize {
+        (self.0 & 0xFFFF_FFFF) as usize
+    }
+    pub const fn generation(&self) -> u32 {
+        (self.0 >> 32) as u32
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryLoanRecord {
+    pub generation: u32,
+    pub lender_task: u32,
+    pub borrower_task: u32,
+    pub lender_vaddr: u64,
+    pub borrower_vaddr: u64,
+    pub page_count: usize,
+    pub frames: Vec<u64>,
+    pub rights: MemoryLoanRights,
+    pub original_lender_writable: Vec<bool>,
+    pub state: LoanState,
+}
+
+pub struct MemoryLoanManager {
+    pub records: Vec<Option<MemoryLoanRecord>>,
+    pub generations: Vec<u32>,
+}
+
+impl MemoryLoanManager {
+    pub const fn new() -> Self {
+        Self {
+            records: Vec::new(),
+            generations: Vec::new(),
+        }
+    }
+
+    pub fn reserve_slot(&mut self) -> Result<(usize, u32), &'static str> {
+        let slot = match self.records.iter().position(|r| r.is_none()) {
+            Some(idx) => idx,
+            None => {
+                if self.records.len() >= 4096 {
+                    return Err("Memory loan table full");
+                }
+                let idx = self.records.len();
+                self.records.push(None);
+                self.generations.push(1);
+                idx
+            }
+        };
+        let gen = self.generations[slot];
+        self.records[slot] = Some(MemoryLoanRecord {
+            generation: gen,
+            lender_task: 0,
+            borrower_task: 0,
+            lender_vaddr: 0,
+            borrower_vaddr: 0,
+            page_count: 0,
+            frames: Vec::new(),
+            rights: MemoryLoanRights::ReadOnly,
+            original_lender_writable: Vec::new(),
+            state: LoanState::Reserved,
+        });
+        Ok((slot, gen))
+    }
+
+    pub fn activate_loan(
+        &mut self,
+        slot: usize,
+        gen: u32,
+        lender_task: u32,
+        borrower_task: u32,
+        lender_vaddr: u64,
+        borrower_vaddr: u64,
+        page_count: usize,
+        frames: Vec<u64>,
+        rights: MemoryLoanRights,
+        original_lender_writable: Vec<bool>,
+    ) -> Result<LendHandle, &'static str> {
+        if slot >= self.records.len() || self.generations[slot] != gen {
+            return Err("Invalid slot or generation mismatch");
+        }
+        let handle = LendHandle::new(slot as u32, gen);
+        self.records[slot] = Some(MemoryLoanRecord {
+            generation: gen,
+            lender_task,
+            borrower_task,
+            lender_vaddr,
+            borrower_vaddr,
+            page_count,
+            frames,
+            rights,
+            original_lender_writable,
+            state: LoanState::Active,
+        });
+        Ok(handle)
+    }
+
+    pub fn claim_return_or_revoke(
+        &mut self,
+        handle: LendHandle,
+        caller_task: u32,
+    ) -> Result<MemoryLoanRecord, &'static str> {
+        let slot = handle.slot();
+        if slot >= self.records.len() || self.generations[slot] != handle.generation() {
+            return Err("Invalid loan handle or generation mismatch");
+        }
+        let rec = self.records[slot].as_mut().ok_or("Empty loan slot")?;
+        if caller_task != rec.borrower_task && caller_task != rec.lender_task {
+            return Err("Permission denied: caller neither borrower nor lender");
+        }
+        if rec.state != LoanState::Active {
+            return Err("Loan not active");
+        }
+        rec.state = if caller_task == rec.lender_task {
+            LoanState::Revoking
+        } else {
+            LoanState::Returning
+        };
+        Ok(rec.clone())
+    }
+
+    pub fn complete_return_or_revoke(&mut self, slot: usize, gen: u32) {
+        if slot < self.records.len() && self.generations[slot] == gen {
+            self.release_slot(slot);
+        }
+    }
+
+    pub fn release_slot(&mut self, slot: usize) {
+        if slot < self.records.len() {
+            self.records[slot] = None;
+            self.generations[slot] = self.generations[slot].wrapping_add(1);
+            if self.generations[slot] == 0 {
+                self.generations[slot] = 1;
+            }
+        }
+    }
+
+    pub fn is_frame_lent(&self, frame: u64) -> bool {
+        for rec_opt in &self.records {
+            if let Some(rec) = rec_opt {
+                if rec.state == LoanState::Active && rec.frames.contains(&frame) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+pub static MEMORY_LOANS: spin::Mutex<MemoryLoanManager> = spin::Mutex::new(MemoryLoanManager::new());
 
 pub fn test_mmu_ownership_reclamation_errors() {
     // 1. Private ownership validation failure in unmap_user_page:
