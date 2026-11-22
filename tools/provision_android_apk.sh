@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg>
+
 #
 # Provisions the external Android acceptance APK used by the Android
 # contract suites. The APK is an upstream release artifact (Fossify File
