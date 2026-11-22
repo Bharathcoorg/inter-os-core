@@ -105,7 +105,9 @@ impl RecordCipher {
 
         // 2. Compute per-record nonce
         let nonce = compute_nonce(&self.iv, self.seq);
-        self.seq = self.seq.wrapping_add(1);
+        // The nonce is IV xor seq: at 2^64 records it would repeat, and
+        // repeating a nonce under AES-GCM is catastrophic. Fail closed.
+        self.seq = self.seq.checked_add(1).ok_or(TlsError::KeyDerivationError)?;
 
         // 3. Prepare inner plaintext in-place inside `out`
         // We write plaintext at out[5..5 + plaintext.len()], inner_type at out[5 + plaintext.len()]
@@ -187,7 +189,8 @@ impl RecordCipher {
         tag.copy_from_slice(&record[RECORD_HEADER_LEN + ciphertext_len..RECORD_HEADER_LEN + record_len]);
 
         let nonce = compute_nonce(&self.iv, self.seq);
-        self.seq = self.seq.wrapping_add(1);
+        // Refuse to reuse a record nonce (see the send path for why).
+        self.seq = self.seq.checked_add(1).ok_or(TlsError::KeyDerivationError)?;
 
         // WHY the caller's buffer is also the decryption target: an intermediate
         // frame of the reader's own would cap every record at its size, and a
@@ -259,7 +262,8 @@ impl RecordCipher {
         tag.copy_from_slice(&buf[RECORD_HEADER_LEN + ciphertext_len..RECORD_HEADER_LEN + record_len]);
 
         let nonce = compute_nonce(&self.iv, self.seq);
-        self.seq = self.seq.wrapping_add(1);
+        // Refuse to reuse a record nonce (see the send path for why).
+        self.seq = self.seq.checked_add(1).ok_or(TlsError::KeyDerivationError)?;
 
         let (aad, body) = buf.split_at_mut(RECORD_HEADER_LEN);
         ChaCha20Poly1305::open_in_place(&self.key, &nonce, aad, &mut body[..ciphertext_len], &tag)

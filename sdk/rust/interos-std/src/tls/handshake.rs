@@ -371,6 +371,12 @@ impl HandshakeClient {
 
     /// Processes a ServerHello message, performs X25519 key exchange, and derives handshake traffic secrets.
     pub fn process_server_hello(&mut self, payload: &[u8]) -> Result<(), TlsError> {
+        // State-machine discipline: exactly one ServerHello per handshake, and
+        // only after our ClientHello is on the wire. A second one would
+        // reinitialize ciphers and rewind the transcript.
+        if self.state != HandshakeState::ClientHelloSent {
+            return Err(TlsError::UnexpectedMessage);
+        }
         if payload.len() < 4 || payload[0] != HANDSHAKE_SERVER_HELLO {
             return Err(TlsError::BadHandshakeMessage);
         }
@@ -515,10 +521,10 @@ impl HandshakeClient {
         self.server_handshake_traffic_secret = derive_secret(&handshake_secret, b"s hs traffic", &th);
 
         // Derive keys and IVs
-        let _ = hkdf_expand_label(&self.client_handshake_traffic_secret, b"key", &[], &mut self.client_handshake_key);
-        let _ = hkdf_expand_label(&self.client_handshake_traffic_secret, b"iv", &[], &mut self.client_handshake_iv);
-        let _ = hkdf_expand_label(&self.server_handshake_traffic_secret, b"key", &[], &mut self.server_handshake_key);
-        let _ = hkdf_expand_label(&self.server_handshake_traffic_secret, b"iv", &[], &mut self.server_handshake_iv);
+        hkdf_expand_label(&self.client_handshake_traffic_secret, b"key", &[], &mut self.client_handshake_key);
+        hkdf_expand_label(&self.client_handshake_traffic_secret, b"iv", &[], &mut self.client_handshake_iv);
+        hkdf_expand_label(&self.server_handshake_traffic_secret, b"key", &[], &mut self.server_handshake_key);
+        hkdf_expand_label(&self.server_handshake_traffic_secret, b"iv", &[], &mut self.server_handshake_iv);
 
         // Store handshake secret in temporary slot for master secret derivation later
         // We can store master secret derivation base:
@@ -532,6 +538,13 @@ impl HandshakeClient {
 
     /// Processes EncryptedExtensions.
     pub fn process_encrypted_extensions(&mut self, payload: &[u8]) -> Result<(), TlsError> {
+        // State-machine discipline: EncryptedExtensions is legal exactly once,
+        // immediately after the key share is accepted. Any other arrival point
+        // (including a re-delivery after Finished) would let a later
+        // Certificate/CertificateVerify be judged against a reset transcript.
+        if self.state != HandshakeState::ServerHelloReceived {
+            return Err(TlsError::UnexpectedMessage);
+        }
         if payload.len() < 4 || payload[0] != HANDSHAKE_ENCRYPTED_EXTENSIONS {
             return Err(TlsError::BadHandshakeMessage);
         }
@@ -793,7 +806,7 @@ impl HandshakeClient {
 
         // Calculate expected verify_data
         let mut finished_key = [0u8; 32];
-        let _ = hkdf_expand_label(&self.server_handshake_traffic_secret, b"finished", &[], &mut finished_key);
+        hkdf_expand_label(&self.server_handshake_traffic_secret, b"finished", &[], &mut finished_key);
         let th = self.transcript.finalize();
         let expected = HmacSha256::compute(&finished_key, &th);
 
@@ -824,10 +837,10 @@ impl HandshakeClient {
         self.client_application_traffic_secret = derive_secret(&master_secret, b"c ap traffic", &th);
         self.server_application_traffic_secret = derive_secret(&master_secret, b"s ap traffic", &th);
 
-        let _ = hkdf_expand_label(&self.client_application_traffic_secret, b"key", &[], &mut self.client_application_key);
-        let _ = hkdf_expand_label(&self.client_application_traffic_secret, b"iv", &[], &mut self.client_application_iv);
-        let _ = hkdf_expand_label(&self.server_application_traffic_secret, b"key", &[], &mut self.server_application_key);
-        let _ = hkdf_expand_label(&self.server_application_traffic_secret, b"iv", &[], &mut self.server_application_iv);
+        hkdf_expand_label(&self.client_application_traffic_secret, b"key", &[], &mut self.client_application_key);
+        hkdf_expand_label(&self.client_application_traffic_secret, b"iv", &[], &mut self.client_application_iv);
+        hkdf_expand_label(&self.server_application_traffic_secret, b"key", &[], &mut self.server_application_key);
+        hkdf_expand_label(&self.server_application_traffic_secret, b"iv", &[], &mut self.server_application_iv);
 
         Ok(())
     }
@@ -840,7 +853,7 @@ impl HandshakeClient {
         out: &mut [u8],
     ) -> Result<usize, TlsError> {
         let mut finished_key = [0u8; 32];
-        let _ = hkdf_expand_label(&self.client_handshake_traffic_secret, b"finished", &[], &mut finished_key);
+        hkdf_expand_label(&self.client_handshake_traffic_secret, b"finished", &[], &mut finished_key);
 
         let th = self.transcript.finalize();
         let verify_data = HmacSha256::compute(&finished_key, &th);
