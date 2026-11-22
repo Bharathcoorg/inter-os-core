@@ -786,7 +786,14 @@ pub fn skip_all_kv_pairs(buf: &[u8], offset: &mut usize, kv_count: u64) -> Resul
         ]) as usize;
         *offset += 8;
 
-        if *offset + key_len + 4 > buf.len() {
+        // Overflow-checked: `*offset + key_len + 4` can wrap in release
+        // builds for a hostile key length, silently passing the bounds
+        // check and reading out of bounds below.
+        let needed = key_len
+            .checked_add(4)
+            .and_then(|n| n.checked_add(*offset))
+            .ok_or(GgufError::BufferTooShort)?;
+        if needed > buf.len() {
             return Err(GgufError::BufferTooShort);
         }
         *offset += key_len;
@@ -812,7 +819,11 @@ pub fn parse_tensor_info(buf: &[u8], offset: &mut usize) -> Result<GgufTensorInf
     ]) as usize;
     *offset += 8;
 
-    if *offset + name_len + 4 > buf.len() {
+    let needed = name_len
+        .checked_add(4)
+        .and_then(|n| n.checked_add(*offset))
+        .ok_or(GgufError::BufferTooShort)?;
+    if needed > buf.len() {
         return Err(GgufError::BufferTooShort);
     }
     let mut info = GgufTensorInfo::empty();
@@ -828,7 +839,11 @@ pub fn parse_tensor_info(buf: &[u8], offset: &mut usize) -> Result<GgufTensorInf
     info.n_dimensions = n_dims;
 
     let dims_bytes_len = (n_dims as usize).checked_mul(8).ok_or(GgufError::InvalidMetadata)?;
-    if *offset + dims_bytes_len + 4 + 8 > buf.len() {
+    let needed = dims_bytes_len
+        .checked_add(4 + 8)
+        .and_then(|n| n.checked_add(*offset))
+        .ok_or(GgufError::BufferTooShort)?;
+    if needed > buf.len() {
         return Err(GgufError::BufferTooShort);
     }
 
@@ -2333,8 +2348,12 @@ pub fn find_metadata_string<'a>(buf: &'a [u8], target_key: &[u8]) -> Option<&'a 
         ]) as usize;
         offset += 8;
 
-        if offset + key_len + 4 > buf.len() {
-            return None;
+        let needed = key_len
+            .checked_add(4)
+            .and_then(|n| n.checked_add(offset));
+        match needed {
+            Some(n) if n <= buf.len() => {}
+            _ => return None,
         }
         let key = &buf[offset..offset + key_len];
         offset += key_len;
