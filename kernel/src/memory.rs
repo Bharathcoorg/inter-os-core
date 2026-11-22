@@ -627,7 +627,10 @@ pub enum MemoryLoanRights {
 /// State of an active or reclaimed memory loan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoanState {
+    Reserved,
     Active,
+    Returning,
+    Revoking,
     Returned,
     Revoked,
 }
@@ -651,7 +654,7 @@ pub struct MemoryLoanRecord {
     pub page_count: usize,
     pub frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
     pub rights: MemoryLoanRights,
-    pub original_lender_flags: PageTableFlags,
+    pub original_lender_flags: alloc::vec::Vec<PageTableFlags>,
     pub state: LoanState,
 }
 
@@ -669,17 +672,8 @@ impl MemoryLoanManager {
         }
     }
 
-    pub fn allocate_loan(
-        &mut self,
-        lender_task: u64,
-        borrower_task: u64,
-        lender_vaddr: u64,
-        borrower_vaddr: u64,
-        page_count: usize,
-        frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
-        rights: MemoryLoanRights,
-        original_lender_flags: PageTableFlags,
-    ) -> Result<LendHandle, &'static str> {
+    /// Reserves an inactive slot in the loan table before committing page table mutations.
+    pub fn reserve_slot(&mut self) -> Result<(usize, u32), &'static str> {
         let slot = match self.records.iter().position(|r| r.is_none()) {
             Some(idx) => idx,
             None => {
@@ -693,6 +687,38 @@ impl MemoryLoanManager {
             }
         };
         let gen = self.generations[slot];
+        self.records[slot] = Some(MemoryLoanRecord {
+            generation: gen,
+            lender_task: 0,
+            borrower_task: 0,
+            lender_vaddr: 0,
+            borrower_vaddr: 0,
+            page_count: 0,
+            frames: alloc::vec::Vec::new(),
+            rights: MemoryLoanRights::ReadOnly,
+            original_lender_flags: alloc::vec::Vec::new(),
+            state: LoanState::Reserved,
+        });
+        Ok((slot, gen))
+    }
+
+    /// Activates a previously reserved slot with verified loan metadata.
+    pub fn activate_loan(
+        &mut self,
+        slot: usize,
+        gen: u32,
+        lender_task: u64,
+        borrower_task: u64,
+        lender_vaddr: u64,
+        borrower_vaddr: u64,
+        page_count: usize,
+        frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
+        rights: MemoryLoanRights,
+        original_lender_flags: alloc::vec::Vec<PageTableFlags>,
+    ) -> Result<LendHandle, &'static str> {
+        if slot >= self.records.len() || self.generations[slot] != gen {
+            return Err("Invalid slot or generation mismatch");
+        }
         let handle = LendHandle::new(slot as u32, gen);
         self.records[slot] = Some(MemoryLoanRecord {
             generation: gen,
@@ -709,6 +735,32 @@ impl MemoryLoanManager {
         Ok(handle)
     }
 
+    pub fn allocate_loan(
+        &mut self,
+        lender_task: u64,
+        borrower_task: u64,
+        lender_vaddr: u64,
+        borrower_vaddr: u64,
+        page_count: usize,
+        frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
+        rights: MemoryLoanRights,
+        original_lender_flags: alloc::vec::Vec<PageTableFlags>,
+    ) -> Result<LendHandle, &'static str> {
+        let (slot, gen) = self.reserve_slot()?;
+        self.activate_loan(
+            slot,
+            gen,
+            lender_task,
+            borrower_task,
+            lender_vaddr,
+            borrower_vaddr,
+            page_count,
+            frames,
+            rights,
+            original_lender_flags,
+        )
+    }
+
     pub fn get(&self, handle: LendHandle) -> Option<&MemoryLoanRecord> {
         let slot = handle.slot();
         if slot >= self.records.len() {
@@ -722,6 +774,38 @@ impl MemoryLoanManager {
             Some(rec)
         } else {
             None
+        }
+    }
+
+    /// Single-consumer atomic transition: claims an Active loan for return or revocation.
+    /// Fails cleanly if the loan is invalid, unauthorized, or already in Returning/Revoking/Returned state.
+    pub fn claim_return_or_revoke(
+        &mut self,
+        handle: LendHandle,
+        caller_task: u64,
+    ) -> Result<MemoryLoanRecord, &'static str> {
+        let slot = handle.slot();
+        if slot >= self.records.len() || self.generations[slot] != handle.generation() {
+            return Err("Invalid loan handle or generation mismatch");
+        }
+        let rec = self.records[slot].as_mut().ok_or("Empty loan slot")?;
+        if caller_task != rec.borrower_task && caller_task != rec.lender_task {
+            return Err("Permission denied: caller neither borrower nor lender");
+        }
+        if rec.state != LoanState::Active {
+            return Err("Loan not active (already transitioning or returned)");
+        }
+        rec.state = if caller_task == rec.lender_task {
+            LoanState::Revoking
+        } else {
+            LoanState::Returning
+        };
+        Ok(rec.clone())
+    }
+
+    pub fn complete_return_or_revoke(&mut self, slot: usize, gen: u32) {
+        if slot < self.records.len() && self.generations[slot] == gen {
+            self.release_slot(slot);
         }
     }
 
@@ -758,6 +842,8 @@ pub fn init_kernel_heap() -> Result<(), MapToError<Size4KiB>> {
     crate::allocator::init_heap(mapper, frame_allocator)
 }
 
+pub const MAX_BORROWED_PAGES_PER_TASK: usize = 2048;
+
 /// An isolated Level 4 Page Table (PML4) dedicated to a specific user task.
 ///
 /// Owns the root physical frame. Lower half (entries 0..256) is completely isolated
@@ -769,6 +855,7 @@ pub struct TaskPageTable {
     pub allocated_frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
     pub shared_mappings: alloc::vec::Vec<SharedSurfaceMapping>,
     pub borrowed_mappings: alloc::vec::Vec<BorrowedMapping>,
+    pub borrowed_pages_count: usize,
     /// Bytes of user virtual memory currently backed by leaf mappings.
     pub user_mapped_bytes: usize,
 }
@@ -812,6 +899,7 @@ impl TaskPageTable {
             allocated_frames: allocated,
             shared_mappings: alloc::vec::Vec::new(),
             borrowed_mappings: alloc::vec::Vec::new(),
+            borrowed_pages_count: 0,
             user_mapped_bytes: 0,
         })
     }
@@ -1411,6 +1499,7 @@ impl Drop for TaskPageTable {
                 let _ = self.clear_leaf_pte(page);
             }
         }
+        self.borrowed_pages_count = 0;
 
         // 2. Clear exclusively owned mappings before returning frames to the allocator.
         for frame in self.allocated_frames.drain(..) {
@@ -1445,7 +1534,7 @@ pub fn cleanup_loans_for_task(task_id: crate::task::TaskId) {
         frames: alloc::vec::Vec<PhysFrame<Size4KiB>>,
         page_count: usize,
         rights: MemoryLoanRights,
-        original_flags: PageTableFlags,
+        original_flags: alloc::vec::Vec<PageTableFlags>,
     }
     struct RevokeAction {
         slot: usize,
@@ -1472,7 +1561,7 @@ pub fn cleanup_loans_for_task(task_id: crate::task::TaskId) {
                             frames: rec.frames.clone(),
                             page_count: rec.page_count,
                             rights: rec.rights,
-                            original_flags: rec.original_lender_flags,
+                            original_flags: rec.original_lender_flags.clone(),
                         });
                     } else if rec.lender_task == tid {
                         rec.state = LoanState::Revoked;
@@ -1503,16 +1592,18 @@ pub fn cleanup_loans_for_task(task_id: crate::task::TaskId) {
         if let Some(pt_arc) = lender_pt {
             let mut pt = pt_arc.lock();
             if act.rights == MemoryLoanRights::ReadOnly {
-                if act.original_flags.contains(PageTableFlags::WRITABLE) {
-                    for i in 0..act.page_count {
+                for i in 0..act.page_count {
+                    let orig = act.original_flags.get(i).copied().unwrap_or(PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE);
+                    if orig.contains(PageTableFlags::WRITABLE) {
                         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(act.lender_vaddr + (i as u64 * 4096)));
-                        let _ = pt.update_leaf_flags(page, act.original_flags);
+                        let _ = pt.update_leaf_flags(page, orig);
                     }
                 }
             } else if act.rights == MemoryLoanRights::ReadWrite {
                 for i in 0..act.page_count {
+                    let orig = act.original_flags.get(i).copied().unwrap_or(PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE);
                     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(act.lender_vaddr + (i as u64 * 4096)));
-                    let _ = pt.map_leaf_raw(page, act.frames[i], act.original_flags);
+                    let _ = pt.map_leaf_raw(page, act.frames[i], orig);
                 }
             }
         }
@@ -1530,6 +1621,7 @@ pub fn cleanup_loans_for_task(task_id: crate::task::TaskId) {
                 let _ = pt.clear_leaf_pte(page);
             }
             pt.borrowed_mappings.retain(|bm| bm.start_page.start_address().as_u64() != act.borrower_vaddr);
+            pt.borrowed_pages_count = pt.borrowed_pages_count.saturating_sub(act.page_count);
         }
         for frame in act.frames {
             recycle_frame(frame);
@@ -1963,7 +2055,10 @@ mod tests {
             2,
             alloc::vec::Vec::new(),
             MemoryLoanRights::ReadOnly,
-            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+            alloc::vec![
+                PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+                PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE
+            ],
         ).expect("allocate loan 1");
 
         assert_eq!(handle1.slot(), 0);
@@ -1987,13 +2082,91 @@ mod tests {
             1,
             alloc::vec::Vec::new(),
             MemoryLoanRights::ReadWrite,
-            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE,
+            alloc::vec![PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE],
         ).expect("allocate loan 2");
 
         assert_eq!(handle2.slot(), 0);
         assert_eq!(handle2.generation(), 2);
         assert!(mgr.get(handle1).is_none(), "stale handle with old generation must be rejected");
         assert!(mgr.get(handle2).is_some(), "new handle must be found");
+    }
+
+    #[test]
+    fn test_memory_loan_single_consumer_race() {
+        let mut mgr = MemoryLoanManager::new();
+        let handle = mgr.allocate_loan(
+            10,
+            20,
+            0x3000_0000,
+            0x4000_0000,
+            2,
+            alloc::vec::Vec::new(),
+            MemoryLoanRights::ReadOnly,
+            alloc::vec![
+                PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+                PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE
+            ],
+        ).expect("allocate loan");
+
+        // Unauthorized caller fails
+        assert!(mgr.claim_return_or_revoke(handle, 999).is_err());
+
+        // First legitimate claim succeeds
+        let rec = mgr.claim_return_or_revoke(handle, 20).expect("first claim by borrower succeeds");
+        assert_eq!(rec.state, LoanState::Returning);
+
+        // Concurrent attempt by lender or second borrower call must fail immediately
+        assert!(mgr.claim_return_or_revoke(handle, 10).is_err(), "concurrent return/revoke must be rejected");
+        assert!(mgr.claim_return_or_revoke(handle, 20).is_err(), "duplicate claim must be rejected");
+
+        // Completion releases slot
+        mgr.complete_return_or_revoke(handle.slot(), handle.generation());
+        assert!(mgr.get(handle).is_none(), "completed loan is no longer active");
+    }
+
+    #[test]
+    fn test_heterogeneous_multi_page_original_flags() {
+        let mut mgr = MemoryLoanManager::new();
+        let orig = alloc::vec![
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE,
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE,
+        ];
+        let handle = mgr.allocate_loan(
+            5,
+            6,
+            0x1000_0000,
+            0x2000_0000,
+            3,
+            alloc::vec::Vec::new(),
+            MemoryLoanRights::ReadOnly,
+            orig.clone(),
+        ).expect("allocate heterogeneous loan");
+
+        let rec = mgr.get(handle).expect("get heterogeneous loan");
+        assert_eq!(rec.original_lender_flags.len(), 3);
+        assert_eq!(rec.original_lender_flags[0], orig[0]);
+        assert_eq!(rec.original_lender_flags[1], orig[1]);
+        assert_eq!(rec.original_lender_flags[2], orig[2]);
+    }
+
+    #[test]
+    fn test_borrower_resource_limit() {
+        assert_eq!(MAX_BORROWED_PAGES_PER_TASK, 2048);
+        let mut pt = TaskPageTable {
+            pml4_frame: PhysFrame::containing_address(PhysAddr::new(0)),
+            allocated_frames: alloc::vec::Vec::new(),
+            shared_mappings: alloc::vec::Vec::new(),
+            borrowed_mappings: alloc::vec::Vec::new(),
+            borrowed_pages_count: 2040,
+            user_mapped_bytes: 0,
+        };
+        // 8 pages fit
+        assert!(pt.borrowed_pages_count + 8 <= MAX_BORROWED_PAGES_PER_TASK);
+        pt.borrowed_pages_count += 8;
+        // 1 more exceeds limit
+        assert!(pt.borrowed_pages_count + 1 > MAX_BORROWED_PAGES_PER_TASK);
+        core::mem::forget(pt);
     }
 }
 

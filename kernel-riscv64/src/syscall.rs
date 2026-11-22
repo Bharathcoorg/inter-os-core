@@ -62,6 +62,12 @@ pub const SYS_APP_FOREGROUND: usize = 117;
 pub const SYS_APP_RESTART: usize = 122;
 pub const SYS_FS_SYNC: usize = 125;
 pub const SYS_FS_READ_AT: usize = 164;
+/// Cross-architecture MMU memory lending/transfer syscall numbers.
+/// Hardware MMU page table lending is currently implemented for x86_64;
+/// returns -38 (-ENOSYS) on RISC-V 64 until stage 2 RISC-V hardware bring-up.
+pub const SYS_MEM_LEND: usize = 173;
+pub const SYS_MEM_RETURN: usize = 174;
+pub const SYS_MEM_TRANSFER: usize = 175;
 
 pub const USER_SPACE_MIN: usize = 0x0000_1000;
 pub const USER_SPACE_MAX: usize = 0x7FFF_FFFF; // Below 2GB Kernel DRAM
@@ -924,6 +930,7 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         SYS_BLOCK_READ => -13,
         SYS_VERIFY_PACKAGE => -38, // -ENOSYS: must not fabricate cryptographic verification success
         SYS_DEVFS_IO | SYS_TELEPHONY_QUERY => -38,
+        SYS_MEM_LEND | SYS_MEM_RETURN | SYS_MEM_TRANSFER => -38, // -ENOSYS: MMU lending implemented on x86_64
         SYS_WAIT_PID => {
             let target_pid = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
             let (caller_pid, is_supervisor) = match get_caller_identity_and_caps() {

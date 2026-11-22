@@ -43,3 +43,12 @@ def test_address_space_accounting_is_connected_to_process_limits():
     assert "user_mapped_bytes()" in USER
     assert "set_address_space_usage" in USER
     assert "max_address_space_bytes" in USER
+
+
+def test_transactional_mmu_lending_and_resource_accounting():
+    assert "reserve_slot" in MEMORY
+    assert "activate_loan" in MEMORY
+    assert "claim_return_or_revoke" in MEMORY
+    assert "MAX_BORROWED_PAGES_PER_TASK" in MEMORY
+    assert "original_lender_flags: alloc::vec::Vec<PageTableFlags>" in MEMORY
+

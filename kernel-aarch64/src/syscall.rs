@@ -68,6 +68,12 @@ pub const SYS_APP_FOREGROUND: u64 = 117;
 pub const SYS_APP_RESTART: u64 = 122;
 pub const SYS_FS_SYNC: u64 = 125;
 pub const SYS_FS_READ_AT: u64 = 164;
+/// Cross-architecture MMU memory lending/transfer syscall numbers.
+/// Hardware MMU page table lending is currently implemented for x86_64;
+/// returns -38 (-ENOSYS) on AArch64 until stage 2 ARM64 hardware bring-up.
+pub const SYS_MEM_LEND: u64 = 173;
+pub const SYS_MEM_RETURN: u64 = 174;
+pub const SYS_MEM_TRANSFER: u64 = 175;
 
 fn validate_user_range(addr: u64, len: usize, write: bool) -> Result<(), i64> {
     let _ = addr.checked_add(len as u64).ok_or(-14i64)?;
@@ -837,6 +843,7 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
         SYS_BLOCK_READ => -13,
         SYS_VERIFY_PACKAGE => -38, // -ENOSYS: must not fabricate cryptographic verification success
         SYS_DEVFS_IO => -38,
+        SYS_MEM_LEND | SYS_MEM_RETURN | SYS_MEM_TRANSFER => -38, // -ENOSYS: MMU lending implemented on x86_64
         _ => -38, // -ENOSYS
     }
 }

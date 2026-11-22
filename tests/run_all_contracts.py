@@ -114,7 +114,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_memory_retirement_notice_contract.py": 9,
     "tests/test_messages_keyboard_truth_contract.py": 9,
     "tests/test_messages_truth_contract.py": 19,
-    "tests/test_mmu_contracts.py": 6,
+    "tests/test_mmu_contracts.py": 7,
     "tests/test_model_provisioning_contract.py": 31,
     "tests/test_music_truth_contract.py": 20,
     "tests/test_native_ui_truth_contract.py": 34,
