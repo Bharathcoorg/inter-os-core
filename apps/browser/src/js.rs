@@ -415,7 +415,13 @@ pub struct Parser<'a> {
     params_pool: [[u8; 32]; 32],
     params_lens: [u8; 32],
     params_count: usize,
+    depth: usize,
 }
+
+/// Nesting limit for expression parsing. Each paren/bracket level recurses
+/// through `parse_expr`, so nesting depth is bounded well before the fixed
+/// node pool could drive the stack past its budget.
+const MAX_PARSE_DEPTH: usize = 128;
 
 impl<'a> Parser<'a> {
     pub fn new(mut lexer: Lexer<'a>) -> Result<Self, JsError> {
@@ -432,6 +438,7 @@ impl<'a> Parser<'a> {
             params_pool: [[0; 32]; 32],
             params_lens: [0; 32],
             params_count: 0,
+            depth: 0,
         })
     }
 
@@ -807,13 +814,19 @@ impl<'a> Parser<'a> {
                 self.alloc_expr(ExprKind::Ident(name, nlen as u8))
             }
             TokenKind::LParen => {
+                self.enter_nested()?;
                 self.advance()?;
                 let expr = self.parse_expr()?;
-                if self.curr.kind != TokenKind::RParen { return Err(JsError::UnexpectedToken); }
+                if self.curr.kind != TokenKind::RParen {
+                    self.depth -= 1;
+                    return Err(JsError::UnexpectedToken);
+                }
                 self.advance()?;
+                self.depth -= 1;
                 Ok(expr)
             }
             TokenKind::LBracket => {
+                self.enter_nested()?;
                 self.advance()?;
                 let start = self.args_count;
                 let mut count = 0u8;
@@ -831,12 +844,24 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                if self.curr.kind != TokenKind::RBracket { return Err(JsError::UnexpectedToken); }
+                if self.curr.kind != TokenKind::RBracket {
+                    self.depth -= 1;
+                    return Err(JsError::UnexpectedToken);
+                }
                 self.advance()?;
+                self.depth -= 1;
                 self.alloc_expr(ExprKind::Array { elements_start: start, elements_count: count })
             }
             _ => Err(JsError::UnexpectedToken),
         }
+    }
+
+    fn enter_nested(&mut self) -> Result<(), JsError> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(JsError::CapacityExceeded);
+        }
+        Ok(())
     }
 }
 

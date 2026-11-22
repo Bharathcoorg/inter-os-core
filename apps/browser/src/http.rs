@@ -311,9 +311,14 @@ pub fn header_section(raw: &[u8]) -> &[u8] {
 /// The status line is skipped, obs-fold continuation lines are not joined
 /// (the response is treated as untrusted input), and every field's name is
 /// returned exactly as it arrived. Values are trimmed of surrounding spaces.
+/// Header count is capped: a response that keeps listing fields has its
+/// excess ignored rather than given further processing budget.
+pub const MAX_HEADER_FIELDS: usize = 256;
+
 pub fn for_each_header<'a, F: FnMut(&'a [u8], &'a [u8])>(raw: &'a [u8], mut visit: F) {
     let section = header_section(raw);
     let mut first = true;
+    let mut fields = 0usize;
     for line in section.split(|&b| b == b'\n') {
         let line = if !line.is_empty() && line[line.len() - 1] == b'\r' {
             &line[..line.len() - 1]
@@ -327,6 +332,10 @@ pub fn for_each_header<'a, F: FnMut(&'a [u8], &'a [u8])>(raw: &'a [u8], mut visi
         let Some(colon) = line.iter().position(|&b| b == b':') else {
             continue;
         };
+        fields += 1;
+        if fields > MAX_HEADER_FIELDS {
+            return;
+        }
         let name = trim_ascii(&line[..colon]);
         let mut value = &line[colon + 1..];
         while !value.is_empty() && (value[0] == b' ' || value[0] == b'\t') {
@@ -902,6 +911,10 @@ impl CookieJar {
         let mut same_site = SameSitePolicy::Lax;
         let mut expires = u64::MAX;
         let mut expired_now = false;
+        // RFC 6265bis §5.5 "Set-Cookie over a non-secure channel": a cookie
+        // with the Secure attribute set over plaintext HTTP is discarded, so a
+        // network attacker cannot create or overwrite Secure cookies.
+        let secure_origin = parsed.scheme == UriScheme::Https;
 
         for attribute in attributes.split(|&b| b == b';') {
             let attribute = trim_ascii(attribute);
@@ -916,6 +929,9 @@ impl CookieJar {
                 None => (attribute, &b""[..]),
             };
             if key.eq_ignore_ascii_case(b"secure") {
+                if !secure_origin {
+                    return CookieOutcome::Rejected;
+                }
                 secure = true;
             } else if key.eq_ignore_ascii_case(b"httponly") {
                 http_only = true;
