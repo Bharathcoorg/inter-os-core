@@ -895,7 +895,7 @@ pub fn run_acr_app_runtime() -> ! {
                             }
                             let _ = std::log("[acr-app-runtime] FAULT INJECTION: triggering deliberate memory fault in child process");
                             unsafe {
-                                core::ptr::write_volatile(0xDEAD_BEEF as *mut u32, 0x42);
+                                core::ptr::write_volatile(0xDEAD_BEEF as *mut u8, 0x42);
                             }
                         }
                         _ => {}
@@ -1574,6 +1574,10 @@ fn handle_agent_ipc(
                 7 => {
                     tool_registry.clear_invocation_grants();
                     emit_agent_ack(sender_task_id, msg_type, 0, b"CLEAR_GRANTS_ACK", tx_buf);
+                }
+                8 => {
+                    populate_default_installed_tools(tool_registry);
+                    emit_agent_ack(sender_task_id, msg_type, 0, b"SYNC_TOOLS_ACK", tx_buf);
                 }
                 _ => {
                     emit_agent_ack(sender_task_id, msg_type, 1, b"UNKNOWN_OP", tx_buf);
@@ -4865,45 +4869,42 @@ pub fn handle_ipc_inference_query(
             std::ai::MODEL_ROLE_GENERATIVE_TEXT
         };
 
-        match requested_role {
-            std::ai::MODEL_ROLE_GENERATIVE_TEXT | std::ai::MODEL_ROLE_PLANNING => {
-                if let Some((_hdr, path)) = probed_models.generative {
+        let mut defaults = std::companion::ModelRegistryDefaults::new();
+        let mut loaded_defaults = false;
+        if let Ok(fd) = std::fs_open(std::companion::PATH_MODEL_DEFAULTS, std::FS_READ) {
+            let mut buf = [0u8; 512];
+            if let Ok(n) = std::fs_read(fd, &mut buf) {
+                if n > 0 && defaults.deserialize(&buf[..n]).is_ok() {
+                    loaded_defaults = true;
+                }
+            }
+            let _ = std::fs_close(fd);
+        }
+
+        let role_opt = std::ai::ModelRole::from_u32(requested_role);
+        let mut resolved = false;
+
+        if loaded_defaults {
+            if let Some(role) = role_opt {
+                if let Some(binding) = defaults.get_binding(role) {
                     let mut resp = [0u8; 64];
                     resp[0..4].copy_from_slice(&STATUS_SUCCESS.to_le_bytes());
                     resp[4..8].copy_from_slice(&requested_role.to_le_bytes());
-                    let path_bytes = path.as_bytes();
-                    let copy_len = path_bytes.len().min(56);
-                    resp[8..8 + copy_len].copy_from_slice(&path_bytes[..copy_len]);
+                    let id_str = binding.model_id_str();
+                    let id_bytes = id_str.as_bytes();
+                    let copy_len = id_bytes.len().min(56);
+                    resp[8..8 + copy_len].copy_from_slice(&id_bytes[..copy_len]);
                     let _ = std::ipc_send(sender_task_id, MSG_TYPE_ROLE_RESOLVE, &resp[..8 + copy_len]);
-                } else {
-                    let mut resp = [0u8; 8];
-                    resp[0..4].copy_from_slice(&STATUS_UNAVAILABLE.to_le_bytes());
-                    resp[4..8].copy_from_slice(&requested_role.to_le_bytes());
-                    let _ = std::ipc_send(sender_task_id, MSG_TYPE_ROLE_RESOLVE, &resp);
+                    resolved = true;
                 }
             }
-            std::ai::MODEL_ROLE_EMBEDDING => {
-                if let Some((_hdr, path)) = probed_models.embedding {
-                    let mut resp = [0u8; 64];
-                    resp[0..4].copy_from_slice(&STATUS_SUCCESS.to_le_bytes());
-                    resp[4..8].copy_from_slice(&requested_role.to_le_bytes());
-                    let path_bytes = path.as_bytes();
-                    let copy_len = path_bytes.len().min(56);
-                    resp[8..8 + copy_len].copy_from_slice(&path_bytes[..copy_len]);
-                    let _ = std::ipc_send(sender_task_id, MSG_TYPE_ROLE_RESOLVE, &resp[..8 + copy_len]);
-                } else {
-                    let mut resp = [0u8; 8];
-                    resp[0..4].copy_from_slice(&STATUS_UNAVAILABLE.to_le_bytes());
-                    resp[4..8].copy_from_slice(&requested_role.to_le_bytes());
-                    let _ = std::ipc_send(sender_task_id, MSG_TYPE_ROLE_RESOLVE, &resp);
-                }
-            }
-            _ => {
-                let mut resp = [0u8; 8];
-                resp[0..4].copy_from_slice(&STATUS_UNAVAILABLE.to_le_bytes());
-                resp[4..8].copy_from_slice(&requested_role.to_le_bytes());
-                let _ = std::ipc_send(sender_task_id, MSG_TYPE_ROLE_RESOLVE, &resp);
-            }
+        }
+
+        if !resolved {
+            let mut resp = [0u8; 8];
+            resp[0..4].copy_from_slice(&STATUS_UNAVAILABLE.to_le_bytes());
+            resp[4..8].copy_from_slice(&requested_role.to_le_bytes());
+            let _ = std::ipc_send(sender_task_id, MSG_TYPE_ROLE_RESOLVE, &resp);
         }
         return;
     }

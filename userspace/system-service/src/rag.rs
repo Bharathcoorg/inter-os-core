@@ -264,6 +264,7 @@ pub struct RagIndex {
     /// false if operating in deterministic lexical baseline mode.
     pub is_neural: bool,
     pub vector_space: VectorSpace,
+    pub identity: VectorSpaceIdentity,
 }
 
 impl RagIndex {
@@ -285,6 +286,7 @@ impl RagIndex {
             count: 0,
             is_neural,
             vector_space: if is_neural { VectorSpace::NeuralGemmaQ7 } else { VectorSpace::LexicalQ7 },
+            identity: VectorSpaceIdentity::lexical_baseline(),
         }
     }
 
@@ -418,6 +420,11 @@ impl RagIndex {
                 std::ai::quantize_f32_to_q7(&f32_out[..RAG_VECTOR_DIM], &mut chunk.embedding);
                 self.is_neural = true;
                 self.vector_space = VectorSpace::NeuralGemmaQ7;
+                self.identity.norm = 1;
+                self.identity.format = 1;
+                self.identity.dimension = RAG_VECTOR_DIM as u16;
+                self.identity.backend_version = 2;
+                self.identity.artifact_digest = *b"GEMMA_2_EMBEDDING_256D_Q7_V1__\0\0";
                 chunk.vector_space = VectorSpace::NeuralGemmaQ7;
             } else {
                 compute_embedding_768(
@@ -521,6 +528,23 @@ impl RagIndex {
         }
 
         found_count
+    }
+
+    /// Performs cosine similarity ranking across all indexed chunks for a query with vector space identity validation.
+    /// Refuses comparison (returns 0) if query_identity does not match the index's vector space identity.
+    pub fn search_with_identity(
+        &self,
+        query: &[u8],
+        target_dim: usize,
+        top_k: usize,
+        min_confidence: u8,
+        query_identity: &VectorSpaceIdentity,
+        out_matches: &mut [RagMatch],
+    ) -> usize {
+        if query_identity != &self.identity {
+            return 0; // Refuse comparison across mismatched vector spaces!
+        }
+        self.search(query, target_dim, top_k, min_confidence, out_matches)
     }
 
     /// Performs neural cosine similarity ranking across all indexed chunks for a query using an inference backend.
@@ -1398,6 +1422,26 @@ Vector search is enabled for notes and downloads.";
             b"/storage/notes/wifi.txt"
         );
         assert!(matches[0].confidence_percent >= 10);
+    }
+
+    #[test]
+    fn test_rag_index_search_with_identity_refuses_mismatch() {
+        let mut index = RagIndex::new(false);
+        index.ingest_document(
+            b"/storage/notes/wifi.txt",
+            b"Wi-Fi wireless network settings configuration WPA3 security password.",
+        );
+
+        let mut matches = [RagMatch::default(); 4];
+        let id_match = VectorSpaceIdentity::lexical_baseline();
+        let count = index.search_with_identity(b"wireless network setup", 256, 4, 10, &id_match, &mut matches);
+        assert!(count >= 1, "matching identity must return results");
+
+        let mut id_mismatch = VectorSpaceIdentity::lexical_baseline();
+        id_mismatch.artifact_digest = [0xFF; 32];
+        let mut mismatch_matches = [RagMatch::default(); 4];
+        let refused_count = index.search_with_identity(b"wireless network setup", 256, 4, 10, &id_mismatch, &mut mismatch_matches);
+        assert_eq!(refused_count, 0, "mismatched vector space identity must refuse comparison");
     }
 
     #[test]

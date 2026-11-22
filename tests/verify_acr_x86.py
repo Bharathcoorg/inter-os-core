@@ -295,11 +295,15 @@ def verify_acr_qemu():
             "Timeout waiting for FAULT_INJECTED"
         assert reader.wait_for("[acr-app-runtime] FAULT INJECTION", timeout=10.0, print_keywords=kw), \
             "Timeout waiting for FAULT INJECTION log"
+        assert reader.wait_for("[USER PAGE FAULT]", timeout=10.0, print_keywords=kw), \
+            "Timeout waiting for hardware USER PAGE FAULT trap"
         time.sleep(0.5)
 
         # Verify APK B is still alive by interacting with it
         print("  Verifying fault containment: peer APK B, acrd and OS alive...")
         reader.send("TAP 360 720\n")
+        assert reader.wait_for("MotionEvent dispatched: touch at (360, 720)", timeout=10.0, print_keywords=kw), \
+            "Timeout waiting for APK B touch dispatch after APK A crashed"
         # Ensure QEMU process didn't terminate or panic
         assert proc.poll() is None, "QEMU terminated unexpectedly during child fault"
         print("  [OK] Fault contained: APK A termination did not affect APK B, acrd, or kernel")

@@ -455,16 +455,32 @@ impl PreferenceCategory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MemoryProvenance {
     ModelInference = 0,         // Transient only: NEVER committed to durable storage!
-    SingleObservation = 1,      // Low confidence, evicted first
-    RepeatedBehavior = 2,       // Empirical observation (count >= 3)
-    ApprovedRoutine = 3,        // User approved suggestion
-    ExplicitCorrection = 4,     // User overturned an action
-    ExplicitUserInstruction = 5,// Highest priority, immune to automatic eviction
+    HeuristicInference = 1,     // Heuristic inference, low confidence / legacy conservative default
+    SingleObservation = 2,      // Single observation, low confidence
+    RepeatedBehavior = 3,       // Empirical observation (count >= 3)
+    ApprovedRoutine = 4,        // User approved suggestion
+    ExplicitCorrection = 5,     // User overturned an action
+    ExplicitUserInstruction = 6,// Highest priority, immune to automatic eviction
 }
 
 impl Default for MemoryProvenance {
     fn default() -> Self {
         Self::ExplicitUserInstruction
+    }
+}
+
+impl MemoryProvenance {
+    pub const fn from_u8(val: u8) -> Self {
+        match val {
+            0 => Self::ModelInference,
+            1 => Self::HeuristicInference,
+            2 => Self::SingleObservation,
+            3 => Self::RepeatedBehavior,
+            4 => Self::ApprovedRoutine,
+            5 => Self::ExplicitCorrection,
+            6 => Self::ExplicitUserInstruction,
+            _ => Self::HeuristicInference,
+        }
     }
 }
 
@@ -543,6 +559,7 @@ pub struct UserCorrection {
     pub user_fix: [u8; 64],
     pub fix_len: u8,
     pub timestamp: u64,
+    pub provenance: MemoryProvenance,
 }
 
 impl Default for UserCorrection {
@@ -555,12 +572,23 @@ impl Default for UserCorrection {
             user_fix: [0u8; 64],
             fix_len: 0,
             timestamp: 0,
+            provenance: MemoryProvenance::ExplicitCorrection,
         }
     }
 }
 
 impl UserCorrection {
     pub fn new(query: &[u8], action: &[u8], fix: &[u8], now: u64) -> Self {
+        Self::with_provenance(query, action, fix, now, MemoryProvenance::ExplicitCorrection)
+    }
+
+    pub fn with_provenance(
+        query: &[u8],
+        action: &[u8],
+        fix: &[u8],
+        now: u64,
+        provenance: MemoryProvenance,
+    ) -> Self {
         let mut rec = Self {
             query: [0u8; 64],
             query_len: query.len().min(64) as u8,
@@ -569,6 +597,7 @@ impl UserCorrection {
             user_fix: [0u8; 64],
             fix_len: fix.len().min(64) as u8,
             timestamp: now,
+            provenance,
         };
         rec.query[..rec.query_len as usize].copy_from_slice(&query[..rec.query_len as usize]);
         rec.system_action[..rec.action_len as usize].copy_from_slice(&action[..rec.action_len as usize]);
@@ -586,6 +615,7 @@ pub struct RoutineRecord {
     pub action_len: u8,
     pub count: u32,
     pub last_executed: u64,
+    pub provenance: MemoryProvenance,
 }
 
 impl Default for RoutineRecord {
@@ -597,7 +627,35 @@ impl Default for RoutineRecord {
             action_len: 0,
             count: 0,
             last_executed: 0,
+            provenance: MemoryProvenance::ApprovedRoutine,
         }
+    }
+}
+
+impl RoutineRecord {
+    pub fn new(trigger: &[u8], action: &[u8], count: u32, now: u64) -> Self {
+        Self::with_provenance(trigger, action, count, now, MemoryProvenance::ApprovedRoutine)
+    }
+
+    pub fn with_provenance(
+        trigger: &[u8],
+        action: &[u8],
+        count: u32,
+        now: u64,
+        provenance: MemoryProvenance,
+    ) -> Self {
+        let mut rec = Self {
+            trigger_name: [0u8; 32],
+            trigger_len: trigger.len().min(32) as u8,
+            action: [0u8; 64],
+            action_len: action.len().min(64) as u8,
+            count,
+            last_executed: now,
+            provenance,
+        };
+        rec.trigger_name[..rec.trigger_len as usize].copy_from_slice(&trigger[..rec.trigger_len as usize]);
+        rec.action[..rec.action_len as usize].copy_from_slice(&action[..rec.action_len as usize]);
+        rec
     }
 }
 
@@ -608,6 +666,7 @@ pub struct IntentPattern {
     pub pattern_len: u8,
     pub tool_id: u32,
     pub confidence: u8,
+    pub provenance: MemoryProvenance,
 }
 
 impl Default for IntentPattern {
@@ -617,6 +676,31 @@ impl Default for IntentPattern {
             pattern_len: 0,
             tool_id: 0,
             confidence: 0,
+            provenance: MemoryProvenance::RepeatedBehavior,
+        }
+    }
+}
+
+impl IntentPattern {
+    pub fn new(pattern: &[u8], tool_id: u32, confidence: u8) -> Self {
+        Self::with_provenance(pattern, tool_id, confidence, MemoryProvenance::RepeatedBehavior)
+    }
+
+    pub fn with_provenance(
+        pattern: &[u8],
+        tool_id: u32,
+        confidence: u8,
+        provenance: MemoryProvenance,
+    ) -> Self {
+        let mut pat = [0u8; 48];
+        let plen = pattern.len().min(48);
+        pat[..plen].copy_from_slice(&pattern[..plen]);
+        Self {
+            pattern: pat,
+            pattern_len: plen as u8,
+            tool_id,
+            confidence: confidence.min(100),
+            provenance,
         }
     }
 }
@@ -629,6 +713,7 @@ pub struct ToolSuccessRecord {
     pub successes: u32,
     pub failures: u32,
     pub last_failure_code: i32,
+    pub provenance: MemoryProvenance,
 }
 
 impl Default for ToolSuccessRecord {
@@ -639,6 +724,31 @@ impl Default for ToolSuccessRecord {
             successes: 0,
             failures: 0,
             last_failure_code: 0,
+            provenance: MemoryProvenance::RepeatedBehavior,
+        }
+    }
+}
+
+impl ToolSuccessRecord {
+    pub fn new(tool_id: u32, invocations: u32, successes: u32, failures: u32, last_failure_code: i32) -> Self {
+        Self::with_provenance(tool_id, invocations, successes, failures, last_failure_code, MemoryProvenance::RepeatedBehavior)
+    }
+
+    pub fn with_provenance(
+        tool_id: u32,
+        invocations: u32,
+        successes: u32,
+        failures: u32,
+        last_failure_code: i32,
+        provenance: MemoryProvenance,
+    ) -> Self {
+        Self {
+            tool_id,
+            invocations,
+            successes,
+            failures,
+            last_failure_code,
+            provenance,
         }
     }
 }
@@ -899,6 +1009,7 @@ impl CompanionState {
                 user_fix: [0u8; 64],
                 fix_len: 0,
                 timestamp: 0,
+                provenance: MemoryProvenance::ExplicitCorrection,
             }; MAX_CORRECTIONS],
             corr_count: 0,
             routines: [RoutineRecord {
@@ -908,6 +1019,7 @@ impl CompanionState {
                 action_len: 0,
                 count: 0,
                 last_executed: 0,
+                provenance: MemoryProvenance::ApprovedRoutine,
             }; MAX_ROUTINES],
             routine_count: 0,
             patterns: [IntentPattern {
@@ -915,6 +1027,7 @@ impl CompanionState {
                 pattern_len: 0,
                 tool_id: 0,
                 confidence: 0,
+                provenance: MemoryProvenance::RepeatedBehavior,
             }; MAX_INTENT_PATTERNS],
             pattern_count: 0,
             tool_stats: [ToolSuccessRecord {
@@ -923,6 +1036,7 @@ impl CompanionState {
                 successes: 0,
                 failures: 0,
                 last_failure_code: 0,
+                provenance: MemoryProvenance::RepeatedBehavior,
             }; MAX_TOOL_STATS],
             tool_stat_count: 0,
             active_plan: None,
@@ -1204,18 +1318,42 @@ impl CompanionState {
         if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Adaptive {
             return false;
         }
+        self.add_correction_with_provenance(query, action, fix, now, MemoryProvenance::ExplicitCorrection)
+    }
+
+    pub fn add_correction_with_provenance(
+        &mut self,
+        query: &[u8],
+        action: &[u8],
+        fix: &[u8],
+        now: u64,
+        provenance: MemoryProvenance,
+    ) -> bool {
+        if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Adaptive {
+            return false;
+        }
         if self.corr_count < MAX_CORRECTIONS || self.evict_lowest_priority() {
-            self.corrections[self.corr_count] = UserCorrection::new(query, action, fix, now);
+            self.corrections[self.corr_count] = UserCorrection::with_provenance(query, action, fix, now, provenance);
             self.corr_count += 1;
             true
         } else {
             // Overwrite oldest
-            self.corrections[0] = UserCorrection::new(query, action, fix, now);
+            self.corrections[0] = UserCorrection::with_provenance(query, action, fix, now, provenance);
             true
         }
     }
 
     pub fn record_routine(&mut self, trigger: &[u8], action: &[u8], now: u64) -> bool {
+        self.record_routine_with_provenance(trigger, action, now, MemoryProvenance::ApprovedRoutine)
+    }
+
+    pub fn record_routine_with_provenance(
+        &mut self,
+        trigger: &[u8],
+        action: &[u8],
+        now: u64,
+        provenance: MemoryProvenance,
+    ) -> bool {
         if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Adaptive {
             return false;
         }
@@ -1225,20 +1363,12 @@ impl CompanionState {
             {
                 self.routines[i].count = self.routines[i].count.saturating_add(1);
                 self.routines[i].last_executed = now;
+                self.routines[i].provenance = provenance;
                 return true;
             }
         }
         if self.routine_count < MAX_ROUTINES {
-            let mut r = RoutineRecord {
-                trigger_name: [0u8; 32],
-                trigger_len: trigger.len().min(32) as u8,
-                action: [0u8; 64],
-                action_len: action.len().min(64) as u8,
-                count: 1,
-                last_executed: now,
-            };
-            r.trigger_name[..r.trigger_len as usize].copy_from_slice(&trigger[..r.trigger_len as usize]);
-            r.action[..r.action_len as usize].copy_from_slice(&action[..r.action_len as usize]);
+            let r = RoutineRecord::with_provenance(trigger, action, 1, now, provenance);
             self.routines[self.routine_count] = r;
             self.routine_count += 1;
             true
@@ -1252,22 +1382,23 @@ impl CompanionState {
                     min_idx = i;
                 }
             }
-            let mut r = RoutineRecord {
-                trigger_name: [0u8; 32],
-                trigger_len: trigger.len().min(32) as u8,
-                action: [0u8; 64],
-                action_len: action.len().min(64) as u8,
-                count: 1,
-                last_executed: now,
-            };
-            r.trigger_name[..r.trigger_len as usize].copy_from_slice(&trigger[..r.trigger_len as usize]);
-            r.action[..r.action_len as usize].copy_from_slice(&action[..r.action_len as usize]);
+            let r = RoutineRecord::with_provenance(trigger, action, 1, now, provenance);
             self.routines[min_idx] = r;
             true
         }
     }
 
     pub fn record_tool_result(&mut self, tool_id: u32, success: bool, err_code: i32) {
+        self.record_tool_result_with_provenance(tool_id, success, err_code, MemoryProvenance::RepeatedBehavior);
+    }
+
+    pub fn record_tool_result_with_provenance(
+        &mut self,
+        tool_id: u32,
+        success: bool,
+        err_code: i32,
+        provenance: MemoryProvenance,
+    ) {
         if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Adaptive {
             return;
         }
@@ -1280,17 +1411,19 @@ impl CompanionState {
                     self.tool_stats[i].failures = self.tool_stats[i].failures.saturating_add(1);
                     self.tool_stats[i].last_failure_code = err_code;
                 }
+                self.tool_stats[i].provenance = provenance;
                 return;
             }
         }
         if self.tool_stat_count < MAX_TOOL_STATS {
-            self.tool_stats[self.tool_stat_count] = ToolSuccessRecord {
+            self.tool_stats[self.tool_stat_count] = ToolSuccessRecord::with_provenance(
                 tool_id,
-                invocations: 1,
-                successes: if success { 1 } else { 0 },
-                failures: if success { 0 } else { 1 },
-                last_failure_code: err_code,
-            };
+                1,
+                if success { 1 } else { 0 },
+                if success { 0 } else { 1 },
+                err_code,
+                provenance,
+            );
             self.tool_stat_count += 1;
         } else {
             let mut min_idx = 0;
@@ -1301,30 +1434,33 @@ impl CompanionState {
                     min_idx = i;
                 }
             }
-            self.tool_stats[min_idx] = ToolSuccessRecord {
+            self.tool_stats[min_idx] = ToolSuccessRecord::with_provenance(
                 tool_id,
-                invocations: 1,
-                successes: if success { 1 } else { 0 },
-                failures: if success { 0 } else { 1 },
-                last_failure_code: err_code,
-            };
+                1,
+                if success { 1 } else { 0 },
+                if success { 0 } else { 1 },
+                err_code,
+                provenance,
+            );
         }
     }
 
     pub fn record_intent_pattern(&mut self, pattern: &[u8], tool_id: u32, confidence: u8) -> bool {
+        self.record_intent_pattern_with_provenance(pattern, tool_id, confidence, MemoryProvenance::RepeatedBehavior)
+    }
+
+    pub fn record_intent_pattern_with_provenance(
+        &mut self,
+        pattern: &[u8],
+        tool_id: u32,
+        confidence: u8,
+        provenance: MemoryProvenance,
+    ) -> bool {
         if self.is_locked || self.is_private_session || self.learning_mode != LearningMode::Adaptive {
             return false;
         }
         if self.pattern_count < MAX_INTENT_PATTERNS {
-            let mut pat = [0u8; 48];
-            let plen = pattern.len().min(48);
-            pat[..plen].copy_from_slice(&pattern[..plen]);
-            self.patterns[self.pattern_count] = IntentPattern {
-                pattern: pat,
-                pattern_len: plen as u8,
-                tool_id,
-                confidence: confidence.min(100),
-            };
+            self.patterns[self.pattern_count] = IntentPattern::with_provenance(pattern, tool_id, confidence, provenance);
             self.pattern_count += 1;
             true
         } else {
@@ -1337,15 +1473,7 @@ impl CompanionState {
                     min_idx = i;
                 }
             }
-            let mut pat = [0u8; 48];
-            let plen = pattern.len().min(48);
-            pat[..plen].copy_from_slice(&pattern[..plen]);
-            self.patterns[min_idx] = IntentPattern {
-                pattern: pat,
-                pattern_len: plen as u8,
-                tool_id,
-                confidence: confidence.min(100),
-            };
+            self.patterns[min_idx] = IntentPattern::with_provenance(pattern, tool_id, confidence, provenance);
             true
         }
     }
@@ -1730,7 +1858,7 @@ impl CompanionState {
                 // Transient only: NEVER committed to durable storage!
                 continue;
             }
-            let rec_len = 1 + 1 + 32 + 1 + 64 + 1 + 8; // 108
+            let rec_len = 1 + 1 + 32 + 1 + 64 + 1 + 8 + 1; // 109
             if pt_cursor + 2 + rec_len > scratch.len() {
                 break;
             }
@@ -1743,6 +1871,7 @@ impl CompanionState {
             scratch[pt_cursor + 37..pt_cursor + 101].copy_from_slice(&p.value);
             scratch[pt_cursor + 101] = p.confidence;
             scratch[pt_cursor + 102..pt_cursor + 110].copy_from_slice(&p.updated_at.to_le_bytes());
+            scratch[pt_cursor + 110] = p.provenance as u8;
             pt_cursor += 2 + rec_len;
             total_records += 1;
             record_type_mask |= 1 << 0;
@@ -1752,7 +1881,10 @@ impl CompanionState {
         if self.learning_mode == LearningMode::Adaptive {
             for i in 0..self.corr_count {
                 let c = &self.corrections[i];
-                let rec_len = 1 + 64 + 1 + 64 + 1 + 64 + 8; // 203
+                if c.provenance == MemoryProvenance::ModelInference {
+                    continue;
+                }
+                let rec_len = 1 + 64 + 1 + 64 + 1 + 64 + 8 + 1; // 204
                 if pt_cursor + 2 + rec_len > scratch.len() {
                     break;
                 }
@@ -1765,6 +1897,7 @@ impl CompanionState {
                 scratch[pt_cursor + 132] = c.fix_len;
                 scratch[pt_cursor + 133..pt_cursor + 197].copy_from_slice(&c.user_fix);
                 scratch[pt_cursor + 197..pt_cursor + 205].copy_from_slice(&c.timestamp.to_le_bytes());
+                scratch[pt_cursor + 205] = c.provenance as u8;
                 pt_cursor += 2 + rec_len;
                 total_records += 1;
                 record_type_mask |= 1 << 1;
@@ -1774,7 +1907,10 @@ impl CompanionState {
         // 3. Routines (Adaptive and ExplicitOnly)
         for i in 0..self.routine_count {
             let r = &self.routines[i];
-            let rec_len = 1 + 32 + 1 + 64 + 4 + 8; // 110
+            if r.provenance == MemoryProvenance::ModelInference {
+                continue;
+            }
+            let rec_len = 1 + 32 + 1 + 64 + 4 + 8 + 1; // 111
             if pt_cursor + 2 + rec_len > scratch.len() {
                 break;
             }
@@ -1786,6 +1922,7 @@ impl CompanionState {
             scratch[pt_cursor + 36..pt_cursor + 100].copy_from_slice(&r.action);
             scratch[pt_cursor + 100..pt_cursor + 104].copy_from_slice(&r.count.to_le_bytes());
             scratch[pt_cursor + 104..pt_cursor + 112].copy_from_slice(&r.last_executed.to_le_bytes());
+            scratch[pt_cursor + 112] = r.provenance as u8;
             pt_cursor += 2 + rec_len;
             total_records += 1;
             record_type_mask |= 1 << 2;
@@ -1795,7 +1932,10 @@ impl CompanionState {
         if self.learning_mode == LearningMode::Adaptive {
             for i in 0..self.pattern_count {
                 let pat = &self.patterns[i];
-                let rec_len = 1 + 48 + 4 + 1; // 54
+                if pat.provenance == MemoryProvenance::ModelInference {
+                    continue;
+                }
+                let rec_len = 1 + 48 + 4 + 1 + 1; // 55
                 if pt_cursor + 2 + rec_len > scratch.len() {
                     break;
                 }
@@ -1805,6 +1945,7 @@ impl CompanionState {
                 scratch[pt_cursor + 3..pt_cursor + 51].copy_from_slice(&pat.pattern);
                 scratch[pt_cursor + 51..pt_cursor + 55].copy_from_slice(&pat.tool_id.to_le_bytes());
                 scratch[pt_cursor + 55] = pat.confidence;
+                scratch[pt_cursor + 56] = pat.provenance as u8;
                 pt_cursor += 2 + rec_len;
                 total_records += 1;
                 record_type_mask |= 1 << 3;
@@ -1815,7 +1956,10 @@ impl CompanionState {
         if self.learning_mode == LearningMode::Adaptive {
             for i in 0..self.tool_stat_count {
                 let ts = &self.tool_stats[i];
-                let rec_len = 4 + 4 + 4 + 4 + 4; // 20
+                if ts.provenance == MemoryProvenance::ModelInference {
+                    continue;
+                }
+                let rec_len = 4 + 4 + 4 + 4 + 4 + 1; // 21
                 if pt_cursor + 2 + rec_len > scratch.len() {
                     break;
                 }
@@ -1826,6 +1970,7 @@ impl CompanionState {
                 scratch[pt_cursor + 10..pt_cursor + 14].copy_from_slice(&ts.successes.to_le_bytes());
                 scratch[pt_cursor + 14..pt_cursor + 18].copy_from_slice(&ts.failures.to_le_bytes());
                 scratch[pt_cursor + 18..pt_cursor + 22].copy_from_slice(&ts.last_failure_code.to_le_bytes());
+                scratch[pt_cursor + 22] = ts.provenance as u8;
                 pt_cursor += 2 + rec_len;
                 total_records += 1;
                 record_type_mask |= 1 << 4;
@@ -1862,6 +2007,11 @@ impl CompanionState {
                             scratch[cursor + 100], scratch[cursor + 101], scratch[cursor + 102], scratch[cursor + 103],
                             scratch[cursor + 104], scratch[cursor + 105], scratch[cursor + 106], scratch[cursor + 107],
                         ]);
+                        let provenance = if rec_len >= 109 {
+                            MemoryProvenance::from_u8(scratch[cursor + 108])
+                        } else {
+                            MemoryProvenance::HeuristicInference
+                        };
                         self.preferences[self.pref_count] = PreferenceRecord {
                             category: cat,
                             key: k,
@@ -1870,7 +2020,7 @@ impl CompanionState {
                             value_len: vlen,
                             confidence: conf,
                             updated_at: upd,
-                            provenance: MemoryProvenance::ExplicitUserInstruction,
+                            provenance,
                         };
                         self.pref_count += 1;
                     }
@@ -1890,6 +2040,11 @@ impl CompanionState {
                             scratch[cursor + 195], scratch[cursor + 196], scratch[cursor + 197], scratch[cursor + 198],
                             scratch[cursor + 199], scratch[cursor + 200], scratch[cursor + 201], scratch[cursor + 202],
                         ]);
+                        let provenance = if rec_len >= 204 {
+                            MemoryProvenance::from_u8(scratch[cursor + 203])
+                        } else {
+                            MemoryProvenance::ExplicitCorrection
+                        };
                         self.corrections[self.corr_count] = UserCorrection {
                             query: q,
                             query_len: qlen,
@@ -1898,6 +2053,7 @@ impl CompanionState {
                             user_fix: fix,
                             fix_len: fixlen,
                             timestamp: ts,
+                            provenance,
                         };
                         self.corr_count += 1;
                     }
@@ -1917,6 +2073,11 @@ impl CompanionState {
                             scratch[cursor + 102], scratch[cursor + 103], scratch[cursor + 104], scratch[cursor + 105],
                             scratch[cursor + 106], scratch[cursor + 107], scratch[cursor + 108], scratch[cursor + 109],
                         ]);
+                        let provenance = if rec_len >= 111 {
+                            MemoryProvenance::from_u8(scratch[cursor + 110])
+                        } else {
+                            MemoryProvenance::ApprovedRoutine
+                        };
                         self.routines[self.routine_count] = RoutineRecord {
                             trigger_name: trig,
                             trigger_len: tlen,
@@ -1924,6 +2085,7 @@ impl CompanionState {
                             action_len: actlen,
                             count,
                             last_executed: last_exec,
+                            provenance,
                         };
                         self.routine_count += 1;
                     }
@@ -1937,11 +2099,17 @@ impl CompanionState {
                             scratch[cursor + 49], scratch[cursor + 50], scratch[cursor + 51], scratch[cursor + 52],
                         ]);
                         let conf = scratch[cursor + 53];
+                        let provenance = if rec_len >= 55 {
+                            MemoryProvenance::from_u8(scratch[cursor + 54])
+                        } else {
+                            MemoryProvenance::RepeatedBehavior
+                        };
                         self.patterns[self.pattern_count] = IntentPattern {
                             pattern: pat,
                             pattern_len: patlen,
                             tool_id: tid,
                             confidence: conf,
+                            provenance,
                         };
                         self.pattern_count += 1;
                     }
@@ -1963,12 +2131,18 @@ impl CompanionState {
                         let err = i32::from_le_bytes([
                             scratch[cursor + 16], scratch[cursor + 17], scratch[cursor + 18], scratch[cursor + 19],
                         ]);
+                        let provenance = if rec_len >= 21 {
+                            MemoryProvenance::from_u8(scratch[cursor + 20])
+                        } else {
+                            MemoryProvenance::RepeatedBehavior
+                        };
                         self.tool_stats[self.tool_stat_count] = ToolSuccessRecord {
                             tool_id: tid,
                             invocations: inv,
                             successes: succ,
                             failures: fail,
                             last_failure_code: err,
+                            provenance,
                         };
                         self.tool_stat_count += 1;
                     }
@@ -2032,7 +2206,7 @@ impl CompanionState {
                 value_len: vlen,
                 confidence: conf,
                 updated_at: updated,
-                provenance: MemoryProvenance::ExplicitUserInstruction,
+                provenance: MemoryProvenance::HeuristicInference,
             };
             self.pref_count += 1;
             cursor += rec_size;
@@ -2659,6 +2833,126 @@ mod tests {
         // Only 1 record (the ExplicitUserInstruction) should be packed; ModelInference is strictly filtered out!
         assert_eq!(count, 1);
         assert!(pt_len > 0);
+    }
+
+    #[test]
+    fn test_preference_provenance_roundtrip_109_bytes() {
+        let mut state = CompanionState::new();
+        state.add_preference_with_provenance(
+            PreferenceCategory::Custom,
+            b"editor",
+            b"helix",
+            95,
+            1234,
+            MemoryProvenance::RepeatedBehavior,
+        );
+        state.add_preference_with_provenance(
+            PreferenceCategory::Theme,
+            b"dark_mode",
+            b"true",
+            100,
+            1235,
+            MemoryProvenance::ExplicitUserInstruction,
+        );
+
+        let mut scratch = [0u8; 4096];
+        let (pt_len, count, mask) = state.pack_records(&mut scratch);
+        assert_eq!(count, 2);
+        assert_eq!(mask, 1);
+        // Each record has 2-byte tag/len header + 109 bytes payload = 111 bytes
+        assert_eq!(pt_len, 2 * 111);
+
+        let mut restored = CompanionState::new();
+        restored.unpack_records_from_scratch(&scratch, pt_len, count);
+        assert_eq!(restored.pref_count, 2);
+        assert_eq!(restored.preferences[0].provenance, MemoryProvenance::RepeatedBehavior);
+        assert_eq!(restored.preferences[1].provenance, MemoryProvenance::ExplicitUserInstruction);
+    }
+
+    #[test]
+    fn test_legacy_record_deserializes_as_heuristic_inference() {
+        // Manually build a legacy 108-byte preference record
+        let mut scratch = [0u8; 256];
+        scratch[0] = REC_TAG_PREFERENCE;
+        scratch[1] = 108; // Legacy length without provenance byte
+        scratch[2] = PreferenceCategory::Theme as u8;
+        scratch[3] = 5; // key_len
+        scratch[4..9].copy_from_slice(b"theme");
+        scratch[36] = 4; // value_len
+        scratch[37..41].copy_from_slice(b"dark");
+        scratch[101] = 80; // confidence
+        scratch[102..110].copy_from_slice(&500u64.to_le_bytes());
+
+        let mut restored = CompanionState::new();
+        restored.unpack_records_from_scratch(&scratch, 110, 1);
+        assert_eq!(restored.pref_count, 1);
+        assert_eq!(restored.preferences[0].key_str(), "theme");
+        assert_eq!(restored.preferences[0].value_str(), "dark");
+        // Conservative default: must be HeuristicInference, NEVER upgraded to ExplicitUserInstruction
+        assert_eq!(restored.preferences[0].provenance, MemoryProvenance::HeuristicInference);
+    }
+
+    #[test]
+    fn test_all_learned_memory_filters_model_inference() {
+        let mut state = CompanionState::new();
+        state.learning_mode = LearningMode::Adaptive;
+
+        // Routines: 1 valid, 1 model inference
+        state.record_routine_with_provenance(b"morning", b"weather", 100, MemoryProvenance::ApprovedRoutine);
+        state.record_routine_with_provenance(b"night", b"dim_lights", 101, MemoryProvenance::ModelInference);
+
+        // Corrections: 1 valid, 1 model inference
+        state.add_correction_with_provenance(b"open file", b"vim", b"helix", 102, MemoryProvenance::ExplicitCorrection);
+        state.add_correction_with_provenance(b"search", b"bing", b"local", 103, MemoryProvenance::ModelInference);
+
+        // Patterns: 1 valid, 1 model inference
+        state.record_intent_pattern_with_provenance(b"note", 10, 90, MemoryProvenance::RepeatedBehavior);
+        state.record_intent_pattern_with_provenance(b"guess", 11, 40, MemoryProvenance::ModelInference);
+
+        // Tool stats: 1 valid, 1 model inference
+        state.record_tool_result_with_provenance(10, true, 0, MemoryProvenance::RepeatedBehavior);
+        state.record_tool_result_with_provenance(99, false, -1, MemoryProvenance::ModelInference);
+
+        let mut scratch = [0u8; 4096];
+        let (_pt_len, total_records, _mask) = state.pack_records(&mut scratch);
+
+        // Exactly 4 valid records should be packed; all 4 ModelInference records must be strictly filtered out!
+        assert_eq!(total_records, 4);
+
+        let mut unpacked = CompanionState::new();
+        unpacked.unpack_records_from_scratch(&scratch, _pt_len, total_records);
+        assert_eq!(unpacked.routine_count, 1);
+        assert_eq!(unpacked.routines[0].trigger_name[..unpacked.routines[0].trigger_len as usize], *b"morning");
+        assert_eq!(unpacked.corr_count, 1);
+        assert_eq!(unpacked.corrections[0].query[..unpacked.corrections[0].query_len as usize], *b"open file");
+        assert_eq!(unpacked.pattern_count, 1);
+        assert_eq!(unpacked.patterns[0].tool_id, 10);
+        assert_eq!(unpacked.tool_stat_count, 1);
+        assert_eq!(unpacked.tool_stats[0].tool_id, 10);
+    }
+
+    #[test]
+    fn test_private_session_end_to_end_zero_durable_state() {
+        let mut state = CompanionState::new();
+        state.set_private_session(true);
+
+        assert!(!state.add_preference(PreferenceCategory::Custom, b"secret_pref", b"secret_val", 90, 100));
+        assert!(!state.add_correction(b"query", b"act", b"fix", 101));
+        assert!(!state.record_routine(b"trig", b"act", 102));
+        assert!(!state.record_intent_pattern(b"pat", 1, 90));
+        state.record_tool_result(1, true, 0);
+
+        assert_eq!(state.pref_count, 0);
+        assert_eq!(state.corr_count, 0);
+        assert_eq!(state.routine_count, 0);
+        assert_eq!(state.pattern_count, 0);
+        assert_eq!(state.tool_stat_count, 0);
+
+        let mut scratch = [0u8; 1024];
+        let (pt_len, count, mask) = state.pack_records(&mut scratch);
+        assert_eq!(count, 0);
+        assert_eq!(pt_len, 0);
+        assert_eq!(mask, 0);
     }
 
     #[test]
