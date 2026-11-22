@@ -22,28 +22,28 @@ impl PageTable {
 }
 
 // Memory attributes for MAIR_EL1
-pub const MAIR_ATTR_NORMAL: u64 = 0xFF;    // Normal Memory, Outer/Inner Write-Back Non-transient Read/Write Allocate
-pub const MAIR_ATTR_DEVICE: u64 = 0x04;    // Device-nGnRE Memory (Strict ordering for MMIO)
+pub const MAIR_ATTR_NORMAL: u64 = 0xFF; // Normal Memory, Outer/Inner Write-Back Non-transient Read/Write Allocate
+pub const MAIR_ATTR_DEVICE: u64 = 0x04; // Device-nGnRE Memory (Strict ordering for MMIO)
 pub const MAIR_VALUE: u64 = (MAIR_ATTR_DEVICE << 8) | MAIR_ATTR_NORMAL;
 
 // Descriptors bitfields
 pub const DESC_VALID: u64 = 1 << 0;
-pub const DESC_TABLE: u64 = 1 << 1;        // Next-level table (for Level 0, 1, 2)
-pub const DESC_BLOCK: u64 = 0 << 1;        // Block entry (for Level 1 or 2)
-pub const DESC_PAGE: u64 = 1 << 1;         // Leaf 4KB page entry (for Level 3)
-pub const DESC_ATTR_NORMAL: u64 = 0 << 2;  // AttrIndx = 0
-pub const DESC_ATTR_DEVICE: u64 = 1 << 2;  // AttrIndx = 1
-pub const DESC_AP_RW_EL1: u64 = 0 << 6;    // Read/Write at EL1 only
-pub const DESC_AP_RW_ALL: u64 = 1 << 6;    // Read/Write at EL1 and EL0
-pub const DESC_AP_RW_EL0: u64 = 1 << 6;    // User EL0 accessible
-pub const DESC_AP_RO_EL1: u64 = 2 << 6;    // Read-Only at EL1 only
-pub const DESC_AP_RO_ALL: u64 = 3 << 6;    // Read-Only at EL1 and EL0
-pub const DESC_SH_OUTER: u64 = 2 << 8;     // Outer Shareable
-pub const DESC_SH_INNER: u64 = 3 << 8;     // Inner Shareable
-pub const DESC_AF: u64 = 1 << 10;          // Access Flag (must be 1 to avoid fault)
-pub const DESC_PXN: u64 = 1 << 53;         // Privileged Execute-Never (EL1 execution forbidden)
-pub const DESC_UXN: u64 = 1 << 54;         // Unprivileged Execute-Never (EL0 execution forbidden)
-pub const DESC_XN: u64 = DESC_UXN;         // General Execute-Never for EL1 block entries
+pub const DESC_TABLE: u64 = 1 << 1; // Next-level table (for Level 0, 1, 2)
+pub const DESC_BLOCK: u64 = 0 << 1; // Block entry (for Level 1 or 2)
+pub const DESC_PAGE: u64 = 1 << 1; // Leaf 4KB page entry (for Level 3)
+pub const DESC_ATTR_NORMAL: u64 = 0 << 2; // AttrIndx = 0
+pub const DESC_ATTR_DEVICE: u64 = 1 << 2; // AttrIndx = 1
+pub const DESC_AP_RW_EL1: u64 = 0 << 6; // Read/Write at EL1 only
+pub const DESC_AP_RW_ALL: u64 = 1 << 6; // Read/Write at EL1 and EL0
+pub const DESC_AP_RW_EL0: u64 = 1 << 6; // User EL0 accessible
+pub const DESC_AP_RO_EL1: u64 = 2 << 6; // Read-Only at EL1 only
+pub const DESC_AP_RO_ALL: u64 = 3 << 6; // Read-Only at EL1 and EL0
+pub const DESC_SH_OUTER: u64 = 2 << 8; // Outer Shareable
+pub const DESC_SH_INNER: u64 = 3 << 8; // Inner Shareable
+pub const DESC_AF: u64 = 1 << 10; // Access Flag (must be 1 to avoid fault)
+pub const DESC_PXN: u64 = 1 << 53; // Privileged Execute-Never (EL1 execution forbidden)
+pub const DESC_UXN: u64 = 1 << 54; // Unprivileged Execute-Never (EL0 execution forbidden)
+pub const DESC_XN: u64 = DESC_UXN; // General Execute-Never for EL1 block entries
 
 // Static primordial page tables
 static mut L1_TABLE: PageTable = PageTable::empty();
@@ -164,7 +164,11 @@ impl ArmMmu {
     }
     pub fn init_and_enable(ram_base: u64, ram_size: u64) {
         let base = if ram_base == 0 { 0x4000_0000 } else { ram_base };
-        let size = if ram_size == 0 { 1024 * 1024 * 1024 } else { ram_size };
+        let size = if ram_size == 0 {
+            1024 * 1024 * 1024
+        } else {
+            ram_size
+        };
         ACTIVE_RAM_BASE.store(base, core::sync::atomic::Ordering::Relaxed);
         ACTIVE_RAM_SIZE.store(size, core::sync::atomic::Ordering::Relaxed);
 
@@ -330,9 +334,8 @@ impl ArmMmu {
                     | (3 << 12)                       // SH0 = 0b11 (Inner Shareable)
                     | (0 << 14)                       // TG0 = 0b00 (4KB Granule)
                     | (1 << 23)                       // EPD1 = 1 (Disable unconfigured TTBR1 table walks)
-                    | (4u64 << 32);                   // IPS = 0b100 (48-bit PA)
+                    | (4u64 << 32); // IPS = 0b100 (48-bit PA)
                 core::arch::asm!("msr tcr_el1, {}", in(reg) tcr_val);
-
 
                 // 7. Install TTBR0_EL1
                 let l1_phys = core::ptr::addr_of!(L1_TABLE) as u64;
@@ -540,16 +543,16 @@ impl ArmMmu {
             // leaf at physical zero, which made the mapped window read back
             // whatever happened to be there.
             for step in 0..count {
-                L2_HIGH_TABLE.entries[(first_in_gib + step) as usize] =
-                    (start_paddr + step * L2_BLOCK)
-                        | DESC_AF
-                        | DESC_SH_OUTER
-                        | DESC_AP_RW_EL1
-                        | DESC_ATTR_DEVICE
-                        | DESC_PXN
-                        | DESC_UXN
-                        | DESC_BLOCK
-                        | DESC_VALID;
+                L2_HIGH_TABLE.entries[(first_in_gib + step) as usize] = (start_paddr
+                    + step * L2_BLOCK)
+                    | DESC_AF
+                    | DESC_SH_OUTER
+                    | DESC_AP_RW_EL1
+                    | DESC_ATTR_DEVICE
+                    | DESC_PXN
+                    | DESC_UXN
+                    | DESC_BLOCK
+                    | DESC_VALID;
             }
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             core::arch::asm!("tlbi vmalle1is", options(nostack, preserves_flags));
@@ -575,12 +578,7 @@ impl ArmMmu {
     /// cannot fail spuriously. Returns false without touching any table when a
     /// gigabyte cannot be subdivided, so a caller never proceeds on a window
     /// that was silently left unmapped.
-    pub fn map_device_blocks(
-        start_paddr: u64,
-        size: u64,
-        guard_lo: u64,
-        guard_hi: u64,
-    ) -> bool {
+    pub fn map_device_blocks(start_paddr: u64, size: u64, guard_lo: u64, guard_hi: u64) -> bool {
         const L1_BLOCK: u64 = 0x4000_0000;
         const L2_BLOCK: u64 = 0x20_0000;
 
@@ -1097,7 +1095,9 @@ impl ArmFrameAllocator {
             return Err("MMIO or borrowed frames cannot be recycled via allocator");
         }
         if own == FrameOwnership::Shared as u8 {
-            return Err("Shared frames must be released via release_shared_frame, not recycle_frame");
+            return Err(
+                "Shared frames must be released via release_shared_frame, not recycle_frame",
+            );
         }
         if own != FrameOwnership::PrivateOwned as u8 && own != FrameOwnership::Kernel as u8 {
             return Err("Only PrivateOwned or Kernel table frames may be recycled");
@@ -1132,7 +1132,9 @@ pub fn allocate_frame() -> Option<u64> {
 }
 
 pub fn allocate_frame_with_ownership(ownership: FrameOwnership) -> Option<u64> {
-    FRAME_ALLOCATOR.lock().allocate_frame_with_ownership(ownership)
+    FRAME_ALLOCATOR
+        .lock()
+        .allocate_frame_with_ownership(ownership)
 }
 
 pub fn recycle_frame(paddr: u64) -> Result<(), &'static str> {
@@ -1162,9 +1164,13 @@ pub fn active_allocated_frames() -> usize {
 
 pub fn frame_ownership(paddr: u64) -> Option<FrameOwnership> {
     let alloc = FRAME_ALLOCATOR.lock();
-    if paddr < alloc.base_paddr { return None; }
+    if paddr < alloc.base_paddr {
+        return None;
+    }
     let frame_idx = ((paddr - alloc.base_paddr) / 4096) as usize;
-    if frame_idx >= alloc.total_frames { return None; }
+    if frame_idx >= alloc.total_frames {
+        return None;
+    }
     match alloc.ownership[frame_idx] {
         0 => Some(FrameOwnership::Kernel),
         1 => Some(FrameOwnership::Mmio),
@@ -1177,18 +1183,26 @@ pub fn frame_ownership(paddr: u64) -> Option<FrameOwnership> {
 
 pub fn set_frame_ownership(paddr: u64, ownership: FrameOwnership) -> Result<(), &'static str> {
     let mut alloc = FRAME_ALLOCATOR.lock();
-    if paddr < alloc.base_paddr { return Err("Physical frame below allocator base"); }
+    if paddr < alloc.base_paddr {
+        return Err("Physical frame below allocator base");
+    }
     let frame_idx = ((paddr - alloc.base_paddr) / 4096) as usize;
-    if frame_idx >= alloc.total_frames { return Err("Physical frame exceeds allocator range"); }
+    if frame_idx >= alloc.total_frames {
+        return Err("Physical frame exceeds allocator range");
+    }
     alloc.ownership[frame_idx] = ownership as u8;
     Ok(())
 }
 
 pub fn frame_refcount(paddr: u64) -> u16 {
     let alloc = FRAME_ALLOCATOR.lock();
-    if paddr < alloc.base_paddr { return 0; }
+    if paddr < alloc.base_paddr {
+        return 0;
+    }
     let frame_idx = ((paddr - alloc.base_paddr) / 4096) as usize;
-    if frame_idx >= alloc.total_frames { return 0; }
+    if frame_idx >= alloc.total_frames {
+        return 0;
+    }
     alloc.ref_counts[frame_idx]
 }
 
@@ -1213,7 +1227,11 @@ pub static QUARANTINED_FRAMES: crate::sync::IrqSpinLock<Vec<QuarantinedFrame>> =
 pub fn quarantine_frame_with_meta(paddr: u64, ownership: FrameOwnership, reason: &'static str) {
     let mut q = QUARANTINED_FRAMES.lock();
     if !q.iter().any(|entry| entry.paddr == paddr) {
-        q.push(QuarantinedFrame { paddr, ownership, reason });
+        q.push(QuarantinedFrame {
+            paddr,
+            ownership,
+            reason,
+        });
     }
 }
 
@@ -1227,7 +1245,10 @@ pub fn quarantined_frame_count() -> usize {
 }
 
 pub fn is_quarantined(paddr: u64) -> bool {
-    QUARANTINED_FRAMES.lock().iter().any(|entry| entry.paddr == paddr)
+    QUARANTINED_FRAMES
+        .lock()
+        .iter()
+        .any(|entry| entry.paddr == paddr)
 }
 
 pub fn current_cpu_id() -> u8 {
@@ -1314,7 +1335,10 @@ impl UserAddressSpace {
     }
 
     pub fn is_destroyed(&self) -> bool {
-        self.destroyed || (self.lifecycle.load(core::sync::atomic::Ordering::Acquire) & LIFECYCLE_DESTROYED_BIT) != 0
+        self.destroyed
+            || (self.lifecycle.load(core::sync::atomic::Ordering::Acquire)
+                & LIFECYCLE_DESTROYED_BIT)
+                != 0
     }
 
     pub fn active_cpus(&self) -> u32 {
@@ -1327,8 +1351,12 @@ impl UserAddressSpace {
 
     pub fn has_unacknowledged_or_active_cpus(&self) -> bool {
         let active = self.active_cpus();
-        let executed = self.executed_cpus.load(core::sync::atomic::Ordering::Acquire);
-        let acknowledged = self.acknowledged_cpus.load(core::sync::atomic::Ordering::Acquire);
+        let executed = self
+            .executed_cpus
+            .load(core::sync::atomic::Ordering::Acquire);
+        let acknowledged = self
+            .acknowledged_cpus
+            .load(core::sync::atomic::Ordering::Acquire);
         active != 0 || (executed & !acknowledged) != 0
     }
 
@@ -1339,8 +1367,12 @@ impl UserAddressSpace {
         }
         let cpu_bit = 1u32 << cid;
         let active = self.active_cpus();
-        let executed = self.executed_cpus.load(core::sync::atomic::Ordering::Acquire);
-        let acknowledged = self.acknowledged_cpus.load(core::sync::atomic::Ordering::Acquire);
+        let executed = self
+            .executed_cpus
+            .load(core::sync::atomic::Ordering::Acquire);
+        let acknowledged = self
+            .acknowledged_cpus
+            .load(core::sync::atomic::Ordering::Acquire);
         (active & cpu_bit) == 0 && (executed & !acknowledged & cpu_bit) == 0
     }
 
@@ -1390,11 +1422,51 @@ impl UserAddressSpace {
                 | DESC_VALID;
         }
 
-        user_l2.entries[8] = 0x0100_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
-        user_l2.entries[14] = 0x01c0_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
-        user_l2.entries[15] = 0x01e0_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
-        user_l2.entries[64] = 0x0800_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
-        user_l2.entries[72] = 0x0900_0000 | DESC_AF | DESC_SH_OUTER | DESC_AP_RW_EL1 | DESC_ATTR_DEVICE | DESC_PXN | DESC_UXN | DESC_BLOCK | DESC_VALID;
+        user_l2.entries[8] = 0x0100_0000
+            | DESC_AF
+            | DESC_SH_OUTER
+            | DESC_AP_RW_EL1
+            | DESC_ATTR_DEVICE
+            | DESC_PXN
+            | DESC_UXN
+            | DESC_BLOCK
+            | DESC_VALID;
+        user_l2.entries[14] = 0x01c0_0000
+            | DESC_AF
+            | DESC_SH_OUTER
+            | DESC_AP_RW_EL1
+            | DESC_ATTR_DEVICE
+            | DESC_PXN
+            | DESC_UXN
+            | DESC_BLOCK
+            | DESC_VALID;
+        user_l2.entries[15] = 0x01e0_0000
+            | DESC_AF
+            | DESC_SH_OUTER
+            | DESC_AP_RW_EL1
+            | DESC_ATTR_DEVICE
+            | DESC_PXN
+            | DESC_UXN
+            | DESC_BLOCK
+            | DESC_VALID;
+        user_l2.entries[64] = 0x0800_0000
+            | DESC_AF
+            | DESC_SH_OUTER
+            | DESC_AP_RW_EL1
+            | DESC_ATTR_DEVICE
+            | DESC_PXN
+            | DESC_UXN
+            | DESC_BLOCK
+            | DESC_VALID;
+        user_l2.entries[72] = 0x0900_0000
+            | DESC_AF
+            | DESC_SH_OUTER
+            | DESC_AP_RW_EL1
+            | DESC_ATTR_DEVICE
+            | DESC_PXN
+            | DESC_UXN
+            | DESC_BLOCK
+            | DESC_VALID;
 
         // Map PCI MMIO aperture (0x1000_0000 .. 0x1200_0000: 32 MiB covering BAR 0 & BAR 2) for kernel EL1 display
         for i in 128..144 {
@@ -1425,7 +1497,13 @@ impl UserAddressSpace {
         })
     }
 
-    fn map_leaf_entry(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+    fn map_leaf_entry(
+        &mut self,
+        vaddr: u64,
+        paddr: u64,
+        is_write: bool,
+        is_exec: bool,
+    ) -> Result<(), &'static str> {
         let l1 = unsafe { &mut *(self.ttbr0 as *mut PageTable) };
         let l1_idx = ((vaddr >> 30) & 0x1FF) as usize;
         if l1_idx != 0 {
@@ -1445,7 +1523,8 @@ impl UserAddressSpace {
         }
         let mut newly_allocated_l3 = None;
         let l3_phys = if l2_entry & DESC_VALID == 0 {
-            let frame = allocate_frame_with_ownership(FrameOwnership::Kernel).ok_or("OOM allocating L3 page table")?;
+            let frame = allocate_frame_with_ownership(FrameOwnership::Kernel)
+                .ok_or("OOM allocating L3 page table")?;
             newly_allocated_l3 = Some(frame);
             frame
         } else {
@@ -1466,7 +1545,8 @@ impl UserAddressSpace {
             self.table_frames.push(new_frame);
         }
 
-        let mut flags = DESC_PAGE | DESC_AF | DESC_SH_INNER | DESC_ATTR_NORMAL | DESC_VALID | DESC_PXN;
+        let mut flags =
+            DESC_PAGE | DESC_AF | DESC_SH_INNER | DESC_ATTR_NORMAL | DESC_VALID | DESC_PXN;
         if is_write {
             flags |= DESC_AP_RW_ALL;
         } else {
@@ -1481,7 +1561,13 @@ impl UserAddressSpace {
         Ok(())
     }
 
-    pub fn map_private_frame(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+    pub fn map_private_frame(
+        &mut self,
+        vaddr: u64,
+        paddr: u64,
+        is_write: bool,
+        is_exec: bool,
+    ) -> Result<(), &'static str> {
         if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
             return Err("Address must be page-aligned (4KB)");
         }
@@ -1510,8 +1596,16 @@ impl UserAddressSpace {
         mark_private_frame_mapped(paddr)?;
         if let Err(e) = self.map_leaf_entry(vaddr, paddr, is_write, is_exec) {
             if let Err(unmap_err) = mark_private_frame_unmapped(paddr) {
-                crate::kprintln!("[MMU ERROR] Failed to unmap private frame 0x{:x} during rollback: {}", paddr, unmap_err);
-                quarantine_frame_with_meta(paddr, FrameOwnership::PrivateOwned, "map_private_frame rollback failed");
+                crate::kprintln!(
+                    "[MMU ERROR] Failed to unmap private frame 0x{:x} during rollback: {}",
+                    paddr,
+                    unmap_err
+                );
+                quarantine_frame_with_meta(
+                    paddr,
+                    FrameOwnership::PrivateOwned,
+                    "map_private_frame rollback failed",
+                );
             }
             return Err(e);
         }
@@ -1525,7 +1619,13 @@ impl UserAddressSpace {
         Ok(())
     }
 
-    pub fn map_shared_frame(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+    pub fn map_shared_frame(
+        &mut self,
+        vaddr: u64,
+        paddr: u64,
+        is_write: bool,
+        is_exec: bool,
+    ) -> Result<(), &'static str> {
         if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
             return Err("Address must be page-aligned (4KB)");
         }
@@ -1554,8 +1654,16 @@ impl UserAddressSpace {
         retain_shared_frame(paddr)?;
         if let Err(e) = self.map_leaf_entry(vaddr, paddr, is_write, is_exec) {
             if let Err(rel_err) = release_shared_frame(paddr) {
-                crate::kprintln!("[MMU ERROR] Failed to release shared frame 0x{:x} during rollback: {}", paddr, rel_err);
-                quarantine_frame_with_meta(paddr, FrameOwnership::Shared, "map_shared_frame rollback failed");
+                crate::kprintln!(
+                    "[MMU ERROR] Failed to release shared frame 0x{:x} during rollback: {}",
+                    paddr,
+                    rel_err
+                );
+                quarantine_frame_with_meta(
+                    paddr,
+                    FrameOwnership::Shared,
+                    "map_shared_frame rollback failed",
+                );
             }
             return Err(e);
         }
@@ -1570,7 +1678,13 @@ impl UserAddressSpace {
         Ok(())
     }
 
-    pub fn map_borrowed_frame(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+    pub fn map_borrowed_frame(
+        &mut self,
+        vaddr: u64,
+        paddr: u64,
+        is_write: bool,
+        is_exec: bool,
+    ) -> Result<(), &'static str> {
         if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
             return Err("Address must be page-aligned (4KB)");
         }
@@ -1596,7 +1710,9 @@ impl UserAddressSpace {
             }
         } else {
             if !is_valid_mmio_peripheral(paddr, 4096) && own != Some(FrameOwnership::Mmio) {
-                return Err("Physical address is neither valid RAM nor a registered MMIO peripheral");
+                return Err(
+                    "Physical address is neither valid RAM nor a registered MMIO peripheral",
+                );
             }
         }
         if self.mappings.iter().any(|m| m.vaddr == vaddr) {
@@ -1617,14 +1733,24 @@ impl UserAddressSpace {
         Ok(())
     }
 
-    pub fn map_user_page(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+    pub fn map_user_page(
+        &mut self,
+        vaddr: u64,
+        paddr: u64,
+        is_write: bool,
+        is_exec: bool,
+    ) -> Result<(), &'static str> {
         if (paddr & 0xFFF) != 0 || (vaddr & 0xFFF) != 0 {
             return Err("Address must be page-aligned (4KB)");
         }
         match frame_ownership(paddr) {
-            Some(FrameOwnership::PrivateOwned) => self.map_private_frame(vaddr, paddr, is_write, is_exec),
+            Some(FrameOwnership::PrivateOwned) => {
+                self.map_private_frame(vaddr, paddr, is_write, is_exec)
+            }
             Some(FrameOwnership::Shared) => self.map_shared_frame(vaddr, paddr, is_write, is_exec),
-            Some(FrameOwnership::Borrowed) | Some(FrameOwnership::Mmio) => self.map_borrowed_frame(vaddr, paddr, is_write, is_exec),
+            Some(FrameOwnership::Borrowed) | Some(FrameOwnership::Mmio) => {
+                self.map_borrowed_frame(vaddr, paddr, is_write, is_exec)
+            }
             _ => {
                 if is_valid_mmio_peripheral(paddr, 4096) {
                     self.map_borrowed_frame(vaddr, paddr, is_write, is_exec)
@@ -1636,7 +1762,11 @@ impl UserAddressSpace {
     }
 
     pub fn unmap_user_page(&mut self, vaddr: u64, release: bool) -> Result<(), &'static str> {
-        let pos = self.mappings.iter().position(|m| m.vaddr == vaddr).ok_or("Address not mapped")?;
+        let pos = self
+            .mappings
+            .iter()
+            .position(|m| m.vaddr == vaddr)
+            .ok_or("Address not mapped")?;
         let mapping = self.mappings[pos];
 
         let l1 = unsafe { &mut *(self.ttbr0 as *mut PageTable) };
@@ -1710,7 +1840,9 @@ impl UserAddressSpace {
     }
 
     pub fn find_free_user_span(&self, page_count: usize) -> Result<u64, &'static str> {
-        let span_bytes = (page_count as u64).checked_mul(4096).ok_or("Overflow in span bytes")?;
+        let span_bytes = (page_count as u64)
+            .checked_mul(4096)
+            .ok_or("Overflow in span bytes")?;
         let mut candidate = 0x2000_0000u64;
         'outer: while candidate.checked_add(span_bytes).unwrap_or(u64::MAX) < 0x3F00_0000 {
             let end_cand = candidate + span_bytes;
@@ -1800,7 +1932,13 @@ impl UserAddressSpace {
         Ok(paddr)
     }
 
-    pub fn restore_leaf_pte(&mut self, vaddr: u64, paddr: u64, is_write: bool, is_exec: bool) -> Result<(), &'static str> {
+    pub fn restore_leaf_pte(
+        &mut self,
+        vaddr: u64,
+        paddr: u64,
+        is_write: bool,
+        is_exec: bool,
+    ) -> Result<(), &'static str> {
         self.map_leaf_entry(vaddr, paddr, is_write, is_exec)?;
         self.mappings.push(UserMapping {
             vaddr,
@@ -1840,8 +1978,10 @@ impl UserAddressSpace {
                 core::sync::atomic::Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    self.executed_cpus.fetch_or(cpu_bit, core::sync::atomic::Ordering::Release);
-                    self.acknowledged_cpus.fetch_and(!cpu_bit, core::sync::atomic::Ordering::Release);
+                    self.executed_cpus
+                        .fetch_or(cpu_bit, core::sync::atomic::Ordering::Release);
+                    self.acknowledged_cpus
+                        .fetch_and(!cpu_bit, core::sync::atomic::Ordering::Release);
                     ArmMmu::switch_to_task(self.ttbr0);
                     return Ok(());
                 }
@@ -1861,7 +2001,8 @@ impl UserAddressSpace {
         }
         let cpu_bit = 1u32 << cid;
         // Hardware register has already switched away from this address space.
-        self.acknowledged_cpus.fetch_or(cpu_bit, core::sync::atomic::Ordering::Release);
+        self.acknowledged_cpus
+            .fetch_or(cpu_bit, core::sync::atomic::Ordering::Release);
         loop {
             let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
             let next = cur & !cpu_bit;
@@ -1921,9 +2062,13 @@ impl UserAddressSpace {
         // before waiting for remote evacuation.
         let cur_before_wait = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
         let remote_active_init = cur_before_wait & LIFECYCLE_ACTIVE_CPUS_MASK & !current_mask;
-        let remote_unack_init = (self.executed_cpus.load(core::sync::atomic::Ordering::Acquire)
+        let remote_unack_init = (self
+            .executed_cpus
+            .load(core::sync::atomic::Ordering::Acquire)
             & !current_mask)
-            & !self.acknowledged_cpus.load(core::sync::atomic::Ordering::Acquire);
+            & !self
+                .acknowledged_cpus
+                .load(core::sync::atomic::Ordering::Acquire);
         let shootdown_mask = remote_active_init | remote_unack_init;
         if shootdown_mask != 0 {
             crate::gic::broadcast_sgi_to_mask(1, shootdown_mask);
@@ -1934,8 +2079,12 @@ impl UserAddressSpace {
         loop {
             let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
             let active_remote = cur & LIFECYCLE_ACTIVE_CPUS_MASK & !current_mask;
-            let executed = self.executed_cpus.load(core::sync::atomic::Ordering::Acquire);
-            let acknowledged = self.acknowledged_cpus.load(core::sync::atomic::Ordering::Acquire);
+            let executed = self
+                .executed_cpus
+                .load(core::sync::atomic::Ordering::Acquire);
+            let acknowledged = self
+                .acknowledged_cpus
+                .load(core::sync::atomic::Ordering::Acquire);
             let unacknowledged = (executed & !current_mask) & !acknowledged;
 
             if active_remote == 0 && unacknowledged == 0 {
@@ -1981,14 +2130,22 @@ impl UserAddressSpace {
                         retained_mappings.push(m);
                         cleanup_failed = true;
                     } else if let Err(_) = recycle_frame(m.paddr) {
-                        quarantine_frame_with_meta(m.paddr, m.kind.into(), "destroy recycle private frame failed");
+                        quarantine_frame_with_meta(
+                            m.paddr,
+                            m.kind.into(),
+                            "destroy recycle private frame failed",
+                        );
                         retained_mappings.push(m);
                         cleanup_failed = true;
                     }
                 }
                 MappingKind::Shared => {
                     if let Err(_) = release_shared_frame(m.paddr) {
-                        quarantine_frame_with_meta(m.paddr, m.kind.into(), "destroy release shared frame failed");
+                        quarantine_frame_with_meta(
+                            m.paddr,
+                            m.kind.into(),
+                            "destroy release shared frame failed",
+                        );
                         retained_mappings.push(m);
                         cleanup_failed = true;
                     }
@@ -2017,7 +2174,10 @@ impl UserAddressSpace {
         if cleanup_failed {
             Err(TeardownError::FrameRecycleFailed)
         } else {
-            self.lifecycle.fetch_or(LIFECYCLE_DESTROYED_BIT, core::sync::atomic::Ordering::Release);
+            self.lifecycle.fetch_or(
+                LIFECYCLE_DESTROYED_BIT,
+                core::sync::atomic::Ordering::Release,
+            );
             self.destroyed = true;
             Ok(())
         }
@@ -2034,8 +2194,12 @@ impl Drop for UserAddressSpace {
             if let Err(e) = self.destroy_fallible() {
                 crate::kprintln!("[MMU WARNING] UserAddressSpace drop failed: {:?}. Quarantining unreclaimed frames.", e);
                 let reason = match e {
-                    TeardownError::ActiveOnRemoteCpu(_) => "drop failed: address space active on remote cpu",
-                    TeardownError::RemoteRendezvousFailed(_) => "drop failed: remote cpu rendezvous failed",
+                    TeardownError::ActiveOnRemoteCpu(_) => {
+                        "drop failed: address space active on remote cpu"
+                    }
+                    TeardownError::RemoteRendezvousFailed(_) => {
+                        "drop failed: remote cpu rendezvous failed"
+                    }
                     TeardownError::QuiescenceTimeout => "drop failed: quiescence timeout",
                     TeardownError::FrameRecycleFailed => "drop failed: frame recycle failed",
                     TeardownError::AlreadyDestroyed => "drop failed: already destroyed",
@@ -2053,7 +2217,10 @@ impl Drop for UserAddressSpace {
                     );
                 }
                 self.mapped_bytes = 0;
-                self.lifecycle.fetch_or(LIFECYCLE_DESTROYED_BIT, core::sync::atomic::Ordering::Release);
+                self.lifecycle.fetch_or(
+                    LIFECYCLE_DESTROYED_BIT,
+                    core::sync::atomic::Ordering::Release,
+                );
                 self.destroyed = true;
             }
         }
@@ -2232,7 +2399,8 @@ impl MemoryLoanManager {
     }
 }
 
-pub static MEMORY_LOANS: spin::Mutex<MemoryLoanManager> = spin::Mutex::new(MemoryLoanManager::new());
+pub static MEMORY_LOANS: spin::Mutex<MemoryLoanManager> =
+    spin::Mutex::new(MemoryLoanManager::new());
 
 pub fn test_mmu_ownership_reclamation_errors() {
     // 1. Private ownership validation failure in unmap_user_page:
@@ -2241,8 +2409,11 @@ pub fn test_mmu_ownership_reclamation_errors() {
     //    - preserves self.mappings entry and self.mapped_bytes
     //    - quarantines frame with original validation failure reason
     let mut aspace = UserAddressSpace::new().expect("test aspace");
-    let f_err = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc private err frame");
-    aspace.map_private_frame(0x0040_0000, f_err, true, false).expect("map private err frame");
+    let f_err = allocate_frame_with_ownership(FrameOwnership::PrivateOwned)
+        .expect("alloc private err frame");
+    aspace
+        .map_private_frame(0x0040_0000, f_err, true, false)
+        .expect("map private err frame");
     assert_eq!(frame_refcount(f_err), 1);
 
     // Corrupt lifecycle state by marking frame unmapped early (refcount 1 -> 0)
@@ -2253,38 +2424,64 @@ pub fn test_mmu_ownership_reclamation_errors() {
     let mapped_before = aspace.mapped_bytes;
     let mappings_len_before = aspace.mappings.len();
     let res = aspace.unmap_user_page(0x0040_0000, true);
-    assert!(res.is_err(), "unmap_user_page must fail when private frame validation fails");
+    assert!(
+        res.is_err(),
+        "unmap_user_page must fail when private frame validation fails"
+    );
     let err_reason = res.unwrap_err();
-    assert_eq!(total_recycled_frames(), recycled_before, "Failed unmap must not recycle frame");
-    assert_eq!(aspace.mappings.len(), mappings_len_before, "Failed unmap must preserve mapping metadata");
+    assert_eq!(
+        total_recycled_frames(),
+        recycled_before,
+        "Failed unmap must not recycle frame"
+    );
+    assert_eq!(
+        aspace.mappings.len(),
+        mappings_len_before,
+        "Failed unmap must preserve mapping metadata"
+    );
     assert_eq!(aspace.mappings[0].paddr, f_err);
-    assert_eq!(aspace.mapped_bytes, mapped_before, "Failed unmap must preserve mapped_bytes");
+    assert_eq!(
+        aspace.mapped_bytes, mapped_before,
+        "Failed unmap must preserve mapped_bytes"
+    );
     assert!(is_quarantined(f_err), "Failed unmap must quarantine frame");
     {
         let q = QUARANTINED_FRAMES.lock();
-        let entry = q.iter().find(|e| e.paddr == f_err).expect("quarantine entry for f_err");
+        let entry = q
+            .iter()
+            .find(|e| e.paddr == f_err)
+            .expect("quarantine entry for f_err");
         assert_eq!(entry.ownership, FrameOwnership::PrivateOwned);
         assert_eq!(entry.reason, err_reason);
     }
 
     // 2. Quarantined frame cannot be accidentally recycled via recycle_frame() or release_shared_frame()
     let recycled_before_q = total_recycled_frames();
-    assert!(recycle_frame(f_err).is_err(), "Quarantined private frame must not be recycled");
+    assert!(
+        recycle_frame(f_err).is_err(),
+        "Quarantined private frame must not be recycled"
+    );
     assert_eq!(total_recycled_frames(), recycled_before_q);
 
-    let f_q_shared = allocate_frame_with_ownership(FrameOwnership::Shared).expect("alloc quarantined shared frame");
+    let f_q_shared = allocate_frame_with_ownership(FrameOwnership::Shared)
+        .expect("alloc quarantined shared frame");
     retain_shared_frame(f_q_shared).expect("retain shared");
     quarantine_frame_with_meta(f_q_shared, FrameOwnership::Shared, "test quarantine shared");
     assert!(is_quarantined(f_q_shared));
     let recycled_before_qs = total_recycled_frames();
-    assert!(release_shared_frame(f_q_shared).is_err(), "Quarantined shared frame must not be freed at refcount 1");
+    assert!(
+        release_shared_frame(f_q_shared).is_err(),
+        "Quarantined shared frame must not be freed at refcount 1"
+    );
     assert_eq!(total_recycled_frames(), recycled_before_qs);
     assert_eq!(frame_refcount(f_q_shared), 1);
 
     // 3. Normal unmap_user_page transitions refcount 1 -> 0 and recycles frame once
     let mut aspace_ok = UserAddressSpace::new().expect("ok aspace");
     let f_ok = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc ok frame");
-    aspace_ok.map_private_frame(0x0040_0000, f_ok, true, false).expect("map ok frame");
+    aspace_ok
+        .map_private_frame(0x0040_0000, f_ok, true, false)
+        .expect("map ok frame");
     assert_eq!(frame_refcount(f_ok), 1);
     let recycled_before_ok = total_recycled_frames();
     assert_eq!(aspace_ok.unmap_user_page(0x0040_0000, true), Ok(()));
@@ -2293,13 +2490,19 @@ pub fn test_mmu_ownership_reclamation_errors() {
     assert_eq!(total_recycled_frames(), recycled_before_ok + 1);
     assert!(aspace_ok.mappings.is_empty());
     assert_eq!(aspace_ok.mapped_bytes, 0);
-    assert!(recycle_frame(f_ok).is_err(), "Already-recycled frame must reject double-free");
+    assert!(
+        recycle_frame(f_ok).is_err(),
+        "Already-recycled frame must reject double-free"
+    );
     assert_eq!(aspace_ok.destroy_fallible(), Ok(()));
 
     // 4. destroy_fallible with corrupted ownership retains metadata, avoids recycle_frame, and quarantines with validation reason
     let mut aspace_bad = UserAddressSpace::new().expect("bad aspace");
-    let f_bad = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc bad frame");
-    aspace_bad.map_private_frame(0x0040_0000, f_bad, true, false).expect("map bad frame");
+    let f_bad =
+        allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc bad frame");
+    aspace_bad
+        .map_private_frame(0x0040_0000, f_bad, true, false)
+        .expect("map bad frame");
     {
         let mut alloc = FRAME_ALLOCATOR.lock();
         let idx = ((f_bad - alloc.base_paddr) / 4096) as usize;
@@ -2308,7 +2511,10 @@ pub fn test_mmu_ownership_reclamation_errors() {
     }
     let expected_tables = aspace_bad.table_frames.len();
     let recycled_before_bad = total_recycled_frames();
-    assert_eq!(aspace_bad.destroy_fallible(), Err(TeardownError::FrameRecycleFailed));
+    assert_eq!(
+        aspace_bad.destroy_fallible(),
+        Err(TeardownError::FrameRecycleFailed)
+    );
     assert_eq!(
         total_recycled_frames(),
         recycled_before_bad + expected_tables,
@@ -2320,7 +2526,10 @@ pub fn test_mmu_ownership_reclamation_errors() {
     assert!(is_quarantined(f_bad));
     {
         let q = QUARANTINED_FRAMES.lock();
-        let entry = q.iter().find(|e| e.paddr == f_bad).expect("quarantine entry for f_bad");
+        let entry = q
+            .iter()
+            .find(|e| e.paddr == f_bad)
+            .expect("quarantine entry for f_bad");
         assert_eq!(entry.ownership, FrameOwnership::PrivateOwned);
         assert_eq!(entry.reason, "Not a private frame");
     }
@@ -2330,37 +2539,61 @@ pub fn test_mmu_ownership_reclamation_errors() {
     drop(aspace);
     {
         let q = QUARANTINED_FRAMES.lock();
-        let entry = q.iter().find(|e| e.paddr == f_bad).expect("f_bad preserved after drop");
+        let entry = q
+            .iter()
+            .find(|e| e.paddr == f_bad)
+            .expect("f_bad preserved after drop");
         assert_eq!(entry.reason, "Not a private frame");
-        let entry_err = q.iter().find(|e| e.paddr == f_err).expect("f_err preserved after drop");
+        let entry_err = q
+            .iter()
+            .find(|e| e.paddr == f_err)
+            .expect("f_err preserved after drop");
         assert_eq!(entry_err.reason, err_reason);
     }
 
     // 5. Shared-frame retain/release continues decrementing properly and frees only at 0
-    let f_shared = allocate_frame_with_ownership(FrameOwnership::Shared).expect("alloc shared frame");
+    let f_shared =
+        allocate_frame_with_ownership(FrameOwnership::Shared).expect("alloc shared frame");
     let mut aspace_s1 = UserAddressSpace::new().expect("aspace s1");
     let mut aspace_s2 = UserAddressSpace::new().expect("aspace s2");
-    aspace_s1.map_shared_frame(0x0040_0000, f_shared, false, false).expect("map shared s1");
-    aspace_s2.map_shared_frame(0x0040_0000, f_shared, false, false).expect("map shared s2");
+    aspace_s1
+        .map_shared_frame(0x0040_0000, f_shared, false, false)
+        .expect("map shared s1");
+    aspace_s2
+        .map_shared_frame(0x0040_0000, f_shared, false, false)
+        .expect("map shared s2");
     assert_eq!(frame_refcount(f_shared), 2);
 
     let recycled_s1 = total_recycled_frames();
     assert_eq!(aspace_s1.unmap_user_page(0x0040_0000, true), Ok(()));
     assert_eq!(frame_refcount(f_shared), 1);
     assert!(!is_quarantined(f_shared));
-    assert_eq!(total_recycled_frames(), recycled_s1, "Shared frame must not be freed while refcount > 0");
+    assert_eq!(
+        total_recycled_frames(),
+        recycled_s1,
+        "Shared frame must not be freed while refcount > 0"
+    );
     assert_eq!(aspace_s1.destroy_fallible(), Ok(()));
 
     let recycled_s2 = total_recycled_frames();
     assert_eq!(aspace_s2.unmap_user_page(0x0040_0000, true), Ok(()));
     assert_eq!(frame_refcount(f_shared), 0);
     assert!(!is_quarantined(f_shared));
-    assert_eq!(total_recycled_frames(), recycled_s2 + 1, "Shared frame must be freed when refcount reaches 0");
+    assert_eq!(
+        total_recycled_frames(),
+        recycled_s2 + 1,
+        "Shared frame must be freed when refcount reaches 0"
+    );
     assert_eq!(aspace_s2.destroy_fallible(), Ok(()));
 
     // 6. Quarantined frame cannot be allocated by allocate_frame_with_ownership
-    let f_to_quarantine = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc test frame for alloc reject");
-    quarantine_frame_with_meta(f_to_quarantine, FrameOwnership::PrivateOwned, "test alloc skip");
+    let f_to_quarantine = allocate_frame_with_ownership(FrameOwnership::PrivateOwned)
+        .expect("alloc test frame for alloc reject");
+    quarantine_frame_with_meta(
+        f_to_quarantine,
+        FrameOwnership::PrivateOwned,
+        "test alloc skip",
+    );
     // Free the frame in bitmap so allocator would otherwise pick it
     {
         let mut alloc = FRAME_ALLOCATOR.lock();
@@ -2368,31 +2601,54 @@ pub fn test_mmu_ownership_reclamation_errors() {
         alloc.bitmap[idx / 64] &= !(1u64 << (idx % 64));
     }
     // Now allocate another frame: it must NOT pick f_to_quarantine!
-    let f_allocated_after = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc next frame");
-    assert_ne!(f_allocated_after, f_to_quarantine, "Allocator must never allocate a quarantined frame");
+    let f_allocated_after =
+        allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("alloc next frame");
+    assert_ne!(
+        f_allocated_after, f_to_quarantine,
+        "Allocator must never allocate a quarantined frame"
+    );
     // Also re-verify quarantine metadata intact
     {
         let q = QUARANTINED_FRAMES.lock();
-        let entry = q.iter().find(|e| e.paddr == f_to_quarantine).expect("quarantine entry preserved");
+        let entry = q
+            .iter()
+            .find(|e| e.paddr == f_to_quarantine)
+            .expect("quarantine entry preserved");
         assert_eq!(entry.reason, "test alloc skip");
     }
 
     // 7. Quarantined shared frame (refcount > 1) rejects retain_shared_frame and map_shared_frame
-    let f_multi_shared = allocate_frame_with_ownership(FrameOwnership::Shared).expect("alloc multi shared frame");
+    let f_multi_shared =
+        allocate_frame_with_ownership(FrameOwnership::Shared).expect("alloc multi shared frame");
     let mut aspace_ms1 = UserAddressSpace::new().expect("aspace ms1");
-    aspace_ms1.map_shared_frame(0x0040_0000, f_multi_shared, false, false).expect("map ms1");
+    aspace_ms1
+        .map_shared_frame(0x0040_0000, f_multi_shared, false, false)
+        .expect("map ms1");
     assert_eq!(frame_refcount(f_multi_shared), 1);
     retain_shared_frame(f_multi_shared).expect("retain refcount 2");
     assert_eq!(frame_refcount(f_multi_shared), 2);
-    quarantine_frame_with_meta(f_multi_shared, FrameOwnership::Shared, "quarantine multi-shared");
+    quarantine_frame_with_meta(
+        f_multi_shared,
+        FrameOwnership::Shared,
+        "quarantine multi-shared",
+    );
     assert!(is_quarantined(f_multi_shared));
     // Must reject further retain
-    assert_eq!(retain_shared_frame(f_multi_shared), Err("Cannot retain quarantined shared frame"));
+    assert_eq!(
+        retain_shared_frame(f_multi_shared),
+        Err("Cannot retain quarantined shared frame")
+    );
     // Must reject mapping in a new address space
     let mut aspace_ms2 = UserAddressSpace::new().expect("aspace ms2");
-    assert_eq!(aspace_ms2.map_shared_frame(0x0040_0000, f_multi_shared, false, false), Err("Cannot map quarantined frame"));
+    assert_eq!(
+        aspace_ms2.map_shared_frame(0x0040_0000, f_multi_shared, false, false),
+        Err("Cannot map quarantined frame")
+    );
     // Must reject mapping as private frame
-    assert_eq!(aspace_ms2.map_private_frame(0x0040_0000, f_multi_shared, false, false), Err("Cannot map quarantined frame"));
+    assert_eq!(
+        aspace_ms2.map_private_frame(0x0040_0000, f_multi_shared, false, false),
+        Err("Cannot map quarantined frame")
+    );
     // Cleanup ms1
     drop(aspace_ms1);
     drop(aspace_ms2);
@@ -2402,24 +2658,55 @@ pub fn test_mmu_ownership_reclamation_errors() {
         let mut aspace_pt = UserAddressSpace::new().expect("aspace ptr validation");
         let f_rw = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("rw frame");
         let f_ro = allocate_frame_with_ownership(FrameOwnership::PrivateOwned).expect("ro frame");
-        aspace_pt.map_private_frame(0x0040_0000, f_rw, true, false).expect("map rw");
-        aspace_pt.map_private_frame(0x0040_2000, f_ro, false, true).expect("map ro+exec");
+        aspace_pt
+            .map_private_frame(0x0040_0000, f_rw, true, false)
+            .expect("map rw");
+        aspace_pt
+            .map_private_frame(0x0040_2000, f_ro, false, true)
+            .expect("map ro+exec");
 
-        assert_eq!(aspace_pt.validate_user_range(0x0040_0000, 64, false), Ok(()));
+        assert_eq!(
+            aspace_pt.validate_user_range(0x0040_0000, 64, false),
+            Ok(())
+        );
         assert_eq!(aspace_pt.validate_user_range(0x0040_0000, 64, true), Ok(()));
-        assert_eq!(aspace_pt.validate_user_range(0x0040_2000, 64, false), Ok(()));
-        assert_eq!(aspace_pt.validate_user_range(0x0040_2000, 64, true), Err(-13));
+        assert_eq!(
+            aspace_pt.validate_user_range(0x0040_2000, 64, false),
+            Ok(())
+        );
+        assert_eq!(
+            aspace_pt.validate_user_range(0x0040_2000, 64, true),
+            Err(-13)
+        );
         // Unmapped gap between RW and RO pages
-        assert_eq!(aspace_pt.validate_user_range(0x0040_1000, 64, false), Err(-14));
+        assert_eq!(
+            aspace_pt.validate_user_range(0x0040_1000, 64, false),
+            Err(-14)
+        );
         // Cross-page range spilling into unmapped gap at 0x0040_1000
-        assert_eq!(aspace_pt.validate_user_range(0x0040_0FF0, 32, false), Err(-14));
+        assert_eq!(
+            aspace_pt.validate_user_range(0x0040_0FF0, 32, false),
+            Err(-14)
+        );
         // Supervisor MMIO device blocks inside 0..1GiB must be rejected
-        assert_eq!(aspace_pt.validate_user_range(0x0800_0000, 16, false), Err(-14));
-        assert_eq!(aspace_pt.validate_user_range(0x0900_0000, 16, true), Err(-14));
-        assert_eq!(aspace_pt.validate_user_range(0x1000_0000, 16, false), Err(-14));
+        assert_eq!(
+            aspace_pt.validate_user_range(0x0800_0000, 16, false),
+            Err(-14)
+        );
+        assert_eq!(
+            aspace_pt.validate_user_range(0x0900_0000, 16, true),
+            Err(-14)
+        );
+        assert_eq!(
+            aspace_pt.validate_user_range(0x1000_0000, 16, false),
+            Err(-14)
+        );
         // Null / kernel addresses rejected even with zero length
         assert_eq!(aspace_pt.validate_user_range(0, 0, false), Err(-14));
-        assert_eq!(aspace_pt.validate_user_range(0x4000_0000, 0, false), Err(-14));
+        assert_eq!(
+            aspace_pt.validate_user_range(0x4000_0000, 0, false),
+            Err(-14)
+        );
 
         assert_eq!(aspace_pt.unmap_user_page(0x0040_0000, true), Ok(()));
         assert_eq!(aspace_pt.unmap_user_page(0x0040_2000, true), Ok(()));
@@ -2435,7 +2722,12 @@ pub fn test_mmu_ownership_reclamation_errors() {
 /// Rejects null/non-canonical/kernel addresses (`< 0x1000 || >= 0x4000_0000`),
 /// overflow, unmapped pages, EL1-only mappings (`DESC_AP_RW_EL1` / `DESC_AP_RO_EL1`),
 /// device-memory (`DESC_ATTR_DEVICE`) MMIO apertures, and writes to read-only pages (`-13`).
-pub fn validate_ttbr0_user_range(ttbr0: u64, addr: u64, len: usize, write: bool) -> Result<(), i64> {
+pub fn validate_ttbr0_user_range(
+    ttbr0: u64,
+    addr: u64,
+    len: usize,
+    write: bool,
+) -> Result<(), i64> {
     const USER_MIN: u64 = 0x0000_1000;
     const USER_LIMIT: u64 = 0x4000_0000; // Strictly below 1 GiB kernel slot boundary
 
@@ -2513,4 +2805,3 @@ pub fn validate_ttbr0_user_range(ttbr0: u64, addr: u64, len: usize, write: bool)
 
     Ok(())
 }
-

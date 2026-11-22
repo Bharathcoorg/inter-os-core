@@ -15,8 +15,8 @@
 //! - Zero Ambient Authority: Enclave operations require `CapabilityType::StrongBoxSecureEnclave`.
 
 extern crate alloc;
-use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
+use alloc::vec::Vec;
 
 pub const STRONGBOX_REG_CTRL: usize = 0x00;
 pub const STRONGBOX_REG_STATUS: usize = 0x04;
@@ -87,8 +87,12 @@ impl StrongBoxHal {
     ) -> Result<u32, StrongBoxError> {
         caps.check(CapabilityType::StrongBoxSecureEnclave, Rights::WRITE)
             .map_err(|_| StrongBoxError::CapabilityDenied)?;
-        if !self.enabled || !self.hardware_present { return Err(StrongBoxError::HardwareDisabled); }
-        if self.tamper_detected { return Err(StrongBoxError::TamperDetected); }
+        if !self.enabled || !self.hardware_present {
+            return Err(StrongBoxError::HardwareDisabled);
+        }
+        if self.tamper_detected {
+            return Err(StrongBoxError::TamperDetected);
+        }
         Err(StrongBoxError::HardwareBackendUnavailable)
     }
 
@@ -101,7 +105,9 @@ impl StrongBoxHal {
     ) -> Result<Vec<u8>, StrongBoxError> {
         caps.check(CapabilityType::StrongBoxSecureEnclave, Rights::READ)
             .map_err(|_| StrongBoxError::CapabilityDenied)?;
-        if !self.enabled || !self.hardware_present { return Err(StrongBoxError::HardwareDisabled); }
+        if !self.enabled || !self.hardware_present {
+            return Err(StrongBoxError::HardwareDisabled);
+        }
         Err(StrongBoxError::HardwareBackendUnavailable)
     }
 
@@ -114,7 +120,9 @@ impl StrongBoxHal {
     ) -> Result<[u8; 64], StrongBoxError> {
         caps.check(CapabilityType::StrongBoxSecureEnclave, Rights::INVOKE)
             .map_err(|_| StrongBoxError::CapabilityDenied)?;
-        if !self.enabled || !self.hardware_present { return Err(StrongBoxError::HardwareDisabled); }
+        if !self.enabled || !self.hardware_present {
+            return Err(StrongBoxError::HardwareDisabled);
+        }
         Err(StrongBoxError::HardwareBackendUnavailable)
     }
 
@@ -138,7 +146,10 @@ impl StrongBoxHal {
     /// Simulates physical tamper detection event triggering hardware cryptographic zeroization.
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
-        if !present { self.keys.clear(); self.tamper_circuit_armed=false; }
+        if !present {
+            self.keys.clear();
+            self.tamper_circuit_armed = false;
+        }
     }
 
     pub fn trigger_tamper_event(&mut self) {

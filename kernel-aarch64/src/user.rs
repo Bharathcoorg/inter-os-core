@@ -140,7 +140,10 @@ pub struct UserProcess {
 
 impl UserProcess {
     pub fn new(entry_point: u64, stack_top: u64) -> Self {
-        Self { entry_point, stack_top }
+        Self {
+            entry_point,
+            stack_top,
+        }
     }
 
     pub unsafe fn load_code(&self, code: &[u8]) {

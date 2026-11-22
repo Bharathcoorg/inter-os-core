@@ -10,10 +10,10 @@
 //! - Non-Negotiable Principle #11: Language and ecosystem choice does not determine trust.
 //!   Strict capability tables and sandbox boundary policies determine trust.
 
+use crate::capability::{CapabilityTable, CapabilityType, Rights};
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
-use crate::capability::{CapabilityTable, CapabilityType, Rights};
 
 // Linux / Android ARM64 Syscall Numbers
 pub const ANDROID_SYS_IOCTL: u64 = 29;
@@ -38,7 +38,8 @@ pub use interos_android_shared::{
 
 impl CapabilityChecker for CapabilityTable {
     fn has_android_guest_cap(&self) -> bool {
-        self.check(CapabilityType::AndroidContainerGuest, Rights::INVOKE).is_ok()
+        self.check(CapabilityType::AndroidContainerGuest, Rights::INVOKE)
+            .is_ok()
     }
 }
 
@@ -106,22 +107,18 @@ impl AndroidRuntime {
         let pkg = app.package_name.clone();
 
         match nr {
-            ANDROID_SYS_OPENAT => {
-                match self.sandbox_fs.open_read(&pkg, path) {
-                    Ok(bytes) => bytes.len() as i64,
-                    Err(AndroidFsError::SecurityViolation) => EACCES,
-                    Err(AndroidFsError::NotFound) => ENOENT,
-                    Err(AndroidFsError::PermissionDenied) => EPERM,
-                    Err(AndroidFsError::InvalidPath) => EINVAL,
-                }
-            }
-            ANDROID_SYS_WRITE => {
-                match self.sandbox_fs.open_write(&pkg, path, data) {
-                    Ok(_) => data.len() as i64,
-                    Err(AndroidFsError::SecurityViolation) => EACCES,
-                    Err(_) => EPERM,
-                }
-            }
+            ANDROID_SYS_OPENAT => match self.sandbox_fs.open_read(&pkg, path) {
+                Ok(bytes) => bytes.len() as i64,
+                Err(AndroidFsError::SecurityViolation) => EACCES,
+                Err(AndroidFsError::NotFound) => ENOENT,
+                Err(AndroidFsError::PermissionDenied) => EPERM,
+                Err(AndroidFsError::InvalidPath) => EINVAL,
+            },
+            ANDROID_SYS_WRITE => match self.sandbox_fs.open_write(&pkg, path, data) {
+                Ok(_) => data.len() as i64,
+                Err(AndroidFsError::SecurityViolation) => EACCES,
+                Err(_) => EPERM,
+            },
             ANDROID_SYS_CLOSE => 0,
             ANDROID_SYS_READ => data.len() as i64,
             ANDROID_SYS_MMAP => 0x0040_0000, // Sandboxed heap address

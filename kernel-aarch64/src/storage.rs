@@ -103,11 +103,17 @@ impl SdhciController {
 
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
-        if !present { self.rca = 0; self.total_sectors = 0; self.high_capacity = false; }
+        if !present {
+            self.rca = 0;
+            self.total_sectors = 0;
+            self.high_capacity = false;
+        }
     }
 
     pub fn reset(&self) -> Result<(), &'static str> {
-        if !self.hardware_present { return Err("SDHCI hardware unavailable"); }
+        if !self.hardware_present {
+            return Err("SDHCI hardware unavailable");
+        }
         unsafe {
             mmio_write8(self.base_vaddr, SDHCI_SOFTWARE_RESET, 0x01);
             for _ in 0..TIMEOUT_CYCLES {
@@ -121,7 +127,9 @@ impl SdhciController {
     }
 
     pub fn is_card_inserted(&self) -> bool {
-        if !self.hardware_present { return false; }
+        if !self.hardware_present {
+            return false;
+        }
         unsafe {
             let state = mmio_read32(self.base_vaddr, SDHCI_PRESENT_STATE);
             (state & STATE_CARD_INSERTED) != 0
@@ -129,11 +137,17 @@ impl SdhciController {
     }
 
     pub fn send_command(&self, cmd_idx: u16, arg: u32, is_data: bool) -> Result<u32, &'static str> {
-        if !self.hardware_present { return Err("SDHCI hardware unavailable"); }
+        if !self.hardware_present {
+            return Err("SDHCI hardware unavailable");
+        }
         unsafe {
             for _ in 0..TIMEOUT_CYCLES {
                 let state = mmio_read32(self.base_vaddr, SDHCI_PRESENT_STATE);
-                let mask = if is_data { STATE_CMD_INHIBIT | STATE_DAT_INHIBIT } else { STATE_CMD_INHIBIT };
+                let mask = if is_data {
+                    STATE_CMD_INHIBIT | STATE_DAT_INHIBIT
+                } else {
+                    STATE_CMD_INHIBIT
+                };
                 if (state & mask) == 0 {
                     break;
                 }
@@ -193,7 +207,11 @@ impl SdhciController {
             }
 
             let cur = mmio_read32(self.base_vaddr, SDHCI_INT_STATUS);
-            mmio_write32(self.base_vaddr, SDHCI_INT_STATUS, cur & !INT_TRANSFER_COMPLETE);
+            mmio_write32(
+                self.base_vaddr,
+                SDHCI_INT_STATUS,
+                cur & !INT_TRANSFER_COMPLETE,
+            );
         }
 
         Ok(())
@@ -228,7 +246,11 @@ impl SdhciController {
             }
 
             let cur = mmio_read32(self.base_vaddr, SDHCI_INT_STATUS);
-            mmio_write32(self.base_vaddr, SDHCI_INT_STATUS, cur & !INT_TRANSFER_COMPLETE);
+            mmio_write32(
+                self.base_vaddr,
+                SDHCI_INT_STATUS,
+                cur & !INT_TRANSFER_COMPLETE,
+            );
         }
 
         Ok(())
@@ -248,14 +270,19 @@ impl SdhciController {
 /// never a successful read of zeroes, because the journal would then commit
 /// records into a device that does not exist and report them as durable.
 impl BlockDevice for SdhciController {
-    fn read_sector(&mut self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+    fn read_sector(
+        &mut self,
+        lba: u32,
+        buf: &mut [u8; SECTOR_SIZE],
+    ) -> Result<(), BlockDeviceError> {
         if !self.hardware_present {
             return Err(BlockDeviceError::DeviceNotFound);
         }
         if self.total_sectors != 0 && lba >= self.total_sectors {
             return Err(BlockDeviceError::LbaOutOfRange);
         }
-        self.read_block(lba, buf).map_err(|_| BlockDeviceError::ReadError)
+        self.read_block(lba, buf)
+            .map_err(|_| BlockDeviceError::ReadError)
     }
 
     fn write_sector(&mut self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
@@ -265,7 +292,8 @@ impl BlockDevice for SdhciController {
         if self.total_sectors != 0 && lba >= self.total_sectors {
             return Err(BlockDeviceError::LbaOutOfRange);
         }
-        self.write_block(lba, buf).map_err(|_| BlockDeviceError::WriteError)
+        self.write_block(lba, buf)
+            .map_err(|_| BlockDeviceError::WriteError)
     }
 
     fn sector_count(&self) -> u32 {
@@ -387,8 +415,7 @@ pub fn bind_journal_device() {
 pub fn report_journal_rollback_floor() {
     let mut floor = [0u8; 8];
     match interos_kernel_core::storage::persistent::load_latest_kind(
-        &mut floor,
-        9, // KIND_FIRMWARE_ROLLBACK_FLOOR, mirrored from the x86 kind table
+        &mut floor, 9, // KIND_FIRMWARE_ROLLBACK_FLOOR, mirrored from the x86 kind table
     ) {
         Ok(Some((generation, len))) => {
             crate::kprintln!(

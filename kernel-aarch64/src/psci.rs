@@ -89,8 +89,18 @@ impl PsciController {
         }
     }
 
-    pub fn cpu_on(&self, target_cpu_mpidr: u64, entry_point_phys: u64, context_id: u64) -> Result<(), i32> {
-        let ret = self.invoke_psci(PSCI_FN_CPU_ON, target_cpu_mpidr, entry_point_phys, context_id);
+    pub fn cpu_on(
+        &self,
+        target_cpu_mpidr: u64,
+        entry_point_phys: u64,
+        context_id: u64,
+    ) -> Result<(), i32> {
+        let ret = self.invoke_psci(
+            PSCI_FN_CPU_ON,
+            target_cpu_mpidr,
+            entry_point_phys,
+            context_id,
+        );
         if ret == 0 {
             Ok(())
         } else {
@@ -102,7 +112,9 @@ impl PsciController {
         self.invoke_psci(PSCI_FN_SYSTEM_RESET, 0, 0, 0);
         loop {
             #[cfg(target_arch = "aarch64")]
-            unsafe { core::arch::asm!("wfe"); }
+            unsafe {
+                core::arch::asm!("wfe");
+            }
         }
     }
 
@@ -110,7 +122,9 @@ impl PsciController {
         self.invoke_psci(PSCI_FN_SYSTEM_OFF, 0, 0, 0);
         loop {
             #[cfg(target_arch = "aarch64")]
-            unsafe { core::arch::asm!("wfe"); }
+            unsafe {
+                core::arch::asm!("wfe");
+            }
         }
     }
 }

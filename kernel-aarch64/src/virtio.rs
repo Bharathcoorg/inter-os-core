@@ -91,10 +91,7 @@ impl VirtioPciDevice {
     /// # Safety
     /// The ECAM window must be mapped and the capability chain must be walked
     /// only through vendor capability identifiers this driver understands.
-    pub unsafe fn probe(
-        ecam: &PcieEcam,
-        device: PcieDevice,
-    ) -> Option<Self> {
+    pub unsafe fn probe(ecam: &PcieEcam, device: PcieDevice) -> Option<Self> {
         if !Self::is_virtio(&device) {
             return None;
         }
@@ -112,13 +109,17 @@ impl VirtioPciDevice {
         let cap_ptr = ecam.read32(bus, dev, func, PCI_CAPABILITY_POINTER) & 0xFF;
         crate::kprintln!(
             "[VIRTIO] {:04x}:{:04x} status 0x{:04X} cap_ptr 0x{:02X}",
-            device.vendor_id, device.device_id, status, cap_ptr
+            device.vendor_id,
+            device.device_id,
+            status,
+            cap_ptr
         );
         ecam.write32(bus, dev, func, PCI_COMMAND, command | (1 << 1));
         if status & PCI_STATUS_CAP_LIST == 0 {
             crate::kprintln!(
                 "[VIRTIO] {:04x}:{:04x} reports no capability list.",
-                device.vendor_id, device.device_id
+                device.vendor_id,
+                device.device_id
             );
             return None;
         }
@@ -147,9 +148,15 @@ impl VirtioPciDevice {
                             let bar = ecam.read8(bus, dev, func, ptr as usize + 4);
                             let offset = ecam.read32(bus, dev, func, ptr as usize + 8) as u64;
                             let length = ecam.read32(bus, dev, func, ptr as usize + 12) as u64;
-                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar) {
+                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar)
+                            {
                                 let min_len = core::mem::size_of::<VirtioPciCommonCfg>() as u64;
-                                if length >= min_len && offset.checked_add(length).map(|end| end <= bar_size).unwrap_or(false) {
+                                if length >= min_len
+                                    && offset
+                                        .checked_add(length)
+                                        .map(|end| end <= bar_size)
+                                        .unwrap_or(false)
+                                {
                                     common_cfg = Some(base.wrapping_add(offset) as *mut u8);
                                 }
                             }
@@ -158,8 +165,13 @@ impl VirtioPciDevice {
                             let bar = ecam.read8(bus, dev, func, ptr as usize + 4);
                             let offset = ecam.read32(bus, dev, func, ptr as usize + 8) as u64;
                             let length = ecam.read32(bus, dev, func, ptr as usize + 12) as u64;
-                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar) {
-                                if offset.checked_add(length).map(|end| end <= bar_size).unwrap_or(false) {
+                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar)
+                            {
+                                if offset
+                                    .checked_add(length)
+                                    .map(|end| end <= bar_size)
+                                    .unwrap_or(false)
+                                {
                                     notify_bar = Some(base.wrapping_add(offset));
                                     notify_mult = ecam.read32(bus, dev, func, ptr as usize + 16);
                                 }
@@ -169,8 +181,13 @@ impl VirtioPciDevice {
                             let bar = ecam.read8(bus, dev, func, ptr as usize + 4);
                             let offset = ecam.read32(bus, dev, func, ptr as usize + 8) as u64;
                             let length = ecam.read32(bus, dev, func, ptr as usize + 12) as u64;
-                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar) {
-                                if offset.checked_add(length).map(|end| end <= bar_size).unwrap_or(false) {
+                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar)
+                            {
+                                if offset
+                                    .checked_add(length)
+                                    .map(|end| end <= bar_size)
+                                    .unwrap_or(false)
+                                {
                                     isr_bar = Some(base.wrapping_add(offset));
                                 }
                             }
@@ -179,8 +196,13 @@ impl VirtioPciDevice {
                             let bar = ecam.read8(bus, dev, func, ptr as usize + 4);
                             let offset = ecam.read32(bus, dev, func, ptr as usize + 8) as u64;
                             let length = ecam.read32(bus, dev, func, ptr as usize + 12) as u64;
-                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar) {
-                                if offset.checked_add(length).map(|end| end <= bar_size).unwrap_or(false) {
+                            if let Some((base, bar_size)) = Self::map_bar(ecam, bus, dev, func, bar)
+                            {
+                                if offset
+                                    .checked_add(length)
+                                    .map(|end| end <= bar_size)
+                                    .unwrap_or(false)
+                                {
                                     device_cfg = Some((base.wrapping_add(offset)) as *const u8);
                                 }
                             }
@@ -209,7 +231,9 @@ impl VirtioPciDevice {
         if high_features & (1 << (VIRTIO_F_VERSION_1 - 32)) == 0 {
             crate::kprintln!(
                 "[VIRTIO] {:04x}:{:04x} did not offer virtio 1.0 (high features 0x{:08X}).",
-                device.vendor_id, device.device_id, high_features
+                device.vendor_id,
+                device.device_id,
+                high_features
             );
             return None;
         }
@@ -218,8 +242,7 @@ impl VirtioPciDevice {
 
         // Accept the mandatory version bit plus the two ring features the driver
         // understands; anything else is declined so the device cannot enable it.
-        let wanted_low: u32 =
-            (1 << VIRTIO_F_RING_INDIRECT_DESC) | (1 << VIRTIO_F_RING_EVENT_IDX);
+        let wanted_low: u32 = (1 << VIRTIO_F_RING_INDIRECT_DESC) | (1 << VIRTIO_F_RING_EVENT_IDX);
         if low_features & wanted_low != wanted_low {
             return None;
         }

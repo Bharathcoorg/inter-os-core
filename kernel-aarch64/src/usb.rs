@@ -18,8 +18,8 @@
 //! - Zero Ambient Authority: USB Power Delivery negotiation and data port configuration require capability tokens.
 
 extern crate alloc;
-use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
+use alloc::vec::Vec;
 
 pub const TCPC_REG_VENDOR_ID: usize = 0x00;
 pub const TCPC_REG_PRODUCT_ID: usize = 0x02;
@@ -55,8 +55,8 @@ pub enum PortPowerRole {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsbDataPortState {
-    LockedChargeOnly,      // Data lines severed in hardware (Anti-Juice Jacking)
-    DataTransferEnabled,   // Data lines connected to SoC USB controller
+    LockedChargeOnly,    // Data lines severed in hardware (Anti-Juice Jacking)
+    DataTransferEnabled, // Data lines connected to SoC USB controller
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +109,11 @@ impl UsbPdController {
 
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
-        if !present { self.polarity=TypeCPolarity::Unattached; self.active_contract=None; self.available_pdos.clear(); }
+        if !present {
+            self.polarity = TypeCPolarity::Unattached;
+            self.active_contract = None;
+            self.available_pdos.clear();
+        }
     }
 
     /// Detects Type-C cable attachment and CC line orientation.

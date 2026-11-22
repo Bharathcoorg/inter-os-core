@@ -56,7 +56,10 @@ pub enum IntcDescription {
 }
 
 /// Reads the `reg` property of a node as a list of `(address, size)` pairs.
-fn reg_windows_with_sizes(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Option<Vec<(usize, usize)>> {
+fn reg_windows_with_sizes(
+    parser: &ArmFdtParser,
+    node: &crate::fdt::ArmFdtNode,
+) -> Option<Vec<(usize, usize)>> {
     let reg = parser.get_node_property(node, "reg").ok()?;
     if reg.is_empty() {
         return None;
@@ -126,7 +129,8 @@ fn reg_windows_with_sizes(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) 
 
 /// Reads the `reg` property of a node as a list of base addresses.
 fn reg_windows(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Option<Vec<usize>> {
-    reg_windows_with_sizes(parser, node).map(|windows| windows.into_iter().map(|(base, _)| base).collect())
+    reg_windows_with_sizes(parser, node)
+        .map(|windows| windows.into_iter().map(|(base, _)| base).collect())
 }
 
 /// Decodes a cell-count property, accepting the 1- and 2-cell encodings.
@@ -416,11 +420,15 @@ pub fn validate_mmio_window(
     if base % width != 0 || offset % width != 0 {
         return Err(GicError::MisalignedMmioAccess);
     }
-    let end = offset.checked_add(width).ok_or(GicError::OutOfBoundsMmioAccess)?;
+    let end = offset
+        .checked_add(width)
+        .ok_or(GicError::OutOfBoundsMmioAccess)?;
     if end > size {
         return Err(GicError::OutOfBoundsMmioAccess);
     }
-    let target_addr = base.checked_add(offset).ok_or(GicError::OutOfBoundsMmioAccess)?;
+    let target_addr = base
+        .checked_add(offset)
+        .ok_or(GicError::OutOfBoundsMmioAccess)?;
     if target_addr % width != 0 {
         return Err(GicError::MisalignedMmioAccess);
     }
@@ -432,7 +440,8 @@ pub const STATE_EMPTY: u8 = 0;
 pub const STATE_WRITING: u8 = 1;
 pub const STATE_VALID: u8 = 2;
 
-static REGISTRATION_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static REGISTRATION_LOCK: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// IRQ-safe RAII guard for PE registration serialization.
 ///
@@ -454,12 +463,15 @@ impl RegistrationLockGuard {
             core::arch::asm!("msr daifset, #2", options(nomem, nostack));
             daif
         };
-        while REGISTRATION_LOCK.compare_exchange(
-            false,
-            true,
-            core::sync::atomic::Ordering::Acquire,
-            core::sync::atomic::Ordering::Relaxed,
-        ).is_err() {
+        while REGISTRATION_LOCK
+            .compare_exchange(
+                false,
+                true,
+                core::sync::atomic::Ordering::Acquire,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
             core::hint::spin_loop();
         }
         Self {
@@ -718,7 +730,11 @@ impl Gicv3 {
         }
     }
 
-    pub const fn with_size(distributor_base: usize, redistributors_base: usize, redistributors_size: usize) -> Self {
+    pub const fn with_size(
+        distributor_base: usize,
+        redistributors_base: usize,
+        redistributors_size: usize,
+    ) -> Self {
         Self {
             distributor_base,
             distributor_size: 0x10000,
@@ -779,14 +795,24 @@ impl Gicv3 {
 
     #[inline(always)]
     pub unsafe fn gicr_read_checked(&self, offset: usize) -> Result<u32, GicError> {
-        let target = validate_mmio_window(self.redistributors_base, self.redistributors_size, offset, 4)?;
+        let target = validate_mmio_window(
+            self.redistributors_base,
+            self.redistributors_size,
+            offset,
+            4,
+        )?;
         let ptr = target as *const u32;
         Ok(core::ptr::read_volatile(ptr))
     }
 
     #[inline(always)]
     pub unsafe fn gicr_write_checked(&self, offset: usize, val: u32) -> Result<(), GicError> {
-        let target = validate_mmio_window(self.redistributors_base, self.redistributors_size, offset, 4)?;
+        let target = validate_mmio_window(
+            self.redistributors_base,
+            self.redistributors_size,
+            offset,
+            4,
+        )?;
         let ptr = target as *mut u32;
         core::ptr::write_volatile(ptr, val);
         #[cfg(target_arch = "aarch64")]
@@ -796,7 +822,12 @@ impl Gicv3 {
 
     #[inline(always)]
     pub unsafe fn gicr_read_64_checked(&self, offset: usize) -> Result<u64, GicError> {
-        let target = validate_mmio_window(self.redistributors_base, self.redistributors_size, offset, 8)?;
+        let target = validate_mmio_window(
+            self.redistributors_base,
+            self.redistributors_size,
+            offset,
+            8,
+        )?;
         let ptr = target as *const u64;
         Ok(core::ptr::read_volatile(ptr))
     }
@@ -834,11 +865,15 @@ impl Gicv3 {
 
         let mut cursor = self.redistributors_base;
         loop {
-            let offset_from_base = cursor.checked_sub(self.redistributors_base)
+            let offset_from_base = cursor
+                .checked_sub(self.redistributors_base)
                 .ok_or(GicError::InvalidMmioRange)?;
 
             // Verify that GICR_TYPER (8 bytes at offset 0x0008) is inside the declared window
-            if offset_from_base.checked_add(0x0010).map_or(true, |end| end > self.redistributors_size) {
+            if offset_from_base
+                .checked_add(0x0010)
+                .map_or(true, |end| end > self.redistributors_size)
+            {
                 return Err(GicError::TruncatedRedistributorWindow);
             }
 
@@ -851,7 +886,10 @@ impl Gicv3 {
             let is_last = (typer & (1 << 4)) != 0; // Bit 4: Last
 
             // Validate that the entire frame (RD + SGI [+ VLPI]) fits in the declared window
-            if offset_from_base.checked_add(stride).map_or(true, |end| end > self.redistributors_size) {
+            if offset_from_base
+                .checked_add(stride)
+                .map_or(true, |end| end > self.redistributors_size)
+            {
                 return Err(GicError::TruncatedRedistributorWindow);
             }
 
@@ -863,7 +901,9 @@ impl Gicv3 {
                 return Err(GicError::RedistributorNotFound);
             }
 
-            cursor = cursor.checked_add(stride).ok_or(GicError::InvalidMmioRange)?;
+            cursor = cursor
+                .checked_add(stride)
+                .ok_or(GicError::InvalidMmioRange)?;
         }
     }
 
@@ -915,7 +955,10 @@ impl Gicv3 {
     }
 
     /// Initializes the Redistributor for the executing PE under a specific logical CPU ID.
-    pub unsafe fn init_redistributor_for_logical_id(&mut self, logical_id: usize) -> Result<(), GicError> {
+    pub unsafe fn init_redistributor_for_logical_id(
+        &mut self,
+        logical_id: usize,
+    ) -> Result<(), GicError> {
         let pe_mpidr = Self::current_raw_mpidr();
         let pe_aff = mpidr_to_gicr_affinity(pe_mpidr);
         let rd_base = self.discover_redistributor_for_affinity(pe_aff)?;
@@ -936,7 +979,8 @@ impl Gicv3 {
     }
 
     unsafe fn wake_and_configure_redistributor(&self, rd_base: usize) -> Result<(), GicError> {
-        let rd_offset = rd_base.checked_sub(self.redistributors_base)
+        let rd_offset = rd_base
+            .checked_sub(self.redistributors_base)
             .ok_or(GicError::InvalidMmioRange)?;
 
         // Clear ProcessorSleep (bit 1) in GICR_WAKER to wake up Redistributor
@@ -959,7 +1003,9 @@ impl Gicv3 {
         }
 
         // SGI_base is at rd_base + 0x10000 (64 KiB frame)
-        let sgi_offset = rd_offset.checked_add(0x10000).ok_or(GicError::InvalidMmioRange)?;
+        let sgi_offset = rd_offset
+            .checked_add(0x10000)
+            .ok_or(GicError::InvalidMmioRange)?;
         // Configure SGIs/PPIs (0..31) to Group 1 Non-Secure
         self.gicr_write_checked(sgi_offset + 0x0080, 0xFFFF_FFFF)?;
         // Set default priority for SGIs and PPIs
@@ -976,7 +1022,10 @@ impl Gicv3 {
 
     /// Full generic GICv3 initialization: Distributor, Redistributor, and CPU Interface.
     pub unsafe fn init(&mut self) -> Result<(), GicError> {
-        if self.distributor_base == 0 || self.redistributors_base == 0 || self.redistributors_size < 0x20000 {
+        if self.distributor_base == 0
+            || self.redistributors_base == 0
+            || self.redistributors_size < 0x20000
+        {
             return Err(GicError::InvalidMmioRange);
         }
 
@@ -1010,7 +1059,9 @@ impl Gicv3 {
                 return Err(GicError::InvalidMmioRange);
             }
             let rd_offset = rd_base - self.redistributors_base;
-            let sgi_offset = rd_offset.checked_add(0x10000).ok_or(GicError::InvalidMmioRange)?;
+            let sgi_offset = rd_offset
+                .checked_add(0x10000)
+                .ok_or(GicError::InvalidMmioRange)?;
             let bit = 1 << irq;
             unsafe {
                 self.gicr_write_checked(sgi_offset + 0x0100, bit)?;
@@ -1042,7 +1093,9 @@ impl Gicv3 {
                 return Err(GicError::InvalidMmioRange);
             }
             let rd_offset = rd_base - self.redistributors_base;
-            let sgi_offset = rd_offset.checked_add(0x10000).ok_or(GicError::InvalidMmioRange)?;
+            let sgi_offset = rd_offset
+                .checked_add(0x10000)
+                .ok_or(GicError::InvalidMmioRange)?;
             let bit = 1 << irq;
             unsafe {
                 self.gicr_write_checked(sgi_offset + 0x0180, bit)?;
@@ -1071,7 +1124,11 @@ impl Gicv3 {
         let (aff3, aff2, aff1, aff0) = decode_mpidr_affinity(affinity);
         let val = encode_irouter(aff3, aff2, aff1, aff0, any_pe);
         let offset = 0x6000usize
-            .checked_add((irq as usize).checked_mul(8).ok_or(GicError::InvalidParameter)?)
+            .checked_add(
+                (irq as usize)
+                    .checked_mul(8)
+                    .ok_or(GicError::InvalidParameter)?,
+            )
             .ok_or(GicError::InvalidParameter)?;
         unsafe {
             self.gicd_write_64_checked(offset, val)?;
@@ -1129,7 +1186,8 @@ pub const ACTIVE_GIC_KIND_NONE: u8 = 0;
 pub const ACTIVE_GIC_KIND_GICV2: u8 = 1;
 pub const ACTIVE_GIC_KIND_GICV3: u8 = 2;
 
-pub static ACTIVE_GIC_KIND: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(ACTIVE_GIC_KIND_NONE);
+pub static ACTIVE_GIC_KIND: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(ACTIVE_GIC_KIND_NONE);
 static ACTIVE_GICC_BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static ACTIVE_GICD_BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
@@ -1174,9 +1232,7 @@ pub fn acknowledge_irq() -> u32 {
         ACTIVE_GIC_KIND_GICV2 => {
             let gicc = ACTIVE_GICC_BASE.load(core::sync::atomic::Ordering::Relaxed);
             if gicc != 0 {
-                unsafe {
-                    core::ptr::read_volatile((gicc + GICC_IAR) as *const u32) & 0x3FF
-                }
+                unsafe { core::ptr::read_volatile((gicc + GICC_IAR) as *const u32) & 0x3FF }
             } else {
                 GIC_SPURIOUS_IRQ
             }
@@ -1228,10 +1284,7 @@ pub const fn encode_irouter(aff3: u8, aff2: u8, aff1: u8, aff0: u8, any_pe: bool
     if any_pe {
         1u64 << 31
     } else {
-        ((aff3 as u64) << 32)
-            | ((aff2 as u64) << 16)
-            | ((aff1 as u64) << 8)
-            | (aff0 as u64)
+        ((aff3 as u64) << 32) | ((aff2 as u64) << 16) | ((aff1 as u64) << 8) | (aff0 as u64)
     }
 }
 
@@ -1386,7 +1439,8 @@ pub fn init_active_gicv2_secondary() {
     }
 }
 
-pub static SGI_INTERRUPT_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static SGI_INTERRUPT_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 pub static PE_TIMER_INTERRUPT_COUNT: [core::sync::atomic::AtomicU64; MAX_GIC_PES] = [
     core::sync::atomic::AtomicU64::new(0),
@@ -1448,7 +1502,8 @@ pub fn pe_sgi_interrupt_count(pe_idx: usize) -> u64 {
 }
 
 #[cfg(test)]
-static GLOBAL_PE_TEST_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static GLOBAL_PE_TEST_LOCK: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 #[cfg(test)]
 pub struct GlobalPeTestGuard;
@@ -1456,12 +1511,15 @@ pub struct GlobalPeTestGuard;
 #[cfg(test)]
 impl GlobalPeTestGuard {
     pub fn acquire() -> Self {
-        while GLOBAL_PE_TEST_LOCK.compare_exchange(
-            false,
-            true,
-            core::sync::atomic::Ordering::Acquire,
-            core::sync::atomic::Ordering::Relaxed,
-        ).is_err() {
+        while GLOBAL_PE_TEST_LOCK
+            .compare_exchange(
+                false,
+                true,
+                core::sync::atomic::Ordering::Acquire,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
             core::hint::spin_loop();
         }
         Self
@@ -1483,7 +1541,7 @@ mod tests {
     fn test_validate_mmio_window_valid_reads_and_writes() {
         let base = 0x080A_0000;
         let size = 0x20000; // 128 KiB
-        // Start of window
+                            // Start of window
         assert_eq!(validate_mmio_window(base, size, 0, 4), Ok(0x080A_0000));
         assert_eq!(validate_mmio_window(base, size, 0, 8), Ok(0x080A_0000));
 
@@ -1492,15 +1550,30 @@ mod tests {
         assert_eq!(validate_mmio_window(base, size, 0x1000, 8), Ok(0x080A_1000));
 
         // Exact end of window boundary
-        assert_eq!(validate_mmio_window(base, size, size - 4, 4), Ok(base + size - 4));
-        assert_eq!(validate_mmio_window(base, size, size - 8, 8), Ok(base + size - 8));
+        assert_eq!(
+            validate_mmio_window(base, size, size - 4, 4),
+            Ok(base + size - 4)
+        );
+        assert_eq!(
+            validate_mmio_window(base, size, size - 8, 8),
+            Ok(base + size - 8)
+        );
     }
 
     #[test]
     fn test_validate_mmio_window_null_base_or_zero_size() {
-        assert_eq!(validate_mmio_window(0, 0x1000, 0, 4), Err(GicError::InvalidMmioRange));
-        assert_eq!(validate_mmio_window(0x0800_0000, 0, 0, 4), Err(GicError::InvalidMmioRange));
-        assert_eq!(validate_mmio_window(0, 0, 0, 4), Err(GicError::InvalidMmioRange));
+        assert_eq!(
+            validate_mmio_window(0, 0x1000, 0, 4),
+            Err(GicError::InvalidMmioRange)
+        );
+        assert_eq!(
+            validate_mmio_window(0x0800_0000, 0, 0, 4),
+            Err(GicError::InvalidMmioRange)
+        );
+        assert_eq!(
+            validate_mmio_window(0, 0, 0, 4),
+            Err(GicError::InvalidMmioRange)
+        );
     }
 
     #[test]
@@ -1508,25 +1581,49 @@ mod tests {
         let base = 0x0800_0000;
         let size = 0x1000;
         // Exactly at size (0-byte remaining) for 4-byte read
-        assert_eq!(validate_mmio_window(base, size, size, 4), Err(GicError::OutOfBoundsMmioAccess));
+        assert_eq!(
+            validate_mmio_window(base, size, size, 4),
+            Err(GicError::OutOfBoundsMmioAccess)
+        );
         // Exactly at size (0-byte remaining) for 8-byte read
-        assert_eq!(validate_mmio_window(base, size, size, 8), Err(GicError::OutOfBoundsMmioAccess));
+        assert_eq!(
+            validate_mmio_window(base, size, size, 8),
+            Err(GicError::OutOfBoundsMmioAccess)
+        );
         // Past size for 4-byte read
-        assert_eq!(validate_mmio_window(base, size, size + 4, 4), Err(GicError::OutOfBoundsMmioAccess));
+        assert_eq!(
+            validate_mmio_window(base, size, size + 4, 4),
+            Err(GicError::OutOfBoundsMmioAccess)
+        );
         // Past size for 8-byte read
-        assert_eq!(validate_mmio_window(base, size, size + 8, 8), Err(GicError::OutOfBoundsMmioAccess));
+        assert_eq!(
+            validate_mmio_window(base, size, size + 8, 8),
+            Err(GicError::OutOfBoundsMmioAccess)
+        );
     }
 
     #[test]
     fn test_validate_mmio_window_unaligned_base() {
         let size = 0x1000;
         // 4-byte read with unaligned base (1, 2, 3)
-        assert_eq!(validate_mmio_window(0x0800_0001, size, 0, 4), Err(GicError::MisalignedMmioAccess));
-        assert_eq!(validate_mmio_window(0x0800_0002, size, 0, 4), Err(GicError::MisalignedMmioAccess));
-        assert_eq!(validate_mmio_window(0x0800_0003, size, 0, 4), Err(GicError::MisalignedMmioAccess));
+        assert_eq!(
+            validate_mmio_window(0x0800_0001, size, 0, 4),
+            Err(GicError::MisalignedMmioAccess)
+        );
+        assert_eq!(
+            validate_mmio_window(0x0800_0002, size, 0, 4),
+            Err(GicError::MisalignedMmioAccess)
+        );
+        assert_eq!(
+            validate_mmio_window(0x0800_0003, size, 0, 4),
+            Err(GicError::MisalignedMmioAccess)
+        );
 
         // 8-byte read with 4-byte aligned base (not 8-byte aligned)
-        assert_eq!(validate_mmio_window(0x0800_0004, size, 0, 8), Err(GicError::MisalignedMmioAccess));
+        assert_eq!(
+            validate_mmio_window(0x0800_0004, size, 0, 8),
+            Err(GicError::MisalignedMmioAccess)
+        );
     }
 
     #[test]
@@ -1534,30 +1631,60 @@ mod tests {
         let base = 0x0800_0000;
         let size = 0x1000;
         // 4-byte read at offsets 1, 2, 3
-        assert_eq!(validate_mmio_window(base, size, 1, 4), Err(GicError::MisalignedMmioAccess));
-        assert_eq!(validate_mmio_window(base, size, 2, 4), Err(GicError::MisalignedMmioAccess));
-        assert_eq!(validate_mmio_window(base, size, 3, 4), Err(GicError::MisalignedMmioAccess));
+        assert_eq!(
+            validate_mmio_window(base, size, 1, 4),
+            Err(GicError::MisalignedMmioAccess)
+        );
+        assert_eq!(
+            validate_mmio_window(base, size, 2, 4),
+            Err(GicError::MisalignedMmioAccess)
+        );
+        assert_eq!(
+            validate_mmio_window(base, size, 3, 4),
+            Err(GicError::MisalignedMmioAccess)
+        );
 
         // 8-byte read at offset 4 (multiple of 4, but not 8)
-        assert_eq!(validate_mmio_window(base, size, 4, 8), Err(GicError::MisalignedMmioAccess));
+        assert_eq!(
+            validate_mmio_window(base, size, 4, 8),
+            Err(GicError::MisalignedMmioAccess)
+        );
     }
 
     #[test]
     fn test_validate_mmio_window_invalid_width() {
         let base = 0x0800_0000;
         let size = 0x1000;
-        assert_eq!(validate_mmio_window(base, size, 0, 0), Err(GicError::InvalidParameter));
-        assert_eq!(validate_mmio_window(base, size, 0, 1), Err(GicError::InvalidParameter));
-        assert_eq!(validate_mmio_window(base, size, 0, 2), Err(GicError::InvalidParameter));
-        assert_eq!(validate_mmio_window(base, size, 0, 16), Err(GicError::InvalidParameter));
+        assert_eq!(
+            validate_mmio_window(base, size, 0, 0),
+            Err(GicError::InvalidParameter)
+        );
+        assert_eq!(
+            validate_mmio_window(base, size, 0, 1),
+            Err(GicError::InvalidParameter)
+        );
+        assert_eq!(
+            validate_mmio_window(base, size, 0, 2),
+            Err(GicError::InvalidParameter)
+        );
+        assert_eq!(
+            validate_mmio_window(base, size, 0, 16),
+            Err(GicError::InvalidParameter)
+        );
     }
 
     #[test]
     fn test_validate_mmio_window_overflow() {
         let base = usize::MAX - 0x100;
         let size = 0x1000;
-        assert_eq!(validate_mmio_window(base, size, 0, 4), Err(GicError::InvalidMmioRange));
-        assert_eq!(validate_mmio_window(0x1000, 0x10000, usize::MAX - 3, 4), Err(GicError::OutOfBoundsMmioAccess));
+        assert_eq!(
+            validate_mmio_window(base, size, 0, 4),
+            Err(GicError::InvalidMmioRange)
+        );
+        assert_eq!(
+            validate_mmio_window(0x1000, 0x10000, usize::MAX - 3, 4),
+            Err(GicError::OutOfBoundsMmioAccess)
+        );
     }
 
     #[test]
@@ -1581,7 +1708,10 @@ mod tests {
         assert_eq!(register_pe_redistributor(0x0000_0000, 0x080A_0000), Ok(()));
 
         // 5. Conflicting re-registration of PE 0 with different base fails
-        assert_eq!(register_pe_redistributor(0x0000_0000, 0x080E_0000), Err(GicError::RegistrationConflict));
+        assert_eq!(
+            register_pe_redistributor(0x0000_0000, 0x080E_0000),
+            Err(GicError::RegistrationConflict)
+        );
 
         // 6. Unknown PE still returns None
         assert_eq!(get_pe_redistributor(0x0000_0002), None);
@@ -1603,7 +1733,10 @@ mod tests {
         }
 
         // 9th PE registration must fail closed with PeTableFull
-        assert_eq!(register_pe_redistributor(0x0000_0008, 0x081A_0000), Err(GicError::PeTableFull));
+        assert_eq!(
+            register_pe_redistributor(0x0000_0008, 0x081A_0000),
+            Err(GicError::PeTableFull)
+        );
 
         reset_pe_redistributor_map_for_test();
     }
@@ -1649,7 +1782,8 @@ mod tests {
 
         // Complex non-zero Aff3, Aff2, Aff1 with target list: Aff3=0xFE, Aff2=0xDC, Aff1=0xBA, TargetList=0x8001, INTID=14
         let complex_sgi = encode_sgi1r(0xFE, 0xDC, 0xBA, 0x8001, 14, false);
-        let expected_complex: u64 = ((0xFEu64) << 48) | ((0xDCu64) << 32) | ((14u64) << 24) | ((0xBAu64) << 16) | 0x8001u64;
+        let expected_complex: u64 =
+            ((0xFEu64) << 48) | ((0xDCu64) << 32) | ((14u64) << 24) | ((0xBAu64) << 16) | 0x8001u64;
         assert_eq!(complex_sgi, expected_complex);
 
         // Broadcast to all except self: IRM=1
@@ -1700,4 +1834,3 @@ mod tests {
         reset_pe_redistributor_map_for_test();
     }
 }
-

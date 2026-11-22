@@ -294,13 +294,20 @@ pub extern "C" fn handle_sync_el1h(frame: &mut ExceptionFrame) {
 pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
     let spsr_mode = frame.spsr & 0x0F;
     if spsr_mode != 0b0000 {
-        crate::kprintln!("[FATAL] handle_sync_lower64 called but SPSR indicates non-EL0 mode: 0x{:X}", frame.spsr);
+        crate::kprintln!(
+            "[FATAL] handle_sync_lower64 called but SPSR indicates non-EL0 mode: 0x{:X}",
+            frame.spsr
+        );
         loop {
             #[cfg(target_arch = "aarch64")]
-            unsafe { core::arch::asm!("wfe"); }
+            unsafe {
+                core::arch::asm!("wfe");
+            }
         }
     }
-    unsafe { crate::user::EL0_HARDWARE_ENTERED = true; }
+    unsafe {
+        crate::user::EL0_HARDWARE_ENTERED = true;
+    }
 
     let ec = (frame.esr >> 26) & 0x3F;
     if ec == 0x15 {
@@ -312,7 +319,9 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
         let a3 = frame.regs[3];
         let a4 = frame.regs[4];
 
-        if syscall_nr == crate::syscall::SYS_EXIT || syscall_nr == crate::syscall::SYS_EXIT_WITH_CODE {
+        if syscall_nr == crate::syscall::SYS_EXIT
+            || syscall_nr == crate::syscall::SYS_EXIT_WITH_CODE
+        {
             let code = a0 as i32;
             crate::kprintln!("[SYSCALL] Task exited with code: {}", code);
             crate::user::record_el0_exit(code);
@@ -342,14 +351,20 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
         frame.regs[0] = ret as u64;
 
         if syscall_nr == crate::syscall::SYS_GET_TICKS {
-            unsafe { crate::user::EL0_TICKS_CAPTURED = ret as u64; }
+            unsafe {
+                crate::user::EL0_TICKS_CAPTURED = ret as u64;
+            }
         } else if syscall_nr == crate::syscall::SYS_GET_TASK_ID {
-            unsafe { crate::user::EL0_TASK_ID_CAPTURED = ret as u64; }
+            unsafe {
+                crate::user::EL0_TASK_ID_CAPTURED = ret as u64;
+            }
         }
     } else if ec == 0x00 && unsafe { crate::user::IN_SECTION17_SMOKE } {
         // EC 0x00 (Section 17 smoke test only): Trapped 'mrs CurrentEL' from EL0
         crate::kprintln!("[TEST] AArch64 EL0 Privilege Isolation: Attempted 'mrs CurrentEL' from EL0 trapped (EC=0x00) VERIFIED.");
-        unsafe { crate::user::EL0_PRIVILEGE_TRAP_VERIFIED = true; }
+        unsafe {
+            crate::user::EL0_PRIVILEGE_TRAP_VERIFIED = true;
+        }
         frame.elr += 4;
     } else if ec == 0x24 && unsafe { crate::user::IN_SECTION17_SMOKE } {
         // EC 0x24 (Section 17 smoke test only): Data Abort from EL0 reading Kernel DRAM
@@ -363,7 +378,9 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
             far = 0;
         }
         crate::kprintln!("[TEST] AArch64 EL0 MMU Memory Isolation: Unauthorized read of kernel DRAM @ 0x{:08X} trapped (EC=0x24) VERIFIED.", far);
-        unsafe { crate::user::EL0_MMU_TRAP_VERIFIED = true; }
+        unsafe {
+            crate::user::EL0_MMU_TRAP_VERIFIED = true;
+        }
         frame.elr += 4;
     } else {
         // Unapproved synchronous fault from EL0 (data abort, instruction abort, illegal instruction, etc.):
@@ -455,7 +472,8 @@ fn handle_sync(frame: &mut ExceptionFrame, context_name: &str) {
     }
 }
 
-pub static TIMER_INTERRUPT_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static TIMER_INTERRUPT_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
 
 #[no_mangle]
 pub extern "C" fn handle_irq_el1t(_frame: &mut ExceptionFrame) {
@@ -506,7 +524,11 @@ fn dispatch_irq() {
         }
         let mut timer = crate::timer::ArmGenericTimer::new();
         let freq = timer.read_frequency();
-        let countdown = if freq > 0 { (freq / 100) as u32 } else { 625_000 };
+        let countdown = if freq > 0 {
+            (freq / 100) as u32
+        } else {
+            625_000
+        };
         timer.program_countdown(countdown);
         crate::task::on_timer_tick_irq();
         crate::gic::end_of_interrupt(irq);
@@ -535,7 +557,11 @@ pub extern "C" fn handle_fiq(_frame: &mut ExceptionFrame) {}
 
 #[no_mangle]
 pub extern "C" fn handle_serror(frame: &mut ExceptionFrame) {
-    crate::kprintln!("[AArch64 SERROR] ESR_EL1: 0x{:016X}, ELR_EL1: 0x{:016X}", frame.esr, frame.elr);
+    crate::kprintln!(
+        "[AArch64 SERROR] ESR_EL1: 0x{:016X}, ELR_EL1: 0x{:016X}",
+        frame.esr,
+        frame.elr
+    );
     loop {
         #[cfg(target_arch = "aarch64")]
         unsafe {

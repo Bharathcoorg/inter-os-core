@@ -108,18 +108,162 @@ struct ServiceEntry {
 
 // 12 core declared services matching userspace/init discovery expectations
 static SERVICES: [ServiceEntry; 12] = [
-    ServiceEntry { id: ServiceId::Display, name: "displayd", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
-    ServiceEntry { id: ServiceId::Input, name: "inputd", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
-    ServiceEntry { id: ServiceId::Storage, name: "storaged", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
-    ServiceEntry { id: ServiceId::Network, name: "netd", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
-    ServiceEntry { id: ServiceId::Power, name: "powerd", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
-    ServiceEntry { id: ServiceId::Modem, name: "modemd", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
-    ServiceEntry { id: ServiceId::Audio, name: "audiod", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
-    ServiceEntry { id: ServiceId::Camera, name: "camerad", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
-    ServiceEntry { id: ServiceId::Compositor, name: "compositor", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
-    ServiceEntry { id: ServiceId::Launcher, name: "launcher", state: AtomicU8::new(0), restart: 1, critical: 1, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
-    ServiceEntry { id: ServiceId::Sensor, name: "sensord", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
-    ServiceEntry { id: ServiceId::Inference, name: "aid", state: AtomicU8::new(0), restart: 1, critical: 0, generation: AtomicU32::new(0), last_heartbeat: AtomicU64::new(0), failures: AtomicU32::new(0), pid: AtomicU32::new(0), restart_count: AtomicU32::new(0), backoff_ticks: AtomicU64::new(0) },
+    ServiceEntry {
+        id: ServiceId::Display,
+        name: "displayd",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 1,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
+    ServiceEntry {
+        id: ServiceId::Input,
+        name: "inputd",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 1,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
+    ServiceEntry {
+        id: ServiceId::Storage,
+        name: "storaged",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 1,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
+    ServiceEntry {
+        id: ServiceId::Network,
+        name: "netd",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 0,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
+    ServiceEntry {
+        id: ServiceId::Power,
+        name: "powerd",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 1,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
+    ServiceEntry {
+        id: ServiceId::Modem,
+        name: "modemd",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 0,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
+    ServiceEntry {
+        id: ServiceId::Audio,
+        name: "audiod",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 0,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
+    ServiceEntry {
+        id: ServiceId::Camera,
+        name: "camerad",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 0,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
+    ServiceEntry {
+        id: ServiceId::Compositor,
+        name: "compositor",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 1,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
+    ServiceEntry {
+        id: ServiceId::Launcher,
+        name: "launcher",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 1,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
+    ServiceEntry {
+        id: ServiceId::Sensor,
+        name: "sensord",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 0,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
+    ServiceEntry {
+        id: ServiceId::Inference,
+        name: "aid",
+        state: AtomicU8::new(0),
+        restart: 1,
+        critical: 0,
+        generation: AtomicU32::new(0),
+        last_heartbeat: AtomicU64::new(0),
+        failures: AtomicU32::new(0),
+        pid: AtomicU32::new(0),
+        restart_count: AtomicU32::new(0),
+        backoff_ticks: AtomicU64::new(0),
+    },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,7 +386,10 @@ fn start_internal(id: u8) -> Result<u32, ()> {
             // Atomic state transition: only Stopped, Crashed, or Restarting can transition to Starting
             let cur = svc.state.load(Ordering::Acquire);
             if cur == ServiceState::Starting as u8 || cur == ServiceState::Running as u8 {
-                crate::kprintln!("[SERVICE] Rejecting duplicate start for active service '{}'", svc.name);
+                crate::kprintln!(
+                    "[SERVICE] Rejecting duplicate start for active service '{}'",
+                    svc.name
+                );
                 return Err(());
             }
 
@@ -253,7 +400,10 @@ fn start_internal(id: u8) -> Result<u32, ()> {
                 Ordering::SeqCst,
             );
             if transitioned.is_err() {
-                crate::kprintln!("[SERVICE] Concurrent start race lost for service '{}'", svc.name);
+                crate::kprintln!(
+                    "[SERVICE] Concurrent start race lost for service '{}'",
+                    svc.name
+                );
                 return Err(());
             }
 
@@ -262,16 +412,27 @@ fn start_internal(id: u8) -> Result<u32, ()> {
                 let token = match ServiceLifecycleToken::issue(svc) {
                     Some(t) => t,
                     None => {
-                        crate::kprintln!("[SERVICE] Failed to issue token for old PID {} for '{}'", old_pid, svc.name);
-                        svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                        crate::kprintln!(
+                            "[SERVICE] Failed to issue token for old PID {} for '{}'",
+                            old_pid,
+                            svc.name
+                        );
+                        svc.state
+                            .store(ServiceState::Crashed as u8, Ordering::Release);
                         return Err(());
                     }
                 };
                 {
                     let mut sched = crate::task::SCHEDULER.lock();
                     if let Err(e) = crate::task::terminate_service_task(&mut sched, &token) {
-                        crate::kprintln!("[SERVICE] Failed to terminate old PID {} for '{}': {}", old_pid, svc.name, e);
-                        svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                        crate::kprintln!(
+                            "[SERVICE] Failed to terminate old PID {} for '{}': {}",
+                            old_pid,
+                            svc.name,
+                            e
+                        );
+                        svc.state
+                            .store(ServiceState::Crashed as u8, Ordering::Release);
                         return Err(());
                     }
                 }
@@ -280,8 +441,14 @@ fn start_internal(id: u8) -> Result<u32, ()> {
                         svc.pid.store(0, Ordering::Release);
                     }
                     Err(e) => {
-                        crate::kprintln!("[SERVICE] Failed to reap old process PID {} for '{}': {}", old_pid, svc.name, e);
-                        svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                        crate::kprintln!(
+                            "[SERVICE] Failed to reap old process PID {} for '{}': {}",
+                            old_pid,
+                            svc.name,
+                            e
+                        );
+                        svc.state
+                            .store(ServiceState::Crashed as u8, Ordering::Release);
                         return Err(());
                     }
                 }
@@ -290,7 +457,8 @@ fn start_internal(id: u8) -> Result<u32, ()> {
             let img = match crate::images::service_image(id) {
                 Some(i) => i,
                 None => {
-                    svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                    svc.state
+                        .store(ServiceState::Crashed as u8, Ordering::Release);
                     svc.failures.fetch_add(1, Ordering::Relaxed);
                     return Err(());
                 }
@@ -300,7 +468,8 @@ fn start_internal(id: u8) -> Result<u32, ()> {
                 Ok(l) => l,
                 Err(e) => {
                     crate::kprintln!("[SERVICE ERROR] Failed to load '{}': {}", img.name, e);
-                    svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                    svc.state
+                        .store(ServiceState::Crashed as u8, Ordering::Release);
                     svc.failures.fetch_add(1, Ordering::Relaxed);
                     return Err(());
                 }
@@ -308,33 +477,95 @@ fn start_internal(id: u8) -> Result<u32, ()> {
 
             let mut sched = crate::task::SCHEDULER.lock();
             let mut caps = crate::capability::CapabilityTable::new();
-            caps.mint(crate::capability::CapabilityType::IpcSend, crate::capability::Rights::INVOKE, None);
-            caps.mint(crate::capability::CapabilityType::IpcReceive, crate::capability::Rights::READ, None);
-            caps.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
-            if id == 9 || id == 10 { // compositor or launcher
-                caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights(crate::capability::Rights::WRITE.0 | crate::capability::Rights::ADMIN.0), None);
-                caps.mint(crate::capability::CapabilityType::SystemResource, crate::capability::Rights(crate::capability::Rights::READ.0 | crate::capability::Rights::WRITE.0 | crate::capability::Rights::ADMIN.0), None);
+            caps.mint(
+                crate::capability::CapabilityType::IpcSend,
+                crate::capability::Rights::INVOKE,
+                None,
+            );
+            caps.mint(
+                crate::capability::CapabilityType::IpcReceive,
+                crate::capability::Rights::READ,
+                None,
+            );
+            caps.mint(
+                crate::capability::CapabilityType::SerialOutput,
+                crate::capability::Rights::WRITE,
+                None,
+            );
+            if id == 9 || id == 10 {
+                // compositor or launcher
+                caps.mint(
+                    crate::capability::CapabilityType::DisplayServer,
+                    crate::capability::Rights(
+                        crate::capability::Rights::WRITE.0 | crate::capability::Rights::ADMIN.0,
+                    ),
+                    None,
+                );
+                caps.mint(
+                    crate::capability::CapabilityType::SystemResource,
+                    crate::capability::Rights(
+                        crate::capability::Rights::READ.0
+                            | crate::capability::Rights::WRITE.0
+                            | crate::capability::Rights::ADMIN.0,
+                    ),
+                    None,
+                );
             } else {
-                caps.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
+                caps.mint(
+                    crate::capability::CapabilityType::DisplayServer,
+                    crate::capability::Rights::WRITE,
+                    None,
+                );
             }
-            caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
-            caps.mint(crate::capability::CapabilityType::InputDevice, crate::capability::Rights::READ, None);
-            if id == 10 { // launcher
-                caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
+            caps.mint(
+                crate::capability::CapabilityType::EventPoll,
+                crate::capability::Rights::READ,
+                None,
+            );
+            caps.mint(
+                crate::capability::CapabilityType::InputDevice,
+                crate::capability::Rights::READ,
+                None,
+            );
+            if id == 10 {
+                // launcher
+                caps.mint(
+                    crate::capability::CapabilityType::TimerTickRead,
+                    crate::capability::Rights::READ,
+                    None,
+                );
             }
-            let next_gen = svc.generation.load(Ordering::Acquire).wrapping_add(1).max(1);
-            let tid = sched.spawn_service_process(svc.id as u8, next_gen, img.name, loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
+            let next_gen = svc
+                .generation
+                .load(Ordering::Acquire)
+                .wrapping_add(1)
+                .max(1);
+            let tid = sched.spawn_service_process(
+                svc.id as u8,
+                next_gen,
+                img.name,
+                loaded.entry_point,
+                loaded.stack_top,
+                Some(loaded.address_space),
+                caps,
+            );
             if tid == 0 {
                 drop(sched);
-                svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                svc.state
+                    .store(ServiceState::Crashed as u8, Ordering::Release);
                 svc.failures.fetch_add(1, Ordering::Relaxed);
                 return Err(());
             }
 
-            let verified = sched.tasks.iter().any(|t| t.id == tid && (t.state == crate::task::TaskState::Ready || t.state == crate::task::TaskState::Running));
+            let verified = sched.tasks.iter().any(|t| {
+                t.id == tid
+                    && (t.state == crate::task::TaskState::Ready
+                        || t.state == crate::task::TaskState::Running)
+            });
             drop(sched);
             if !verified {
-                svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                svc.state
+                    .store(ServiceState::Crashed as u8, Ordering::Release);
                 svc.failures.fetch_add(1, Ordering::Relaxed);
                 return Err(());
             }
@@ -346,10 +577,15 @@ fn start_internal(id: u8) -> Result<u32, ()> {
             svc.pid.store(tid, Ordering::Release);
             svc.generation.store(next_gen, Ordering::Release);
             svc.last_heartbeat.store(ticks, Ordering::Release);
-            svc.state.store(ServiceState::Running as u8, Ordering::Release);
+            svc.state
+                .store(ServiceState::Running as u8, Ordering::Release);
             svc.failures.store(0, Ordering::Relaxed);
 
-            crate::kprintln!("[SERVICE] AArch64 userspace service '{}' spawned (PID {})", img.name, tid);
+            crate::kprintln!(
+                "[SERVICE] AArch64 userspace service '{}' spawned (PID {})",
+                img.name,
+                tid
+            );
             return Ok(tid);
         }
     }
@@ -365,14 +601,23 @@ pub fn stop(id: u8) -> Result<(), ()> {
                 let token = match ServiceLifecycleToken::issue(svc) {
                     Some(t) => t,
                     None => {
-                        crate::kprintln!("[SERVICE] Failed to issue token for PID {} during stop of '{}'", pid, svc.name);
+                        crate::kprintln!(
+                            "[SERVICE] Failed to issue token for PID {} during stop of '{}'",
+                            pid,
+                            svc.name
+                        );
                         return Err(());
                     }
                 };
                 {
                     let mut sched = crate::task::SCHEDULER.lock();
                     if let Err(e) = crate::task::terminate_service_task(&mut sched, &token) {
-                        crate::kprintln!("[SERVICE] Failed to terminate PID {} during stop of '{}': {}", pid, svc.name, e);
+                        crate::kprintln!(
+                            "[SERVICE] Failed to terminate PID {} during stop of '{}': {}",
+                            pid,
+                            svc.name,
+                            e
+                        );
                         return Err(());
                     }
                 }
@@ -381,12 +626,18 @@ pub fn stop(id: u8) -> Result<(), ()> {
                         svc.pid.store(0, Ordering::Release);
                     }
                     Err(e) => {
-                        crate::kprintln!("[SERVICE] Failed to reap PID {} during stop of '{}': {}", pid, svc.name, e);
+                        crate::kprintln!(
+                            "[SERVICE] Failed to reap PID {} during stop of '{}': {}",
+                            pid,
+                            svc.name,
+                            e
+                        );
                         return Err(());
                     }
                 }
             }
-            svc.state.store(ServiceState::Stopped as u8, Ordering::Release);
+            svc.state
+                .store(ServiceState::Stopped as u8, Ordering::Release);
             return Ok(());
         }
     }
@@ -406,7 +657,8 @@ pub fn heartbeat(caller_pid: u32, generation: u32) -> Result<(), ()> {
     for svc in &SERVICES {
         if svc.pid.load(Ordering::Acquire) == caller_pid {
             let cur_state = svc.state.load(Ordering::Acquire);
-            if cur_state == ServiceState::Stopped as u8 || cur_state == ServiceState::Crashed as u8 {
+            if cur_state == ServiceState::Stopped as u8 || cur_state == ServiceState::Crashed as u8
+            {
                 return Err(());
             }
             let actual_gen = svc.generation.load(Ordering::Acquire);
@@ -416,7 +668,8 @@ pub fn heartbeat(caller_pid: u32, generation: u32) -> Result<(), ()> {
             }
             svc.last_heartbeat.store(ticks, Ordering::Release);
             if cur_state == ServiceState::Degraded as u8 {
-                svc.state.store(ServiceState::Running as u8, Ordering::Release);
+                svc.state
+                    .store(ServiceState::Running as u8, Ordering::Release);
             }
             return Ok(());
         }
@@ -445,7 +698,11 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
 
             let fails = svc.failures.load(Ordering::Relaxed);
             if fails >= MAX_RESTART_ATTEMPTS {
-                crate::kprintln!("[SERVICE] Service '{}' exceeded maximum retry budget ({})", svc.name, fails);
+                crate::kprintln!(
+                    "[SERVICE] Service '{}' exceeded maximum retry budget ({})",
+                    svc.name,
+                    fails
+                );
                 return Err(());
             }
 
@@ -455,7 +712,11 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
                 let token = match ServiceLifecycleToken::issue(svc) {
                     Some(t) => t,
                     None => {
-                        crate::kprintln!("[SERVICE] Failed to issue token for recovery of PID {} for '{}'", old_pid, svc.name);
+                        crate::kprintln!(
+                            "[SERVICE] Failed to issue token for recovery of PID {} for '{}'",
+                            old_pid,
+                            svc.name
+                        );
                         return Err(());
                     }
                 };
@@ -468,23 +729,30 @@ pub fn recover_failed(id: u8) -> Result<(), ()> {
                         svc.pid.store(0, Ordering::Release);
                     }
                     Err(e) => {
-                        crate::kprintln!("[SERVICE] Recovery reap failed for PID {}: {}", old_pid, e);
+                        crate::kprintln!(
+                            "[SERVICE] Recovery reap failed for PID {}: {}",
+                            old_pid,
+                            e
+                        );
                         return Err(());
                     }
                 }
             }
 
-            svc.state.store(ServiceState::Restarting as u8, Ordering::Release);
+            svc.state
+                .store(ServiceState::Restarting as u8, Ordering::Release);
             return match start_internal(id) {
                 Ok(_) => {
                     svc.restart_count.fetch_add(1, Ordering::Relaxed);
                     Ok(())
                 }
                 Err(()) => {
-                    svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                    svc.state
+                        .store(ServiceState::Crashed as u8, Ordering::Release);
                     svc.failures.fetch_add(1, Ordering::Relaxed);
                     let backoff_interval = (1u64 << fails.min(6)) * (HEARTBEAT_TIMEOUT_TICKS / 10);
-                    svc.backoff_ticks.store(ticks.saturating_add(backoff_interval), Ordering::Release);
+                    svc.backoff_ticks
+                        .store(ticks.saturating_add(backoff_interval), Ordering::Release);
                     Err(())
                 }
             };
@@ -528,14 +796,21 @@ pub fn snapshot(out: &mut [u8]) -> usize {
 
         // Audit active process status
         if state_val == ServiceState::Running as u8 {
-            let task_active = pid != 0 && sched.tasks.iter().any(|t| t.id == pid && (t.state == crate::task::TaskState::Ready || t.state == crate::task::TaskState::Running));
+            let task_active = pid != 0
+                && sched.tasks.iter().any(|t| {
+                    t.id == pid
+                        && (t.state == crate::task::TaskState::Ready
+                            || t.state == crate::task::TaskState::Running)
+                });
             if !task_active {
-                svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+                svc.state
+                    .store(ServiceState::Crashed as u8, Ordering::Release);
                 state_val = ServiceState::Crashed as u8;
             } else {
                 let hb = svc.last_heartbeat.load(Ordering::Acquire);
                 if hb > 0 && ticks.saturating_sub(hb) > HEARTBEAT_TIMEOUT_TICKS {
-                    svc.state.store(ServiceState::Degraded as u8, Ordering::Release);
+                    svc.state
+                        .store(ServiceState::Degraded as u8, Ordering::Release);
                     state_val = ServiceState::Degraded as u8;
                 }
             }
@@ -545,7 +820,11 @@ pub fn snapshot(out: &mut [u8]) -> usize {
         let gen = svc.generation.load(Ordering::Relaxed);
         let fails = svc.failures.load(Ordering::Relaxed);
         let hb = svc.last_heartbeat.load(Ordering::Acquire);
-        let age = if hb > 0 { ticks.saturating_sub(hb) / 1000 } else { 0 };
+        let age = if hb > 0 {
+            ticks.saturating_sub(hb) / 1000
+        } else {
+            0
+        };
         let _ = writeln!(
             writer,
             "{}|1|{}|{}|{}|{}|{}|{}",
@@ -556,7 +835,9 @@ pub fn snapshot(out: &mut [u8]) -> usize {
 }
 
 pub fn test_service_supervisor_lifecycle_hardening() {
-    crate::kprintln!("--- [Testing AArch64 Service Supervisor Lifecycle & Authorization Hardening] ---");
+    crate::kprintln!(
+        "--- [Testing AArch64 Service Supervisor Lifecycle & Authorization Hardening] ---"
+    );
     let test_svc_id = 3; // ServiceId::Storage ("storaged")
 
     // Clean initial state: stop if already running
@@ -564,37 +845,72 @@ pub fn test_service_supervisor_lifecycle_hardening() {
 
     // Test 1: Start service (valid PID, registry updated, task exists with is_service: true, service_id: Some(id))
     let pid1 = start(test_svc_id).expect("Test 1: Service start must succeed");
-    assert!(pid1 > 0 && !crate::task::is_reserved_pid(pid1), "Test 1: Service PID must be non-zero and non-reserved");
+    assert!(
+        pid1 > 0 && !crate::task::is_reserved_pid(pid1),
+        "Test 1: Service PID must be non-zero and non-reserved"
+    );
     {
         let sched = crate::task::SCHEDULER.lock();
-        let t = sched.tasks.iter().find(|t| t.id == pid1).expect("Test 1: Service task must exist in scheduler");
-        assert!(t.is_service, "Test 1: Service task must have is_service == true");
-        assert_eq!(t.service_id, Some(test_svc_id), "Test 1: Service task must have service_id matching declared ID");
-        assert_eq!(t.parent_id, crate::task::SUPERVISOR_PID, "Test 1: Service task must have parent_id == SUPERVISOR_PID");
+        let t = sched
+            .tasks
+            .iter()
+            .find(|t| t.id == pid1)
+            .expect("Test 1: Service task must exist in scheduler");
+        assert!(
+            t.is_service,
+            "Test 1: Service task must have is_service == true"
+        );
+        assert_eq!(
+            t.service_id,
+            Some(test_svc_id),
+            "Test 1: Service task must have service_id matching declared ID"
+        );
+        assert_eq!(
+            t.parent_id,
+            crate::task::SUPERVISOR_PID,
+            "Test 1: Service task must have parent_id == SUPERVISOR_PID"
+        );
     }
     assert_eq!(service_state(test_svc_id), Some(ServiceState::Running));
     assert_eq!(service_pid(test_svc_id), Some(pid1));
     crate::kprintln!("[TEST] Test 1 (Start Service & Identity Verification): PASSED");
 
     // Test 2: Stop service (task removed, registry PID cleared, state Stopped)
-    assert_eq!(stop(test_svc_id), Ok(()), "Test 2: Service stop must succeed");
+    assert_eq!(
+        stop(test_svc_id),
+        Ok(()),
+        "Test 2: Service stop must succeed"
+    );
     assert_eq!(service_state(test_svc_id), Some(ServiceState::Stopped));
     assert_eq!(service_pid(test_svc_id), None);
     {
         let sched = crate::task::SCHEDULER.lock();
-        assert!(!sched.tasks.iter().any(|t| t.id == pid1), "Test 2: Stopped service task must be reaped from scheduler");
+        assert!(
+            !sched.tasks.iter().any(|t| t.id == pid1),
+            "Test 2: Stopped service task must be reaped from scheduler"
+        );
     }
     crate::kprintln!("[TEST] Test 2 (Stop Service & Clean Reaping): PASSED");
 
     // Test 3: Restart service (old task reaped, new PID assigned, generation advances)
     let initial_gen = service_generation(test_svc_id).unwrap_or(0);
     let pid2 = start(test_svc_id).expect("Test 3: Service restart must succeed");
-    assert!(pid2 > 0 && pid2 != pid1, "Test 3: Restarted service must receive a new distinct PID");
+    assert!(
+        pid2 > 0 && pid2 != pid1,
+        "Test 3: Restarted service must receive a new distinct PID"
+    );
     let restarted_gen = service_generation(test_svc_id).unwrap_or(0);
-    assert!(restarted_gen > initial_gen, "Test 3: Generation must advance on service restart");
+    assert!(
+        restarted_gen > initial_gen,
+        "Test 3: Generation must advance on service restart"
+    );
     {
         let sched = crate::task::SCHEDULER.lock();
-        let t = sched.tasks.iter().find(|t| t.id == pid2).expect("Test 3: Restarted task must exist in scheduler");
+        let t = sched
+            .tasks
+            .iter()
+            .find(|t| t.id == pid2)
+            .expect("Test 3: Restarted task must exist in scheduler");
         assert!(t.is_service);
         assert_eq!(t.service_id, Some(test_svc_id));
     }
@@ -603,7 +919,8 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     // Test 4: Failed service recovery (recover_failed() on Crashed service)
     for svc in &SERVICES {
         if svc.id as u8 == test_svc_id {
-            svc.state.store(ServiceState::Crashed as u8, Ordering::Release);
+            svc.state
+                .store(ServiceState::Crashed as u8, Ordering::Release);
         }
     }
     {
@@ -612,25 +929,59 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     }
     let mut snap_buf = [0u8; 1024];
     let _ = snapshot(&mut snap_buf);
-    assert_eq!(recover_failed(test_svc_id), Ok(()), "Test 4: recover_failed must succeed");
+    assert_eq!(
+        recover_failed(test_svc_id),
+        Ok(()),
+        "Test 4: recover_failed must succeed"
+    );
     let pid3 = service_pid(test_svc_id).expect("Test 4: Recovered service must have active PID");
     assert_eq!(service_state(test_svc_id), Some(ServiceState::Running));
-    assert!(pid3 > 0 && pid3 != pid2, "Test 4: Recovered service must have new PID");
+    assert!(
+        pid3 > 0 && pid3 != pid2,
+        "Test 4: Recovered service must have new PID"
+    );
     {
         let sched = crate::task::SCHEDULER.lock();
-        assert!(!sched.tasks.iter().any(|t| t.id == pid2), "Test 4: Old crashed PID must be reaped");
-        let t = sched.tasks.iter().find(|t| t.id == pid3).expect("Test 4: New service task must be active");
+        assert!(
+            !sched.tasks.iter().any(|t| t.id == pid2),
+            "Test 4: Old crashed PID must be reaped"
+        );
+        let t = sched
+            .tasks
+            .iter()
+            .find(|t| t.id == pid3)
+            .expect("Test 4: New service task must be active");
         assert!(t.is_service);
     }
     crate::kprintln!("[TEST] Test 4 (Failed Service Recovery & Reaping): PASSED");
 
     // Test 5: Unauthorized undeclared service lifecycle rejection
     let invalid_svc_id = 255u8;
-    assert_eq!(stop(invalid_svc_id), Err(()), "Test 5: stop on undeclared service must fail");
-    assert_eq!(recover_failed(invalid_svc_id), Err(()), "Test 5: recover_failed on undeclared service must fail");
-    assert_eq!(service_pid(invalid_svc_id), None, "Test 5: Undeclared service PID must be None");
-    assert_eq!(service_state(invalid_svc_id), None, "Test 5: Undeclared service state must be None");
-    assert_eq!(service_generation(invalid_svc_id), None, "Test 5: Undeclared service generation must be None");
+    assert_eq!(
+        stop(invalid_svc_id),
+        Err(()),
+        "Test 5: stop on undeclared service must fail"
+    );
+    assert_eq!(
+        recover_failed(invalid_svc_id),
+        Err(()),
+        "Test 5: recover_failed on undeclared service must fail"
+    );
+    assert_eq!(
+        service_pid(invalid_svc_id),
+        None,
+        "Test 5: Undeclared service PID must be None"
+    );
+    assert_eq!(
+        service_state(invalid_svc_id),
+        None,
+        "Test 5: Undeclared service state must be None"
+    );
+    assert_eq!(
+        service_generation(invalid_svc_id),
+        None,
+        "Test 5: Undeclared service generation must be None"
+    );
     assert_eq!(service_pid(test_svc_id), Some(pid3));
     assert_eq!(service_state(test_svc_id), Some(ServiceState::Running));
     crate::kprintln!("[TEST] Test 5 (Unauthorized Undeclared Service Rejection): PASSED");
@@ -638,28 +989,53 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     // Test 6: Ordinary task isolation & unprivileged access denial (-EACCES)
     let user_pid = {
         let mut sched = crate::task::SCHEDULER.lock();
-        sched.spawn_user_process(1, "unauth_user", 0x1000, 0x2000, None, crate::capability::CapabilityTable::new())
+        sched.spawn_user_process(
+            1,
+            "unauth_user",
+            0x1000,
+            0x2000,
+            None,
+            crate::capability::CapabilityTable::new(),
+        )
     };
     assert!(user_pid > 0);
     {
         let mut sched = crate::task::SCHEDULER.lock();
         // 1. Unprivileged caller cannot terminate an active process (-EACCES -13)
-        assert_eq!(sched.terminate_task(9999, false, user_pid), Err(-13), "Test 6: Unprivileged terminate_task must fail with -EACCES (-13)");
+        assert_eq!(
+            sched.terminate_task(9999, false, user_pid),
+            Err(-13),
+            "Test 6: Unprivileged terminate_task must fail with -EACCES (-13)"
+        );
         // 2. Supervisor termination transitions task to Terminated
-        assert_eq!(sched.terminate_task(crate::task::SUPERVISOR_PID, true, user_pid), Ok(()), "Test 6: Supervisor termination must succeed");
+        assert_eq!(
+            sched.terminate_task(crate::task::SUPERVISOR_PID, true, user_pid),
+            Ok(()),
+            "Test 6: Supervisor termination must succeed"
+        );
         // 3. Unprivileged caller cannot reap a terminated process (-EACCES -13)
-        assert_eq!(sched.begin_reap(9999, false, user_pid), Err(-13), "Test 6: Unprivileged begin_reap must fail with -EACCES (-13)");
+        assert_eq!(
+            sched.begin_reap(9999, false, user_pid),
+            Err(-13),
+            "Test 6: Unprivileged begin_reap must fail with -EACCES (-13)"
+        );
         let pos = sched.tasks.iter().position(|t| t.id == user_pid).unwrap();
         sched.remove_task_at(pos);
     }
-    crate::kprintln!("[TEST] Test 6 (Ordinary Task Isolation & Non-Supervisor Access Denial): PASSED");
+    crate::kprintln!(
+        "[TEST] Test 6 (Ordinary Task Isolation & Non-Supervisor Access Denial): PASSED"
+    );
 
     // Test 7: Redundant / spurious service stop safety
     // Stopping an already stopped service must be safe and idempotent
     assert_eq!(stop(test_svc_id), Ok(()), "Initial stop must succeed");
     assert_eq!(service_state(test_svc_id), Some(ServiceState::Stopped));
     assert_eq!(service_pid(test_svc_id), None);
-    assert_eq!(stop(test_svc_id), Ok(()), "Redundant stop on stopped service must return Ok(()) cleanly");
+    assert_eq!(
+        stop(test_svc_id),
+        Ok(()),
+        "Redundant stop on stopped service must return Ok(()) cleanly"
+    );
     assert_eq!(service_state(test_svc_id), Some(ServiceState::Stopped));
     assert_eq!(service_pid(test_svc_id), None);
     let pid4 = start(test_svc_id).expect("start service for test 9");
@@ -669,24 +1045,71 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     // Test 8: Reserved PID registration & spawn_service_process validation
     {
         let mut sched = crate::task::SCHEDULER.lock();
-        assert!(!sched.add_task(0, 0x1000, 0x2000), "Test 8: Explicit registration of PID 0 must be rejected");
-        assert!(!sched.add_task(crate::task::SUPERVISOR_PID, 0x1000, 0x2000), "Test 8: Explicit registration of SUPERVISOR_PID must be rejected");
-        assert!(!sched.add_task(crate::task::INVALID_PID, 0x1000, 0x2000), "Test 8: Explicit registration of INVALID_PID must be rejected");
+        assert!(
+            !sched.add_task(0, 0x1000, 0x2000),
+            "Test 8: Explicit registration of PID 0 must be rejected"
+        );
+        assert!(
+            !sched.add_task(crate::task::SUPERVISOR_PID, 0x1000, 0x2000),
+            "Test 8: Explicit registration of SUPERVISOR_PID must be rejected"
+        );
+        assert!(
+            !sched.add_task(crate::task::INVALID_PID, 0x1000, 0x2000),
+            "Test 8: Explicit registration of INVALID_PID must be rejected"
+        );
         let reg_ok = sched.add_task(23456, 0x1000, 0x2000);
-        assert!(reg_ok, "Test 8: Explicit registration of valid PID must succeed");
+        assert!(
+            reg_ok,
+            "Test 8: Explicit registration of valid PID must succeed"
+        );
         let reg_dup = sched.add_task(23456, 0x1000, 0x2000);
-        assert!(!reg_dup, "Test 8: Duplicate PID registration must be rejected");
+        assert!(
+            !reg_dup,
+            "Test 8: Duplicate PID registration must be rejected"
+        );
         if let Some(pos) = sched.tasks.iter().position(|t| t.id == 23456) {
             sched.remove_task_at(pos);
         }
 
         // Validate spawn_service_process generation and ID validation
-        assert_eq!(sched.spawn_service_process(test_svc_id, 0, "gen0_svc", 0x1000, 0x2000, None, crate::capability::CapabilityTable::new()), 0, "Test 8: spawn_service_process with generation 0 must be rejected");
-        assert_eq!(sched.spawn_service_process(255, 1, "inv_svc", 0x1000, 0x2000, None, crate::capability::CapabilityTable::new()), 0, "Test 8: spawn_service_process with invalid service ID must be rejected");
-        assert!(is_valid_service_id(test_svc_id), "Test 8: test_svc_id must be valid");
-        assert!(!is_valid_service_id(255), "Test 8: service_id 255 must be invalid");
+        assert_eq!(
+            sched.spawn_service_process(
+                test_svc_id,
+                0,
+                "gen0_svc",
+                0x1000,
+                0x2000,
+                None,
+                crate::capability::CapabilityTable::new()
+            ),
+            0,
+            "Test 8: spawn_service_process with generation 0 must be rejected"
+        );
+        assert_eq!(
+            sched.spawn_service_process(
+                255,
+                1,
+                "inv_svc",
+                0x1000,
+                0x2000,
+                None,
+                crate::capability::CapabilityTable::new()
+            ),
+            0,
+            "Test 8: spawn_service_process with invalid service ID must be rejected"
+        );
+        assert!(
+            is_valid_service_id(test_svc_id),
+            "Test 8: test_svc_id must be valid"
+        );
+        assert!(
+            !is_valid_service_id(255),
+            "Test 8: service_id 255 must be invalid"
+        );
     }
-    crate::kprintln!("[TEST] Test 8 (Reserved PID Registration Rejection & Spawn Validation): PASSED");
+    crate::kprintln!(
+        "[TEST] Test 8 (Reserved PID Registration Rejection & Spawn Validation): PASSED"
+    );
 
     // Test 9: Failure paths preserve service registry PID & state
     {
@@ -695,11 +1118,23 @@ pub fn test_service_supervisor_lifecycle_hardening() {
 
         // recover_failed on a healthy Running service must fail
         let invalid_recovery = recover_failed(test_svc_id);
-        assert_eq!(invalid_recovery, Err(()), "Test 9: recover_failed on healthy Running service must fail");
+        assert_eq!(
+            invalid_recovery,
+            Err(()),
+            "Test 9: recover_failed on healthy Running service must fail"
+        );
 
         // The running PID and state must NOT be cleared or corrupted by failed recovery
-        assert_eq!(service_pid(test_svc_id), Some(pid4), "Test 9: Failed recover_failed must NOT clear service PID from registry");
-        assert_eq!(service_state(test_svc_id), Some(ServiceState::Running), "Test 9: Failed recover_failed must preserve Running state");
+        assert_eq!(
+            service_pid(test_svc_id),
+            Some(pid4),
+            "Test 9: Failed recover_failed must NOT clear service PID from registry"
+        );
+        assert_eq!(
+            service_state(test_svc_id),
+            Some(ServiceState::Running),
+            "Test 9: Failed recover_failed must preserve Running state"
+        );
     }
     crate::kprintln!("[TEST] Test 9 (Failure Paths Preserve Service PID): PASSED");
 
@@ -707,12 +1142,28 @@ pub fn test_service_supervisor_lifecycle_hardening() {
     assert_eq!(stop(test_svc_id), Ok(()));
     {
         let sched = crate::task::SCHEDULER.lock();
-        assert!(!sched.tasks.iter().any(|t| t.id == pid1), "Test 10: pid1 must be absent");
-        assert!(!sched.tasks.iter().any(|t| t.id == pid2), "Test 10: pid2 must be absent");
-        assert!(!sched.tasks.iter().any(|t| t.id == pid3), "Test 10: pid3 must be absent");
-        assert!(!sched.tasks.iter().any(|t| t.id == pid4), "Test 10: pid4 must be reaped after stop");
+        assert!(
+            !sched.tasks.iter().any(|t| t.id == pid1),
+            "Test 10: pid1 must be absent"
+        );
+        assert!(
+            !sched.tasks.iter().any(|t| t.id == pid2),
+            "Test 10: pid2 must be absent"
+        );
+        assert!(
+            !sched.tasks.iter().any(|t| t.id == pid3),
+            "Test 10: pid3 must be absent"
+        );
+        assert!(
+            !sched.tasks.iter().any(|t| t.id == pid4),
+            "Test 10: pid4 must be reaped after stop"
+        );
     }
-    assert_eq!(service_pid(test_svc_id), None, "Test 10: Stopped service PID must be None");
+    assert_eq!(
+        service_pid(test_svc_id),
+        None,
+        "Test 10: Stopped service PID must be None"
+    );
     crate::kprintln!("[TEST] Test 10 (Process Absence & Replacement Integrity): PASSED");
     crate::kprintln!("[TEST] AArch64 Service Supervisor Lifecycle Hardening 10/10 Tests VERIFIED.");
 }

@@ -12,7 +12,9 @@ pub struct ArmGenericTimer {
 
 impl ArmGenericTimer {
     pub const fn new() -> Self {
-        Self { frequency_hz: 62_500_000 }
+        Self {
+            frequency_hz: 62_500_000,
+        }
     }
 
     pub fn read_frequency(&mut self) -> u64 {

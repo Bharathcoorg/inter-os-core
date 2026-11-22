@@ -11,8 +11,8 @@
 //! and neural vision edge feature extraction in pure `no_std` Rust.
 
 extern crate alloc;
-use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
+use alloc::vec::Vec;
 
 /// MIPI CSI-2 / ISP Controller Register Offsets (MMIO)
 pub const REG_CSI_CTRL: usize = 0x00;

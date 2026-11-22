@@ -6,11 +6,11 @@
 //! Provides capability-governed hierarchical filesystem access without ambient authority.
 
 extern crate alloc;
+use crate::capability::{CapabilityTable, CapabilityType, Rights};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
-use crate::capability::{CapabilityTable, CapabilityType, Rights};
 
 pub const MAX_FD_PER_TASK: usize = 16;
 pub const FILE_STAT_BYTES: usize = 96;
@@ -78,77 +78,117 @@ impl Vfs {
         self.mkdir_internal("/tmp");
         self.mkdir_internal("/dev");
 
-        self.add_system_file("/system/etc/os-release", b"NAME=\"InterOS\"\nVERSION=\"1.0\"\nID=interos\n");
+        self.add_system_file(
+            "/system/etc/os-release",
+            b"NAME=\"InterOS\"\nVERSION=\"1.0\"\nID=interos\n",
+        );
         self.add_system_file("/system/etc/hostname", b"interos-phone\n");
 
-        self.add_package_file("/packages/org.interos.calculator.rapp", b"RAPP\x02\x00\x00\x00org.interos.calculator\x001.0.0\x00");
-        self.add_package_file("/packages/org.interos.settings.rapp", b"RAPP\x02\x00\x00\x00org.interos.settings\x001.0.0\x00");
-        self.add_package_file("/packages/org.interos.notes.rapp", b"RAPP\x02\x00\x00\x00org.interos.notes\x001.0.0\x00");
-        self.add_package_file("/packages/org.interos.browser.rapp", b"RAPP\x02\x00\x00\x00org.interos.browser\x001.0.0\x00");
-        self.add_package_file("/packages/org.interos.file_manager.rapp", b"RAPP\x02\x00\x00\x00org.interos.file_manager\x001.0.0\x00");
+        self.add_package_file(
+            "/packages/org.interos.calculator.rapp",
+            b"RAPP\x02\x00\x00\x00org.interos.calculator\x001.0.0\x00",
+        );
+        self.add_package_file(
+            "/packages/org.interos.settings.rapp",
+            b"RAPP\x02\x00\x00\x00org.interos.settings\x001.0.0\x00",
+        );
+        self.add_package_file(
+            "/packages/org.interos.notes.rapp",
+            b"RAPP\x02\x00\x00\x00org.interos.notes\x001.0.0\x00",
+        );
+        self.add_package_file(
+            "/packages/org.interos.browser.rapp",
+            b"RAPP\x02\x00\x00\x00org.interos.browser\x001.0.0\x00",
+        );
+        self.add_package_file(
+            "/packages/org.interos.file_manager.rapp",
+            b"RAPP\x02\x00\x00\x00org.interos.file_manager\x001.0.0\x00",
+        );
     }
 
     fn mkdir_internal(&mut self, path: &str) {
         let inode = self.next_inode;
         self.next_inode += 1;
-        self.nodes.insert(path.to_string(), VfsNode {
-            inode,
-            path: path.to_string(),
-            data: Vec::new(),
-            is_dir: true,
-            uid: 0,
-            gid: 0,
-            mode: 0o755,
-            mtime: 1700000000,
-            file_type: 3, // Directory
-            read_only: false,
-        });
+        self.nodes.insert(
+            path.to_string(),
+            VfsNode {
+                inode,
+                path: path.to_string(),
+                data: Vec::new(),
+                is_dir: true,
+                uid: 0,
+                gid: 0,
+                mode: 0o755,
+                mtime: 1700000000,
+                file_type: 3, // Directory
+                read_only: false,
+            },
+        );
     }
 
     fn add_system_file(&mut self, path: &str, content: &[u8]) {
         let inode = self.next_inode;
         self.next_inode += 1;
-        self.nodes.insert(path.to_string(), VfsNode {
-            inode,
-            path: path.to_string(),
-            data: content.to_vec(),
-            is_dir: false,
-            uid: 0,
-            gid: 0,
-            mode: 0o644,
-            mtime: 1700000000,
-            file_type: 2, // ReadOnlySystem
-            read_only: true,
-        });
+        self.nodes.insert(
+            path.to_string(),
+            VfsNode {
+                inode,
+                path: path.to_string(),
+                data: content.to_vec(),
+                is_dir: false,
+                uid: 0,
+                gid: 0,
+                mode: 0o644,
+                mtime: 1700000000,
+                file_type: 2, // ReadOnlySystem
+                read_only: true,
+            },
+        );
     }
 
     fn add_package_file(&mut self, path: &str, content: &[u8]) {
         let inode = self.next_inode;
         self.next_inode += 1;
-        self.nodes.insert(path.to_string(), VfsNode {
-            inode,
-            path: path.to_string(),
-            data: content.to_vec(),
-            is_dir: false,
-            uid: 0,
-            gid: 0,
-            mode: 0o644,
-            mtime: 1700000000,
-            file_type: 1, // RegularFile
-            read_only: true,
-        });
+        self.nodes.insert(
+            path.to_string(),
+            VfsNode {
+                inode,
+                path: path.to_string(),
+                data: content.to_vec(),
+                is_dir: false,
+                uid: 0,
+                gid: 0,
+                mode: 0o644,
+                mtime: 1700000000,
+                file_type: 1, // RegularFile
+                read_only: true,
+            },
+        );
     }
 
-    pub fn open(&mut self, task_id: u32, path: &str, rights: u32, caps: &CapabilityTable) -> Result<u32, i64> {
+    pub fn open(
+        &mut self,
+        task_id: u32,
+        path: &str,
+        rights: u32,
+        caps: &CapabilityTable,
+    ) -> Result<u32, i64> {
         self.ensure_initialized();
         let is_write = (rights & 2) != 0;
         if is_write {
-            if caps.check(CapabilityType::FileSystemWrite, Rights::WRITE).is_err() {
+            if caps
+                .check(CapabilityType::FileSystemWrite, Rights::WRITE)
+                .is_err()
+            {
                 return Err(-13); // -EACCES
             }
         } else {
-            if caps.check(CapabilityType::FileSystemRead, Rights::READ).is_err()
-                && caps.check(CapabilityType::FileSystemWrite, Rights::READ).is_err()
+            if caps
+                .check(CapabilityType::FileSystemRead, Rights::READ)
+                .is_err()
+                && caps
+                    .check(CapabilityType::FileSystemWrite, Rights::READ)
+                    .is_err()
             {
                 return Err(-13); // -EACCES
             }
@@ -185,7 +225,10 @@ impl Vfs {
             }
         };
 
-        let task_fds = self.descriptors.entry(task_id).or_insert_with(BTreeMap::new);
+        let task_fds = self
+            .descriptors
+            .entry(task_id)
+            .or_insert_with(BTreeMap::new);
         if task_fds.len() >= MAX_FD_PER_TASK {
             return Err(-24); // -EMFILE
         }
@@ -196,17 +239,30 @@ impl Vfs {
             *fd_counter = 3;
         }
 
-        task_fds.insert(fd, OpenFile {
-            inode: node.inode,
-            offset: 0,
-            is_write,
-        });
+        task_fds.insert(
+            fd,
+            OpenFile {
+                inode: node.inode,
+                offset: 0,
+                is_write,
+            },
+        );
         Ok(fd)
     }
 
-    pub fn read(&mut self, task_id: u32, fd: u32, buf: &mut [u8], caps: &CapabilityTable) -> Result<usize, i64> {
-        if caps.check(CapabilityType::FileSystemRead, Rights::READ).is_err()
-            && caps.check(CapabilityType::FileSystemWrite, Rights::READ).is_err()
+    pub fn read(
+        &mut self,
+        task_id: u32,
+        fd: u32,
+        buf: &mut [u8],
+        caps: &CapabilityTable,
+    ) -> Result<usize, i64> {
+        if caps
+            .check(CapabilityType::FileSystemRead, Rights::READ)
+            .is_err()
+            && caps
+                .check(CapabilityType::FileSystemWrite, Rights::READ)
+                .is_err()
         {
             return Err(-13); // -EACCES
         }
@@ -215,7 +271,11 @@ impl Vfs {
         let inode = open_file.inode;
         let offset = open_file.offset;
 
-        let node = self.nodes.values().find(|n| n.inode == inode).ok_or(-2i64)?;
+        let node = self
+            .nodes
+            .values()
+            .find(|n| n.inode == inode)
+            .ok_or(-2i64)?;
         if offset >= node.data.len() {
             return Ok(0);
         }
@@ -226,9 +286,20 @@ impl Vfs {
         Ok(to_copy)
     }
 
-    pub fn read_at(&mut self, task_id: u32, fd: u32, offset: usize, buf: &mut [u8], caps: &CapabilityTable) -> Result<usize, i64> {
-        if caps.check(CapabilityType::FileSystemRead, Rights::READ).is_err()
-            && caps.check(CapabilityType::FileSystemWrite, Rights::READ).is_err()
+    pub fn read_at(
+        &mut self,
+        task_id: u32,
+        fd: u32,
+        offset: usize,
+        buf: &mut [u8],
+        caps: &CapabilityTable,
+    ) -> Result<usize, i64> {
+        if caps
+            .check(CapabilityType::FileSystemRead, Rights::READ)
+            .is_err()
+            && caps
+                .check(CapabilityType::FileSystemWrite, Rights::READ)
+                .is_err()
         {
             return Err(-13); // -EACCES
         }
@@ -236,7 +307,11 @@ impl Vfs {
         let open_file = task_fds.get(&fd).ok_or(-9i64)?;
         let inode = open_file.inode;
 
-        let node = self.nodes.values().find(|n| n.inode == inode).ok_or(-2i64)?;
+        let node = self
+            .nodes
+            .values()
+            .find(|n| n.inode == inode)
+            .ok_or(-2i64)?;
         if offset >= node.data.len() {
             return Ok(0);
         }
@@ -246,8 +321,17 @@ impl Vfs {
         Ok(to_copy)
     }
 
-    pub fn write(&mut self, task_id: u32, fd: u32, buf: &[u8], caps: &CapabilityTable) -> Result<usize, i64> {
-        if caps.check(CapabilityType::FileSystemWrite, Rights::WRITE).is_err() {
+    pub fn write(
+        &mut self,
+        task_id: u32,
+        fd: u32,
+        buf: &[u8],
+        caps: &CapabilityTable,
+    ) -> Result<usize, i64> {
+        if caps
+            .check(CapabilityType::FileSystemWrite, Rights::WRITE)
+            .is_err()
+        {
             return Err(-13); // -EACCES
         }
         let task_fds = self.descriptors.get_mut(&task_id).ok_or(-9i64)?;
@@ -258,7 +342,11 @@ impl Vfs {
         let inode = open_file.inode;
         let offset = open_file.offset;
 
-        let node = self.nodes.values_mut().find(|n| n.inode == inode).ok_or(-2i64)?;
+        let node = self
+            .nodes
+            .values_mut()
+            .find(|n| n.inode == inode)
+            .ok_or(-2i64)?;
         if node.read_only {
             return Err(-30); // -EROFS
         }
@@ -276,10 +364,19 @@ impl Vfs {
         Ok(())
     }
 
-    pub fn stat(&mut self, path: &str, out: &mut [u8], caps: &CapabilityTable) -> Result<usize, i64> {
+    pub fn stat(
+        &mut self,
+        path: &str,
+        out: &mut [u8],
+        caps: &CapabilityTable,
+    ) -> Result<usize, i64> {
         self.ensure_initialized();
-        if caps.check(CapabilityType::FileSystemRead, Rights::READ).is_err()
-            && caps.check(CapabilityType::FileSystemWrite, Rights::READ).is_err()
+        if caps
+            .check(CapabilityType::FileSystemRead, Rights::READ)
+            .is_err()
+            && caps
+                .check(CapabilityType::FileSystemWrite, Rights::READ)
+                .is_err()
         {
             return Err(-13); // -EACCES
         }
@@ -303,10 +400,19 @@ impl Vfs {
         Ok(FILE_STAT_BYTES)
     }
 
-    pub fn list(&mut self, path: &str, out: &mut [u8], caps: &CapabilityTable) -> Result<usize, i64> {
+    pub fn list(
+        &mut self,
+        path: &str,
+        out: &mut [u8],
+        caps: &CapabilityTable,
+    ) -> Result<usize, i64> {
         self.ensure_initialized();
-        if caps.check(CapabilityType::FileSystemRead, Rights::READ).is_err()
-            && caps.check(CapabilityType::FileSystemWrite, Rights::READ).is_err()
+        if caps
+            .check(CapabilityType::FileSystemRead, Rights::READ)
+            .is_err()
+            && caps
+                .check(CapabilityType::FileSystemWrite, Rights::READ)
+                .is_err()
         {
             return Err(-13); // -EACCES
         }

@@ -16,9 +16,9 @@
 //! - Offline-first Merkle State Sync Engine reconciling local and peer state deltas.
 //! - Zero ambient authority: transmit and receive guarded by unforgeable capability tokens.
 
-use alloc::vec::Vec;
 use crate::capability::{CapError, CapabilityTable, CapabilityType, Rights};
 use crate::crypto::{constant_time_eq_32, HmacSha256, Sha256, SHA256_DIGEST_LENGTH};
+use alloc::vec::Vec;
 
 /// Mesh Frame Magic: ASCII "INTR" (0x494E5452)
 pub const MESH_FRAME_MAGIC: u32 = 0x494E5452;
@@ -309,7 +309,8 @@ impl MeshController {
             DEFAULT_MESH_TTL,
             payload,
             &self.shared_mesh_key,
-        ).map_err(|_| CapError::PermissionDenied)?;
+        )
+        .map_err(|_| CapError::PermissionDenied)?;
 
         self.packets_sent += 1;
         Ok(packet)
@@ -352,7 +353,9 @@ impl MeshController {
         );
 
         // 5. Destination check: local delivery vs multi-hop forwarding
-        if packet.header.dest_node_id == self.node_id || packet.header.dest_node_id == BROADCAST_NODE_ID {
+        if packet.header.dest_node_id == self.node_id
+            || packet.header.dest_node_id == BROADCAST_NODE_ID
+        {
             self.highest_rx_seq = self.highest_rx_seq.max(packet.header.seq);
             self.packets_received += 1;
             Ok(Some(packet))

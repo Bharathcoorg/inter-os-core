@@ -81,7 +81,9 @@ impl TaskMailbox {
         if self.count == 0 {
             return Err(IpcError::MailboxEmpty);
         }
-        let msg = self.messages[self.head].take().ok_or(IpcError::MailboxEmpty)?;
+        let msg = self.messages[self.head]
+            .take()
+            .ok_or(IpcError::MailboxEmpty)?;
         self.head = (self.head + 1) % MAILBOX_CAPACITY;
         self.count -= 1;
         Ok(msg)
@@ -145,7 +147,11 @@ impl IpcRouter {
         mailbox.push(IpcMessage::new(sender, msg_type, data))
     }
 
-    pub fn receive(&mut self, receiver_caps: &CapabilityTable, receiver: u32) -> Result<IpcMessage, IpcError> {
+    pub fn receive(
+        &mut self,
+        receiver_caps: &CapabilityTable,
+        receiver: u32,
+    ) -> Result<IpcMessage, IpcError> {
         receiver_caps
             .check(CapabilityType::IpcReceive, Rights::READ)
             .map_err(IpcError::CapabilityDenied)?;
@@ -161,4 +167,3 @@ impl IpcRouter {
 }
 
 pub static IPC_ROUTER: Mutex<IpcRouter> = Mutex::new(IpcRouter::new());
-

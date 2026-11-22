@@ -80,7 +80,11 @@ impl MobileShell {
         None
     }
 
-    pub fn process_touch(&mut self, pt: &TouchPoint, fb: &mut SimpleFramebuffer) -> Option<MobileAction> {
+    pub fn process_touch(
+        &mut self,
+        pt: &TouchPoint,
+        fb: &mut SimpleFramebuffer,
+    ) -> Option<MobileAction> {
         self.last_touch_x = pt.x;
         self.last_touch_y = pt.y;
 
@@ -108,8 +112,24 @@ impl MobileShell {
         // High-contrast touch feedback crosshair at (x, y)
         let cx = x.min(fb.width.saturating_sub(6));
         let cy = y.min(fb.height.saturating_sub(6));
-        fb.fill_rect(cx.saturating_sub(5), cy.saturating_sub(1), 11, 3, 0, 229, 255);
-        fb.fill_rect(cx.saturating_sub(1), cy.saturating_sub(5), 3, 11, 0, 229, 255);
+        fb.fill_rect(
+            cx.saturating_sub(5),
+            cy.saturating_sub(1),
+            11,
+            3,
+            0,
+            229,
+            255,
+        );
+        fb.fill_rect(
+            cx.saturating_sub(1),
+            cy.saturating_sub(5),
+            3,
+            11,
+            0,
+            229,
+            255,
+        );
     }
 
     pub fn highlight_button(&self, fb: &mut SimpleFramebuffer, action: MobileAction) {
@@ -140,25 +160,97 @@ impl MobileShell {
         match action {
             MobileAction::LaunchSettings => {
                 fb.draw_string(40, 130, "SYSTEM SETTINGS", (0, 229, 255), (14, 18, 32));
-                fb.draw_string(40, 160, "Security: Zero Ambient Authority", (255, 255, 255), (14, 18, 32));
-                fb.draw_string(40, 190, "Capability Matrix: Active & Enforced", (160, 175, 195), (14, 18, 32));
-                fb.draw_string(40, 220, "Architecture: AArch64 (ARMv8-A)", (160, 175, 195), (14, 18, 32));
-                fb.draw_string(40, 250, "Flash Storage: SDHCI Controller Online", (160, 175, 195), (14, 18, 32));
-                fb.draw_string(40, 280, "Kernel Privilege: EL1 Supervised Separation", (0, 229, 255), (14, 18, 32));
-                fb.draw_string(40, 320, "[STATUS: OPERATIONAL  |  MEMORY: ISOLATED]", (100, 255, 150), (14, 18, 32));
+                fb.draw_string(
+                    40,
+                    160,
+                    "Security: Zero Ambient Authority",
+                    (255, 255, 255),
+                    (14, 18, 32),
+                );
+                fb.draw_string(
+                    40,
+                    190,
+                    "Capability Matrix: Active & Enforced",
+                    (160, 175, 195),
+                    (14, 18, 32),
+                );
+                fb.draw_string(
+                    40,
+                    220,
+                    "Architecture: AArch64 (ARMv8-A)",
+                    (160, 175, 195),
+                    (14, 18, 32),
+                );
+                fb.draw_string(
+                    40,
+                    250,
+                    "Flash Storage: SDHCI Controller Online",
+                    (160, 175, 195),
+                    (14, 18, 32),
+                );
+                fb.draw_string(
+                    40,
+                    280,
+                    "Kernel Privilege: EL1 Supervised Separation",
+                    (0, 229, 255),
+                    (14, 18, 32),
+                );
+                fb.draw_string(
+                    40,
+                    320,
+                    "[STATUS: OPERATIONAL  |  MEMORY: ISOLATED]",
+                    (100, 255, 150),
+                    (14, 18, 32),
+                );
             }
             MobileAction::LaunchDialer => {
                 fb.draw_string(40, 130, "TELEPHONY SUBSYSTEM", (0, 229, 255), (14, 18, 32));
-                fb.draw_string(40, 160, "Modem Interface: Serial AT Controller", (255, 255, 255), (14, 18, 32));
-                fb.draw_string(40, 190, "Capability Required: TelephonyModem", (160, 175, 195), (14, 18, 32));
+                fb.draw_string(
+                    40,
+                    160,
+                    "Modem Interface: Serial AT Controller",
+                    (255, 255, 255),
+                    (14, 18, 32),
+                );
+                fb.draw_string(
+                    40,
+                    190,
+                    "Capability Required: TelephonyModem",
+                    (160, 175, 195),
+                    (14, 18, 32),
+                );
                 fb.draw_string(40, 220, "Call State: Idle", (160, 175, 195), (14, 18, 32));
-                fb.draw_string(40, 250, "Modem Hardware: Checking UART / AT", (160, 175, 195), (14, 18, 32));
+                fb.draw_string(
+                    40,
+                    250,
+                    "Modem Hardware: Checking UART / AT",
+                    (160, 175, 195),
+                    (14, 18, 32),
+                );
             }
             MobileAction::LaunchVault => {
                 fb.draw_string(40, 130, "ENCRYPTED VAULT", (0, 229, 255), (14, 18, 32));
-                fb.draw_string(40, 160, "Hardware Keystore: 16 Enclave Slots", (255, 255, 255), (14, 18, 32));
-                fb.draw_string(40, 190, "Master Seed: Sealed in EL1 Memory", (100, 255, 150), (14, 18, 32));
-                fb.draw_string(40, 220, "Storage Isolation: AES-256 Block Encrypted", (160, 175, 195), (14, 18, 32));
+                fb.draw_string(
+                    40,
+                    160,
+                    "Hardware Keystore: 16 Enclave Slots",
+                    (255, 255, 255),
+                    (14, 18, 32),
+                );
+                fb.draw_string(
+                    40,
+                    190,
+                    "Master Seed: Sealed in EL1 Memory",
+                    (100, 255, 150),
+                    (14, 18, 32),
+                );
+                fb.draw_string(
+                    40,
+                    220,
+                    "Storage Isolation: AES-256 Block Encrypted",
+                    (160, 175, 195),
+                    (14, 18, 32),
+                );
             }
         }
     }

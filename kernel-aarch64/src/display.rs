@@ -176,8 +176,14 @@ impl SimpleFramebuffer {
         }
     }
 
-    pub fn from_fdt(parser: &ArmFdtParser, node_name: &str, base_vaddr: usize) -> Result<Self, &'static str> {
-        let node = parser.find_node_by_name(node_name).map_err(|_| "Framebuffer node not found in DTB")?;
+    pub fn from_fdt(
+        parser: &ArmFdtParser,
+        node_name: &str,
+        base_vaddr: usize,
+    ) -> Result<Self, &'static str> {
+        let node = parser
+            .find_node_by_name(node_name)
+            .map_err(|_| "Framebuffer node not found in DTB")?;
         let mut fb = Self::from_fdt_node(parser, &node)?;
         if base_vaddr != 0 {
             fb.base_vaddr = base_vaddr;
@@ -195,27 +201,46 @@ impl SimpleFramebuffer {
     }
 
     /// Constructs a SimpleFramebuffer from a discovered device tree node.
-    pub fn from_fdt_node(parser: &ArmFdtParser, node: &crate::fdt::ArmFdtNode) -> Result<Self, &'static str> {
-        let w_bytes = parser.get_node_property(node, "width").map_err(|_| "Missing width property")?;
-        if w_bytes.len() < 4 { return Err("Invalid width in DTB"); }
+    pub fn from_fdt_node(
+        parser: &ArmFdtParser,
+        node: &crate::fdt::ArmFdtNode,
+    ) -> Result<Self, &'static str> {
+        let w_bytes = parser
+            .get_node_property(node, "width")
+            .map_err(|_| "Missing width property")?;
+        if w_bytes.len() < 4 {
+            return Err("Invalid width in DTB");
+        }
         let width = u32::from_be_bytes([w_bytes[0], w_bytes[1], w_bytes[2], w_bytes[3]]);
 
-        let h_bytes = parser.get_node_property(node, "height").map_err(|_| "Missing height property")?;
-        if h_bytes.len() < 4 { return Err("Invalid height in DTB"); }
+        let h_bytes = parser
+            .get_node_property(node, "height")
+            .map_err(|_| "Missing height property")?;
+        if h_bytes.len() < 4 {
+            return Err("Invalid height in DTB");
+        }
         let height = u32::from_be_bytes([h_bytes[0], h_bytes[1], h_bytes[2], h_bytes[3]]);
 
-        let s_bytes = parser.get_node_property(node, "stride").map_err(|_| "Missing stride property")?;
-        if s_bytes.len() < 4 { return Err("Invalid stride in DTB"); }
+        let s_bytes = parser
+            .get_node_property(node, "stride")
+            .map_err(|_| "Missing stride property")?;
+        if s_bytes.len() < 4 {
+            return Err("Invalid stride in DTB");
+        }
         let stride = u32::from_be_bytes([s_bytes[0], s_bytes[1], s_bytes[2], s_bytes[3]]);
 
-        let fmt_bytes = parser.get_node_property(node, "format").map_err(|_| "Missing format property")?;
+        let fmt_bytes = parser
+            .get_node_property(node, "format")
+            .map_err(|_| "Missing format property")?;
         let len = if !fmt_bytes.is_empty() && fmt_bytes[fmt_bytes.len() - 1] == 0 {
             fmt_bytes.len() - 1
         } else {
             fmt_bytes.len()
         };
-        let fmt_str = core::str::from_utf8(&fmt_bytes[..len]).map_err(|_| "Corrupted format string")?;
-        let format = SimpleFbFormat::from_dtb_string(fmt_str).ok_or("Unsupported SimpleFB format in DTB")?;
+        let fmt_str =
+            core::str::from_utf8(&fmt_bytes[..len]).map_err(|_| "Corrupted format string")?;
+        let format =
+            SimpleFbFormat::from_dtb_string(fmt_str).ok_or("Unsupported SimpleFB format in DTB")?;
 
         // Validate the geometry before any surface is built from it.
         if width == 0 || height == 0 {
@@ -265,7 +290,9 @@ impl SimpleFramebuffer {
         }
 
         // Initially, virtual address matches physical address (identity mapping)
-        Ok(Self::new(base_paddr, base_paddr, width, height, stride, format))
+        Ok(Self::new(
+            base_paddr, base_paddr, width, height, stride, format,
+        ))
     }
 
     /// Dynamically maps the physical framebuffer into the kernel's virtual memory
@@ -369,7 +396,8 @@ impl SimpleFramebuffer {
                     core::ptr::write_volatile(ptr.add(2), b);
                 }
                 SimpleFbFormat::Argb8888 => {
-                    let argb32 = (0xFF00_0000u32) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                    let argb32 =
+                        (0xFF00_0000u32) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
                     core::ptr::write_volatile(ptr as *mut u32, argb32);
                 }
                 SimpleFbFormat::Xrgb8888 => {
@@ -450,7 +478,14 @@ impl SimpleFramebuffer {
         }
     }
 
-    pub fn draw_string(&mut self, mut x: u32, y: u32, text: &str, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
+    pub fn draw_string(
+        &mut self,
+        mut x: u32,
+        y: u32,
+        text: &str,
+        fg: (u8, u8, u8),
+        bg: (u8, u8, u8),
+    ) {
         for c in text.chars() {
             if c == '\n' {
                 break;
@@ -495,7 +530,13 @@ impl SurfaceManager {
         }
     }
 
-    pub fn create_surface(&mut self, owner_task: u32, width: u32, height: u32, z_order: u32) -> Result<u32, i64> {
+    pub fn create_surface(
+        &mut self,
+        owner_task: u32,
+        width: u32,
+        height: u32,
+        z_order: u32,
+    ) -> Result<u32, i64> {
         if self.surfaces.len() >= MAX_CLIENT_SURFACES {
             return Err(-28); // -ENOSPC: surface table full (M23)
         }
@@ -529,8 +570,18 @@ impl SurfaceManager {
         Ok(id)
     }
 
-    pub fn write_surface(&mut self, surface_id: u32, caller_task: u32, offset: usize, src_pixels: &[u32]) -> Result<usize, i64> {
-        let s = self.surfaces.iter_mut().find(|s| s.id == surface_id).ok_or(-2)?; // -ENOENT
+    pub fn write_surface(
+        &mut self,
+        surface_id: u32,
+        caller_task: u32,
+        offset: usize,
+        src_pixels: &[u32],
+    ) -> Result<usize, i64> {
+        let s = self
+            .surfaces
+            .iter_mut()
+            .find(|s| s.id == surface_id)
+            .ok_or(-2)?; // -ENOENT
         if s.owner_task != caller_task {
             return Err(-13); // -EACCES: caller does not own this surface
         }
@@ -542,7 +593,12 @@ impl SurfaceManager {
         Ok(copy_len)
     }
 
-    pub fn destroy_surface(&mut self, surface_id: u32, caller_task: u32, is_admin: bool) -> Result<(), i64> {
+    pub fn destroy_surface(
+        &mut self,
+        surface_id: u32,
+        caller_task: u32,
+        is_admin: bool,
+    ) -> Result<(), i64> {
         if let Some(pos) = self.surfaces.iter().position(|s| s.id == surface_id) {
             if self.surfaces[pos].owner_task != caller_task && !is_admin {
                 return Err(-13); // -EACCES: caller does not own this surface and lacks ADMIN
@@ -570,7 +626,10 @@ impl SurfaceManager {
         let mut fb_guard = FRAMEBUFFER.lock();
         if let Some(fb) = fb_guard.as_mut() {
             let has_full_cover = self.surfaces.iter().any(|s| {
-                s.visible && s.width >= fb.width && s.height >= fb.height && s.pixels.first().map_or(false, |&p| (p >> 24) == 255)
+                s.visible
+                    && s.width >= fb.width
+                    && s.height >= fb.height
+                    && s.pixels.first().map_or(false, |&p| (p >> 24) == 255)
             });
             if !has_full_cover {
                 // Clear to dark slate background only when no full-cover opaque surface is present
@@ -636,12 +695,12 @@ pub fn init_bochs_display(bar0_paddr: usize, bar2_paddr: usize) {
 
     unsafe {
         let dispi = (bar2_paddr + 0x500) as *mut u16;
-        core::ptr::write_volatile(dispi.add(1), 720);   // XRES = 720
-        core::ptr::write_volatile(dispi.add(2), 1440);  // YRES = 1440
-        core::ptr::write_volatile(dispi.add(3), 32);    // BPP = 32
-        core::ptr::write_volatile(dispi.add(4), 0x41);  // ENABLE = VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED
-        core::ptr::write_volatile(dispi.add(6), 720);   // VIRT_WIDTH = 720
-        core::ptr::write_volatile(dispi.add(7), 1440);  // VIRT_HEIGHT = 1440
+        core::ptr::write_volatile(dispi.add(1), 720); // XRES = 720
+        core::ptr::write_volatile(dispi.add(2), 1440); // YRES = 1440
+        core::ptr::write_volatile(dispi.add(3), 32); // BPP = 32
+        core::ptr::write_volatile(dispi.add(4), 0x41); // ENABLE = VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED
+        core::ptr::write_volatile(dispi.add(6), 720); // VIRT_WIDTH = 720
+        core::ptr::write_volatile(dispi.add(7), 1440); // VIRT_HEIGHT = 1440
     }
 
     let mut fb = SimpleFramebuffer::new(
@@ -654,6 +713,8 @@ pub fn init_bochs_display(bar0_paddr: usize, bar2_paddr: usize) {
     );
     fb.clear(16, 21, 32);
     register_framebuffer(fb);
-    crate::kprintln!("[OK] Display: Bochs PCI display bound @ 0x{:08X} (720x1440 32bpp ARGB scanout).", bar0_paddr);
+    crate::kprintln!(
+        "[OK] Display: Bochs PCI display bound @ 0x{:08X} (720x1440 32bpp ARGB scanout).",
+        bar0_paddr
+    );
 }
-

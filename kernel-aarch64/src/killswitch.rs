@@ -131,11 +131,16 @@ impl RemoteKillswitchHal {
 
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
-        if !present { self.state = KillswitchState::Armed; }
+        if !present {
+            self.state = KillswitchState::Armed;
+        }
     }
 
     /// Reverses screen lockdown state with master physical authorization.
-    pub fn unlock_screen_lockdown(&mut self, caps: &CapabilityTable) -> Result<(), KillswitchError> {
+    pub fn unlock_screen_lockdown(
+        &mut self,
+        caps: &CapabilityTable,
+    ) -> Result<(), KillswitchError> {
         caps.check(CapabilityType::RemoteKillSwitchDirect, Rights::WRITE)
             .map_err(|_| KillswitchError::CapabilityDenied)?;
 

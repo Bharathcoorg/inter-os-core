@@ -284,7 +284,11 @@ impl GoodixGt911Driver {
         }
     }
 
-    pub fn parse_frame(&mut self, frame_data: &[u8], out_points: &mut [TouchPoint; MAX_TOUCH_SLOTS]) -> usize {
+    pub fn parse_frame(
+        &mut self,
+        frame_data: &[u8],
+        out_points: &mut [TouchPoint; MAX_TOUCH_SLOTS],
+    ) -> usize {
         if frame_data.is_empty() {
             return 0;
         }
@@ -310,8 +314,10 @@ impl GoodixGt911Driver {
                 let track_id = frame_data[offset];
                 let slot = (track_id as usize) % MAX_TOUCH_SLOTS;
 
-                let raw_x = u16::from_le_bytes([frame_data[offset + 1], frame_data[offset + 2]]) as u32;
-                let raw_y = u16::from_le_bytes([frame_data[offset + 3], frame_data[offset + 4]]) as u32;
+                let raw_x =
+                    u16::from_le_bytes([frame_data[offset + 1], frame_data[offset + 2]]) as u32;
+                let raw_y =
+                    u16::from_le_bytes([frame_data[offset + 3], frame_data[offset + 4]]) as u32;
                 let raw_size = u16::from_le_bytes([frame_data[offset + 5], frame_data[offset + 6]]);
 
                 let x = raw_x.min(self.touch_width.saturating_sub(1));

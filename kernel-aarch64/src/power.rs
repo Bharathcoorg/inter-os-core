@@ -72,10 +72,10 @@ impl BatteryStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThermalPolicy {
-    Normal,          // < 65 C: highest clock in the policy table
-    Warm,            // 65-74 C: reduced clock, no refresh cap
-    ThrottlingTier1, // 75-84 C: further reduced clock, cap display refresh
-    CriticalCooldown,// >= 85 C: lowest clock in the policy table, lowest refresh target
+    Normal,           // < 65 C: highest clock in the policy table
+    Warm,             // 65-74 C: reduced clock, no refresh cap
+    ThrottlingTier1,  // 75-84 C: further reduced clock, cap display refresh
+    CriticalCooldown, // >= 85 C: lowest clock in the policy table, lowest refresh target
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +123,9 @@ impl DvfsGovernor {
         }
     }
 
-    pub fn set_hardware_present(&mut self, present: bool) { self.hardware_present = present; }
+    pub fn set_hardware_present(&mut self, present: bool) {
+        self.hardware_present = present;
+    }
 
     /// Records the clock operating points reported by a bound clock controller.
     ///
@@ -160,7 +162,8 @@ impl DvfsGovernor {
         };
 
         // Evaluate battery saver
-        self.battery_saver_active = battery.capacity_pct <= 15 && battery.state == ChargingState::Discharging;
+        self.battery_saver_active =
+            battery.capacity_pct <= 15 && battery.state == ChargingState::Discharging;
 
         // Apply DVFS frequency and display target.
         // These numbers are POLICY TARGETS, not measurements of this device: what the policy would
@@ -169,8 +172,20 @@ impl DvfsGovernor {
         let requested_mhz = match self.current_thermal_policy {
             ThermalPolicy::CriticalCooldown => 600,
             ThermalPolicy::ThrottlingTier1 => 1200,
-            ThermalPolicy::Warm => if self.battery_saver_active { 1200 } else { 1800 },
-            ThermalPolicy::Normal => if self.battery_saver_active { 1200 } else { 2400 },
+            ThermalPolicy::Warm => {
+                if self.battery_saver_active {
+                    1200
+                } else {
+                    1800
+                }
+            }
+            ThermalPolicy::Normal => {
+                if self.battery_saver_active {
+                    1200
+                } else {
+                    2400
+                }
+            }
         };
         self.current_freq_mhz = requested_mhz.clamp(self.min_freq_mhz, self.max_freq_mhz);
 
@@ -179,10 +194,19 @@ impl DvfsGovernor {
         let requested_hz = match self.current_thermal_policy {
             ThermalPolicy::CriticalCooldown => 30,
             ThermalPolicy::ThrottlingTier1 => 60,
-            ThermalPolicy::Warm | ThermalPolicy::Normal => if self.battery_saver_active { 60 } else { 120 },
+            ThermalPolicy::Warm | ThermalPolicy::Normal => {
+                if self.battery_saver_active {
+                    60
+                } else {
+                    120
+                }
+            }
         };
-        self.display_target_fps =
-            if self.max_freq_mhz == NO_FREQ_MHZ { NO_REFRESH_TARGET_HZ } else { requested_hz };
+        self.display_target_fps = if self.max_freq_mhz == NO_FREQ_MHZ {
+            NO_REFRESH_TARGET_HZ
+        } else {
+            requested_hz
+        };
 
         self.current_thermal_policy
     }

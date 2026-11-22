@@ -10,9 +10,9 @@
 //! anti-rollback monotonic version enforcement, and watchdog boot counter rollback protection.
 
 extern crate alloc;
-use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
 use crate::crypto::{constant_time_eq_32, sha256, verify_ed25519_signature};
+use alloc::vec::Vec;
 
 /// OTA Package Header Magic: "INTR_OTA"
 pub const OTA_MAGIC: [u8; 8] = *b"INTR_OTA";

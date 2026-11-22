@@ -17,9 +17,9 @@
 //! - Compact binary E911 emergency coordinate dispatch for SMS SOS broadcasts
 
 extern crate alloc;
+use crate::capability::{CapabilityTable, CapabilityType, Rights};
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::capability::{CapabilityTable, CapabilityType, Rights};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpsError {
@@ -71,7 +71,10 @@ pub struct CircularGeofence {
 
 impl CircularGeofence {
     pub fn new(center: Coordinates, radius_meters: u32) -> Self {
-        Self { center, radius_meters }
+        Self {
+            center,
+            radius_meters,
+        }
     }
 
     /// Evaluates if coordinates are within the circular geofence boundary using integer math.
@@ -119,7 +122,9 @@ impl GpsController {
 
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
-        if !present { self.last_fix = None; }
+        if !present {
+            self.last_fix = None;
+        }
     }
 
     /// Validates standard NMEA-0183 XOR checksum (e.g. "$GPGGA,...*47").
@@ -169,7 +174,12 @@ impl GpsController {
         let fix_quality = parts[6].parse::<u8>().unwrap_or(0);
         let sats = parts[7].parse::<u8>().unwrap_or(0);
         let hdop = (parts[8].parse::<f32>().unwrap_or(1.0) * 10.0) as u16;
-        let alt = parts[9].split('.').next().unwrap_or("0").parse::<i32>().unwrap_or(0);
+        let alt = parts[9]
+            .split('.')
+            .next()
+            .unwrap_or("0")
+            .parse::<i32>()
+            .unwrap_or(0);
 
         if fix_quality == 0 {
             return Err(GpsError::NoSatelliteFix);
@@ -180,7 +190,11 @@ impl GpsController {
         let lon_microdeg = Self::parse_nmea_coord(raw_lon, lon_dir == "W");
 
         let fix = GpsFix {
-            fix_type: if fix_quality >= 2 { FixType::DifferentialGps } else { FixType::Fix3D },
+            fix_type: if fix_quality >= 2 {
+                FixType::DifferentialGps
+            } else {
+                FixType::Fix3D
+            },
             coordinates: Coordinates {
                 lat_microdeg,
                 lon_microdeg,
@@ -227,7 +241,9 @@ impl GpsController {
         accuracy: AccuracyLevel,
         caps: &CapabilityTable,
     ) -> Result<Coordinates, GpsError> {
-        if !self.enabled || !self.hardware_present { return Err(GpsError::HardwareDisabled); }
+        if !self.enabled || !self.hardware_present {
+            return Err(GpsError::HardwareDisabled);
+        }
         let fix = self.last_fix.as_ref().ok_or(GpsError::NoSatelliteFix)?;
         self.total_privacy_queries += 1;
 

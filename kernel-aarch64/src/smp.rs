@@ -17,9 +17,9 @@
 //! - Zero Ambient Authority: Core hotplug and IPI dispatch require `CapabilityType::CpuSmpGovernorDirect`.
 
 extern crate alloc;
-use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
 use crate::psci::{PsciController, PSCI_FN_CPU_ON, PSCI_SUCCESS};
+use alloc::vec::Vec;
 
 pub const MAX_CPU_CORES: usize = 8;
 pub const GICD_SGIR_OFFSET: usize = 0x0F00;
@@ -105,7 +105,11 @@ impl SmpController {
                 core_id: i as u8,
                 cluster,
                 mpidr,
-                state: if i == 0 { CoreState::Online } else { CoreState::Offline },
+                state: if i == 0 {
+                    CoreState::Online
+                } else {
+                    CoreState::Offline
+                },
                 load_pct: 0,
                 active_task_id: None,
             });
@@ -122,7 +126,10 @@ impl SmpController {
 
     /// Returns count of currently active/online CPU cores.
     pub fn online_core_count(&self) -> usize {
-        self.cores.iter().filter(|c| c.state == CoreState::Online).count()
+        self.cores
+            .iter()
+            .filter(|c| c.state == CoreState::Online)
+            .count()
     }
 
     /// Binds the controller to a real PSCI/GIC-backed SMP topology.
@@ -145,11 +152,16 @@ impl SmpController {
         context_id: u64,
         caps: &CapabilityTable,
     ) -> Result<(), SmpError> {
-        if !self.hardware_present { return Err(SmpError::HardwareDisabled); }
+        if !self.hardware_present {
+            return Err(SmpError::HardwareDisabled);
+        }
         caps.check(CapabilityType::CpuSmpGovernorDirect, Rights::INVOKE)
             .map_err(|_| SmpError::CapabilityDenied)?;
 
-        let core = self.cores.get_mut(core_id as usize).ok_or(SmpError::InvalidCoreId)?;
+        let core = self
+            .cores
+            .get_mut(core_id as usize)
+            .ok_or(SmpError::InvalidCoreId)?;
 
         if core.state == CoreState::Online {
             return Err(SmpError::CoreAlreadyOnline);
@@ -158,12 +170,9 @@ impl SmpController {
         core.state = CoreState::Booting;
 
         // Execute standard PSCI_FN_CPU_ON call
-        let psci_ret = self.psci.invoke_psci(
-            PSCI_FN_CPU_ON,
-            core.mpidr,
-            entry_paddr,
-            context_id,
-        );
+        let psci_ret = self
+            .psci
+            .invoke_psci(PSCI_FN_CPU_ON, core.mpidr, entry_paddr, context_id);
 
         if psci_ret == PSCI_SUCCESS as i64 {
             core.state = CoreState::Online;
@@ -176,7 +185,9 @@ impl SmpController {
 
     /// Powers off a secondary core to conserve battery life during low workload periods.
     pub fn power_off_core(&mut self, core_id: u8, caps: &CapabilityTable) -> Result<(), SmpError> {
-        if !self.hardware_present { return Err(SmpError::HardwareDisabled); }
+        if !self.hardware_present {
+            return Err(SmpError::HardwareDisabled);
+        }
         caps.check(CapabilityType::CpuSmpGovernorDirect, Rights::INVOKE)
             .map_err(|_| SmpError::CapabilityDenied)?;
 
@@ -195,7 +206,10 @@ impl SmpController {
             }
         }
 
-        let core = self.cores.get_mut(core_id as usize).ok_or(SmpError::InvalidCoreId)?;
+        let core = self
+            .cores
+            .get_mut(core_id as usize)
+            .ok_or(SmpError::InvalidCoreId)?;
 
         if core.state == CoreState::Offline {
             return Err(SmpError::CoreAlreadyOffline);
@@ -215,7 +229,9 @@ impl SmpController {
         ipi_kind: IpiKind,
         caps: &CapabilityTable,
     ) -> Result<(), SmpError> {
-        if !self.hardware_present { return Err(SmpError::HardwareDisabled); }
+        if !self.hardware_present {
+            return Err(SmpError::HardwareDisabled);
+        }
         caps.check(CapabilityType::CpuSmpGovernorDirect, Rights::INVOKE)
             .map_err(|_| SmpError::CapabilityDenied)?;
 
@@ -254,7 +270,9 @@ impl SmpController {
 
         let target_cluster = match affinity {
             TaskAffinityClass::BackgroundDaemon => CoreCluster::LittleEfficiency,
-            TaskAffinityClass::InteractiveUi | TaskAffinityClass::ComputeVector => CoreCluster::BigPerformance,
+            TaskAffinityClass::InteractiveUi | TaskAffinityClass::ComputeVector => {
+                CoreCluster::BigPerformance
+            }
         };
 
         // Find the least loaded online core in target cluster, fallback to any online core
@@ -264,7 +282,10 @@ impl SmpController {
             .filter(|c| c.state == CoreState::Online && c.cluster == target_cluster)
             .min_by_key(|c| c.load_pct)
             .or_else(|| {
-                self.cores.iter().filter(|c| c.state == CoreState::Online).min_by_key(|c| c.load_pct)
+                self.cores
+                    .iter()
+                    .filter(|c| c.state == CoreState::Online)
+                    .min_by_key(|c| c.load_pct)
             })
             .ok_or(SmpError::HardwareDisabled)?;
 

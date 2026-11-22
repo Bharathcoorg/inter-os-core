@@ -194,7 +194,8 @@ impl SensorHub {
         self.total_samples_read += 1;
 
         // 1. Classify Device Orientation from Accelerometer Vector
-        self.orientation = Self::classify_orientation(imu.accel_x_mg, imu.accel_y_mg, imu.accel_z_mg);
+        self.orientation =
+            Self::classify_orientation(imu.accel_x_mg, imu.accel_y_mg, imu.accel_z_mg);
 
         // 2. Ear Detection & Screen Blanking State Machine
         // During an active voice call, if proximity <= 30 mm (3 cm), blank the screen
@@ -224,7 +225,9 @@ impl SensorHub {
         let mut detected_gesture = GestureEvent::None;
 
         // Flip to Mute: transition to FaceDown while calling or ringing
-        if prev_orientation != DeviceOrientation::FaceDown && self.orientation == DeviceOrientation::FaceDown {
+        if prev_orientation != DeviceOrientation::FaceDown
+            && self.orientation == DeviceOrientation::FaceDown
+        {
             detected_gesture = GestureEvent::FlipToMute;
         }
         // Shake for Emergency SOS: high X-axis lateral acceleration >= 2000 mg (2.0g)

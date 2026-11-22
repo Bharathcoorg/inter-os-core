@@ -146,7 +146,12 @@ impl CapabilityTable {
         }
     }
 
-    pub fn mint(&mut self, cap_type: CapabilityType, rights: Rights, target_id: Option<u32>) -> CapabilityId {
+    pub fn mint(
+        &mut self,
+        cap_type: CapabilityType,
+        rights: Rights,
+        target_id: Option<u32>,
+    ) -> CapabilityId {
         let id = CapabilityId(self.next_id);
         self.next_id += 1;
         self.entries.push(Capability {
@@ -158,7 +163,11 @@ impl CapabilityTable {
         id
     }
 
-    pub fn check(&self, cap_type: CapabilityType, required_rights: Rights) -> Result<&Capability, CapError> {
+    pub fn check(
+        &self,
+        cap_type: CapabilityType,
+        required_rights: Rights,
+    ) -> Result<&Capability, CapError> {
         for cap in &self.entries {
             if cap.cap_type == cap_type {
                 if cap.rights.contains(required_rights) {
@@ -171,7 +180,12 @@ impl CapabilityTable {
         Err(CapError::CapabilityNotFound)
     }
 
-    pub fn check_targeted(&self, cap_type: CapabilityType, required_rights: Rights, target: u32) -> Result<&Capability, CapError> {
+    pub fn check_targeted(
+        &self,
+        cap_type: CapabilityType,
+        required_rights: Rights,
+        target: u32,
+    ) -> Result<&Capability, CapError> {
         for cap in &self.entries {
             if cap.cap_type == cap_type {
                 if cap.target_id == Some(target) || cap.target_id.is_none() {
@@ -186,11 +200,21 @@ impl CapabilityTable {
         Err(CapError::TargetMismatch)
     }
 
-    pub fn authorize_capability(&self, expected_type: CapabilityType, required_rights: Rights) -> bool {
+    pub fn authorize_capability(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+    ) -> bool {
         self.check(expected_type, required_rights).is_ok()
     }
 
-    pub fn authorize_object(&self, expected_type: CapabilityType, required_rights: Rights, expected_object_id: u64) -> bool {
-        self.check_targeted(expected_type, required_rights, expected_object_id as u32).is_ok()
+    pub fn authorize_object(
+        &self,
+        expected_type: CapabilityType,
+        required_rights: Rights,
+        expected_object_id: u64,
+    ) -> bool {
+        self.check_targeted(expected_type, required_rights, expected_object_id as u32)
+            .is_ok()
     }
 }

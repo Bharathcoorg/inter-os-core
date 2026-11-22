@@ -26,7 +26,7 @@
 //! - Buffer slot bookkeeping for a future VSYNC-driven ping-pong compositor
 //! - Zero Ambient Authority: display reconfiguration requires `CapabilityType::DisplayControllerDirect`.
 
-use crate::capability::{CapabilityType, Rights, CapabilityTable};
+use crate::capability::{CapabilityTable, CapabilityType, Rights};
 
 /// Reserved offsets for a future concrete controller driver.
 ///
@@ -301,7 +301,10 @@ impl Orientation {
 
     #[inline]
     pub const fn is_landscape(self) -> bool {
-        matches!(self, Orientation::LandscapeRight | Orientation::LandscapeLeft)
+        matches!(
+            self,
+            Orientation::LandscapeRight | Orientation::LandscapeLeft
+        )
     }
 }
 

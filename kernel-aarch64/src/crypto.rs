@@ -22,8 +22,7 @@ pub const SHA256_BLOCK_SIZE: usize = 64;
 
 /// Initial hash values (first 32 bits of fractional parts of square roots of first 8 primes).
 const H_INIT: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 /// Round constants (first 32 bits of fractional parts of cube roots of first 64 primes).
@@ -109,14 +108,12 @@ impl Sha256 {
         if self.buffer_len > 0 {
             let needed = SHA256_BLOCK_SIZE - self.buffer_len;
             if data.len() >= needed {
-                self.buffer[self.buffer_len..SHA256_BLOCK_SIZE]
-                    .copy_from_slice(&data[..needed]);
+                self.buffer[self.buffer_len..SHA256_BLOCK_SIZE].copy_from_slice(&data[..needed]);
                 self.process_block(&self.buffer.clone());
                 self.buffer_len = 0;
                 offset = needed;
             } else {
-                self.buffer[self.buffer_len..self.buffer_len + data.len()]
-                    .copy_from_slice(data);
+                self.buffer[self.buffer_len..self.buffer_len + data.len()].copy_from_slice(data);
                 self.buffer_len += data.len();
                 return;
             }
@@ -409,12 +406,14 @@ pub fn verify_crypto_subsystem() {
     // 1. SHA-256 test vector for "abc"
     let digest_abc = Sha256::digest(b"abc");
     let expected_abc = [
-        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
-        0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
-        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
-        0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
+        0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
+        0x15, 0xad,
     ];
-    assert!(constant_time_eq_32(&digest_abc, &expected_abc), "SHA-256 'abc' test vector failed");
+    assert!(
+        constant_time_eq_32(&digest_abc, &expected_abc),
+        "SHA-256 'abc' test vector failed"
+    );
 
     // 2. RFC 4231 Test Case 1:
     // Key: 20 bytes of 0x0b
@@ -423,12 +422,14 @@ pub fn verify_crypto_subsystem() {
     let data1 = b"Hi There";
     let tag1 = HmacSha256::mac(&key1, data1);
     let expected_tag1 = [
-        0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53,
-        0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1, 0x2b,
-        0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7,
-        0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7,
+        0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1,
+        0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32,
+        0xcf, 0xf7,
     ];
-    assert!(constant_time_eq_32(&tag1, &expected_tag1), "RFC 4231 Test Case 1 failed");
+    assert!(
+        constant_time_eq_32(&tag1, &expected_tag1),
+        "RFC 4231 Test Case 1 failed"
+    );
 
     // 3. RFC 4231 Test Case 2:
     // Key: "Jefe"
@@ -437,14 +438,15 @@ pub fn verify_crypto_subsystem() {
     let data2 = b"what do ya want for nothing?";
     let tag2 = HmacSha256::mac(key2, data2);
     let expected_tag2 = [
-        0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e,
-        0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75, 0xc7,
-        0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83,
-        0x9d, 0xec, 0x58, 0xb9, 0x64, 0xec, 0x38, 0x43,
+        0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75,
+        0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9, 0x64, 0xec,
+        0x38, 0x43,
     ];
-    assert!(constant_time_eq_32(&tag2, &expected_tag2), "RFC 4231 Test Case 2 failed");
+    assert!(
+        constant_time_eq_32(&tag2, &expected_tag2),
+        "RFC 4231 Test Case 2 failed"
+    );
 }
-
 
 /// Verifies a detached Ed25519 signature using a caller-supplied trusted
 /// publisher public key. OTA trust decisions must remain asymmetric.
@@ -483,7 +485,9 @@ pub fn ed25519_public_key(secret_key: &[u8; 32]) -> [u8; 32] {
 #[inline(always)]
 pub fn zeroize_slice(buf: &mut [u8]) {
     for b in buf.iter_mut() {
-        unsafe { core::ptr::write_volatile(b, 0); }
+        unsafe {
+            core::ptr::write_volatile(b, 0);
+        }
     }
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
@@ -550,7 +554,9 @@ impl HardwareRng {
                 }
             }
             if success != 0 {
-                self.state = EntropyState::HardwareSeeded { source: "AArch64 FEAT_RNG" };
+                self.state = EntropyState::HardwareSeeded {
+                    source: "AArch64 FEAT_RNG",
+                };
                 self.mix_entropy(test_val);
                 return;
             }
@@ -601,7 +607,9 @@ impl HardwareRng {
         match self.state {
             EntropyState::Uninitialized => Err(EntropyError::InsufficientEntropy),
             EntropyState::DegradedPseudoOnly => Err(EntropyError::HardwareUnavailable),
-            EntropyState::HardwareSeeded { source: "AArch64 FEAT_RNG" } => {
+            EntropyState::HardwareSeeded {
+                source: "AArch64 FEAT_RNG",
+            } => {
                 #[cfg(target_arch = "aarch64")]
                 if self.has_feat_rng {
                     for _ in 0..10 {
@@ -624,9 +632,9 @@ impl HardwareRng {
                 }
                 self.expand_pool()
             }
-            EntropyState::HardwareSeeded { .. } | EntropyState::BootloaderSeeded { .. } | EntropyState::TestSeeded => {
-                self.expand_pool()
-            }
+            EntropyState::HardwareSeeded { .. }
+            | EntropyState::BootloaderSeeded { .. }
+            | EntropyState::TestSeeded => self.expand_pool(),
         }
     }
 
@@ -638,8 +646,14 @@ impl HardwareRng {
         self.entropy_pool = Sha256::digest(&mix_buf);
         zeroize_slice(&mut mix_buf);
         let val = u64::from_le_bytes([
-            self.entropy_pool[0], self.entropy_pool[1], self.entropy_pool[2], self.entropy_pool[3],
-            self.entropy_pool[4], self.entropy_pool[5], self.entropy_pool[6], self.entropy_pool[7],
+            self.entropy_pool[0],
+            self.entropy_pool[1],
+            self.entropy_pool[2],
+            self.entropy_pool[3],
+            self.entropy_pool[4],
+            self.entropy_pool[5],
+            self.entropy_pool[6],
+            self.entropy_pool[7],
         ]);
         Ok(val)
     }

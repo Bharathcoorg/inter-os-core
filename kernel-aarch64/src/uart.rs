@@ -7,8 +7,8 @@
 //! 1. ARM PrimeCell PL011 UART (MMIO base: `0x09000000` on QEMU `virt`).
 //! 2. Allwinner 8250 / Synopsys DesignWare 16550A UART (MMIO base: `0x01c28000` on PinePhone A64).
 
-use core::fmt;
 use crate::sync::IrqSpinLock;
+use core::fmt;
 
 // ============================================================================
 // ARM PrimeCell PL011 Register Definitions (QEMU virt)
@@ -169,7 +169,7 @@ pub const NS16550_LCR_PARITY_NONE: u32 = 0x00; // No parity
 pub const NS16550_LCR_DLAB: u32 = 1 << 7; // Divisor Latch Access Bit
 
 // LSR Bitfields
-pub const NS16550_LSR_DR: u32 = 1 << 0;   // Data Ready (RX FIFO has byte)
+pub const NS16550_LSR_DR: u32 = 1 << 0; // Data Ready (RX FIFO has byte)
 pub const NS16550_LSR_THRE: u32 = 1 << 5; // Transmitter Holding Register Empty
 pub const NS16550_LSR_TEMT: u32 = 1 << 6; // Transmitter Empty
 
@@ -226,7 +226,10 @@ impl Ns16550Uart {
         self.write_reg(NS16550_DLH, ((divisor >> 8) & 0xFF) as u32);
 
         // 4. Clear DLAB and configure 8 data bits, 1 stop bit, no parity (8N1)
-        self.write_reg(NS16550_LCR, NS16550_LCR_WLEN8 | NS16550_LCR_STOP1 | NS16550_LCR_PARITY_NONE);
+        self.write_reg(
+            NS16550_LCR,
+            NS16550_LCR_WLEN8 | NS16550_LCR_STOP1 | NS16550_LCR_PARITY_NONE,
+        );
 
         // 5. Reset and enable 16-byte FIFO (FIFOE | RFIFOR | XFIFOR)
         self.write_reg(
@@ -454,11 +457,12 @@ impl KernelUart {
             UartDriver::Pl011(ref uart) => unsafe {
                 (uart.read_reg(PL011_FR), uart.read_reg(PL011_CR))
             },
-            UartDriver::Ns16550(ref uart) => unsafe {
-                (uart.read_reg(NS16550_LSR), 0)
-            },
+            UartDriver::Ns16550(ref uart) => unsafe { (uart.read_reg(NS16550_LSR), 0) },
             UartDriver::QcomGeni(ref uart) => unsafe {
-                (uart.read_reg(GENI_STATUS), uart.read_reg(GENI_TX_FIFO_STATUS))
+                (
+                    uart.read_reg(GENI_STATUS),
+                    uart.read_reg(GENI_TX_FIFO_STATUS),
+                )
             },
         }
     }
@@ -503,7 +507,8 @@ impl From<QcomGeniUart> for KernelUart {
     }
 }
 
-pub static UART: IrqSpinLock<KernelUart> = IrqSpinLock::new(KernelUart::new_pl011(DEFAULT_PL011_BASE));
+pub static UART: IrqSpinLock<KernelUart> =
+    IrqSpinLock::new(KernelUart::new_pl011(DEFAULT_PL011_BASE));
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {

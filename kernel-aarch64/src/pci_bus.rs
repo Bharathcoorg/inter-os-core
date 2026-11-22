@@ -44,7 +44,10 @@ impl PcieBus {
 
     /// Locates the ECAM host bridge declared by the device tree.
     pub fn init_from_fdt(parser: &ArmFdtParser) -> Self {
-        let mut bus = Self { ecam: None, devices: [None; 32] };
+        let mut bus = Self {
+            ecam: None,
+            devices: [None; 32],
+        };
 
         let node = match parser.find_node_by_compatible("pci-host-ecam-generic") {
             Ok(node) => node,
@@ -84,7 +87,8 @@ impl PcieBus {
         }
 
         // Try the coarsest exact mapping first, then the dedicated high table.
-        let mapped = ArmMmu::map_device_region(base, size) || ArmMmu::map_device_region_high(base, size);
+        let mapped =
+            ArmMmu::map_device_region(base, size) || ArmMmu::map_device_region_high(base, size);
         if !mapped {
             crate::kprintln!(
                 "[PCI] ECAM window could not be mapped (base 0x{:X}, size 0x{:X}); bus unavailable.",
@@ -93,7 +97,11 @@ impl PcieBus {
             );
             return bus;
         }
-        crate::kprintln!("[PCI] ECAM window mapped at 0x{:X} ({} MiB).", base, size / (1024 * 1024));
+        crate::kprintln!(
+            "[PCI] ECAM window mapped at 0x{:X} ({} MiB).",
+            base,
+            size / (1024 * 1024)
+        );
 
         let ecam = PcieEcam::new(base as usize);
         let devices = unsafe { ecam.enumerate_bus0() };
@@ -141,7 +149,8 @@ impl PcieBus {
                         window.base.saturating_add(window.size),
                         window.size,
                         window.size / (1024 * 1024),
-                        if window.base.saturating_add(window.size) > crate::pci_bars::MAX_REACHABLE {
+                        if window.base.saturating_add(window.size) > crate::pci_bars::MAX_REACHABLE
+                        {
                             " - above the address space these translation tables describe, so it cannot be used"
                         } else {
                             ""
@@ -152,11 +161,16 @@ impl PcieBus {
                 let mut total = 0u32;
                 while let Some(device) = bus.devices.get(index).and_then(|d| *d) {
                     if !device.is_absent() {
-                        total += unsafe { crate::pci_bars::assign_device_bars(&ecam, &device, &mut allocator) };
+                        total += unsafe {
+                            crate::pci_bars::assign_device_bars(&ecam, &device, &mut allocator)
+                        };
                     }
                     index += 1;
                 }
-                crate::kprintln!("[PCI] {} memory BAR(s) assigned from the host bridge ranges.", total);
+                crate::kprintln!(
+                    "[PCI] {} memory BAR(s) assigned from the host bridge ranges.",
+                    total
+                );
             }
         }
         bus.ecam = Some(ecam);
@@ -184,14 +198,19 @@ impl PcieBus {
                             );
                             unsafe { report_device_config(&virtio, &device) };
                         } else {
-                            crate::kprintln!("[VIRTIO] {:04x}:{:04x} refused the handshake.", device.vendor_id, device.device_id);
+                            crate::kprintln!(
+                                "[VIRTIO] {:04x}:{:04x} refused the handshake.",
+                                device.vendor_id,
+                                device.device_id
+                            );
                         }
                     }
                     None => {
                         crate::kprintln!(
                             "[VIRTIO] {:04x}:{:04x} could not be claimed: one of the BARs its \
                              capabilities refer to has no assigned address.",
-                            device.vendor_id, device.device_id
+                            device.vendor_id,
+                            device.device_id
                         );
                     }
                 }
@@ -239,14 +258,19 @@ unsafe fn report_device_config(virtio: &crate::virtio::VirtioPciDevice, device: 
     if !virtio.has_device_config() {
         crate::kprintln!(
             "[VIRTIO] {:04x}:{:04x} published no configuration capability.",
-            device.vendor_id, device.device_id
+            device.vendor_id,
+            device.device_id
         );
         return;
     }
     const WORDS: usize = 5;
     let gpu = device.device_id == VIRTIO_GPU_DEVICE;
     let names: [&str; WORDS] = ["events_read", "cursor_x", "cursor_y", "width", "height"];
-    let label = if gpu { "virtio-gpu" } else { "unnamed virtio device" };
+    let label = if gpu {
+        "virtio-gpu"
+    } else {
+        "unnamed virtio device"
+    };
     let mut line = crate::alloc::format!("[VIRTIO] {} configuration space:", label);
     let mut readable = true;
     for index in 0..WORDS {

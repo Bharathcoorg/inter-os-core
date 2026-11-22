@@ -14,8 +14,8 @@
 //! - Zero Ambient Authority: Triggering tactile effects requires `CapabilityType::HapticsActuatorDirect`.
 
 extern crate alloc;
-use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
+use alloc::vec::Vec;
 
 pub const DEFAULT_LRA_RESONANT_FREQ_HZ: u16 = 170;
 
@@ -36,12 +36,12 @@ pub enum ActuatorType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TactileEffect {
-    LightClick,          // UI button tap (15ms)
-    KeyboardTap,         // Virtual keyboard tap (20ms)
-    HeavyClick,          // Long press / drawer toggle (45ms)
-    SuccessDoublePulse,  // Success / authentication confirm (two 20ms pulses)
-    ErrorVibe,           // Security alert / denial (200ms)
-    RingtoneCadence,     // Incoming phone call rhythm
+    LightClick,         // UI button tap (15ms)
+    KeyboardTap,        // Virtual keyboard tap (20ms)
+    HeavyClick,         // Long press / drawer toggle (45ms)
+    SuccessDoublePulse, // Success / authentication confirm (two 20ms pulses)
+    ErrorVibe,          // Security alert / denial (200ms)
+    RingtoneCadence,    // Incoming phone call rhythm
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,7 +199,9 @@ impl HapticsController {
 
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
-        if !present { self.is_playing=false; }
+        if !present {
+            self.is_playing = false;
+        }
     }
 
     /// Resets vibration thermal/battery governor window.

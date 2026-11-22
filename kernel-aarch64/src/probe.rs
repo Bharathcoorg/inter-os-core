@@ -69,8 +69,12 @@ impl DiscoveredHardware {
         }
 
         // 2. Discover UART: Check Allwinner A64 8250 UART first, then PL011
-        if parser.find_node_by_compatible("allwinner,sun50i-a64-uart").is_ok()
-            || parser.find_node_by_compatible("allwinner,sun6i-a31-uart").is_ok()
+        if parser
+            .find_node_by_compatible("allwinner,sun50i-a64-uart")
+            .is_ok()
+            || parser
+                .find_node_by_compatible("allwinner,sun6i-a31-uart")
+                .is_ok()
             || parser.find_node_by_compatible("snps,dw-apb-uart").is_ok()
             || hw.is_pinephone
         {

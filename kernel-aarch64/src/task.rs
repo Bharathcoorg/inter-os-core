@@ -11,10 +11,10 @@
 //! - Dedicated stack pointer: `sp`
 
 extern crate alloc;
+use crate::sync::IrqSpinLock as Mutex;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use crate::sync::IrqSpinLock as Mutex;
 
 pub const STACK_SIZE: usize = 16384; // 16 KiB per kernel task stack
 pub const MAX_CPUS: usize = 8;
@@ -141,7 +141,6 @@ pub unsafe extern "C" fn switch_context(old_ctx: *mut ArmContext, new_ctx: *cons
         "mrs x3, fpsr",
         "str x2, [x0, #624]",
         "str x3, [x0, #632]",
-
         // Restore callee-saved registers x19-x28 from new_ctx.x19_x28 (offset 0..80)
         "ldp x19, x20, [x1, #0]",
         "ldp x21, x22, [x1, #16]",
@@ -175,7 +174,6 @@ pub unsafe extern "C" fn switch_context(old_ctx: *mut ArmContext, new_ctx: *cons
         "ldr x3, [x1, #632]",
         "msr fpcr, x2",
         "msr fpsr, x3",
-
         // Branch to restored lr (x30)
         "ret",
     );
@@ -308,7 +306,9 @@ pub fn init_per_cpu(logical_id: usize) {
         let ptr = &raw mut PER_CPU_DATA[slot];
         (*ptr).logical_id = slot;
         (*ptr).current_pid.store(INVALID_PID, Ordering::Release);
-        (*ptr).pending_release_pid.store(INVALID_PID, Ordering::Release);
+        (*ptr)
+            .pending_release_pid
+            .store(INVALID_PID, Ordering::Release);
         (*ptr).need_resched.store(false, Ordering::Release);
         (*ptr).tlb_shootdown_pending.store(false, Ordering::Release);
         #[cfg(target_arch = "aarch64")]
@@ -408,7 +408,11 @@ impl Scheduler {
     }
 
     pub fn allocate_pid(&mut self) -> Option<u32> {
-        let start = if is_reserved_pid(self.next_pid) { 1 } else { self.next_pid };
+        let start = if is_reserved_pid(self.next_pid) {
+            1
+        } else {
+            self.next_pid
+        };
         let mut candidate = start;
         loop {
             if !is_reserved_pid(candidate) && !self.tasks.iter().any(|t| t.id == candidate) {
@@ -443,7 +447,12 @@ impl Scheduler {
         self.spawn_with_caps(name, entry_fn, CapabilityTable::new());
     }
 
-    pub fn spawn_with_caps(&mut self, name: &'static str, entry_fn: fn() -> !, cap_table: CapabilityTable) {
+    pub fn spawn_with_caps(
+        &mut self,
+        name: &'static str,
+        entry_fn: fn() -> !,
+        cap_table: CapabilityTable,
+    ) {
         self.spawn_kernel_task_with_options(name, entry_fn, cap_table, 0, 0xFFFF_FFFF);
     }
 
@@ -455,7 +464,9 @@ impl Scheduler {
         priority: u8,
         affinity_mask: u32,
     ) -> u32 {
-        let task_id = self.allocate_pid().expect("PID allocation failure during kernel daemon spawn");
+        let task_id = self
+            .allocate_pid()
+            .expect("PID allocation failure during kernel daemon spawn");
         let stack = Box::new([0u8; STACK_SIZE]);
 
         let stack_top = (stack.as_ptr() as u64) + STACK_SIZE as u64;
@@ -670,16 +681,28 @@ impl Scheduler {
         task_id
     }
 
-    pub fn terminate_task(&mut self, caller_pid: u32, is_supervisor: bool, target_pid: u32) -> Result<(), i64> {
+    pub fn terminate_task(
+        &mut self,
+        caller_pid: u32,
+        is_supervisor: bool,
+        target_pid: u32,
+    ) -> Result<(), i64> {
         if target_pid == 0 {
             return Err(-22); // -EINVAL
         }
-        let pos = self.tasks.iter().position(|t| t.id == target_pid).ok_or(-3)?; // -ESRCH
+        let pos = self
+            .tasks
+            .iter()
+            .position(|t| t.id == target_pid)
+            .ok_or(-3)?; // -ESRCH
         let task = &mut self.tasks[pos];
         if !is_supervisor && task.parent_id != caller_pid && task.id != caller_pid {
             return Err(-13); // -EACCES
         }
-        if task.state == TaskState::Terminated || task.state == TaskState::Exited || task.state == TaskState::Reaping {
+        if task.state == TaskState::Terminated
+            || task.state == TaskState::Exited
+            || task.state == TaskState::Reaping
+        {
             return Ok(());
         }
         task.state = TaskState::Terminated;
@@ -707,22 +730,40 @@ impl Scheduler {
     /// transitions the task to `TaskState::Reaping`, increments `generation`, and returns a
     /// `ReapHandle` while keeping `task.address_space` attached so remote `prepare_switch()`
     /// calls can still observe and deactivate it.
-    pub fn begin_reap(&mut self, caller_pid: u32, is_supervisor: bool, target_pid: u32) -> Result<ReapHandle, i64> {
+    pub fn begin_reap(
+        &mut self,
+        caller_pid: u32,
+        is_supervisor: bool,
+        target_pid: u32,
+    ) -> Result<ReapHandle, i64> {
         let curr_pid = self.current_pid();
         if target_pid != 0 && target_pid == caller_pid {
             return Err(-16); // -EBUSY: caller cannot reap itself
         }
-        if target_pid != 0 && target_pid == curr_pid && self.tasks.get(self.current_task_idx).map(|t| t.state == TaskState::Running).unwrap_or(false) {
+        if target_pid != 0
+            && target_pid == curr_pid
+            && self
+                .tasks
+                .get(self.current_task_idx)
+                .map(|t| t.state == TaskState::Running)
+                .unwrap_or(false)
+        {
             return Err(-16); // -EBUSY: cannot reap active running process
         }
 
-        let pos = self.tasks.iter().position(|t| {
-            (target_pid == 0 || t.id == target_pid)
-                && (target_pid != 0 || t.id != caller_pid)
-                && (target_pid != 0 || t.id != 0)
-                && (target_pid != 0 || is_supervisor || t.parent_id == caller_pid)
-                && (t.state == TaskState::Terminated || t.state == TaskState::Exited || t.state == TaskState::ReapFailed)
-        }).ok_or(-30i64)?; // NotReady or not found
+        let pos = self
+            .tasks
+            .iter()
+            .position(|t| {
+                (target_pid == 0 || t.id == target_pid)
+                    && (target_pid != 0 || t.id != caller_pid)
+                    && (target_pid != 0 || t.id != 0)
+                    && (target_pid != 0 || is_supervisor || t.parent_id == caller_pid)
+                    && (t.state == TaskState::Terminated
+                        || t.state == TaskState::Exited
+                        || t.state == TaskState::ReapFailed)
+            })
+            .ok_or(-30i64)?; // NotReady or not found
 
         let task = &mut self.tasks[pos];
         if !is_supervisor && task.parent_id != caller_pid {
@@ -732,9 +773,10 @@ impl Scheduler {
         task.state = TaskState::Reaping;
         task.generation = task.generation.wrapping_add(1);
         if let Some(ref aspace) = task.address_space {
-            aspace
-                .lifecycle
-                .fetch_or(crate::mmu::LIFECYCLE_CLOSING_BIT, core::sync::atomic::Ordering::Release);
+            aspace.lifecycle.fetch_or(
+                crate::mmu::LIFECYCLE_CLOSING_BIT,
+                core::sync::atomic::Ordering::Release,
+            );
         }
         Ok(ReapHandle {
             pid: task.id,
@@ -751,9 +793,15 @@ impl Scheduler {
         &mut self,
         handle: ReapHandle,
     ) -> Result<Option<crate::mmu::UserAddressSpace>, i64> {
-        let pos = self.tasks.iter().position(|t| {
-            t.id == handle.pid && t.generation == handle.generation && t.state == TaskState::Reaping
-        }).ok_or(-3i64)?; // -ESRCH: identity or generation mismatch
+        let pos = self
+            .tasks
+            .iter()
+            .position(|t| {
+                t.id == handle.pid
+                    && t.generation == handle.generation
+                    && t.state == TaskState::Reaping
+            })
+            .ok_or(-3i64)?; // -ESRCH: identity or generation mismatch
 
         if self.tasks[pos].switching_out || self.tasks[pos].running_cpu.is_some() {
             self.abort_reap(handle, None);
@@ -771,9 +819,15 @@ impl Scheduler {
     }
 
     pub fn finish_reap(&mut self, handle: ReapHandle) -> Result<i32, i64> {
-        let pos = self.tasks.iter().position(|t| {
-            t.id == handle.pid && t.generation == handle.generation && t.state == TaskState::Reaping
-        }).ok_or(-3i64)?; // -ESRCH: identity or generation mismatch
+        let pos = self
+            .tasks
+            .iter()
+            .position(|t| {
+                t.id == handle.pid
+                    && t.generation == handle.generation
+                    && t.state == TaskState::Reaping
+            })
+            .ok_or(-3i64)?; // -ESRCH: identity or generation mismatch
 
         if self.tasks[pos].switching_out || self.tasks[pos].running_cpu.is_some() {
             self.abort_reap(handle, None);
@@ -781,10 +835,17 @@ impl Scheduler {
         }
 
         let removed = self.remove_task_at(pos);
-        crate::kprintln!("[REAP] Reclaimed user address space and frames for PID {}", removed.id);
+        crate::kprintln!(
+            "[REAP] Reclaimed user address space and frames for PID {}",
+            removed.id
+        );
         crate::ipc::IPC_ROUTER.lock().unregister_task(removed.id);
-        crate::display::SURFACE_MANAGER.lock().destroy_surfaces_owned_by(removed.id);
-        crate::input_queue::INPUT_QUEUE.lock().clear_for_task(removed.id);
+        crate::display::SURFACE_MANAGER
+            .lock()
+            .destroy_surfaces_owned_by(removed.id);
+        crate::input_queue::INPUT_QUEUE
+            .lock()
+            .clear_for_task(removed.id);
         Ok(handle.exit_code)
     }
 
@@ -802,12 +863,21 @@ impl Scheduler {
         }
     }
 
-    pub fn reap_task(&mut self, caller_pid: u32, is_supervisor: bool, target_pid: u32) -> Result<i32, i64> {
+    pub fn reap_task(
+        &mut self,
+        caller_pid: u32,
+        is_supervisor: bool,
+        target_pid: u32,
+    ) -> Result<i32, i64> {
         let handle = self.begin_reap(caller_pid, is_supervisor, target_pid)?;
         let mut aspace_opt = self.detach_reaping_aspace(handle)?;
         if let Some(ref mut aspace) = aspace_opt {
             if let Err(e) = aspace.destroy_fallible() {
-                crate::kprintln!("[REAP ERROR] Failed to destroy user address space for PID {}: {:?}", handle.pid, e);
+                crate::kprintln!(
+                    "[REAP ERROR] Failed to destroy user address space for PID {}: {:?}",
+                    handle.pid,
+                    e
+                );
                 self.abort_reap(handle, aspace_opt);
                 return Err(-16); // -EBUSY: teardown failed; preserve task and do not emit success log
             }
@@ -872,7 +942,10 @@ impl Scheduler {
     ///
     /// Outgoing tasks enter `switching_out = true` until `finish_post_switch()` completes
     /// after `switch_context`, preventing another CPU from stealing a task mid-save.
-    pub fn prepare_switch_for_cpu(&mut self, cpu_id: usize) -> Option<(*mut ArmContext, *const ArmContext)> {
+    pub fn prepare_switch_for_cpu(
+        &mut self,
+        cpu_id: usize,
+    ) -> Option<(*mut ArmContext, *const ArmContext)> {
         if cpu_id >= MAX_CPUS {
             return None;
         }
@@ -943,7 +1016,12 @@ impl Scheduler {
         if let Some(npos) = next_pos {
             if let Some(ref aspace) = self.tasks[npos].address_space {
                 if let Err(e) = aspace.try_activate() {
-                    crate::kprintln!("[SCHED CPU {}] Activation failed for PID {}: {:?}", cpu_id, self.tasks[npos].id, e);
+                    crate::kprintln!(
+                        "[SCHED CPU {}] Activation failed for PID {}: {:?}",
+                        cpu_id,
+                        self.tasks[npos].id,
+                        e
+                    );
                     return None;
                 }
                 if let Some(cpos) = curr_pos {
@@ -972,10 +1050,12 @@ impl Scheduler {
             let out_task = &mut self.tasks[cpos];
             out_task.switching_out = true;
             out_task.running_cpu = Some(cpu_id);
-            pcpu.pending_release_pid.store(out_task.id, Ordering::Release);
+            pcpu.pending_release_pid
+                .store(out_task.id, Ordering::Release);
             &mut out_task.context as *mut ArmContext
         } else {
-            pcpu.pending_release_pid.store(INVALID_PID, Ordering::Release);
+            pcpu.pending_release_pid
+                .store(INVALID_PID, Ordering::Release);
             unsafe { &raw mut PER_CPU_DATA[cpu_id].idle_context }
         };
 
@@ -1015,7 +1095,9 @@ impl Scheduler {
         if cpu_id >= MAX_CPUS {
             return;
         }
-        let rel_pid = per_cpu(cpu_id).pending_release_pid.swap(INVALID_PID, Ordering::AcqRel);
+        let rel_pid = per_cpu(cpu_id)
+            .pending_release_pid
+            .swap(INVALID_PID, Ordering::AcqRel);
         if is_reserved_pid(rel_pid) {
             return;
         }
@@ -1042,7 +1124,9 @@ extern "C" fn kernel_task_trampoline() -> ! {
     finish_post_switch();
     let entry_opt = {
         let sched = SCHEDULER.lock();
-        sched.current_task_pos().and_then(|pos| sched.tasks[pos].kernel_entry_fn)
+        sched
+            .current_task_pos()
+            .and_then(|pos| sched.tasks[pos].kernel_entry_fn)
     };
     #[cfg(target_arch = "aarch64")]
     unsafe {
@@ -1111,7 +1195,13 @@ pub fn on_tlb_shootdown_ipi() {
     pcpu.tlb_shootdown_pending.store(false, Ordering::Release);
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        core::arch::asm!("dsb ishst", "tlbi vmalle1", "dsb ish", "isb", options(nostack));
+        core::arch::asm!(
+            "dsb ishst",
+            "tlbi vmalle1",
+            "dsb ish",
+            "isb",
+            options(nostack)
+        );
     }
     if is_smp_scheduling_enabled() {
         let curr_pid = pcpu.current_pid.load(Ordering::Acquire);
@@ -1174,7 +1264,11 @@ pub fn secondary_scheduler_loop(logical_id: usize) -> ! {
     }
 }
 
-pub fn reap_task_locksafe(caller_pid: u32, is_supervisor: bool, target_pid: u32) -> Result<i32, i64> {
+pub fn reap_task_locksafe(
+    caller_pid: u32,
+    is_supervisor: bool,
+    target_pid: u32,
+) -> Result<i32, i64> {
     // Stage 1: Mark target Reaping under lock while keeping address_space attached.
     let handle = {
         let mut sched = SCHEDULER.lock();
@@ -1193,7 +1287,9 @@ pub fn reap_task_locksafe(caller_pid: u32, is_supervisor: bool, target_pid: u32)
         let check = {
             let sched = SCHEDULER.lock();
             match sched.tasks.iter().position(|t| {
-                t.id == handle.pid && t.generation == handle.generation && t.state == TaskState::Reaping
+                t.id == handle.pid
+                    && t.generation == handle.generation
+                    && t.state == TaskState::Reaping
             }) {
                 Some(pos) => {
                     let t = &sched.tasks[pos];
@@ -1258,7 +1354,11 @@ pub fn reap_task_locksafe(caller_pid: u32, is_supervisor: bool, target_pid: u32)
             sched.finish_reap(handle)
         }
         Err(e) => {
-            crate::kprintln!("[REAP ERROR] Failed to destroy user address space for PID {}: {:?}", handle.pid, e);
+            crate::kprintln!(
+                "[REAP ERROR] Failed to destroy user address space for PID {}: {:?}",
+                handle.pid,
+                e
+            );
             let mut sched = SCHEDULER.lock();
             sched.abort_reap(handle, aspace_opt);
             Err(-16) // -EBUSY
@@ -1269,7 +1369,9 @@ pub fn reap_task_locksafe(caller_pid: u32, is_supervisor: bool, target_pid: u32)
 /// Reaps a supervisor-managed service task.
 /// Validates caller's `ServiceLifecycleToken` against the live service registry and scheduler TCB.
 /// Rejects non-service tasks, stale tokens, and wrong service IDs with -EPERM (-1).
-pub(crate) fn reap_service_task(token: &crate::services::ServiceLifecycleToken) -> Result<i32, i64> {
+pub(crate) fn reap_service_task(
+    token: &crate::services::ServiceLifecycleToken,
+) -> Result<i32, i64> {
     if !token.verify_live() {
         return Err(-1); // -EPERM
     }
@@ -1283,7 +1385,11 @@ pub(crate) fn reap_service_task(token: &crate::services::ServiceLifecycleToken) 
             Some(t) => t,
             None => return Err(-30), // -ESRCH
         };
-        if !t.is_service || t.service_id != Some(token.service_id()) || t.service_generation != Some(token.generation()) || t.parent_id != SUPERVISOR_PID {
+        if !t.is_service
+            || t.service_id != Some(token.service_id())
+            || t.service_generation != Some(token.generation())
+            || t.parent_id != SUPERVISOR_PID
+        {
             return Err(-1); // -EPERM
         }
     }
@@ -1308,7 +1414,11 @@ pub(crate) fn terminate_service_task(
         Some(t) => t,
         None => return Err(-3), // -ESRCH
     };
-    if !t.is_service || t.service_id != Some(token.service_id()) || t.service_generation != Some(token.generation()) || t.parent_id != SUPERVISOR_PID {
+    if !t.is_service
+        || t.service_id != Some(token.service_id())
+        || t.service_generation != Some(token.generation())
+        || t.parent_id != SUPERVISOR_PID
+    {
         return Err(-1); // -EPERM
     }
     sched.terminate_task(SUPERVISOR_PID, true, target_pid)
@@ -1599,7 +1709,8 @@ pub fn test_context_switching() {
         // 2. Distinguishable 64-bit test patterns across all 10 callee-saved GPRs x19-x28
         let mut patterns_gpr = [0u64; 10];
         for i in 0..10 {
-            patterns_gpr[i] = 0xAA19_0000_0000_0000_u64 | ((i as u64 + 19) << 32) | ((i as u64 + 1) * 0x1111);
+            patterns_gpr[i] =
+                0xAA19_0000_0000_0000_u64 | ((i as u64 + 19) << 32) | ((i as u64 + 1) * 0x1111);
         }
 
         // 3. Known architectural test values for FPCR and FPSR
@@ -1627,7 +1738,10 @@ pub fn test_context_switching() {
 
         // Verify that the worker executed on WORKER_STACK
         let flag_val = core::ptr::read_volatile(core::ptr::addr_of!(TEST_SWITCH_FLAG));
-        assert_eq!(flag_val, 0xCAFE_BABE, "Context switch failed to execute worker task");
+        assert_eq!(
+            flag_val, 0xCAFE_BABE,
+            "Context switch failed to execute worker task"
+        );
 
         // A. Verify that all 10 callee-saved GPRs (x19-x28) were restored bit-exact
         for i in 0..10 {
@@ -1642,8 +1756,7 @@ pub fn test_context_switching() {
         // B. Verify that all 32 vector registers (q0-q31) were restored bit-exact
         for i in 0..32 {
             assert_eq!(
-                captured_q[i],
-                patterns_q[i],
+                captured_q[i], patterns_q[i],
                 "AArch64 SIMD context switch restoration mismatch on register q{}",
                 i
             );
@@ -1674,8 +1787,16 @@ pub fn test_context_switching() {
         let main_sp = core::ptr::read_volatile(core::ptr::addr_of!(MAIN_CTX.sp));
         let worker_sp = core::ptr::read_volatile(core::ptr::addr_of!(WORKER_CTX.sp));
         let main_lr = core::ptr::read_volatile(core::ptr::addr_of!(MAIN_CTX.lr));
-        assert_eq!(main_sp & 0x0F, 0, "Main task stack pointer must remain 16-byte aligned");
-        assert_eq!(worker_sp & 0x0F, 0, "Worker task stack pointer must remain 16-byte aligned");
+        assert_eq!(
+            main_sp & 0x0F,
+            0,
+            "Main task stack pointer must remain 16-byte aligned"
+        );
+        assert_eq!(
+            worker_sp & 0x0F,
+            0,
+            "Worker task stack pointer must remain 16-byte aligned"
+        );
         assert_ne!(main_lr, 0, "Saved return address (lr) must be non-zero");
     }
 
@@ -1745,7 +1866,9 @@ pub fn test_task_lifecycle() {
 
     // Test 5: PID monotonicity, collision avoidance, and reserved PID skip
     sched.next_pid = SUPERVISOR_PID - 1;
-    let pid_a = sched.allocate_pid().expect("allocate before supervisor pid");
+    let pid_a = sched
+        .allocate_pid()
+        .expect("allocate before supervisor pid");
     assert_eq!(pid_a, SUPERVISOR_PID - 1);
     let pid_b = sched.allocate_pid().expect("allocate wraps to 1");
     assert_eq!(pid_b, 1); // Skips SUPERVISOR_PID (u32::MAX - 1), INVALID_PID (u32::MAX), and 0
@@ -1758,13 +1881,18 @@ pub fn test_task_lifecycle() {
     // Test 6: Multi-Stage Lock-Safe Reaping & Generation Tracking
     let c2 = sched2.spawn_user_process(p1, "child2", 0, 0, None, caps.clone());
     sched2.tasks[1].state = TaskState::Terminated;
-    let handle = sched2.begin_reap(p1, false, c2).expect("begin_reap on terminated child");
+    let handle = sched2
+        .begin_reap(p1, false, c2)
+        .expect("begin_reap on terminated child");
     assert_eq!(sched2.tasks[1].state, TaskState::Reaping);
     // Reaping task must be unschedulable (prepare_switch ignores Reaping)
     sched2.current_task_idx = 0;
     sched2.tasks[0].state = TaskState::Running;
     let (old_opt, new_opt) = sched2.prepare_switch();
-    assert!(old_opt.is_none() && new_opt.is_none(), "prepare_switch must ignore Reaping task");
+    assert!(
+        old_opt.is_none() && new_opt.is_none(),
+        "prepare_switch must ignore Reaping task"
+    );
     // Concurrent second reap while Reaping must be rejected
     match sched2.begin_reap(p1, false, c2) {
         Err(e) => assert_eq!(e, -30),
@@ -1774,15 +1902,29 @@ pub fn test_task_lifecycle() {
     let mut stale_handle = handle;
     stale_handle.generation = stale_handle.generation.wrapping_add(99);
     assert_eq!(sched2.finish_reap(stale_handle), Err(-3));
-    assert!(matches!(sched2.detach_reaping_aspace(stale_handle), Err(-3)));
+    assert!(matches!(
+        sched2.detach_reaping_aspace(stale_handle),
+        Err(-3)
+    ));
     // Abort reap preserves task in ReapFailed state with incremented generation
     sched2.abort_reap(handle, None);
     assert_eq!(sched2.tasks[1].state, TaskState::ReapFailed);
-    assert_eq!(sched2.tasks[1].generation, handle.generation.wrapping_add(1));
-    assert_eq!(sched2.finish_reap(handle), Err(-3), "Old handle must not reap newer generation");
+    assert_eq!(
+        sched2.tasks[1].generation,
+        handle.generation.wrapping_add(1)
+    );
+    assert_eq!(
+        sched2.finish_reap(handle),
+        Err(-3),
+        "Old handle must not reap newer generation"
+    );
     // Retry reap on ReapFailed task must succeed
-    let retry_handle = sched2.begin_reap(p1, false, c2).expect("begin_reap on ReapFailed child");
-    let retry_aspace = sched2.detach_reaping_aspace(retry_handle).expect("detach on ReapFailed retry");
+    let retry_handle = sched2
+        .begin_reap(p1, false, c2)
+        .expect("begin_reap on ReapFailed child");
+    let retry_aspace = sched2
+        .detach_reaping_aspace(retry_handle)
+        .expect("detach on ReapFailed retry");
     assert!(retry_aspace.is_none());
     assert_eq!(sched2.finish_reap(retry_handle), Ok(0));
 
@@ -1799,12 +1941,19 @@ pub fn test_task_lifecycle() {
 
     // Caller p_b calls wildcard begin_reap(p_b, false, 0).
     // It MUST skip foreign child_a and select p_b's child c_b!
-    let h_b = sched2.begin_reap(p_b, false, 0).expect("Wildcard reap for parent_b must select child_b");
-    assert_eq!(h_b.pid, c_b, "Wildcard reap must find caller's own child, not foreign child");
+    let h_b = sched2
+        .begin_reap(p_b, false, 0)
+        .expect("Wildcard reap for parent_b must select child_b");
+    assert_eq!(
+        h_b.pid, c_b,
+        "Wildcard reap must find caller's own child, not foreign child"
+    );
     assert_eq!(sched2.finish_reap(h_b), Ok(0));
 
     // Now caller p_a calls wildcard begin_reap(p_a, false, 0) -> selects child_a
-    let h_a = sched2.begin_reap(p_a, false, 0).expect("Wildcard reap for parent_a must select child_a");
+    let h_a = sched2
+        .begin_reap(p_a, false, 0)
+        .expect("Wildcard reap for parent_a must select child_a");
     assert_eq!(h_a.pid, c_a, "Wildcard reap must select child_a");
     assert_eq!(sched2.finish_reap(h_a), Ok(0));
 
@@ -1816,7 +1965,9 @@ pub fn test_task_lifecycle() {
     let svc_pos = sched2.tasks.iter().position(|t| t.id == svc_child).unwrap();
     sched2.tasks[svc_pos].state = TaskState::Terminated;
     // Supervisor reap of svc_child succeeds using internal SUPERVISOR_PID
-    let h_svc = sched2.begin_reap(SUPERVISOR_PID, true, svc_child).expect("Supervisor begin_reap on service task");
+    let h_svc = sched2
+        .begin_reap(SUPERVISOR_PID, true, svc_child)
+        .expect("Supervisor begin_reap on service task");
     assert_eq!(h_svc.pid, svc_child);
     assert_eq!(sched2.finish_reap(h_svc), Ok(0));
 
@@ -1835,15 +1986,22 @@ pub fn test_reap_evacuation_protocol() {
     let c_ready = sched.spawn_user_process(p1, "ready_child", 0, 0, None, caps.clone());
     let c_reap_pos = sched.tasks.iter().position(|t| t.id == c_reap).unwrap();
     sched.tasks[c_reap_pos].state = TaskState::Terminated;
-    let h_skip = sched.begin_reap(p1, false, c_reap).expect("begin_reap on c_reap");
+    let h_skip = sched
+        .begin_reap(p1, false, c_reap)
+        .expect("begin_reap on c_reap");
     sched.current_task_idx = 0;
     sched.tasks[0].state = TaskState::Running;
     let (old_opt, new_opt) = sched.prepare_switch();
     assert!(old_opt.is_some() && new_opt.is_some());
-    assert_eq!(sched.tasks[sched.current_task_idx].id, c_ready, "prepare_switch must skip Reaping task");
+    assert_eq!(
+        sched.tasks[sched.current_task_idx].id, c_ready,
+        "prepare_switch must skip Reaping task"
+    );
     let c_reap_pos = sched.tasks.iter().position(|t| t.id == c_reap).unwrap();
     assert_eq!(sched.tasks[c_reap_pos].state, TaskState::Reaping);
-    let _ = sched.detach_reaping_aspace(h_skip).expect("detach none aspace");
+    let _ = sched
+        .detach_reaping_aspace(h_skip)
+        .expect("detach none aspace");
     assert_eq!(sched.finish_reap(h_skip), Ok(0));
 
     // Reset p1 as Ready for subsequent switch tests
@@ -1865,11 +2023,20 @@ pub fn test_reap_evacuation_protocol() {
         .unwrap()
         .try_activate()
         .expect("activate outgoing aspace");
-    assert!(sched.tasks[c_out_pos].address_space.as_ref().unwrap().is_active_on_any_cpu());
+    assert!(sched.tasks[c_out_pos]
+        .address_space
+        .as_ref()
+        .unwrap()
+        .is_active_on_any_cpu());
     sched.tasks[c_out_pos].state = TaskState::Terminated;
-    let h_out = sched.begin_reap(p1, false, c_out).expect("begin_reap on outgoing task");
+    let h_out = sched
+        .begin_reap(p1, false, c_out)
+        .expect("begin_reap on outgoing task");
     assert_eq!(sched.tasks[c_out_pos].state, TaskState::Reaping);
-    assert!(sched.tasks[c_out_pos].address_space.is_some(), "address_space must stay attached in Reaping");
+    assert!(
+        sched.tasks[c_out_pos].address_space.is_some(),
+        "address_space must stay attached in Reaping"
+    );
 
     // Simulate remote/outgoing CPU switching away from the Reaping task
     sched.current_task_idx = c_out_pos;
@@ -1877,11 +2044,24 @@ pub fn test_reap_evacuation_protocol() {
     assert!(old_opt.is_some() && new_opt.is_some());
     assert_eq!(sched.tasks[sched.current_task_idx].id, p1);
     let c_out_pos = sched.tasks.iter().position(|t| t.id == c_out).unwrap();
-    assert_eq!(sched.tasks[c_out_pos].state, TaskState::Reaping, "Outgoing Reaping task must stay Reaping");
+    assert_eq!(
+        sched.tasks[c_out_pos].state,
+        TaskState::Reaping,
+        "Outgoing Reaping task must stay Reaping"
+    );
     {
-        let aspace_ref = sched.tasks[c_out_pos].address_space.as_ref().expect("aspace still attached");
-        assert!(!aspace_ref.is_active_on_any_cpu(), "prepare_switch must deactivate outgoing Reaping aspace");
-        assert!(Scheduler::is_aspace_evacuated(aspace_ref), "outgoing Reaping aspace must be acknowledged");
+        let aspace_ref = sched.tasks[c_out_pos]
+            .address_space
+            .as_ref()
+            .expect("aspace still attached");
+        assert!(
+            !aspace_ref.is_active_on_any_cpu(),
+            "prepare_switch must deactivate outgoing Reaping aspace"
+        );
+        assert!(
+            Scheduler::is_aspace_evacuated(aspace_ref),
+            "outgoing Reaping aspace must be acknowledged"
+        );
     }
     let mut detached_out = sched
         .detach_reaping_aspace(h_out)
@@ -1893,7 +2073,8 @@ pub fn test_reap_evacuation_protocol() {
     // 4, 5 & 6. detach_reaping_aspace rejects while active_cpus != 0, succeeds once deactivate() called,
     // abort_reap restores address_space & sets ReapFailed, and stale ReapHandle cannot reap newer generation.
     let aspace_guard = crate::mmu::UserAddressSpace::new().expect("Address space alloc");
-    let c_guard = sched.spawn_user_process(p1, "guarded_reap", 0, 0, Some(aspace_guard), caps.clone());
+    let c_guard =
+        sched.spawn_user_process(p1, "guarded_reap", 0, 0, Some(aspace_guard), caps.clone());
     let c_guard_pos = sched.tasks.iter().position(|t| t.id == c_guard).unwrap();
     sched.tasks[c_guard_pos]
         .address_space
@@ -1901,21 +2082,49 @@ pub fn test_reap_evacuation_protocol() {
         .unwrap()
         .try_activate()
         .expect("activate guarded aspace");
-    assert_ne!(sched.tasks[c_guard_pos].address_space.as_ref().unwrap().active_cpus(), 0);
+    assert_ne!(
+        sched.tasks[c_guard_pos]
+            .address_space
+            .as_ref()
+            .unwrap()
+            .active_cpus(),
+        0
+    );
     sched.tasks[c_guard_pos].state = TaskState::Terminated;
-    let h_active = sched.begin_reap(p1, false, c_guard).expect("begin_reap while active");
+    let h_active = sched
+        .begin_reap(p1, false, c_guard)
+        .expect("begin_reap while active");
 
     // Must reject detachment while active_cpus != 0 and preserve attached address_space
     assert!(matches!(sched.detach_reaping_aspace(h_active), Err(-16)));
     let c_guard_pos = sched.tasks.iter().position(|t| t.id == c_guard).unwrap();
     assert_eq!(sched.tasks[c_guard_pos].state, TaskState::ReapFailed);
-    assert_eq!(sched.tasks[c_guard_pos].generation, h_active.generation.wrapping_add(1));
-    assert!(sched.tasks[c_guard_pos].address_space.is_some(), "failed detach must not drop address_space");
+    assert_eq!(
+        sched.tasks[c_guard_pos].generation,
+        h_active.generation.wrapping_add(1)
+    );
+    assert!(
+        sched.tasks[c_guard_pos].address_space.is_some(),
+        "failed detach must not drop address_space"
+    );
 
     // Evacuate CPU via deactivate(), then detach must succeed
-    sched.tasks[c_guard_pos].address_space.as_ref().unwrap().deactivate();
-    assert_eq!(sched.tasks[c_guard_pos].address_space.as_ref().unwrap().active_cpus(), 0);
-    let h_retry = sched.begin_reap(p1, false, c_guard).expect("retry begin_reap after deactivate");
+    sched.tasks[c_guard_pos]
+        .address_space
+        .as_ref()
+        .unwrap()
+        .deactivate();
+    assert_eq!(
+        sched.tasks[c_guard_pos]
+            .address_space
+            .as_ref()
+            .unwrap()
+            .active_cpus(),
+        0
+    );
+    let h_retry = sched
+        .begin_reap(p1, false, c_guard)
+        .expect("retry begin_reap after deactivate");
     let detached = sched
         .detach_reaping_aspace(h_retry)
         .expect("detach after deactivate")
@@ -1928,14 +2137,26 @@ pub fn test_reap_evacuation_protocol() {
     // Failed teardown via abort_reap restores address_space, sets ReapFailed, and invalidates old ReapHandle
     sched.abort_reap(h_retry, Some(detached));
     let c_guard_pos = sched.tasks.iter().position(|t| t.id == c_guard).unwrap();
-    assert!(sched.tasks[c_guard_pos].address_space.is_some(), "abort_reap must restore address_space");
+    assert!(
+        sched.tasks[c_guard_pos].address_space.is_some(),
+        "abort_reap must restore address_space"
+    );
     assert_eq!(sched.tasks[c_guard_pos].state, TaskState::ReapFailed);
-    assert_eq!(sched.tasks[c_guard_pos].generation, h_retry.generation.wrapping_add(1));
-    assert_eq!(sched.finish_reap(h_retry), Err(-3), "stale ReapHandle must not reap newer generation");
+    assert_eq!(
+        sched.tasks[c_guard_pos].generation,
+        h_retry.generation.wrapping_add(1)
+    );
+    assert_eq!(
+        sched.finish_reap(h_retry),
+        Err(-3),
+        "stale ReapHandle must not reap newer generation"
+    );
     assert!(matches!(sched.detach_reaping_aspace(h_retry), Err(-3)));
 
     // Clean final reap so zero frames or IPC mailboxes leak
-    let h_final = sched.begin_reap(p1, false, c_guard).expect("final begin_reap");
+    let h_final = sched
+        .begin_reap(p1, false, c_guard)
+        .expect("final begin_reap");
     let mut final_aspace = sched
         .detach_reaping_aspace(h_final)
         .expect("final detach")
@@ -1951,24 +2172,47 @@ pub fn test_reap_evacuation_protocol() {
         let mut g_sched = SCHEDULER.lock();
         let len = g_sched.tasks.len();
         let next_p = g_sched.next_pid;
-        let aspace_ls = crate::mmu::UserAddressSpace::new().expect("Address space alloc for locksafe e2e");
-        aspace_ls.try_activate().expect("activate locksafe test aspace");
-        let pid = g_sched.spawn_user_process(1, "locksafe_e2e", 0, 0, Some(aspace_ls), CapabilityTable::new());
+        let aspace_ls =
+            crate::mmu::UserAddressSpace::new().expect("Address space alloc for locksafe e2e");
+        aspace_ls
+            .try_activate()
+            .expect("activate locksafe test aspace");
+        let pid = g_sched.spawn_user_process(
+            1,
+            "locksafe_e2e",
+            0,
+            0,
+            Some(aspace_ls),
+            CapabilityTable::new(),
+        );
         if let Some(t) = g_sched.tasks.iter_mut().find(|t| t.id == pid) {
             t.state = TaskState::Terminated;
         }
         (len, next_p, pid)
     };
-    assert_eq!(reap_task_locksafe(ls_pid.wrapping_add(100), true, ls_pid), Err(-16));
+    assert_eq!(
+        reap_task_locksafe(ls_pid.wrapping_add(100), true, ls_pid),
+        Err(-16)
+    );
     {
         let g_sched = SCHEDULER.lock();
-        let t = g_sched.tasks.iter().find(|t| t.id == ls_pid).expect("task must remain after EBUSY");
+        let t = g_sched
+            .tasks
+            .iter()
+            .find(|t| t.id == ls_pid)
+            .expect("task must remain after EBUSY");
         assert_eq!(t.state, TaskState::ReapFailed);
-        let aspace_ref = t.address_space.as_ref().expect("aspace must remain attached on EBUSY");
+        let aspace_ref = t
+            .address_space
+            .as_ref()
+            .expect("aspace must remain attached on EBUSY");
         assert_ne!(aspace_ref.active_cpus(), 0);
         aspace_ref.deactivate();
     }
-    assert_eq!(reap_task_locksafe(ls_pid.wrapping_add(100), true, ls_pid), Ok(0));
+    assert_eq!(
+        reap_task_locksafe(ls_pid.wrapping_add(100), true, ls_pid),
+        Ok(0)
+    );
     {
         let mut g_sched = SCHEDULER.lock();
         assert_eq!(g_sched.tasks.len(), orig_len);
@@ -1977,42 +2221,84 @@ pub fn test_reap_evacuation_protocol() {
 
     // 8. Remote Unacknowledged CPU Rendezvous Rejection & Quarantine Safety
     let p_rem_parent = sched.spawn_user_process(0, "rem_parent", 0, 0, None, caps.clone());
-    let aspace_remote = crate::mmu::UserAddressSpace::new().expect("Address space alloc for remote test");
+    let aspace_remote =
+        crate::mmu::UserAddressSpace::new().expect("Address space alloc for remote test");
     // Simulate remote CPU 1 executed but has not yet acknowledged
-    aspace_remote.executed_cpus.fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
-    aspace_remote.acknowledged_cpus.fetch_and(!(1 << 1), core::sync::atomic::Ordering::Release);
-    assert!(!Scheduler::is_aspace_evacuated(&aspace_remote), "Address space with unacknowledged remote CPU must not be evacuated");
-    assert!(aspace_remote.has_unacknowledged_or_active_cpus(), "Must report unacknowledged remote CPU");
+    aspace_remote
+        .executed_cpus
+        .fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
+    aspace_remote
+        .acknowledged_cpus
+        .fetch_and(!(1 << 1), core::sync::atomic::Ordering::Release);
+    assert!(
+        !Scheduler::is_aspace_evacuated(&aspace_remote),
+        "Address space with unacknowledged remote CPU must not be evacuated"
+    );
+    assert!(
+        aspace_remote.has_unacknowledged_or_active_cpus(),
+        "Must report unacknowledged remote CPU"
+    );
 
-    let c_remote = sched.spawn_user_process(p_rem_parent, "remote_child", 0, 0, Some(aspace_remote), caps.clone());
+    let c_remote = sched.spawn_user_process(
+        p_rem_parent,
+        "remote_child",
+        0,
+        0,
+        Some(aspace_remote),
+        caps.clone(),
+    );
     let c_rem_pos = sched.tasks.iter().position(|t| t.id == c_remote).unwrap();
     sched.tasks[c_rem_pos].state = TaskState::Terminated;
 
-    let h_rem = sched.begin_reap(p_rem_parent, false, c_remote).expect("begin_reap on remote_child");
-    assert!(matches!(sched.detach_reaping_aspace(h_rem), Err(-16)), "detach_reaping_aspace must reject while remote CPU unacknowledged");
+    let h_rem = sched
+        .begin_reap(p_rem_parent, false, c_remote)
+        .expect("begin_reap on remote_child");
+    assert!(
+        matches!(sched.detach_reaping_aspace(h_rem), Err(-16)),
+        "detach_reaping_aspace must reject while remote CPU unacknowledged"
+    );
     let c_rem_pos = sched.tasks.iter().position(|t| t.id == c_remote).unwrap();
     assert_eq!(sched.tasks[c_rem_pos].state, TaskState::ReapFailed);
-    assert!(sched.tasks[c_rem_pos].address_space.is_some(), "address space must remain attached in ReapFailed");
+    assert!(
+        sched.tasks[c_rem_pos].address_space.is_some(),
+        "address space must remain attached in ReapFailed"
+    );
 
     // Direct destroy_fallible() timeout and error check on unacknowledged remote CPU
     let mut unack_aspace = crate::mmu::UserAddressSpace::new().expect("Address space alloc");
-    unack_aspace.executed_cpus.fetch_or(1 << 2, core::sync::atomic::Ordering::Release);
-    unack_aspace.acknowledged_cpus.fetch_and(!(1 << 2), core::sync::atomic::Ordering::Release);
+    unack_aspace
+        .executed_cpus
+        .fetch_or(1 << 2, core::sync::atomic::Ordering::Release);
+    unack_aspace
+        .acknowledged_cpus
+        .fetch_and(!(1 << 2), core::sync::atomic::Ordering::Release);
     assert_eq!(
         unack_aspace.destroy_fallible(),
         Err(crate::mmu::TeardownError::RemoteRendezvousFailed(1 << 2)),
         "destroy_fallible must time out with RemoteRendezvousFailed when remote CPU does not acknowledge"
     );
     // Acknowledge CPU 2 so unack_aspace can be cleanly destroyed without leaking frames
-    unack_aspace.acknowledged_cpus.fetch_or(1 << 2, core::sync::atomic::Ordering::Release);
+    unack_aspace
+        .acknowledged_cpus
+        .fetch_or(1 << 2, core::sync::atomic::Ordering::Release);
     assert!(unack_aspace.destroy_fallible().is_ok());
 
     // Clean up c_remote after acknowledging remote CPU 1
     {
         let c_rem_pos = sched.tasks.iter().position(|t| t.id == c_remote).unwrap();
-        sched.tasks[c_rem_pos].address_space.as_ref().unwrap().acknowledged_cpus.fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
-        let h_clean = sched.begin_reap(p_rem_parent, false, c_remote).expect("begin_reap after remote acknowledge");
-        let mut clean_aspace = sched.detach_reaping_aspace(h_clean).expect("detach clean").expect("aspace");
+        sched.tasks[c_rem_pos]
+            .address_space
+            .as_ref()
+            .unwrap()
+            .acknowledged_cpus
+            .fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
+        let h_clean = sched
+            .begin_reap(p_rem_parent, false, c_remote)
+            .expect("begin_reap after remote acknowledge");
+        let mut clean_aspace = sched
+            .detach_reaping_aspace(h_clean)
+            .expect("detach clean")
+            .expect("aspace");
         assert!(clean_aspace.destroy_fallible().is_ok());
         assert_eq!(sched.finish_reap(h_clean), Ok(0));
     }
@@ -2023,26 +2309,53 @@ pub fn test_reap_evacuation_protocol() {
         let mut g_sched = SCHEDULER.lock();
         let len = g_sched.tasks.len();
         let next_p = g_sched.next_pid;
-        let aspace_e2e = crate::mmu::UserAddressSpace::new().expect("Address space alloc for remote e2e");
-        aspace_e2e.executed_cpus.fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
-        aspace_e2e.acknowledged_cpus.fetch_and(!(1 << 1), core::sync::atomic::Ordering::Release);
-        let pid = g_sched.spawn_user_process(1, "remote_e2e", 0, 0, Some(aspace_e2e), CapabilityTable::new());
+        let aspace_e2e =
+            crate::mmu::UserAddressSpace::new().expect("Address space alloc for remote e2e");
+        aspace_e2e
+            .executed_cpus
+            .fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
+        aspace_e2e
+            .acknowledged_cpus
+            .fetch_and(!(1 << 1), core::sync::atomic::Ordering::Release);
+        let pid = g_sched.spawn_user_process(
+            1,
+            "remote_e2e",
+            0,
+            0,
+            Some(aspace_e2e),
+            CapabilityTable::new(),
+        );
         if let Some(t) = g_sched.tasks.iter_mut().find(|t| t.id == pid) {
             t.state = TaskState::Terminated;
         }
         (len, next_p, pid)
     };
-    assert_eq!(reap_task_locksafe(rem_pid.wrapping_add(100), true, rem_pid), Err(-16));
+    assert_eq!(
+        reap_task_locksafe(rem_pid.wrapping_add(100), true, rem_pid),
+        Err(-16)
+    );
     {
         let g_sched = SCHEDULER.lock();
-        let t = g_sched.tasks.iter().find(|t| t.id == rem_pid).expect("task must remain after remote EBUSY");
+        let t = g_sched
+            .tasks
+            .iter()
+            .find(|t| t.id == rem_pid)
+            .expect("task must remain after remote EBUSY");
         assert_eq!(t.state, TaskState::ReapFailed);
-        let aspace_ref = t.address_space.as_ref().expect("aspace must remain attached on remote EBUSY");
+        let aspace_ref = t
+            .address_space
+            .as_ref()
+            .expect("aspace must remain attached on remote EBUSY");
         assert!(!Scheduler::is_aspace_evacuated(aspace_ref));
-        aspace_ref.acknowledged_cpus.fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
+        aspace_ref
+            .acknowledged_cpus
+            .fetch_or(1 << 1, core::sync::atomic::Ordering::Release);
         assert!(Scheduler::is_aspace_evacuated(aspace_ref));
     }
-    assert_eq!(reap_task_locksafe(rem_pid.wrapping_add(100), true, rem_pid), Ok(0));
+    assert_eq!(
+        reap_task_locksafe(rem_pid.wrapping_add(100), true, rem_pid),
+        Ok(0)
+    );
     {
         let mut g_sched = SCHEDULER.lock();
         assert_eq!(g_sched.tasks.len(), orig_len_rem);
@@ -2061,18 +2374,35 @@ pub fn test_transactional_switch() {
     let p1 = sched2.spawn_user_process(0, "parent", 0, 0, None, caps.clone());
 
     let aspace_closing = crate::mmu::UserAddressSpace::new().expect("Address space alloc");
-    aspace_closing.lifecycle.fetch_or(crate::mmu::LIFECYCLE_CLOSING_BIT, core::sync::atomic::Ordering::SeqCst);
+    aspace_closing.lifecycle.fetch_or(
+        crate::mmu::LIFECYCLE_CLOSING_BIT,
+        core::sync::atomic::Ordering::SeqCst,
+    );
     let c3 = sched2.spawn_user_process(p1, "closing_candidate", 0, 0, Some(aspace_closing), caps);
     sched2.current_task_idx = 0;
     sched2.tasks[0].state = TaskState::Running;
     let (old_opt, new_opt) = sched2.prepare_switch();
     // Activation should fail and switch must be transactionally aborted without state mutation
     assert!(old_opt.is_none() && new_opt.is_none());
-    assert_eq!(sched2.current_task_idx, 0, "current_task_idx must remain unchanged on activation failure");
-    assert_eq!(sched2.tasks[0].state, TaskState::Running, "Running task state must remain Running");
+    assert_eq!(
+        sched2.current_task_idx, 0,
+        "current_task_idx must remain unchanged on activation failure"
+    );
+    assert_eq!(
+        sched2.tasks[0].state,
+        TaskState::Running,
+        "Running task state must remain Running"
+    );
     let c3_pos = sched2.tasks.iter().position(|t| t.id == c3).unwrap();
-    assert_eq!(sched2.tasks[c3_pos].state, TaskState::Ready, "Candidate task must remain Ready, not falsely Terminated");
-    assert_eq!(sched2.tasks[c3_pos].cpu_ticks, 0, "Candidate task cpu_ticks must not be incremented on abort");
+    assert_eq!(
+        sched2.tasks[c3_pos].state,
+        TaskState::Ready,
+        "Candidate task must remain Ready, not falsely Terminated"
+    );
+    assert_eq!(
+        sched2.tasks[c3_pos].cpu_ticks, 0,
+        "Candidate task cpu_ticks must not be incremented on abort"
+    );
 
     crate::kprintln!("[TEST] AArch64 Transactional Switch Rollback VERIFIED.");
     test_reap_evacuation_protocol();

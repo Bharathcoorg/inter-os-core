@@ -176,12 +176,7 @@ fn read_cell_count(property: &[u8]) -> Option<usize> {
     if property.len() < 4 {
         return None;
     }
-    Some(u32::from_be_bytes([
-        property[0],
-        property[1],
-        property[2],
-        property[3],
-    ]) as usize)
+    Some(u32::from_be_bytes([property[0], property[1], property[2], property[3]]) as usize)
 }
 
 /// Hands out addresses for unassigned memory BARs from the bridge's windows.
@@ -329,10 +324,7 @@ impl BarAllocator {
         // almost never 2 MiB aligned, so the tables can only describe the blocks
         // that cover it.
         let map_base = base & !(BLOCK - 1);
-        let map_end = base
-            .saturating_add(size)
-            .saturating_add(BLOCK - 1)
-            & !(BLOCK - 1);
+        let map_end = base.saturating_add(size).saturating_add(BLOCK - 1) & !(BLOCK - 1);
         let (ram_lo, ram_hi) = self.ram_span();
         ArmMmu::map_device_blocks(map_base, map_end - map_base, ram_lo, ram_hi)
     }

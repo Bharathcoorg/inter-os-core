@@ -12,9 +12,9 @@
 //! broadcast subscription requires an unforgeable CapabilityToken (`CapabilityType::SmsDispatchDirect`).
 
 extern crate alloc;
+use crate::capability::{CapabilityTable, CapabilityType, Rights};
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::capability::{CapabilityTable, CapabilityType, Rights};
 
 /// 3GPP TS 23.040 Constants
 pub const SMS_MAX_USER_DATA_CHARS: usize = 160;
@@ -151,7 +151,11 @@ pub fn encode_address(phone_number: &str) -> Result<(u8, u8, Vec<u8>), SmsError>
         (false, phone_number)
     };
 
-    let digits: Vec<u8> = clean_num.bytes().filter(|&b| b.is_ascii_digit()).map(|b| b - b'0').collect();
+    let digits: Vec<u8> = clean_num
+        .bytes()
+        .filter(|&b| b.is_ascii_digit())
+        .map(|b| b - b'0')
+        .collect();
     if digits.is_empty() {
         return Err(SmsError::InvalidPhoneNumber);
     }
@@ -162,7 +166,11 @@ pub fn encode_address(phone_number: &str) -> Result<(u8, u8, Vec<u8>), SmsError>
     let mut i = 0;
     while i < digits.len() {
         let d1 = digits[i];
-        let d2 = if i + 1 < digits.len() { digits[i + 1] } else { 0x0F }; // Pad with 0xF
+        let d2 = if i + 1 < digits.len() {
+            digits[i + 1]
+        } else {
+            0x0F
+        }; // Pad with 0xF
         let octet = (d2 << 4) | (d1 & 0x0F);
         bcd_octets.push(octet);
         i += 2;
@@ -205,8 +213,16 @@ impl AntiPhishingFilter {
 
         // Check for urgency/banking impersonation keywords
         let suspicious_keywords = [
-            "urgent", "locked", "bank", "verify", "password", "suspended",
-            "wire transfer", "login immediately", "identity alert", "claim reward"
+            "urgent",
+            "locked",
+            "bank",
+            "verify",
+            "password",
+            "suspended",
+            "wire transfer",
+            "login immediately",
+            "identity alert",
+            "claim reward",
         ];
 
         for kw in suspicious_keywords {
@@ -216,7 +232,11 @@ impl AntiPhishingFilter {
         }
 
         // Check for suspicious URL patterns
-        if lower.contains("http://") || lower.contains(".xyz") || lower.contains(".top") || lower.contains("bit.ly") {
+        if lower.contains("http://")
+            || lower.contains(".xyz")
+            || lower.contains(".top")
+            || lower.contains("bit.ly")
+        {
             score = score.saturating_add(40);
         }
 

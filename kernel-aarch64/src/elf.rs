@@ -9,8 +9,8 @@
 //! sets up user stack and guard page, and provides atomic rollback on any mapping failure.
 
 extern crate alloc;
-use alloc::vec::Vec;
 use crate::mmu::{allocate_frame, recycle_frame, UserAddressSpace};
+use alloc::vec::Vec;
 
 pub const USER_STACK_TOP: u64 = 0x2000_0000;
 pub const USER_STACK_SIZE: u64 = 256 * 1024; // 256 KiB stack
@@ -37,12 +37,14 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
     }
 
     let e_type = u16::from_le_bytes([elf_data[16], elf_data[17]]);
-    if e_type != 2 { // ET_EXEC
+    if e_type != 2 {
+        // ET_EXEC
         return Err("ELF must be ET_EXEC (static executable)");
     }
 
     let e_machine = u16::from_le_bytes([elf_data[18], elf_data[19]]);
-    if e_machine != 0xB7 { // EM_AARCH64
+    if e_machine != 0xB7 {
+        // EM_AARCH64
         return Err("ELF machine is not AArch64");
     }
 
@@ -64,15 +66,23 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
     if e_phentsize != 56 {
         return Err("Invalid program header entry size (expected 56)");
     }
-    let ph_table_bytes = e_phnum.checked_mul(e_phentsize).ok_or("Program header table size overflow")?;
-    let ph_table_end = e_phoff.checked_add(ph_table_bytes).ok_or("Program header offset overflow")?;
+    let ph_table_bytes = e_phnum
+        .checked_mul(e_phentsize)
+        .ok_or("Program header table size overflow")?;
+    let ph_table_end = e_phoff
+        .checked_add(ph_table_bytes)
+        .ok_or("Program header offset overflow")?;
     if ph_table_end > elf_data.len() {
         return Err("Program header table exceeds ELF file bounds");
     }
 
     let stack_top_addr = USER_STACK_TOP;
-    let stack_bottom_addr = stack_top_addr.checked_sub(USER_STACK_SIZE).ok_or("Stack address underflow")?;
-    let stack_guard_start = stack_bottom_addr.checked_sub(4096).ok_or("Stack guard address underflow")?;
+    let stack_bottom_addr = stack_top_addr
+        .checked_sub(USER_STACK_SIZE)
+        .ok_or("Stack address underflow")?;
+    let stack_guard_start = stack_bottom_addr
+        .checked_sub(4096)
+        .ok_or("Stack guard address underflow")?;
     let stack_guard_end = stack_top_addr + 65536 + 4096;
 
     let mut aspace = UserAddressSpace::new().ok_or("Failed to create UserAddressSpace")?;
@@ -88,16 +98,22 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
             let _ = aspace.destroy();
             return Err("PT_INTERP dynamic linkers rejected in static microkernel architecture");
         }
-        if p_type != 1 { // PT_LOAD
+        if p_type != 1 {
+            // PT_LOAD
             continue;
         }
 
         let p_flags = u32::from_le_bytes(elf_data[ph_start + 4..ph_start + 8].try_into().unwrap());
-        let p_offset = u64::from_le_bytes(elf_data[ph_start + 8..ph_start + 16].try_into().unwrap()) as usize;
-        let p_vaddr = u64::from_le_bytes(elf_data[ph_start + 16..ph_start + 24].try_into().unwrap());
-        let p_filesz = u64::from_le_bytes(elf_data[ph_start + 32..ph_start + 40].try_into().unwrap()) as usize;
-        let p_memsz = u64::from_le_bytes(elf_data[ph_start + 40..ph_start + 48].try_into().unwrap()) as usize;
-        let p_align = u64::from_le_bytes(elf_data[ph_start + 48..ph_start + 56].try_into().unwrap());
+        let p_offset =
+            u64::from_le_bytes(elf_data[ph_start + 8..ph_start + 16].try_into().unwrap()) as usize;
+        let p_vaddr =
+            u64::from_le_bytes(elf_data[ph_start + 16..ph_start + 24].try_into().unwrap());
+        let p_filesz =
+            u64::from_le_bytes(elf_data[ph_start + 32..ph_start + 40].try_into().unwrap()) as usize;
+        let p_memsz =
+            u64::from_le_bytes(elf_data[ph_start + 40..ph_start + 48].try_into().unwrap()) as usize;
+        let p_align =
+            u64::from_le_bytes(elf_data[ph_start + 48..ph_start + 56].try_into().unwrap());
 
         if p_memsz == 0 {
             continue;
@@ -153,14 +169,21 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
 
         if is_exec && is_write {
             let _ = aspace.destroy();
-            return Err("W^X security violation: ELF segment requests both write and execute permissions");
+            return Err(
+                "W^X security violation: ELF segment requests both write and execute permissions",
+            );
         }
 
-        if load_ranges.iter().any(|(s, e, oe, ow)| p_vaddr < *e && seg_end_vaddr > *s && (*oe != is_exec || *ow != is_write)) {
+        if load_ranges.iter().any(|(s, e, oe, ow)| {
+            p_vaddr < *e && seg_end_vaddr > *s && (*oe != is_exec || *ow != is_write)
+        }) {
             let _ = aspace.destroy();
             return Err("Overlapping ELF load segments request conflicting permissions");
         }
-        if load_ranges.iter().any(|(s, e, _, _)| p_vaddr < *e && seg_end_vaddr > *s) {
+        if load_ranges
+            .iter()
+            .any(|(s, e, _, _)| p_vaddr < *e && seg_end_vaddr > *s)
+        {
             let _ = aspace.destroy();
             return Err("Overlapping ELF load segments are not supported");
         }
@@ -172,7 +195,10 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
 
         let start_page = p_vaddr & !0xFFF;
         let end_page = (seg_end_vaddr + 0xFFF) & !0xFFF;
-        if mapped_page_ranges.iter().any(|(ps, pe)| start_page < *pe && end_page > *ps) {
+        if mapped_page_ranges
+            .iter()
+            .any(|(ps, pe)| start_page < *pe && end_page > *ps)
+        {
             let _ = aspace.destroy();
             return Err("ELF load segments overlap within the same 4 KiB page");
         }
@@ -195,7 +221,11 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
                 let dest_offset = (page_file_start - page_vaddr) as usize;
                 unsafe {
                     let dest_ptr = (frame as *mut u8).add(dest_offset);
-                    core::ptr::copy_nonoverlapping(elf_data[file_src_offset..].as_ptr(), dest_ptr, file_copy_len);
+                    core::ptr::copy_nonoverlapping(
+                        elf_data[file_src_offset..].as_ptr(),
+                        dest_ptr,
+                        file_copy_len,
+                    );
                 }
             }
 
@@ -242,12 +272,7 @@ pub fn load_elf(elf_data: &[u8]) -> Result<LoadedElf, &'static str> {
 
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        core::arch::asm!(
-            "dsb ish",
-            "ic ialluis",
-            "dsb ish",
-            "isb"
-        );
+        core::arch::asm!("dsb ish", "ic ialluis", "dsb ish", "isb");
     }
 
     Ok(LoadedElf {

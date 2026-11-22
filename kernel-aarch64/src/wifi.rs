@@ -26,9 +26,9 @@
 //! - Zero Ambient Authority: Wi-Fi scanning, connection, and data transfer require `CapabilityType::WifiNetworkDirect`.
 
 extern crate alloc;
+use crate::capability::{CapabilityTable, CapabilityType, Rights};
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::capability::{CapabilityTable, CapabilityType, Rights};
 
 pub const FRAME_TYPE_MGMT: u8 = 0x00;
 pub const FRAME_TYPE_DATA: u8 = 0x02;
@@ -70,8 +70,8 @@ pub struct Dot11FrameHeader {
     pub subtype: u8,
     pub to_ds: bool,
     pub from_ds: bool,
-    pub addr1_ra: [u8; 6], // Receiver
-    pub addr2_ta: [u8; 6], // Transmitter
+    pub addr1_ra: [u8; 6],    // Receiver
+    pub addr2_ta: [u8; 6],    // Transmitter
     pub addr3_bssid: [u8; 6], // BSSID
     pub sequence_num: u16,
 }
@@ -237,7 +237,11 @@ impl WifiController {
     /// Requires a bound radio. Anti-tracking rotation only protects a user if the address actually
     /// leaves the device over the air; previously this returned `Ok` and incremented a rotation
     /// counter with no radio attached, reporting privacy that was never in effect.
-    pub fn rotate_mac_address(&mut self, seed: u64, caps: &CapabilityTable) -> Result<[u8; 6], WifiError> {
+    pub fn rotate_mac_address(
+        &mut self,
+        seed: u64,
+        caps: &CapabilityTable,
+    ) -> Result<[u8; 6], WifiError> {
         caps.check(CapabilityType::WifiNetworkDirect, Rights::INVOKE)
             .map_err(|_| WifiError::CapabilityDenied)?;
 
@@ -260,7 +264,11 @@ impl WifiController {
     ///
     /// Requires a bound radio AND a known station address. Returning a frame and bumping
     /// `frames_transmitted` with no radio claimed a transmission that never happened.
-    pub fn construct_probe_request(&mut self, target_ssid: Option<&str>, caps: &CapabilityTable) -> Result<Vec<u8>, WifiError> {
+    pub fn construct_probe_request(
+        &mut self,
+        target_ssid: Option<&str>,
+        caps: &CapabilityTable,
+    ) -> Result<Vec<u8>, WifiError> {
         caps.check(CapabilityType::WifiNetworkDirect, Rights::READ)
             .map_err(|_| WifiError::CapabilityDenied)?;
 
@@ -328,7 +336,12 @@ impl WifiController {
     ///
     /// Requires `hardware_present`: an AP cannot be "discovered" and `frames_received` cannot
     /// increment with no radio to receive anything. Use `decode_beacon` for standalone decoding.
-    pub fn process_beacon_frame(&mut self, frame: &[u8], rssi_dbm: i8, caps: &CapabilityTable) -> Result<DiscoveredNetwork, WifiError> {
+    pub fn process_beacon_frame(
+        &mut self,
+        frame: &[u8],
+        rssi_dbm: i8,
+        caps: &CapabilityTable,
+    ) -> Result<DiscoveredNetwork, WifiError> {
         caps.check(CapabilityType::WifiNetworkDirect, Rights::READ)
             .map_err(|_| WifiError::CapabilityDenied)?;
 
@@ -422,11 +435,20 @@ impl WifiController {
             i = body_end;
         }
 
-        Ok(DecodedBeacon { bssid, ssid: ssid.unwrap_or_default(), channel, sae })
+        Ok(DecodedBeacon {
+            bssid,
+            ssid: ssid.unwrap_or_default(),
+            channel,
+            sae,
+        })
     }
 
     /// Negotiates Sovereign P2P Wi-Fi Direct autonomous Group Owner (GO) mode.
-    pub fn start_p2p_group_owner(&mut self, go_intent: u8, caps: &CapabilityTable) -> Result<bool, WifiError> {
+    pub fn start_p2p_group_owner(
+        &mut self,
+        go_intent: u8,
+        caps: &CapabilityTable,
+    ) -> Result<bool, WifiError> {
         caps.check(CapabilityType::WifiNetworkDirect, Rights::INVOKE)
             .map_err(|_| WifiError::CapabilityDenied)?;
 
@@ -446,8 +468,12 @@ impl WifiController {
 /// Combines SAE evidence observed across multiple security IEs in one beacon.
 fn merge_sae_evidence(accumulated: SaeEvidence, next: SaeEvidence) -> SaeEvidence {
     match (accumulated, next) {
-        (SaeEvidence::AdvertisedSae, _) | (_, SaeEvidence::AdvertisedSae) => SaeEvidence::AdvertisedSae,
-        (SaeEvidence::AdvertisedWithoutSae, SaeEvidence::AdvertisedWithoutSae) => SaeEvidence::AdvertisedWithoutSae,
+        (SaeEvidence::AdvertisedSae, _) | (_, SaeEvidence::AdvertisedSae) => {
+            SaeEvidence::AdvertisedSae
+        }
+        (SaeEvidence::AdvertisedWithoutSae, SaeEvidence::AdvertisedWithoutSae) => {
+            SaeEvidence::AdvertisedWithoutSae
+        }
         _ => SaeEvidence::Unknown,
     }
 }
@@ -469,14 +495,20 @@ fn parse_rsn_akm(body: &[u8]) -> SaeEvidence {
 
     // Group Cipher Suite List: 4 bytes per suite.
     let group_count = read_u16(body, offset) as usize;
-    offset = match offset.checked_add(2).and_then(|o| o.checked_add(group_count.saturating_mul(4))) {
+    offset = match offset
+        .checked_add(2)
+        .and_then(|o| o.checked_add(group_count.saturating_mul(4)))
+    {
         Some(o) => o,
         None => return SaeEvidence::Unknown,
     };
 
     // Pairwise Cipher Suite List: 4 bytes per suite.
     let pairwise_count = read_u16(body, offset) as usize;
-    offset = match offset.checked_add(2).and_then(|o| o.checked_add(pairwise_count.saturating_mul(4))) {
+    offset = match offset
+        .checked_add(2)
+        .and_then(|o| o.checked_add(pairwise_count.saturating_mul(4)))
+    {
         Some(o) => o,
         None => return SaeEvidence::Unknown,
     };
@@ -493,7 +525,11 @@ fn parse_rsn_akm(body: &[u8]) -> SaeEvidence {
         // AKM Suite Selectors are 2 bytes each.
         if offset + 2 > body.len() {
             // IE truncated before its declared AKM count: nothing was proven.
-            return if saw_akm { SaeEvidence::AdvertisedWithoutSae } else { SaeEvidence::Unknown };
+            return if saw_akm {
+                SaeEvidence::AdvertisedWithoutSae
+            } else {
+                SaeEvidence::Unknown
+            };
         }
         let selector = u16::from_le_bytes([body[offset], body[offset + 1]]);
         offset += 2;

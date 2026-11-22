@@ -26,9 +26,9 @@
 //! - Zero Ambient Authority: BLE scanning, beaconing, and connection require `CapabilityType::BluetoothDirect`.
 
 extern crate alloc;
+use crate::capability::{CapabilityTable, CapabilityType, Rights};
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::capability::{CapabilityTable, CapabilityType, Rights};
 
 /// HCI Packet Indicator Types (Bluetooth Core v5.2)
 pub const HCI_PKT_COMMAND: u8 = 0x01;
@@ -208,7 +208,9 @@ impl BluetoothController {
         }
     }
 
-    pub fn init_hardware(&mut self) { self.powered = true; }
+    pub fn init_hardware(&mut self) {
+        self.powered = true;
+    }
 
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
@@ -256,7 +258,9 @@ impl BluetoothController {
     ) -> Result<Vec<u8>, BluetoothError> {
         caps.check(CapabilityType::BluetoothDirect, Rights::WRITE)
             .map_err(|_| BluetoothError::CapabilityDenied)?;
-        if !self.powered || !self.hardware_present { return Err(BluetoothError::HardwareDisabled); }
+        if !self.powered || !self.hardware_present {
+            return Err(BluetoothError::HardwareDisabled);
+        }
 
         let mut adv_payload = Vec::new();
 
@@ -300,14 +304,18 @@ impl BluetoothController {
     ) -> Result<HciEventPacket, BluetoothError> {
         caps.check(CapabilityType::BluetoothDirect, Rights::READ)
             .map_err(|_| BluetoothError::CapabilityDenied)?;
-        if !self.powered || !self.hardware_present { return Err(BluetoothError::HardwareDisabled); }
+        if !self.powered || !self.hardware_present {
+            return Err(BluetoothError::HardwareDisabled);
+        }
 
         let event = HciEventPacket::parse(raw_event)?;
         self.events_received += 1;
 
         if event.event_code == EVT_COMMAND_COMPLETE {
             // Success response for pending command
-        } else if event.event_code == EVT_LE_META && event.params.first() == Some(&SUBEVT_LE_ADV_REPORT) {
+        } else if event.event_code == EVT_LE_META
+            && event.params.first() == Some(&SUBEVT_LE_ADV_REPORT)
+        {
             // LE_Advertising_Report params:
             //   subevent(1) num_reports(1) [event_type(1) addr_type(1) addr(6) data_len(1) data(n) rssi(1)]*
             // The RSSI sits AFTER the AD data, not at an arbitrary end offset, so it must be located
@@ -354,10 +362,16 @@ impl BluetoothController {
     }
 
     /// Address rotation requires controller-provided cryptographic randomness.
-    pub fn rotate_private_address(&mut self, _seed: u64, caps: &CapabilityTable) -> Result<[u8; 6], BluetoothError> {
+    pub fn rotate_private_address(
+        &mut self,
+        _seed: u64,
+        caps: &CapabilityTable,
+    ) -> Result<[u8; 6], BluetoothError> {
         caps.check(CapabilityType::BluetoothDirect, Rights::INVOKE)
             .map_err(|_| BluetoothError::CapabilityDenied)?;
-        if !self.powered || !self.hardware_present { return Err(BluetoothError::HardwareDisabled); }
+        if !self.powered || !self.hardware_present {
+            return Err(BluetoothError::HardwareDisabled);
+        }
         Err(BluetoothError::HardwareBackendUnavailable)
     }
 }

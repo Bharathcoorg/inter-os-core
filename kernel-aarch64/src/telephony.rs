@@ -138,7 +138,10 @@ impl SerialRilDriver {
         if line == "OK" {
             self.transaction_succeeded = true;
             self.transaction_failed = false;
-        } else if line == "ERROR" || line.starts_with("+CME ERROR:") || line.starts_with("+CMS ERROR:") {
+        } else if line == "ERROR"
+            || line.starts_with("+CME ERROR:")
+            || line.starts_with("+CMS ERROR:")
+        {
             self.transaction_succeeded = false;
             self.transaction_failed = true;
         } else if line.starts_with("+CSQ:") {
@@ -147,11 +150,13 @@ impl SerialRilDriver {
                 if parts.len() >= 2 {
                     let rssi = parts[0].trim().parse::<u8>().unwrap_or(0);
                     let ber = parts[1].trim().parse::<u8>().unwrap_or(99);
-                    self.pending_urcs.push(UrcEvent::SignalQuality { rssi, ber });
+                    self.pending_urcs
+                        .push(UrcEvent::SignalQuality { rssi, ber });
                 }
             }
         } else if line.starts_with("+CRING:") || line == "RING" {
-            self.pending_urcs.push(UrcEvent::IncomingCall { caller_id: None });
+            self.pending_urcs
+                .push(UrcEvent::IncomingCall { caller_id: None });
         } else {
             self.last_response = Some(String::from(line));
         }

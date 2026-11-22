@@ -13,10 +13,10 @@
 //! cloud server, SMS gateway, or trusted third party.
 
 extern crate alloc;
-use alloc::string::String;
-use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
 use crate::crypto::{constant_time_eq_32, HmacSha256};
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// Status of an authorized recovery guardian.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -94,7 +94,10 @@ impl RecoveryPolicy {
 
     /// Returns the number of currently active guardians.
     pub fn active_guardian_count(&self) -> usize {
-        self.guardians.iter().filter(|g| g.status == GuardianStatus::Active).count()
+        self.guardians
+            .iter()
+            .filter(|g| g.status == GuardianStatus::Active)
+            .count()
     }
 }
 
@@ -207,7 +210,10 @@ impl SocialRecoveryEnclave {
             .check(CapabilityType::SocialRecoveryEnclave, Rights::WRITE)
             .map_err(|_| RecoveryError::CapabilityDenied)?;
 
-        let claim = self.active_claim.as_mut().ok_or(RecoveryError::ClaimNotFound)?;
+        let claim = self
+            .active_claim
+            .as_mut()
+            .ok_or(RecoveryError::ClaimNotFound)?;
         if claim.claim_id != claim_id {
             return Err(RecoveryError::ClaimNotFound);
         }
@@ -232,7 +238,11 @@ impl SocialRecoveryEnclave {
         }
 
         // Check for duplicate attestation
-        if claim.attestations.iter().any(|a| a.guardian_did == guardian_did) {
+        if claim
+            .attestations
+            .iter()
+            .any(|a| a.guardian_did == guardian_did)
+        {
             return Err(RecoveryError::DuplicateAttestation);
         }
 
@@ -280,7 +290,10 @@ impl SocialRecoveryEnclave {
             .check(CapabilityType::SocialRecoveryEnclave, Rights::WRITE)
             .map_err(|_| RecoveryError::CapabilityDenied)?;
 
-        let claim = self.active_claim.as_mut().ok_or(RecoveryError::ClaimNotFound)?;
+        let claim = self
+            .active_claim
+            .as_mut()
+            .ok_or(RecoveryError::ClaimNotFound)?;
         if claim.claim_id != claim_id {
             return Err(RecoveryError::ClaimNotFound);
         }
@@ -311,7 +324,10 @@ impl SocialRecoveryEnclave {
             .check(CapabilityType::SocialRecoveryEnclave, Rights::WRITE)
             .map_err(|_| RecoveryError::CapabilityDenied)?;
 
-        let claim = self.active_claim.as_mut().ok_or(RecoveryError::ClaimNotFound)?;
+        let claim = self
+            .active_claim
+            .as_mut()
+            .ok_or(RecoveryError::ClaimNotFound)?;
         if claim.claim_id != claim_id {
             return Err(RecoveryError::ClaimNotFound);
         }
@@ -324,7 +340,11 @@ impl SocialRecoveryEnclave {
             return Err(RecoveryError::QuorumNotReached);
         }
 
-        if now < claim.created_timestamp.saturating_add(self.policy.delay_seconds) {
+        if now
+            < claim
+                .created_timestamp
+                .saturating_add(self.policy.delay_seconds)
+        {
             return Err(RecoveryError::TimelockNotExpired);
         }
 

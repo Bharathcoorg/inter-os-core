@@ -114,14 +114,17 @@ pub static INPUT_QUEUE: Mutex<InputQueue> = Mutex::new(InputQueue::new());
 
 pub fn post_touch(x: u32, y: u32) {
     let target = crate::display::focused_task_pid();
-    INPUT_QUEUE.lock().push(target, RawInputEvent {
-        kind: 1,
-        x,
-        y,
-        dx: 0,
-        dy: 0,
-        scale_milli: 1000,
-    });
+    INPUT_QUEUE.lock().push(
+        target,
+        RawInputEvent {
+            kind: 1,
+            x,
+            y,
+            dx: 0,
+            dy: 0,
+            scale_milli: 1000,
+        },
+    );
 }
 
 static SERIAL_LINE_BUF: Mutex<([u8; 128], usize)> = Mutex::new(([0u8; 128], 0));
@@ -131,10 +134,10 @@ pub fn service_serial_commands() {
     let (buf, len) = &mut *guard;
 
     loop {
-        let byte_opt = {
-            crate::uart::UART.lock().read_byte()
+        let byte_opt = { crate::uart::UART.lock().read_byte() };
+        let Some(byte) = byte_opt else {
+            break;
         };
-        let Some(byte) = byte_opt else { break; };
         if byte == b'\n' || byte == b'\r' {
             if *len > 0 {
                 process_line(&buf[..*len]);
@@ -175,31 +178,52 @@ fn process_line(line: &[u8]) {
         if let (Some(x_str), Some(y_str)) = (parts.next(), parts.next()) {
             if let (Some(x), Some(y)) = (parse_u32(x_str), parse_u32(y_str)) {
                 if x < 720 && y < 1440 {
-                    crate::kprintln!("[UART INPUT] Hardware touch tap received at ({}, {}).", x, y);
+                    crate::kprintln!(
+                        "[UART INPUT] Hardware touch tap received at ({}, {}).",
+                        x,
+                        y
+                    );
                     post_touch(x, y);
                 }
             }
         }
     } else if verb.eq_ignore_ascii_case("SWIPE") {
-        if let (Some(x1_str), Some(y1_str), Some(x2_str), Some(y2_str)) = (parts.next(), parts.next(), parts.next(), parts.next()) {
-            if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (parse_u32(x1_str), parse_u32(y1_str), parse_u32(x2_str), parse_u32(y2_str)) {
+        if let (Some(x1_str), Some(y1_str), Some(x2_str), Some(y2_str)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        {
+            if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (
+                parse_u32(x1_str),
+                parse_u32(y1_str),
+                parse_u32(x2_str),
+                parse_u32(y2_str),
+            ) {
                 let dy = (y2 as i32) - (y1 as i32);
                 let dx = (x2 as i32) - (x1 as i32);
-                crate::kprintln!("[UART INPUT] Hardware swipe received from ({},{}) to ({},{}) dy={}.", x1, y1, x2, y2, dy);
+                crate::kprintln!(
+                    "[UART INPUT] Hardware swipe received from ({},{}) to ({},{}) dy={}.",
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    dy
+                );
                 let kind = if dy <= -40 && y1 >= 1000 {
                     7 // Home / Unlock gesture
                 } else {
                     4 // Pan / Drag
                 };
                 let target = crate::display::focused_task_idx();
-                INPUT_QUEUE.lock().push(target, RawInputEvent {
-                    kind,
-                    x: x2,
-                    y: y2,
-                    dx,
-                    dy,
-                    scale_milli: 1000,
-                });
+                INPUT_QUEUE.lock().push(
+                    target,
+                    RawInputEvent {
+                        kind,
+                        x: x2,
+                        y: y2,
+                        dx,
+                        dy,
+                        scale_milli: 1000,
+                    },
+                );
             }
         }
     } else if verb.eq_ignore_ascii_case("NAV") {
@@ -207,34 +231,43 @@ fn process_line(line: &[u8]) {
             let target = crate::display::focused_task_idx();
             if target_nav.eq_ignore_ascii_case("HOME") {
                 crate::kprintln!("[UART INPUT] Hardware NAV HOME event received.");
-                INPUT_QUEUE.lock().push(target, RawInputEvent {
-                    kind: 7,
-                    x: 360,
-                    y: 1416,
-                    dx: 0,
-                    dy: 0,
-                    scale_milli: 1000,
-                });
+                INPUT_QUEUE.lock().push(
+                    target,
+                    RawInputEvent {
+                        kind: 7,
+                        x: 360,
+                        y: 1416,
+                        dx: 0,
+                        dy: 0,
+                        scale_milli: 1000,
+                    },
+                );
             } else if target_nav.eq_ignore_ascii_case("BACK") {
                 crate::kprintln!("[UART INPUT] Hardware NAV BACK event received.");
-                INPUT_QUEUE.lock().push(target, RawInputEvent {
-                    kind: 6,
-                    x: 120,
-                    y: 1416,
-                    dx: 0,
-                    dy: 0,
-                    scale_milli: 1000,
-                });
+                INPUT_QUEUE.lock().push(
+                    target,
+                    RawInputEvent {
+                        kind: 6,
+                        x: 120,
+                        y: 1416,
+                        dx: 0,
+                        dy: 0,
+                        scale_milli: 1000,
+                    },
+                );
             } else if target_nav.eq_ignore_ascii_case("RECENTS") {
                 crate::kprintln!("[UART INPUT] Hardware NAV RECENTS event received.");
-                INPUT_QUEUE.lock().push(target, RawInputEvent {
-                    kind: 8,
-                    x: 600,
-                    y: 1416,
-                    dx: 0,
-                    dy: 0,
-                    scale_milli: 1000,
-                });
+                INPUT_QUEUE.lock().push(
+                    target,
+                    RawInputEvent {
+                        kind: 8,
+                        x: 600,
+                        y: 1416,
+                        dx: 0,
+                        dy: 0,
+                        scale_milli: 1000,
+                    },
+                );
             }
         }
     }

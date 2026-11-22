@@ -15,9 +15,9 @@
 //! - Zero Ambient Authority: Privileged NFC operations require `CapabilityType::NfcSecureElement`.
 
 extern crate alloc;
+use crate::capability::{CapabilityTable, CapabilityType, Rights};
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::capability::{CapabilityTable, CapabilityType, Rights};
 
 pub const INTER_OS_DID_AID: [u8; 10] = [
     0xF0, 0x49, 0x4E, 0x54, 0x45, 0x52, 0x44, 0x49, 0x44, 0x01, // F0 "INTERDID" 01
@@ -172,7 +172,10 @@ impl NfcController {
 
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
-        if !present { self.field_present=false; self.active_aid_selected=false; }
+        if !present {
+            self.field_present = false;
+            self.active_aid_selected = false;
+        }
     }
 
     /// Processes an incoming ISO 7816-4 APDU frame received over the contactless RF field.
@@ -213,7 +216,10 @@ impl NfcController {
 
             INS_GET_DATA => {
                 if !self.active_aid_selected {
-                    return Ok(ApduResponse::new(Vec::new(), SW_SECURITY_STATUS_NOT_SATISFIED));
+                    return Ok(ApduResponse::new(
+                        Vec::new(),
+                        SW_SECURITY_STATUS_NOT_SATISFIED,
+                    ));
                 }
 
                 // P1-P2 = 0x0001: Return Public DID string
@@ -231,7 +237,10 @@ impl NfcController {
                     .map_err(|_| NfcError::CapabilityDenied)?;
 
                 if !self.active_aid_selected {
-                    return Ok(ApduResponse::new(Vec::new(), SW_SECURITY_STATUS_NOT_SATISFIED));
+                    return Ok(ApduResponse::new(
+                        Vec::new(),
+                        SW_SECURITY_STATUS_NOT_SATISFIED,
+                    ));
                 }
 
                 if cmd.data.is_empty() {
@@ -271,8 +280,8 @@ impl NfcController {
                 break;
             }
 
-            let type_str = core::str::from_utf8(&payload[offset..offset + type_len])
-                .unwrap_or("unknown");
+            let type_str =
+                core::str::from_utf8(&payload[offset..offset + type_len]).unwrap_or("unknown");
             offset += type_len;
 
             let rec_payload = payload[offset..offset + payload_len].to_vec();

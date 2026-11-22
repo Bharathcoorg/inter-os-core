@@ -10,8 +10,8 @@
 //! double-buffering, priority audio focus arbitration, and integer tone synthesis.
 
 extern crate alloc;
-use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
+use alloc::vec::Vec;
 
 /// Audio Controller Register Offsets (MMIO)
 pub const REG_AUDIO_CTRL: usize = 0x00;
@@ -156,7 +156,8 @@ impl AudioFocusGovernor {
                     self.current_stream = Some(stream_type);
                     AudioFocusState::Active
                 } else if stream_type == AudioStreamType::BackgroundMediaMusic
-                    && (active == AudioStreamType::TelephonyVoice || active == AudioStreamType::EmergencyCallAlert)
+                    && (active == AudioStreamType::TelephonyVoice
+                        || active == AudioStreamType::EmergencyCallAlert)
                 {
                     // Media is paused during voice calls
                     AudioFocusState::Paused
@@ -235,7 +236,11 @@ impl AudioDriver {
         }
 
         // Apply gain attenuation if ducked
-        let attenuation_shift = if focus == AudioFocusState::Ducked { 2 } else { 0 };
+        let attenuation_shift = if focus == AudioFocusState::Ducked {
+            2
+        } else {
+            0
+        };
 
         let mut written = 0;
         for &sample in samples {
@@ -253,7 +258,9 @@ impl AudioDriver {
 
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
-        if !present { self.ring_buffer = PcmRingBuffer::new(); }
+        if !present {
+            self.ring_buffer = PcmRingBuffer::new();
+        }
     }
 
     /// Consumes samples from the software staging ring buffer.

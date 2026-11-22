@@ -118,14 +118,7 @@ impl PcieEcam {
     /// # Safety
     /// As [`PcieEcam::read32`], and the caller must be authorised to change the
     /// device.
-    pub unsafe fn write32(
-        &self,
-        bus: u16,
-        device: u8,
-        function: u8,
-        offset: usize,
-        value: u32,
-    ) {
+    pub unsafe fn write32(&self, bus: u16, device: u8, function: u8, offset: usize, value: u32) {
         write_volatile(
             self.config_ptr(bus, device, function).add(offset) as *mut u32,
             value,
@@ -136,12 +129,7 @@ impl PcieEcam {
     ///
     /// # Safety
     /// As [`PcieEcam::read32`].
-    pub unsafe fn probe(
-        &self,
-        bus: u16,
-        device: u8,
-        function: u8,
-    ) -> PcieDevice {
+    pub unsafe fn probe(&self, bus: u16, device: u8, function: u8) -> PcieDevice {
         let id = self.read32(bus, device, function, PCI_VENDOR_ID);
         let class_revision = self.read32(bus, device, function, PCI_CLASS_REVISION);
         PcieDevice {
@@ -209,13 +197,7 @@ impl PcieEcam {
     ///
     /// # Safety
     /// As [`PcieEcam::read32`].
-    pub unsafe fn read_bar64(
-        &self,
-        bus: u16,
-        device: u8,
-        function: u8,
-        bar: usize,
-    ) -> Option<u64> {
+    pub unsafe fn read_bar64(&self, bus: u16, device: u8, function: u8, bar: usize) -> Option<u64> {
         let low = self.read32(bus, device, function, PCI_BAR0 + bar * 8);
         // A 64-bit memory BAR has bit 0 clear; a 32-bit one has bit 0 set.
         if low & 1 != 0 {
@@ -229,12 +211,7 @@ impl PcieEcam {
     ///
     /// # Safety
     /// As [`PcieEcam::read32`].
-    pub unsafe fn enable_memory_and_bus_master(
-        &self,
-        bus: u16,
-        device: u8,
-        function: u8,
-    ) {
+    pub unsafe fn enable_memory_and_bus_master(&self, bus: u16, device: u8, function: u8) {
         let command = self.read32(bus, device, function, PCI_COMMAND);
         // Bit 1: memory space enable. Bit 2: bus master enable.
         let wanted = command | (1 << 1) | (1 << 2);
@@ -264,13 +241,7 @@ impl PcieEcam {
     ///
     /// # Safety
     /// As [`PcieEcam::read32`].
-    pub unsafe fn probe_bar(
-        &self,
-        bus: u16,
-        device: u8,
-        function: u8,
-        bar: usize,
-    ) -> BarProbe {
+    pub unsafe fn probe_bar(&self, bus: u16, device: u8, function: u8, bar: usize) -> BarProbe {
         let offset = PCI_BAR0 + bar * 4;
         let assigned_low = self.read32(bus, device, function, offset);
         let assigned_high = self.read32(bus, device, function, offset + 4);

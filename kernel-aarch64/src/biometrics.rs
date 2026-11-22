@@ -14,8 +14,8 @@
 //! - Zero Ambient Authority: Biometric enrollment and verification require `CapabilityType::BiometricAuthEnclave`.
 
 extern crate alloc;
-use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
+use alloc::vec::Vec;
 
 pub const MAX_ENROLLED_FINGERS: usize = 5;
 pub const MAX_FAILED_ATTEMPTS_BEFORE_LOCKOUT: u8 = 5;
@@ -100,7 +100,9 @@ impl BiometricsController {
     ) -> Result<(), BiometricError> {
         caps.check(CapabilityType::BiometricAuthEnclave, Rights::INVOKE)
             .map_err(|_| BiometricError::CapabilityDenied)?;
-        if !self.enabled || !self.hardware_present { return Err(BiometricError::HardwareDisabled); }
+        if !self.enabled || !self.hardware_present {
+            return Err(BiometricError::HardwareDisabled);
+        }
         Err(BiometricError::HardwareBackendUnavailable)
     }
 
@@ -112,7 +114,9 @@ impl BiometricsController {
     ) -> Result<[u8; 32], BiometricError> {
         caps.check(CapabilityType::BiometricAuthEnclave, Rights::INVOKE)
             .map_err(|_| BiometricError::CapabilityDenied)?;
-        if !self.enabled || !self.hardware_present { return Err(BiometricError::HardwareDisabled); }
+        if !self.enabled || !self.hardware_present {
+            return Err(BiometricError::HardwareDisabled);
+        }
         Err(BiometricError::HardwareBackendUnavailable)
     }
 
@@ -147,7 +151,11 @@ impl BiometricsController {
 
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
-        if !present { self.enrolled_templates.clear(); self.failed_attempts=0; self.lockout_active=false; }
+        if !present {
+            self.enrolled_templates.clear();
+            self.failed_attempts = 0;
+            self.lockout_active = false;
+        }
     }
 
     /// Resets hardware lockout following successful master passphrase verification.

@@ -11,12 +11,12 @@
 //! - Non-Negotiable Principle #12: User-created and approved automations run within bounded sandboxes.
 //! - Non-Negotiable Principle #13: Arbitrary script code never becomes privileged execution automatically.
 
+use crate::capability::{CapabilityTable, CapabilityType, Rights};
+use crate::crypto::Sha256;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::capability::{CapabilityTable, CapabilityType, Rights};
-use crate::crypto::Sha256;
 
 /// WASM standard page size: 64 KiB.
 pub const WASM_PAGE_SIZE: usize = 65536;
@@ -112,7 +112,10 @@ impl WasmMemory {
     }
 
     pub fn read_u8(&self, addr: usize) -> Result<u8, WasmError> {
-        self.data.get(addr).copied().ok_or(WasmError::OutOfBoundsMemory)
+        self.data
+            .get(addr)
+            .copied()
+            .ok_or(WasmError::OutOfBoundsMemory)
     }
 
     pub fn write_u8(&mut self, addr: usize, val: u8) -> Result<(), WasmError> {
@@ -146,7 +149,10 @@ impl WasmMemory {
     }
 
     pub fn read_slice(&self, addr: usize, len: usize) -> Result<&[u8], WasmError> {
-        if addr.checked_add(len).map_or(true, |end| end > self.data.len()) {
+        if addr
+            .checked_add(len)
+            .map_or(true, |end| end > self.data.len())
+        {
             return Err(WasmError::OutOfBoundsMemory);
         }
         Ok(&self.data[addr..addr + len])
@@ -154,7 +160,10 @@ impl WasmMemory {
 
     pub fn write_slice(&mut self, addr: usize, slice: &[u8]) -> Result<(), WasmError> {
         let len = slice.len();
-        if addr.checked_add(len).map_or(true, |end| end > self.data.len()) {
+        if addr
+            .checked_add(len)
+            .map_or(true, |end| end > self.data.len())
+        {
             return Err(WasmError::OutOfBoundsMemory);
         }
         self.data[addr..addr + len].copy_from_slice(slice);
@@ -267,7 +276,10 @@ impl WasmVm {
         caps: &CapabilityTable,
     ) -> Result<Option<Value>, WasmError> {
         // Enforce capability check
-        if caps.check(CapabilityType::WasmExecute, Rights::EXECUTE).is_err() {
+        if caps
+            .check(CapabilityType::WasmExecute, Rights::EXECUTE)
+            .is_err()
+        {
             return Err(WasmError::CapabilityDenied);
         }
 
@@ -322,7 +334,9 @@ impl WasmVm {
 
             match opcode {
                 opcodes::NOP => {}
-                opcodes::UNREACHABLE => return Err(WasmError::HostCallFailed("unreachable".to_string())),
+                opcodes::UNREACHABLE => {
+                    return Err(WasmError::HostCallFailed("unreachable".to_string()))
+                }
                 opcodes::RETURN | opcodes::END => break,
                 opcodes::DROP => {
                     self.pop()?;
@@ -367,7 +381,9 @@ impl WasmVm {
                     let _align = read_var_u32(code, &mut pc)?;
                     let offset = read_var_u32(code, &mut pc)? as usize;
                     let base = self.pop()?.as_i32()? as usize;
-                    let addr = base.checked_add(offset).ok_or(WasmError::OutOfBoundsMemory)?;
+                    let addr = base
+                        .checked_add(offset)
+                        .ok_or(WasmError::OutOfBoundsMemory)?;
                     let val = self.memory.read_i32(addr)?;
                     self.push(Value::I32(val));
                 }
@@ -376,7 +392,9 @@ impl WasmVm {
                     let offset = read_var_u32(code, &mut pc)? as usize;
                     let val = self.pop()?.as_i32()?;
                     let base = self.pop()?.as_i32()? as usize;
-                    let addr = base.checked_add(offset).ok_or(WasmError::OutOfBoundsMemory)?;
+                    let addr = base
+                        .checked_add(offset)
+                        .ok_or(WasmError::OutOfBoundsMemory)?;
                     self.memory.write_i32(addr, val)?;
                 }
                 opcodes::CALL => {

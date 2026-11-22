@@ -16,8 +16,8 @@
 //! - Zero Ambient Authority: SIM cryptographic access requires `CapabilityType::SimCardSecureElement`.
 
 extern crate alloc;
-use alloc::vec::Vec;
 use crate::capability::{CapabilityTable, CapabilityType, Rights};
+use alloc::vec::Vec;
 
 pub const SIM_REG_CTRL: usize = 0x00;
 pub const SIM_REG_STATUS: usize = 0x04;
@@ -90,7 +90,9 @@ impl SimCardController {
 
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
-        if !present { self.card_present = [false; 2]; }
+        if !present {
+            self.card_present = [false; 2];
+        }
     }
 
     /// Switches the active transceiver slot between Physical nano-SIM and eSIM.
@@ -137,10 +139,16 @@ impl SimCardController {
                 };
 
                 match fid {
-                    FID_MF | FID_DF_TELECOM | FID_EF_ICCID | FID_EF_IMSI => {
-                        Ok(ApduResponse { data: alloc::vec![], sw1: 0x90, sw2: 0x00 })
-                    }
-                    _ => Ok(ApduResponse { data: alloc::vec![], sw1: 0x6A, sw2: 0x82 }), // File Not Found
+                    FID_MF | FID_DF_TELECOM | FID_EF_ICCID | FID_EF_IMSI => Ok(ApduResponse {
+                        data: alloc::vec![],
+                        sw1: 0x90,
+                        sw2: 0x00,
+                    }),
+                    _ => Ok(ApduResponse {
+                        data: alloc::vec![],
+                        sw1: 0x6A,
+                        sw2: 0x82,
+                    }), // File Not Found
                 }
             }
             0xB0 => {
@@ -148,13 +156,23 @@ impl SimCardController {
                 match self.active_slot {
                     SimSlot::PhysicalNanoSim => {
                         // Return Physical SIM ICCID: 89014103211118990012 (BCD format)
-                        let iccid = alloc::vec![0x89, 0x01, 0x41, 0x03, 0x21, 0x11, 0x18, 0x99, 0x00, 0x12];
-                        Ok(ApduResponse { data: iccid, sw1: 0x90, sw2: 0x00 })
+                        let iccid =
+                            alloc::vec![0x89, 0x01, 0x41, 0x03, 0x21, 0x11, 0x18, 0x99, 0x00, 0x12];
+                        Ok(ApduResponse {
+                            data: iccid,
+                            sw1: 0x90,
+                            sw2: 0x00,
+                        })
                     }
                     SimSlot::EsimEuicc => {
                         // Return eSIM ICCID: 89019999000123456789 (BCD format)
-                        let esim_iccid = alloc::vec![0x89, 0x01, 0x99, 0x99, 0x00, 0x01, 0x23, 0x45, 0x67, 0x89];
-                        Ok(ApduResponse { data: esim_iccid, sw1: 0x90, sw2: 0x00 })
+                        let esim_iccid =
+                            alloc::vec![0x89, 0x01, 0x99, 0x99, 0x00, 0x01, 0x23, 0x45, 0x67, 0x89];
+                        Ok(ApduResponse {
+                            data: esim_iccid,
+                            sw1: 0x90,
+                            sw2: 0x00,
+                        })
                     }
                 }
             }
@@ -168,9 +186,17 @@ impl SimCardController {
                 for (i, byte) in cmd.data.iter().take(8).enumerate() {
                     res[i] = byte ^ 0x5A;
                 }
-                Ok(ApduResponse { data: res, sw1: 0x90, sw2: 0x00 })
+                Ok(ApduResponse {
+                    data: res,
+                    sw1: 0x90,
+                    sw2: 0x00,
+                })
             }
-            _ => Ok(ApduResponse { data: alloc::vec![], sw1: 0x6D, sw2: 0x00 }), // Instruction not supported
+            _ => Ok(ApduResponse {
+                data: alloc::vec![],
+                sw1: 0x6D,
+                sw2: 0x00,
+            }), // Instruction not supported
         }
     }
 
