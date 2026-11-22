@@ -14,10 +14,10 @@
 //! - RES_XML_END_ELEMENT_TYPE (0x0103)
 //! - RES_XML_CDATA_TYPE (0x0104)
 
+use super::resources::{StringPool, RES_XML_TYPE};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use super::resources::{StringPool, RES_XML_TYPE};
 
 pub const RES_XML_RESOURCE_MAP_TYPE: u16 = 0x0180;
 pub const RES_XML_START_NAMESPACE_TYPE: u16 = 0x0100;
@@ -71,7 +71,9 @@ impl AxmlElement {
     }
 
     pub fn get_attr_string(&self, name: &str) -> Option<&str> {
-        self.attributes.get(name).and_then(|a| a.raw_value.as_deref())
+        self.attributes
+            .get(name)
+            .and_then(|a| a.raw_value.as_deref())
     }
 
     pub fn get_attr_res_id(&self, name: &str) -> Option<u32> {
@@ -91,7 +93,8 @@ const MAX_ELEMENT_DEPTH: usize = 256;
 
 impl AxmlDocument {
     /// Parses an in-memory binary XML buffer.
-    pub fn parse(data: &[u8]) -> Result<Self, AxmlError> {        if data.len() < 8 {
+    pub fn parse(data: &[u8]) -> Result<Self, AxmlError> {
+        if data.len() < 8 {
             return Err(AxmlError::TooSmall);
         }
 
@@ -108,8 +111,8 @@ impl AxmlDocument {
         }
 
         // Global String Pool
-        let (string_pool, mut cursor) = StringPool::parse(data, header_size)
-            .map_err(|_| AxmlError::MalformedStringPool)?;
+        let (string_pool, mut cursor) =
+            StringPool::parse(data, header_size).map_err(|_| AxmlError::MalformedStringPool)?;
 
         let mut res_map = Vec::new();
         let mut element_stack: Vec<AxmlElement> = Vec::new();
@@ -120,7 +123,8 @@ impl AxmlDocument {
                 break;
             }
             let sub_type = u16::from_le_bytes(data[cursor..cursor + 2].try_into().unwrap());
-            let sub_size = u32::from_le_bytes(data[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
+            let sub_size =
+                u32::from_le_bytes(data[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
 
             if sub_size == 0 || cursor + sub_size > chunk_size {
                 return Err(AxmlError::MalformedChunk);
@@ -148,9 +152,12 @@ impl AxmlDocument {
                     if element_stack.len() >= MAX_ELEMENT_DEPTH {
                         return Err(AxmlError::MalformedChunk);
                     }
-                    let ns_idx = u32::from_le_bytes(data[cursor + 16..cursor + 20].try_into().unwrap());
-                    let name_idx = u32::from_le_bytes(data[cursor + 20..cursor + 24].try_into().unwrap());
-                    let attr_count = u16::from_le_bytes([data[cursor + 28], data[cursor + 29]]) as usize;
+                    let ns_idx =
+                        u32::from_le_bytes(data[cursor + 16..cursor + 20].try_into().unwrap());
+                    let name_idx =
+                        u32::from_le_bytes(data[cursor + 20..cursor + 24].try_into().unwrap());
+                    let attr_count =
+                        u16::from_le_bytes([data[cursor + 28], data[cursor + 29]]) as usize;
 
                     let tag = string_pool.get(name_idx as usize).unwrap_or("").to_string();
                     let ns = if ns_idx != 0xFFFF_FFFF {
@@ -162,21 +169,33 @@ impl AxmlDocument {
                     let mut elem = AxmlElement::new(tag, ns);
 
                     // Attributes start at offset: cursor + attr_start (offset 24 in start element, 2 bytes)
-                    let attr_start = u16::from_le_bytes([data[cursor + 24], data[cursor + 25]]) as usize;
-                    let attr_size = u16::from_le_bytes([data[cursor + 26], data[cursor + 27]]) as usize;
+                    let attr_start =
+                        u16::from_le_bytes([data[cursor + 24], data[cursor + 25]]) as usize;
+                    let attr_size =
+                        u16::from_le_bytes([data[cursor + 26], data[cursor + 27]]) as usize;
                     let mut attr_cur = cursor + attr_start;
 
                     for _i in 0..attr_count {
                         if attr_cur + 20 > cursor + sub_size {
                             break;
                         }
-                        let a_ns_idx = u32::from_le_bytes(data[attr_cur..attr_cur + 4].try_into().unwrap());
-                        let a_name_idx = u32::from_le_bytes(data[attr_cur + 4..attr_cur + 8].try_into().unwrap());
-                        let a_raw_idx = u32::from_le_bytes(data[attr_cur + 8..attr_cur + 12].try_into().unwrap());
+                        let a_ns_idx =
+                            u32::from_le_bytes(data[attr_cur..attr_cur + 4].try_into().unwrap());
+                        let a_name_idx = u32::from_le_bytes(
+                            data[attr_cur + 4..attr_cur + 8].try_into().unwrap(),
+                        );
+                        let a_raw_idx = u32::from_le_bytes(
+                            data[attr_cur + 8..attr_cur + 12].try_into().unwrap(),
+                        );
                         let a_data_type = data[attr_cur + 15];
-                        let a_data_val = u32::from_le_bytes(data[attr_cur + 16..attr_cur + 20].try_into().unwrap());
+                        let a_data_val = u32::from_le_bytes(
+                            data[attr_cur + 16..attr_cur + 20].try_into().unwrap(),
+                        );
 
-                        let a_name = string_pool.get(a_name_idx as usize).unwrap_or("").to_string();
+                        let a_name = string_pool
+                            .get(a_name_idx as usize)
+                            .unwrap_or("")
+                            .to_string();
                         let a_ns = if a_ns_idx != 0xFFFF_FFFF {
                             string_pool.get(a_ns_idx as usize).map(|s| s.to_string())
                         } else {
@@ -242,14 +261,17 @@ mod tests {
     #[test]
     fn test_axml_element_and_attributes() {
         let mut elem = AxmlElement::new(String::from("TextView"), None);
-        elem.attributes.insert(String::from("text"), AxmlAttribute {
-            namespace: None,
-            name: String::from("text"),
-            raw_value: Some(String::from("Hello World")),
-            data_type: 0x03,
-            data_value: 0,
-            resource_id: 0,
-        });
+        elem.attributes.insert(
+            String::from("text"),
+            AxmlAttribute {
+                namespace: None,
+                name: String::from("text"),
+                raw_value: Some(String::from("Hello World")),
+                data_type: 0x03,
+                data_value: 0,
+                resource_id: 0,
+            },
+        );
         assert_eq!(elem.get_attr_string("text"), Some("Hello World"));
 
         let child = AxmlElement::new(String::from("Button"), None);
@@ -261,8 +283,13 @@ mod tests {
     #[test]
     fn test_axml_bounds_and_error_handling() {
         assert_eq!(AxmlDocument::parse(&[]).unwrap_err(), AxmlError::TooSmall);
-        assert_eq!(AxmlDocument::parse(&[0u8; 4]).unwrap_err(), AxmlError::TooSmall);
-        assert_eq!(AxmlDocument::parse(&[0x05, 0x00, 0x08, 0x00, 0x10, 0x00, 0x00, 0x00]).unwrap_err(), AxmlError::InvalidHeader);
+        assert_eq!(
+            AxmlDocument::parse(&[0u8; 4]).unwrap_err(),
+            AxmlError::TooSmall
+        );
+        assert_eq!(
+            AxmlDocument::parse(&[0x05, 0x00, 0x08, 0x00, 0x10, 0x00, 0x00, 0x00]).unwrap_err(),
+            AxmlError::InvalidHeader
+        );
     }
 }
-

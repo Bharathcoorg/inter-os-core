@@ -6,8 +6,8 @@
 //! Provides bounded, authenticated encryption and decryption of TLS records
 //! using ChaCha20-Poly1305 AEAD. Pure `#![no_std]`, zero heap allocations.
 
-use crate::crypto::chacha20_poly1305::{ChaCha20Poly1305, KEY_LEN, NONCE_LEN, TAG_LEN};
 use super::TlsError;
+use crate::crypto::chacha20_poly1305::{ChaCha20Poly1305, KEY_LEN, NONCE_LEN, TAG_LEN};
 
 pub const RECORD_HEADER_LEN: usize = 5;
 pub const TLS_LEGACY_VERSION: u16 = 0x0303;
@@ -107,7 +107,10 @@ impl RecordCipher {
         let nonce = compute_nonce(&self.iv, self.seq);
         // The nonce is IV xor seq: at 2^64 records it would repeat, and
         // repeating a nonce under AES-GCM is catastrophic. Fail closed.
-        self.seq = self.seq.checked_add(1).ok_or(TlsError::KeyDerivationError)?;
+        self.seq = self
+            .seq
+            .checked_add(1)
+            .ok_or(TlsError::KeyDerivationError)?;
 
         // 3. Prepare inner plaintext in-place inside `out`
         // We write plaintext at out[5..5 + plaintext.len()], inner_type at out[5 + plaintext.len()]
@@ -186,11 +189,16 @@ impl RecordCipher {
         let aad = &record[..RECORD_HEADER_LEN];
         let ciphertext = &record[RECORD_HEADER_LEN..RECORD_HEADER_LEN + ciphertext_len];
         let mut tag = [0u8; TAG_LEN];
-        tag.copy_from_slice(&record[RECORD_HEADER_LEN + ciphertext_len..RECORD_HEADER_LEN + record_len]);
+        tag.copy_from_slice(
+            &record[RECORD_HEADER_LEN + ciphertext_len..RECORD_HEADER_LEN + record_len],
+        );
 
         let nonce = compute_nonce(&self.iv, self.seq);
         // Refuse to reuse a record nonce (see the send path for why).
-        self.seq = self.seq.checked_add(1).ok_or(TlsError::KeyDerivationError)?;
+        self.seq = self
+            .seq
+            .checked_add(1)
+            .ok_or(TlsError::KeyDerivationError)?;
 
         // WHY the caller's buffer is also the decryption target: an intermediate
         // frame of the reader's own would cap every record at its size, and a
@@ -202,7 +210,8 @@ impl RecordCipher {
             ciphertext,
             &tag,
             &mut out[..ciphertext_len],
-        ).map_err(|_| TlsError::DecryptionFailed)?;
+        )
+        .map_err(|_| TlsError::DecryptionFailed)?;
 
         // Find the inner content type by scanning backwards past any zero padding (RFC 8446 Section 5.4)
         let mut idx = ciphertext_len;
@@ -231,7 +240,10 @@ impl RecordCipher {
     /// WHY the payload is not slid to the front: copying up to 16 KiB per record
     /// to make the indexing uniform costs a pass over the document for the shape
     /// of a slice.
-    pub fn open_record_in_place(&mut self, buf: &mut [u8]) -> Result<(ContentType, usize), TlsError> {
+    pub fn open_record_in_place(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<(ContentType, usize), TlsError> {
         if buf.len() < RECORD_HEADER_LEN + TAG_LEN + 1 {
             return Err(TlsError::BadRecordLength);
         }
@@ -259,11 +271,16 @@ impl RecordCipher {
         }
 
         let mut tag = [0u8; TAG_LEN];
-        tag.copy_from_slice(&buf[RECORD_HEADER_LEN + ciphertext_len..RECORD_HEADER_LEN + record_len]);
+        tag.copy_from_slice(
+            &buf[RECORD_HEADER_LEN + ciphertext_len..RECORD_HEADER_LEN + record_len],
+        );
 
         let nonce = compute_nonce(&self.iv, self.seq);
         // Refuse to reuse a record nonce (see the send path for why).
-        self.seq = self.seq.checked_add(1).ok_or(TlsError::KeyDerivationError)?;
+        self.seq = self
+            .seq
+            .checked_add(1)
+            .ok_or(TlsError::KeyDerivationError)?;
 
         let (aad, body) = buf.split_at_mut(RECORD_HEADER_LEN);
         ChaCha20Poly1305::open_in_place(&self.key, &nonce, aad, &mut body[..ciphertext_len], &tag)

@@ -13,7 +13,9 @@
 //! pipeline in `lib.rs` owns that, and this module hands it bytes in UTF-8.
 
 use crate::{parse_uri, UriScheme};
-use interos_std::tls::{HandshakeReader, TlsClient, TlsError, TlsStream, MAX_HANDSHAKE_MESSAGE_BYTES};
+use interos_std::tls::{
+    HandshakeReader, TlsClient, TlsError, TlsStream, MAX_HANDSHAKE_MESSAGE_BYTES,
+};
 
 // =============================================================================
 // Transport and TLS 1.3 Client Integration
@@ -214,9 +216,8 @@ pub fn perform_tls_handshake<S: TlsStream>(
     // arrives as one message, but a message is only ever as big as the record
     // the server chose to write, so a chain that fills two frames needs two
     // records and the rejoiner still has work to do after the last one.
-    let mut messages = unsafe {
-        HandshakeReader::new(&mut *core::ptr::addr_of_mut!(HANDSHAKE_MESSAGES))
-    };
+    let mut messages =
+        unsafe { HandshakeReader::new(&mut *core::ptr::addr_of_mut!(HANDSHAKE_MESSAGES)) };
     let mut records = 0usize;
     while client.session.app_send_cipher.is_none() {
         records += 1;
@@ -272,7 +273,9 @@ pub fn parse_ipv4(host: &[u8]) -> Option<[u8; 4]> {
             has_digit = false;
         } else if b.is_ascii_digit() {
             has_digit = true;
-            current_val = current_val.saturating_mul(10).saturating_add((b - b'0') as u16);
+            current_val = current_val
+                .saturating_mul(10)
+                .saturating_add((b - b'0') as u16);
             if current_val > 255 {
                 return None;
             }
@@ -362,11 +365,7 @@ pub fn find_header<'a>(raw: &'a [u8], wanted: &[u8]) -> Option<&'a [u8]> {
 }
 
 /// Finds every value of a repeated header, calling `visit` in wire order.
-pub fn for_each_header_value<'a, F: FnMut(&'a [u8])>(
-    raw: &'a [u8],
-    wanted: &[u8],
-    mut visit: F,
-) {
+pub fn for_each_header_value<'a, F: FnMut(&'a [u8])>(raw: &'a [u8], wanted: &[u8], mut visit: F) {
     for_each_header(raw, |name, value| {
         if name.eq_ignore_ascii_case(wanted) {
             visit(value);
@@ -581,7 +580,11 @@ pub fn resolve_url(base: &[u8], reference: &[u8], out: &mut [u8]) -> Option<usiz
         b'?' => {
             candidate[..end_of_origin].copy_from_slice(&base[..end_of_origin]);
             length = end_of_origin;
-            let path: &[u8] = if base_path.is_empty() { b"/" } else { base_path };
+            let path: &[u8] = if base_path.is_empty() {
+                b"/"
+            } else {
+                base_path
+            };
             candidate[length..length + path.len()].copy_from_slice(path);
             length += path.len();
         }
@@ -746,9 +749,15 @@ pub fn is_public_suffix(domain: &[u8]) -> bool {
     }
     matches!(
         lower,
-        b"co.uk" | b"org.uk" | b"gov.uk" | b"ac.uk"
-            | b"com.au" | b"net.au" | b"org.au"
-            | b"co.jp" | b"ne.jp"
+        b"co.uk"
+            | b"org.uk"
+            | b"gov.uk"
+            | b"ac.uk"
+            | b"com.au"
+            | b"net.au"
+            | b"org.au"
+            | b"co.jp"
+            | b"ne.jp"
             | b"com.br"
     )
 }
@@ -949,7 +958,10 @@ impl CookieJar {
                     candidate = &candidate[1..];
                 }
                 let candidate = lower_host(candidate);
-                if candidate.is_empty() || is_public_suffix(candidate) || !domain_matches(host, candidate) {
+                if candidate.is_empty()
+                    || is_public_suffix(candidate)
+                    || !domain_matches(host, candidate)
+                {
                     return CookieOutcome::Rejected;
                 }
                 domain = candidate;
@@ -1117,10 +1129,7 @@ impl CookieJar {
             // The '=' is part of the pair; the separator belongs only to a
             // pair that follows another. Counting both wrong skipped a
             // cookie one byte too late and wrote past the buffer.
-            let needed = cookie.name_len
-                + cookie.value_len
-                + 1
-                + if emitted_any { 2 } else { 0 };
+            let needed = cookie.name_len + cookie.value_len + 1 + if emitted_any { 2 } else { 0 };
             if written + needed > out.len() {
                 continue;
             }
@@ -1232,9 +1241,7 @@ fn parse_i64(raw: &[u8]) -> Option<i64> {
         if !byte.is_ascii_digit() {
             return None;
         }
-        value = value
-            .checked_mul(10)?
-            .checked_add((byte - b'0') as i64)?;
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as i64)?;
     }
     Some(if negative { -value } else { value })
 }
@@ -1245,8 +1252,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year_of_era = year - era * 400;
     let adjusted_month = month + if month > 2 { -3 } else { 9 };
     let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
-    let day_of_era =
-        year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
 }
 
@@ -1349,7 +1355,11 @@ pub fn urlencode_component(raw: &[u8], out: &mut [u8], at: &mut usize) -> bool {
                 }
             }
             _ => {
-                if !append(out, at, &[b'%', hex_digit(byte >> 4), hex_digit(byte & 0x0F)]) {
+                if !append(
+                    out,
+                    at,
+                    &[b'%', hex_digit(byte >> 4), hex_digit(byte & 0x0F)],
+                ) {
                     return false;
                 }
             }
@@ -1376,7 +1386,11 @@ pub fn form_urlencode(pairs: &[(&[u8], &[u8])], out: &mut [u8]) -> Option<usize>
 }
 
 /// Builds a GET URL from an action and form fields.
-pub fn form_urlencode_url(action: &[u8], pairs: &[(&[u8], &[u8])], out: &mut [u8]) -> Option<usize> {
+pub fn form_urlencode_url(
+    action: &[u8],
+    pairs: &[(&[u8], &[u8])],
+    out: &mut [u8],
+) -> Option<usize> {
     let mut written = 0usize;
     if !append(out, &mut written, action) {
         return None;
@@ -1465,7 +1479,11 @@ pub fn multipart_body(
         let name_len = safe_part_name(field, b"field", &mut name)?;
         if !append(out, &mut written, b"--")
             || !append(out, &mut written, MULTIPART_BOUNDARY)
-            || !append(out, &mut written, b"\r\nContent-Disposition: form-data; name=\"")
+            || !append(
+                out,
+                &mut written,
+                b"\r\nContent-Disposition: form-data; name=\"",
+            )
             || !append(out, &mut written, &name[..name_len])
             || !append(out, &mut written, b"\"\r\n\r\n")
             || !append(out, &mut written, value)
@@ -1476,11 +1494,16 @@ pub fn multipart_body(
     }
     for file in files {
         let name_len = safe_part_name(file.field, b"file", &mut name)?;
-        let filename_len = safe_part_name(file_basename(file.filename), b"upload.bin", &mut file_name)?;
+        let filename_len =
+            safe_part_name(file_basename(file.filename), b"upload.bin", &mut file_name)?;
         let mime_len = safe_part_name(file.content_type, b"application/octet-stream", &mut mime)?;
         if !append(out, &mut written, b"--")
             || !append(out, &mut written, MULTIPART_BOUNDARY)
-            || !append(out, &mut written, b"\r\nContent-Disposition: form-data; name=\"")
+            || !append(
+                out,
+                &mut written,
+                b"\r\nContent-Disposition: form-data; name=\"",
+            )
             || !append(out, &mut written, &name[..name_len])
             || !append(out, &mut written, b"\"; filename=\"")
             || !append(out, &mut written, &file_name[..filename_len])
@@ -1665,7 +1688,9 @@ fn string_field_span(json: &[u8], key: &[u8]) -> Option<(usize, Option<usize>)> 
     pattern[1..1 + key.len()].copy_from_slice(key);
     pattern[1 + key.len()] = b'"';
     let pattern_len = key.len() + 2;
-    let position = json.windows(pattern_len).position(|w| w == &pattern[..pattern_len])?;
+    let position = json
+        .windows(pattern_len)
+        .position(|w| w == &pattern[..pattern_len])?;
     let mut cursor = position + pattern_len;
     while cursor < json.len() && json[cursor].is_ascii_whitespace() {
         cursor += 1;
@@ -1939,8 +1964,7 @@ pub fn charset_from_content_type(content_type: &[u8]) -> Charset {
             {
                 return Charset::Latin1;
             }
-            if value.eq_ignore_ascii_case(b"windows-1252")
-                || value.eq_ignore_ascii_case(b"cp1252")
+            if value.eq_ignore_ascii_case(b"windows-1252") || value.eq_ignore_ascii_case(b"cp1252")
             {
                 return Charset::Windows1252;
             }
@@ -1952,10 +1976,9 @@ pub fn charset_from_content_type(content_type: &[u8]) -> Charset {
 }
 
 const WINDOWS_1252_HIGH: [u16; 32] = [
-    0x20AC, 0xFFFD, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030,
-    0x0160, 0x2039, 0x0152, 0xFFFD, 0x017D, 0xFFFD, 0xFFFD, 0x2018, 0x2019, 0x201C,
-    0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0xFFFD,
-    0x017E, 0x0178,
+    0x20AC, 0xFFFD, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039,
+    0x0152, 0xFFFD, 0x017D, 0xFFFD, 0xFFFD, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0xFFFD, 0x017E, 0x0178,
 ];
 
 /// The result of converting a body to UTF-8.
@@ -2401,8 +2424,12 @@ mod tests {
         let n = resolve_url(b"https://example.com", b"//other.test/x", &mut out).unwrap();
         assert_eq!(&out[..n], b"https://other.test/x");
 
-        let n = resolve_url(b"https://example.com/a", b"https://absolute.test/z/../q", &mut out)
-            .unwrap();
+        let n = resolve_url(
+            b"https://example.com/a",
+            b"https://absolute.test/z/../q",
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(&out[..n], b"https://absolute.test/q");
     }
 
@@ -2468,7 +2495,10 @@ mod tests {
         let mut jar = CookieJar::new();
         jar.store(b"https://example.com/", b"a=1; Path=/", 1_700_000_000);
         let mut out = [0u8; 64];
-        assert_eq!(jar.header_for(b"https://sub.example.com/", 1_700_000_100, &mut out), 0);
+        assert_eq!(
+            jar.header_for(b"https://sub.example.com/", 1_700_000_100, &mut out),
+            0
+        );
         assert!(jar.header_for(b"https://example.com/x", 1_700_000_100, &mut out) > 0);
     }
 
@@ -2476,7 +2506,11 @@ mod tests {
     fn a_domain_cookie_is_sent_to_a_subdomain() {
         let mut jar = CookieJar::new();
         assert_eq!(
-            jar.store(b"https://example.com/", b"a=1; Domain=.example.com; Path=/", 1_700_000_000),
+            jar.store(
+                b"https://example.com/",
+                b"a=1; Domain=.example.com; Path=/",
+                1_700_000_000
+            ),
             CookieOutcome::Stored
         );
         let mut out = [0u8; 64];
@@ -2488,7 +2522,11 @@ mod tests {
     fn a_cookie_for_an_unrelated_domain_is_rejected() {
         let mut jar = CookieJar::new();
         assert_eq!(
-            jar.store(b"https://example.com/", b"a=1; Domain=evil.test", 1_700_000_000),
+            jar.store(
+                b"https://example.com/",
+                b"a=1; Domain=evil.test",
+                1_700_000_000
+            ),
             CookieOutcome::Rejected
         );
     }
@@ -2502,9 +2540,17 @@ mod tests {
             CookieOutcome::Deleted
         );
         assert_eq!(jar.len(), 0);
-        jar.store(b"https://e.test/", b"b=1; Path=/; Expires=Wed, 21 Oct 2015 07:28:00 GMT", 1_700_000_000);
+        jar.store(
+            b"https://e.test/",
+            b"b=1; Path=/; Expires=Wed, 21 Oct 2015 07:28:00 GMT",
+            1_700_000_000,
+        );
         assert_eq!(
-            jar.store(b"https://e.test/", b"b=2; Path=/; Expires=Wed, 21 Oct 2015 07:28:00 GMT", 1_700_000_100),
+            jar.store(
+                b"https://e.test/",
+                b"b=2; Path=/; Expires=Wed, 21 Oct 2015 07:28:00 GMT",
+                1_700_000_100
+            ),
             CookieOutcome::Deleted
         );
     }
@@ -2640,8 +2686,14 @@ mod tests {
     fn the_envelope_fields_are_read_without_a_json_dependency() {
         let json = br#"{"success": true, "status": 302, "location": "https://e.test/next", "set_cookie": "a=1\nb=2", "content_encoding": "gzip", "body_b64": "aGVsbG8=", "html": "hi"}"#;
         assert_eq!(proxy_status(json), Some(302));
-        assert_eq!(proxy_string_field(json, b"location"), Some(&b"https://e.test/next"[..]));
-        assert_eq!(proxy_string_field(json, b"content_encoding"), Some(&b"gzip"[..]));
+        assert_eq!(
+            proxy_string_field(json, b"location"),
+            Some(&b"https://e.test/next"[..])
+        );
+        assert_eq!(
+            proxy_string_field(json, b"content_encoding"),
+            Some(&b"gzip"[..])
+        );
         assert_eq!(proxy_string_field(json, b"missing"), None);
         let raw = proxy_string_field(json, b"set_cookie").unwrap();
         let mut cookies = [0u8; 32];
@@ -2704,7 +2756,10 @@ mod tests {
         assert_eq!(result.invalid, 0);
 
         let result = decode_text(b"\x93quoted\x94 \x80", Charset::Windows1252, &mut out);
-        assert_eq!(&out[..result.written], b"\xE2\x80\x9Cquoted\xE2\x80\x9D \xE2\x82\xAC");
+        assert_eq!(
+            &out[..result.written],
+            b"\xE2\x80\x9Cquoted\xE2\x80\x9D \xE2\x82\xAC"
+        );
         let result = decode_text(b"\x81", Charset::Windows1252, &mut out);
         assert_eq!(&out[..result.written], b"\xEF\xBF\xBD");
         assert_eq!(result.invalid, 1);
@@ -2753,13 +2808,7 @@ mod tests {
         assert!(date_len > 0);
         assert_eq!(cache.lookup(b"https://e.test/a").unwrap().body(), b"body");
 
-        assert!(!cache.store(
-            b"https://e.test/a",
-            b"\"v2\"",
-            b"",
-            b"no-store",
-            b"new"
-        ));
+        assert!(!cache.store(b"https://e.test/a", b"\"v2\"", b"", b"no-store", b"new"));
         assert!(cache.lookup(b"https://e.test/a").is_none());
     }
 
@@ -2789,8 +2838,7 @@ mod tests {
     #[test]
     fn a_gateway_envelope_is_walked_to_drawable_text() {
         // gzip('<html><body><h1>Caf\xe9</h1></body></html>')
-        const B64: &[u8] =
-            b"H4sIAAAAAAAC/7PJKMnNsbNJyk+ptLPJMLRzTkx7aaMPZNjoQ8T0wQoAxEYgnicAAAA=";
+        const B64: &[u8] = b"H4sIAAAAAAAC/7PJKMnNsbNJyk+ptLPJMLRzTkx7aaMPZNjoQ8T0wQoAxEYgnicAAAA=";
         let mut envelope = [0u8; 512];
         let mut length = 0usize;
         for part in [
@@ -2859,7 +2907,9 @@ mod tests {
         };
         let len = format_proxy_request(&req, &mut out);
         let s = core::str::from_utf8(&out[..len]).expect("valid request bytes");
-        assert!(s.starts_with("POST /api/browser/proxy?url=https%3A%2F%2Fapi.interos.org%2Fv1%2Fauth"));
+        assert!(
+            s.starts_with("POST /api/browser/proxy?url=https%3A%2F%2Fapi.interos.org%2Fv1%2Fauth")
+        );
         assert!(s.contains("Content-Length: 23\r\n"));
         assert!(s.contains("Content-Type: application/x-www-form-urlencoded\r\n"));
         assert!(s.ends_with("\r\n\r\nuser=alice&action=login"));
@@ -2882,17 +2932,29 @@ mod tests {
         let mut jar = CookieJar::new();
         // Domain cookie: scoped to .example.com
         assert_eq!(
-            jar.store(b"https://api.example.com/", b"global=1; Domain=example.com; Path=/", 1000),
+            jar.store(
+                b"https://api.example.com/",
+                b"global=1; Domain=example.com; Path=/",
+                1000
+            ),
             CookieOutcome::Stored
         );
         // Host-only cookie: scoped strictly to auth.example.com
         assert_eq!(
-            jar.store(b"https://auth.example.com/login", b"auth_token=secret; Path=/login; Secure", 1000),
+            jar.store(
+                b"https://auth.example.com/login",
+                b"auth_token=secret; Path=/login; Secure",
+                1000
+            ),
             CookieOutcome::Stored
         );
         // Path-scoped cookie
         assert_eq!(
-            jar.store(b"https://example.com/app", b"app_state=active; Path=/app; SameSite=Strict", 1000),
+            jar.store(
+                b"https://example.com/app",
+                b"app_state=active; Path=/app; SameSite=Strict",
+                1000
+            ),
             CookieOutcome::Stored
         );
         // Public suffix cookie must be rejected
@@ -2930,36 +2992,66 @@ mod tests {
     fn test_cookie_jar_samesite_policy() {
         let mut jar = CookieJar::new();
         assert_eq!(
-            jar.store(b"https://service.example.com/", b"c_strict=A; SameSite=Strict", 1000),
+            jar.store(
+                b"https://service.example.com/",
+                b"c_strict=A; SameSite=Strict",
+                1000
+            ),
             CookieOutcome::Stored
         );
         assert_eq!(
-            jar.store(b"https://service.example.com/", b"c_lax=B; SameSite=Lax", 1000),
+            jar.store(
+                b"https://service.example.com/",
+                b"c_lax=B; SameSite=Lax",
+                1000
+            ),
             CookieOutcome::Stored
         );
         assert_eq!(
-            jar.store(b"https://service.example.com/", b"c_none=C; SameSite=None; Secure", 1000),
+            jar.store(
+                b"https://service.example.com/",
+                b"c_none=C; SameSite=None; Secure",
+                1000
+            ),
             CookieOutcome::Stored
         );
 
         let mut out = [0u8; 256];
 
         // Same-site request: all three cookies sent
-        let n = jar.header_for_request(b"https://service.example.com/api", false, true, 1000, &mut out);
+        let n = jar.header_for_request(
+            b"https://service.example.com/api",
+            false,
+            true,
+            1000,
+            &mut out,
+        );
         let header = core::str::from_utf8(&out[..n]).unwrap();
         assert!(header.contains("c_strict=A"));
         assert!(header.contains("c_lax=B"));
         assert!(header.contains("c_none=C"));
 
         // Cross-site safe GET: Strict omitted, Lax and None included
-        let n = jar.header_for_request(b"https://service.example.com/api", true, true, 1000, &mut out);
+        let n = jar.header_for_request(
+            b"https://service.example.com/api",
+            true,
+            true,
+            1000,
+            &mut out,
+        );
         let header = core::str::from_utf8(&out[..n]).unwrap();
         assert!(!header.contains("c_strict="));
         assert!(header.contains("c_lax=B"));
         assert!(header.contains("c_none=C"));
 
         // Cross-site unsafe POST: Strict and Lax omitted, only None included
-        let n = jar.header_for_request(b"https://service.example.com/api", true, false, 1000, &mut out);
+        let n = jar.header_for_request(
+            b"https://service.example.com/api",
+            true,
+            false,
+            1000,
+            &mut out,
+        );
         let header = core::str::from_utf8(&out[..n]).unwrap();
         assert!(!header.contains("c_strict="));
         assert!(!header.contains("c_lax="));
@@ -2986,7 +3078,11 @@ mod tests {
 
         // Valid registrable domain under public suffix is accepted
         assert_eq!(
-            jar.store(b"https://sub.example.co.uk/", b"k=v; Domain=example.co.uk", 1000),
+            jar.store(
+                b"https://sub.example.co.uk/",
+                b"k=v; Domain=example.co.uk",
+                1000
+            ),
             CookieOutcome::Stored
         );
 
@@ -3036,7 +3132,11 @@ mod tests {
             CookieOutcome::Stored
         );
         assert_eq!(
-            jar.store(b"https://example.com/app/deep", b"c_deep=2; Path=/app/deep", 1000),
+            jar.store(
+                b"https://example.com/app/deep",
+                b"c_deep=2; Path=/app/deep",
+                1000
+            ),
             CookieOutcome::Stored
         );
 

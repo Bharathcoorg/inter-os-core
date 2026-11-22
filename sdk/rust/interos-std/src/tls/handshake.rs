@@ -11,19 +11,19 @@
 //! - Client Finished generation
 //! Pure `#![no_std]`, zero heap allocations.
 
-use crate::crypto::hkdf::{derive_secret, empty_hash, hkdf_expand_label, hkdf_extract};
-use crate::crypto::hmac::HmacSha256;
-use crate::crypto::sha256::Sha256;
-use crate::crypto::sha384::Sha384;
-use crate::crypto::x25519::{x25519, x25519_base};
 use super::certificate::{
-    declares_advertised_scheme, is_supported_sig_scheme, spki_is_verifiable, transcript_hash_len,
-    enforce_ca_constraints, verify_link, CertificateVerifier, ParsedCertificate,
+    declares_advertised_scheme, enforce_ca_constraints, is_supported_sig_scheme,
+    spki_is_verifiable, transcript_hash_len, verify_link, CertificateVerifier, ParsedCertificate,
     MAX_REFERENCE_IDENTITY_LEN, SUPPORTED_SIG_SCHEMES,
 };
 use super::ed25519::Sha512;
 use super::record::{ContentType, RecordCipher, RECORD_HEADER_LEN};
 use super::TlsError;
+use crate::crypto::hkdf::{derive_secret, empty_hash, hkdf_expand_label, hkdf_extract};
+use crate::crypto::hmac::HmacSha256;
+use crate::crypto::sha256::Sha256;
+use crate::crypto::sha384::Sha384;
+use crate::crypto::x25519::{x25519, x25519_base};
 
 pub const HANDSHAKE_CLIENT_HELLO: u8 = 1;
 pub const HANDSHAKE_SERVER_HELLO: u8 = 2;
@@ -335,7 +335,8 @@ impl HandshakeClient {
 
         // Fill total extensions length
         let total_ext_len = pos - ext_len_offset - 2;
-        body[ext_len_offset..ext_len_offset + 2].copy_from_slice(&(total_ext_len as u16).to_be_bytes());
+        body[ext_len_offset..ext_len_offset + 2]
+            .copy_from_slice(&(total_ext_len as u16).to_be_bytes());
 
         let body_len = pos;
 
@@ -381,7 +382,8 @@ impl HandshakeClient {
             return Err(TlsError::BadHandshakeMessage);
         }
 
-        let hs_len = ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
+        let hs_len =
+            ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
         if payload.len() < 4 + hs_len {
             return Err(TlsError::BadHandshakeMessage);
         }
@@ -449,7 +451,9 @@ impl HandshakeClient {
 
             if ext_type == EXT_SUPPORTED_VERSIONS {
                 // The negotiated version must be one this client advertised.
-                if ext_data.len() == 2 && SUPPORTED_VERSIONS.contains(&u16::from_be_bytes([ext_data[0], ext_data[1]])) {
+                if ext_data.len() == 2
+                    && SUPPORTED_VERSIONS.contains(&u16::from_be_bytes([ext_data[0], ext_data[1]]))
+                {
                     found_version = true;
                 }
             } else if ext_type == EXT_KEY_SHARE {
@@ -459,7 +463,8 @@ impl HandshakeClient {
                     let key_len = u16::from_be_bytes([ext_data[2], ext_data[3]]) as usize;
                     // A server picking a group we never advertised is a hard
                     // rejection: accepted groups == advertised groups.
-                    if SUPPORTED_GROUPS.contains(&group) && key_len == self.server_public_key.len() {
+                    if SUPPORTED_GROUPS.contains(&group) && key_len == self.server_public_key.len()
+                    {
                         // Reject a small-order/zero peer share before any state
                         // changes: the DHE output would carry no entropy, and a
                         // refused handshake must leave no trace.
@@ -469,7 +474,8 @@ impl HandshakeClient {
                         if x25519(&self.client_private_key, &candidate) == [0u8; 32] {
                             return Err(TlsError::KeyDerivationError);
                         }
-                        self.server_public_key.copy_from_slice(&ext_data[4..4 + key_len]);
+                        self.server_public_key
+                            .copy_from_slice(&ext_data[4..4 + key_len]);
                         found_key_share = true;
                     }
                 }
@@ -517,14 +523,36 @@ impl HandshakeClient {
         // Notice we clone/continue transcript:
         // In our Sha256, finalize takes self, but transcript must continue.
         // We will keep a clone of transcript.
-        self.client_handshake_traffic_secret = derive_secret(&handshake_secret, b"c hs traffic", &th);
-        self.server_handshake_traffic_secret = derive_secret(&handshake_secret, b"s hs traffic", &th);
+        self.client_handshake_traffic_secret =
+            derive_secret(&handshake_secret, b"c hs traffic", &th);
+        self.server_handshake_traffic_secret =
+            derive_secret(&handshake_secret, b"s hs traffic", &th);
 
         // Derive keys and IVs
-        hkdf_expand_label(&self.client_handshake_traffic_secret, b"key", &[], &mut self.client_handshake_key);
-        hkdf_expand_label(&self.client_handshake_traffic_secret, b"iv", &[], &mut self.client_handshake_iv);
-        hkdf_expand_label(&self.server_handshake_traffic_secret, b"key", &[], &mut self.server_handshake_key);
-        hkdf_expand_label(&self.server_handshake_traffic_secret, b"iv", &[], &mut self.server_handshake_iv);
+        hkdf_expand_label(
+            &self.client_handshake_traffic_secret,
+            b"key",
+            &[],
+            &mut self.client_handshake_key,
+        );
+        hkdf_expand_label(
+            &self.client_handshake_traffic_secret,
+            b"iv",
+            &[],
+            &mut self.client_handshake_iv,
+        );
+        hkdf_expand_label(
+            &self.server_handshake_traffic_secret,
+            b"key",
+            &[],
+            &mut self.server_handshake_key,
+        );
+        hkdf_expand_label(
+            &self.server_handshake_traffic_secret,
+            b"iv",
+            &[],
+            &mut self.server_handshake_iv,
+        );
 
         // Store handshake secret in temporary slot for master secret derivation later
         // We can store master secret derivation base:
@@ -548,7 +576,8 @@ impl HandshakeClient {
         if payload.len() < 4 || payload[0] != HANDSHAKE_ENCRYPTED_EXTENSIONS {
             return Err(TlsError::BadHandshakeMessage);
         }
-        let hs_len = ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
+        let hs_len =
+            ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
         if payload.len() < 4 + hs_len {
             return Err(TlsError::BadHandshakeMessage);
         }
@@ -585,7 +614,8 @@ impl HandshakeClient {
         if payload.len() < 4 || payload[0] != HANDSHAKE_CERTIFICATE {
             return Err(TlsError::BadHandshakeMessage);
         }
-        let hs_len = ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
+        let hs_len =
+            ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
         if payload.len() < 4 + hs_len {
             return Err(TlsError::BadHandshakeMessage);
         }
@@ -603,7 +633,9 @@ impl HandshakeClient {
         }
 
         // certificate_list length (3 bytes)
-        let list_len = ((body[cur] as usize) << 16) | ((body[cur + 1] as usize) << 8) | (body[cur + 2] as usize);
+        let list_len = ((body[cur] as usize) << 16)
+            | ((body[cur + 1] as usize) << 8)
+            | (body[cur + 2] as usize);
         cur += 3;
         if list_len < 3 || body.len() < cur + list_len {
             return Err(TlsError::BadHandshakeMessage);
@@ -626,7 +658,8 @@ impl HandshakeClient {
             if chain.len() < 3 {
                 return Err(TlsError::BadHandshakeMessage);
             }
-            let cert_len = ((chain[0] as usize) << 16) | ((chain[1] as usize) << 8) | (chain[2] as usize);
+            let cert_len =
+                ((chain[0] as usize) << 16) | ((chain[1] as usize) << 8) | (chain[2] as usize);
             chain = &chain[3..];
             if cert_len == 0 || chain.len() < cert_len {
                 return Err(TlsError::BadHandshakeMessage);
@@ -670,8 +703,7 @@ impl HandshakeClient {
             match previous {
                 None => {
                     // End-entity position carries the reference identity check.
-                    if reference_identity.is_empty()
-                        || !parsed.matches_hostname(reference_identity)
+                    if reference_identity.is_empty() || !parsed.matches_hostname(reference_identity)
                     {
                         return Err(TlsError::CertificateVerificationFailed);
                     }
@@ -733,7 +765,8 @@ impl HandshakeClient {
         if payload.len() < 4 || payload[0] != HANDSHAKE_CERTIFICATE_VERIFY {
             return Err(TlsError::BadHandshakeMessage);
         }
-        let hs_len = ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
+        let hs_len =
+            ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
         if payload.len() < 4 + hs_len {
             return Err(TlsError::BadHandshakeMessage);
         }
@@ -797,7 +830,8 @@ impl HandshakeClient {
         if payload.len() < 4 || payload[0] != HANDSHAKE_FINISHED {
             return Err(TlsError::BadHandshakeMessage);
         }
-        let hs_len = ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
+        let hs_len =
+            ((payload[1] as usize) << 16) | ((payload[2] as usize) << 8) | (payload[3] as usize);
         if payload.len() < 4 + hs_len || hs_len != 32 {
             return Err(TlsError::BadHandshakeMessage);
         }
@@ -806,7 +840,12 @@ impl HandshakeClient {
 
         // Calculate expected verify_data
         let mut finished_key = [0u8; 32];
-        hkdf_expand_label(&self.server_handshake_traffic_secret, b"finished", &[], &mut finished_key);
+        hkdf_expand_label(
+            &self.server_handshake_traffic_secret,
+            b"finished",
+            &[],
+            &mut finished_key,
+        );
         let th = self.transcript.finalize();
         let expected = HmacSha256::compute(&finished_key, &th);
 
@@ -834,13 +873,35 @@ impl HandshakeClient {
         let master_secret = self.client_application_traffic_secret;
         let th = self.transcript.finalize();
 
-        self.client_application_traffic_secret = derive_secret(&master_secret, b"c ap traffic", &th);
-        self.server_application_traffic_secret = derive_secret(&master_secret, b"s ap traffic", &th);
+        self.client_application_traffic_secret =
+            derive_secret(&master_secret, b"c ap traffic", &th);
+        self.server_application_traffic_secret =
+            derive_secret(&master_secret, b"s ap traffic", &th);
 
-        hkdf_expand_label(&self.client_application_traffic_secret, b"key", &[], &mut self.client_application_key);
-        hkdf_expand_label(&self.client_application_traffic_secret, b"iv", &[], &mut self.client_application_iv);
-        hkdf_expand_label(&self.server_application_traffic_secret, b"key", &[], &mut self.server_application_key);
-        hkdf_expand_label(&self.server_application_traffic_secret, b"iv", &[], &mut self.server_application_iv);
+        hkdf_expand_label(
+            &self.client_application_traffic_secret,
+            b"key",
+            &[],
+            &mut self.client_application_key,
+        );
+        hkdf_expand_label(
+            &self.client_application_traffic_secret,
+            b"iv",
+            &[],
+            &mut self.client_application_iv,
+        );
+        hkdf_expand_label(
+            &self.server_application_traffic_secret,
+            b"key",
+            &[],
+            &mut self.server_application_key,
+        );
+        hkdf_expand_label(
+            &self.server_application_traffic_secret,
+            b"iv",
+            &[],
+            &mut self.server_application_iv,
+        );
 
         Ok(())
     }
@@ -853,7 +914,12 @@ impl HandshakeClient {
         out: &mut [u8],
     ) -> Result<usize, TlsError> {
         let mut finished_key = [0u8; 32];
-        hkdf_expand_label(&self.client_handshake_traffic_secret, b"finished", &[], &mut finished_key);
+        hkdf_expand_label(
+            &self.client_handshake_traffic_secret,
+            b"finished",
+            &[],
+            &mut finished_key,
+        );
 
         let th = self.transcript.finalize();
         let verify_data = HmacSha256::compute(&finished_key, &th);

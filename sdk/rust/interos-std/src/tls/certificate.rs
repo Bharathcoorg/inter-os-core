@@ -23,12 +23,10 @@ pub const SIG_SCHEME_RSA_PKCS1_SHA256: u16 = 0x0401;
 pub const ED25519_SPKI_OID: [u8; 3] = [0x2b, 0x65, 0x70];
 /// `rsaEncryption` (`1.2.840.113549.1.1.1`) — the algorithm a certificate names
 /// when its key is an RSA public key.
-pub const RSA_ENCRYPTION_OID: [u8; 9] =
-    [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+pub const RSA_ENCRYPTION_OID: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
 /// `sha256WithRSAEncryption` (`1.2.840.113549.1.1.11`) — the name almost every
 /// public CA signs with, including every link of the ISRG chain.
-pub const SHA256_WITH_RSA_OID: [u8; 9] =
-    [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b];
+pub const SHA256_WITH_RSA_OID: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b];
 /// `ecPublicKey` (`1.2.840.10045.2.1`).
 pub const EC_PUBLIC_KEY_OID: [u8; 7] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
 /// `prime256v1` (`1.2.840.10045.3.1.7`) — the curve an EC `AlgorithmIdentifier`
@@ -134,8 +132,7 @@ pub const fn transcript_hash_len(scheme: u16) -> Option<usize> {
 /// permissive verifier accept an entry that declares an algorithm no code here
 /// implements.
 pub fn declares_advertised_scheme(cert: &ParsedCertificate<'_>) -> bool {
-    scheme_for_sig_oid(cert.sig_alg_oid)
-        .is_some_and(|scheme| is_supported_sig_scheme(scheme))
+    scheme_for_sig_oid(cert.sig_alg_oid).is_some_and(|scheme| is_supported_sig_scheme(scheme))
 }
 
 /// True when `cert` carries a public key this client can verify a signature with.
@@ -146,7 +143,8 @@ pub fn declares_advertised_scheme(cert: &ParsedCertificate<'_>) -> bool {
 /// key later, in a place that says nothing about why. The listed curves are the
 /// ones with an implementation behind them, not the ones ASN.1 can spell.
 pub fn spki_is_verifiable(cert: &ParsedCertificate<'_>) -> bool {
-    if cert.spki_algorithm_oid == ED25519_SPKI_OID || cert.spki_algorithm_oid == RSA_ENCRYPTION_OID {
+    if cert.spki_algorithm_oid == ED25519_SPKI_OID || cert.spki_algorithm_oid == RSA_ENCRYPTION_OID
+    {
         return true;
     }
     cert.spki_algorithm_oid == EC_PUBLIC_KEY_OID
@@ -157,9 +155,7 @@ pub fn spki_is_verifiable(cert: &ParsedCertificate<'_>) -> bool {
 fn scheme_key_algorithm(scheme: u16) -> &'static [u8] {
     match scheme {
         SIG_SCHEME_ED25519 => &ED25519_SPKI_OID,
-        SIG_SCHEME_ECDSA_SECP256R1_SHA256 | SIG_SCHEME_ECDSA_SECP384R1_SHA384 => {
-            &EC_PUBLIC_KEY_OID
-        }
+        SIG_SCHEME_ECDSA_SECP256R1_SHA256 | SIG_SCHEME_ECDSA_SECP384R1_SHA384 => &EC_PUBLIC_KEY_OID,
         SIG_SCHEME_RSA_PSS_RSAE_SHA256 | SIG_SCHEME_RSA_PKCS1_SHA256 => &RSA_ENCRYPTION_OID,
         _ => &[],
     }
@@ -211,9 +207,17 @@ pub fn verify_signed_by(
             // Each curve gets the scalar width its own order needs, and no other
             // curve's: a 48-byte `r` is not a P-256 scalar wearing a hat.
             let verified = if scheme == SIG_SCHEME_ECDSA_SECP384R1_SHA384 {
-                crate::crypto::p384::verify(bytes, message, &decode_ecdsa_signature::<96>(signature)?)
+                crate::crypto::p384::verify(
+                    bytes,
+                    message,
+                    &decode_ecdsa_signature::<96>(signature)?,
+                )
             } else {
-                crate::crypto::p256::verify(bytes, message, &decode_ecdsa_signature::<64>(signature)?)
+                crate::crypto::p256::verify(
+                    bytes,
+                    message,
+                    &decode_ecdsa_signature::<64>(signature)?,
+                )
             };
             if verified {
                 Ok(())
@@ -226,7 +230,12 @@ pub fn verify_signed_by(
             let verified = if scheme == SIG_SCHEME_RSA_PSS_RSAE_SHA256 {
                 crate::crypto::rsa::verify_pss_sha256(key.modulus, key.exponent, signature, message)
             } else {
-                crate::crypto::rsa::verify_pkcs1_sha256(key.modulus, key.exponent, signature, message)
+                crate::crypto::rsa::verify_pkcs1_sha256(
+                    key.modulus,
+                    key.exponent,
+                    signature,
+                    message,
+                )
             };
             if verified {
                 Ok(())
@@ -641,10 +650,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year_of_era = y - era * 400;
     let month_of_year = if month > 2 { month - 3 } else { month + 9 };
     let day_of_year = (153 * month_of_year + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365
-        + year_of_era / 4
-        - year_of_era / 100
-        + day_of_year;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
 }
 
@@ -656,7 +662,13 @@ fn days_in_month(year: i64, month: i64) -> i64 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap_year(year) { 29 } else { 28 },
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 0,
     }
 }
@@ -942,10 +954,10 @@ impl<'a> ParsedCertificate<'a> {
     /// a deliberately malformed certificate.
     pub fn check_validity_at(&self, now_unix: i64) -> Result<(), TlsError> {
         self.check_validity()?;
-        let not_before = asn1_time_to_unix(self.not_before)
-            .ok_or(TlsError::CertificateVerificationFailed)?;
-        let not_after = asn1_time_to_unix(self.not_after)
-            .ok_or(TlsError::CertificateVerificationFailed)?;
+        let not_before =
+            asn1_time_to_unix(self.not_before).ok_or(TlsError::CertificateVerificationFailed)?;
+        let not_after =
+            asn1_time_to_unix(self.not_after).ok_or(TlsError::CertificateVerificationFailed)?;
         if now_unix < not_before {
             return Err(TlsError::CertificateNotYetValid);
         }
@@ -1519,7 +1531,9 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
         // Hostname validation against reference identifier (SNI).
         // Must fail closed if expected_hostname is missing or fails to match;
         // no silent skipping via an unverified Option path.
-        let expected_host = self.expected_hostname.ok_or(TlsError::CertificateVerificationFailed)?;
+        let expected_host = self
+            .expected_hostname
+            .ok_or(TlsError::CertificateVerificationFailed)?;
         if !cert.matches_hostname(expected_host) {
             return Err(TlsError::CertificateVerificationFailed);
         }
@@ -1634,14 +1648,7 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
         // like one, so a server cannot present an RSA leaf and then sign the
         // transcript as if it were ECDSA. The algorithm OID is left to the chain
         // walk, which read it from the certificate this key came from.
-        verify_signed_by(
-            public_key,
-            &[],
-            &[],
-            algorithm,
-            context_and_hash,
-            signature,
-        )
+        verify_signed_by(public_key, &[], &[], algorithm, context_and_hash, signature)
     }
 }
 

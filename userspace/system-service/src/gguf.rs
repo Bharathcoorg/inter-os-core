@@ -195,8 +195,14 @@ pub enum GgufError {
 /// with sequential chunk buffering, enabling bounded parsing of arbitrarily large models
 /// without consuming unbounded memory.
 pub enum GgufStream<'a> {
-    Slice { data: &'a [u8], pos: usize },
-    File { fd: u32, pos: usize },
+    Slice {
+        data: &'a [u8],
+        pos: usize,
+    },
+    File {
+        fd: u32,
+        pos: usize,
+    },
     /// One source read through a fixed window of `METADATA_WINDOW_BYTES`.
     ///
     /// WHY the walk that owns it uses this and not a plain `File`: the reader that
@@ -353,7 +359,8 @@ impl<'a> GgufStream<'a> {
                     let remaining = req_len - filled;
                     let n = std::fs_read_at(
                         *fd,
-                        pos.checked_add(filled).ok_or(GgufError::ArithmeticOverflow)? as u64,
+                        pos.checked_add(filled)
+                            .ok_or(GgufError::ArithmeticOverflow)? as u64,
                         &mut out[filled..],
                     )
                     .map_err(|_| GgufError::ReadFailed)?;
@@ -373,7 +380,9 @@ impl<'a> GgufStream<'a> {
                     }
                     filled = filled.checked_add(n).ok_or(GgufError::ArithmeticOverflow)?;
                 }
-                *pos = pos.checked_add(req_len).ok_or(GgufError::ArithmeticOverflow)?;
+                *pos = pos
+                    .checked_add(req_len)
+                    .ok_or(GgufError::ArithmeticOverflow)?;
                 Ok(())
             }
             Self::Buffered {
@@ -426,7 +435,9 @@ impl<'a> GgufStream<'a> {
                 // and where the walk is about to report a verdict about the file
                 // instead, `source_ends_early` asks the one question the step can no
                 // longer answer on its own.
-                *pos = pos.checked_add(count).ok_or(GgufError::ArithmeticOverflow)?;
+                *pos = pos
+                    .checked_add(count)
+                    .ok_or(GgufError::ArithmeticOverflow)?;
                 Ok(())
             }
             Self::Buffered {
@@ -666,116 +677,155 @@ pub fn skip_metadata_value(buf: &[u8], offset: &mut usize, val_type: u32) -> Res
         0 | 1 | 7 => {
             // Uint8, Int8, Bool: 1 byte
             let needed = (*offset).checked_add(1).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+            if needed > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
             *offset += 1;
         }
         2 | 3 => {
             // Uint16, Int16: 2 bytes
             let needed = (*offset).checked_add(2).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+            if needed > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
             *offset += 2;
         }
         4 | 5 | 6 => {
             // Uint32, Int32, Float32: 4 bytes
             let needed = (*offset).checked_add(4).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+            if needed > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
             *offset += 4;
         }
         10 | 11 | 12 => {
             // Uint64, Int64, Float64: 8 bytes
             let needed = (*offset).checked_add(8).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+            if needed > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
             *offset += 8;
         }
         8 => {
             // String: 8 bytes length + string bytes
             let needed = (*offset).checked_add(8).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+            if needed > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
             let str_len = u64::from_le_bytes([
-                buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
-                buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
+                buf[*offset],
+                buf[*offset + 1],
+                buf[*offset + 2],
+                buf[*offset + 3],
+                buf[*offset + 4],
+                buf[*offset + 5],
+                buf[*offset + 6],
+                buf[*offset + 7],
             ]) as usize;
             *offset += 8;
-            let needed = (*offset).checked_add(str_len).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+            let needed = (*offset)
+                .checked_add(str_len)
+                .ok_or(GgufError::BufferTooShort)?;
+            if needed > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
             *offset += str_len;
         }
         9 => {
             // Array: 4 bytes element_type + 8 bytes element_count + elements
             let needed = (*offset).checked_add(12).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+            if needed > buf.len() {
+                return Err(GgufError::BufferTooShort);
+            }
             let elem_type = u32::from_le_bytes([
-                buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+                buf[*offset],
+                buf[*offset + 1],
+                buf[*offset + 2],
+                buf[*offset + 3],
             ]);
             let elem_count = u64::from_le_bytes([
-                buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
-                buf[*offset + 8], buf[*offset + 9], buf[*offset + 10], buf[*offset + 11],
+                buf[*offset + 4],
+                buf[*offset + 5],
+                buf[*offset + 6],
+                buf[*offset + 7],
+                buf[*offset + 8],
+                buf[*offset + 9],
+                buf[*offset + 10],
+                buf[*offset + 11],
             ]) as usize;
             *offset += 12;
 
             match elem_type {
                 0 | 1 | 7 => {
                     let total = elem_count;
-                    let needed = (*offset).checked_add(total).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+                    let needed = (*offset)
+                        .checked_add(total)
+                        .ok_or(GgufError::BufferTooShort)?;
+                    if needed > buf.len() {
+                        return Err(GgufError::BufferTooShort);
+                    }
                     *offset += total;
                 }
                 2 | 3 => {
-                    let total = elem_count.checked_mul(2).ok_or(GgufError::InvalidMetadata)?;
-                    let needed = (*offset).checked_add(total).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+                    let total = elem_count
+                        .checked_mul(2)
+                        .ok_or(GgufError::InvalidMetadata)?;
+                    let needed = (*offset)
+                        .checked_add(total)
+                        .ok_or(GgufError::BufferTooShort)?;
+                    if needed > buf.len() {
+                        return Err(GgufError::BufferTooShort);
+                    }
                     *offset += total;
                 }
                 4 | 5 | 6 => {
-                    let total = elem_count.checked_mul(4).ok_or(GgufError::InvalidMetadata)?;
-                    let needed = (*offset).checked_add(total).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+                    let total = elem_count
+                        .checked_mul(4)
+                        .ok_or(GgufError::InvalidMetadata)?;
+                    let needed = (*offset)
+                        .checked_add(total)
+                        .ok_or(GgufError::BufferTooShort)?;
+                    if needed > buf.len() {
+                        return Err(GgufError::BufferTooShort);
+                    }
                     *offset += total;
                 }
                 10 | 11 | 12 => {
-                    let total = elem_count.checked_mul(8).ok_or(GgufError::InvalidMetadata)?;
-                    let needed = (*offset).checked_add(total).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+                    let total = elem_count
+                        .checked_mul(8)
+                        .ok_or(GgufError::InvalidMetadata)?;
+                    let needed = (*offset)
+                        .checked_add(total)
+                        .ok_or(GgufError::BufferTooShort)?;
+                    if needed > buf.len() {
+                        return Err(GgufError::BufferTooShort);
+                    }
                     *offset += total;
                 }
                 8 => {
                     // Array of strings
                     for _ in 0..elem_count {
                         let needed = (*offset).checked_add(8).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+                        if needed > buf.len() {
+                            return Err(GgufError::BufferTooShort);
+                        }
                         let s_len = u64::from_le_bytes([
-                            buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
-                            buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
+                            buf[*offset],
+                            buf[*offset + 1],
+                            buf[*offset + 2],
+                            buf[*offset + 3],
+                            buf[*offset + 4],
+                            buf[*offset + 5],
+                            buf[*offset + 6],
+                            buf[*offset + 7],
                         ]) as usize;
                         *offset += 8;
-                        let needed = (*offset).checked_add(s_len).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+                        let needed = (*offset)
+                            .checked_add(s_len)
+                            .ok_or(GgufError::BufferTooShort)?;
+                        if needed > buf.len() {
+                            return Err(GgufError::BufferTooShort);
+                        }
                         *offset += s_len;
                     }
                 }
@@ -791,12 +841,18 @@ pub fn skip_metadata_value(buf: &[u8], offset: &mut usize, val_type: u32) -> Res
 pub fn skip_all_kv_pairs(buf: &[u8], offset: &mut usize, kv_count: u64) -> Result<(), GgufError> {
     for _ in 0..kv_count {
         let needed = (*offset).checked_add(8).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+        if needed > buf.len() {
+            return Err(GgufError::BufferTooShort);
+        }
         let key_len = u64::from_le_bytes([
-            buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
-            buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
+            buf[*offset],
+            buf[*offset + 1],
+            buf[*offset + 2],
+            buf[*offset + 3],
+            buf[*offset + 4],
+            buf[*offset + 5],
+            buf[*offset + 6],
+            buf[*offset + 7],
         ]) as usize;
         *offset += 8;
 
@@ -813,7 +869,10 @@ pub fn skip_all_kv_pairs(buf: &[u8], offset: &mut usize, kv_count: u64) -> Resul
         *offset += key_len;
 
         let val_type = u32::from_le_bytes([
-            buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+            buf[*offset],
+            buf[*offset + 1],
+            buf[*offset + 2],
+            buf[*offset + 3],
         ]);
         *offset += 4;
 
@@ -825,12 +884,18 @@ pub fn skip_all_kv_pairs(buf: &[u8], offset: &mut usize, kv_count: u64) -> Resul
 /// Parses a single GGUF tensor info entry from a byte buffer at `offset`, advancing `offset`.
 pub fn parse_tensor_info(buf: &[u8], offset: &mut usize) -> Result<GgufTensorInfo, GgufError> {
     let needed = (*offset).checked_add(8).ok_or(GgufError::BufferTooShort)?;
-   if needed > buf.len() {
-       return Err(GgufError::BufferTooShort);
-   }
+    if needed > buf.len() {
+        return Err(GgufError::BufferTooShort);
+    }
     let name_len = u64::from_le_bytes([
-        buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
-        buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
+        buf[*offset],
+        buf[*offset + 1],
+        buf[*offset + 2],
+        buf[*offset + 3],
+        buf[*offset + 4],
+        buf[*offset + 5],
+        buf[*offset + 6],
+        buf[*offset + 7],
     ]) as usize;
     *offset += 8;
 
@@ -848,12 +913,17 @@ pub fn parse_tensor_info(buf: &[u8], offset: &mut usize) -> Result<GgufTensorInf
     *offset += name_len;
 
     let n_dims = u32::from_le_bytes([
-        buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+        buf[*offset],
+        buf[*offset + 1],
+        buf[*offset + 2],
+        buf[*offset + 3],
     ]);
     *offset += 4;
     info.n_dimensions = n_dims;
 
-    let dims_bytes_len = (n_dims as usize).checked_mul(8).ok_or(GgufError::InvalidMetadata)?;
+    let dims_bytes_len = (n_dims as usize)
+        .checked_mul(8)
+        .ok_or(GgufError::InvalidMetadata)?;
     let needed = dims_bytes_len
         .checked_add(4 + 8)
         .and_then(|n| n.checked_add(*offset))
@@ -864,23 +934,36 @@ pub fn parse_tensor_info(buf: &[u8], offset: &mut usize) -> Result<GgufTensorInf
 
     for d in 0..(n_dims as usize).min(4) {
         let dim_val = u64::from_le_bytes([
-            buf[*offset + d * 8], buf[*offset + d * 8 + 1],
-            buf[*offset + d * 8 + 2], buf[*offset + d * 8 + 3],
-            buf[*offset + d * 8 + 4], buf[*offset + d * 8 + 5],
-            buf[*offset + d * 8 + 6], buf[*offset + d * 8 + 7],
+            buf[*offset + d * 8],
+            buf[*offset + d * 8 + 1],
+            buf[*offset + d * 8 + 2],
+            buf[*offset + d * 8 + 3],
+            buf[*offset + d * 8 + 4],
+            buf[*offset + d * 8 + 5],
+            buf[*offset + d * 8 + 6],
+            buf[*offset + d * 8 + 7],
         ]);
         info.dimensions[d] = dim_val;
     }
     *offset += dims_bytes_len;
 
     info.tensor_type = u32::from_le_bytes([
-        buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
+        buf[*offset],
+        buf[*offset + 1],
+        buf[*offset + 2],
+        buf[*offset + 3],
     ]);
     *offset += 4;
 
     info.offset = u64::from_le_bytes([
-        buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
-        buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
+        buf[*offset],
+        buf[*offset + 1],
+        buf[*offset + 2],
+        buf[*offset + 3],
+        buf[*offset + 4],
+        buf[*offset + 5],
+        buf[*offset + 6],
+        buf[*offset + 7],
     ]);
     *offset += 8;
 
@@ -890,9 +973,9 @@ pub fn parse_tensor_info(buf: &[u8], offset: &mut usize) -> Result<GgufTensorInf
 /// Zero-allocation helper to skip a single metadata value in a streaming GGUF reader.
 pub fn skip_metadata_value_stream(stream: &mut GgufStream, val_type: u32) -> Result<(), GgufError> {
     match val_type {
-        0 | 1 | 7 => stream.skip(1), // Uint8, Int8, Bool: 1 byte
-        2 | 3 => stream.skip(2),     // Uint16, Int16: 2 bytes
-        4 | 5 | 6 => stream.skip(4), // Uint32, Int32, Float32: 4 bytes
+        0 | 1 | 7 => stream.skip(1),    // Uint8, Int8, Bool: 1 byte
+        2 | 3 => stream.skip(2),        // Uint16, Int16: 2 bytes
+        4 | 5 | 6 => stream.skip(4),    // Uint32, Int32, Float32: 4 bytes
         10 | 11 | 12 => stream.skip(8), // Uint64, Int64, Float64: 8 bytes
         8 => {
             // String: 8 bytes length + string bytes
@@ -906,15 +989,21 @@ pub fn skip_metadata_value_stream(stream: &mut GgufStream, val_type: u32) -> Res
             match elem_type {
                 0 | 1 | 7 => stream.skip(elem_count),
                 2 | 3 => {
-                    let total = elem_count.checked_mul(2).ok_or(GgufError::ArithmeticOverflow)?;
+                    let total = elem_count
+                        .checked_mul(2)
+                        .ok_or(GgufError::ArithmeticOverflow)?;
                     stream.skip(total)
                 }
                 4 | 5 | 6 => {
-                    let total = elem_count.checked_mul(4).ok_or(GgufError::ArithmeticOverflow)?;
+                    let total = elem_count
+                        .checked_mul(4)
+                        .ok_or(GgufError::ArithmeticOverflow)?;
                     stream.skip(total)
                 }
                 10 | 11 | 12 => {
-                    let total = elem_count.checked_mul(8).ok_or(GgufError::ArithmeticOverflow)?;
+                    let total = elem_count
+                        .checked_mul(8)
+                        .ok_or(GgufError::ArithmeticOverflow)?;
                     stream.skip(total)
                 }
                 8 => {
@@ -1523,9 +1612,7 @@ pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, 
             info.vocab_size = u32::try_from(elem_count).ok();
             if !info.is_complete() {
                 if elem_count > MAX_STRING_ARRAY_ELEMENTS as u64 {
-                    let missing = info
-                        .missing_key()
-                        .expect("incomplete by the branch above");
+                    let missing = info.missing_key().expect("incomplete by the branch above");
                     return Err(GgufError::MissingMetadata(missing, info));
                 }
                 for _ in 0..elem_count {
@@ -1564,18 +1651,14 @@ pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, 
                 b"freq_base_swa" => info.rope_theta_swa = Some(read_epsilon(stream, val_type)?),
                 b"key_length_swa" => info.head_dim_swa = Some(read_count(stream, val_type)?),
                 b"value_length" => info.value_length = Some(read_count(stream, val_type)?),
-                b"value_length_swa" => {
-                    info.value_length_swa = Some(read_count(stream, val_type)?)
-                }
+                b"value_length_swa" => info.value_length_swa = Some(read_count(stream, val_type)?),
                 b"dimension_count" => {
                     info.rope_dimension_count = Some(read_count(stream, val_type)?)
                 }
                 b"dimension_count_swa" => {
                     info.rope_dimension_count_swa = Some(read_count(stream, val_type)?)
                 }
-                b"shared_kv_layers" => {
-                    info.shared_kv_layers = Some(read_count(stream, val_type)?)
-                }
+                b"shared_kv_layers" => info.shared_kv_layers = Some(read_count(stream, val_type)?),
                 b"embedding_length_per_layer_input" => {
                     info.embedding_length_per_layer_input = Some(read_count(stream, val_type)?)
                 }
@@ -1583,19 +1666,29 @@ pub fn read_model_info_stream(stream: &mut GgufStream) -> Result<GgufModelInfo, 
                     info.embedding_length_out = Some(read_count(stream, val_type)?)
                 }
                 b"interos.resource.peak_scratch_bytes" => {
-                    info.resource_manifest.get_or_insert(crate::ResourceManifest::default()).peak_scratch_bytes = read_count(stream, val_type)?.into();
+                    info.resource_manifest
+                        .get_or_insert(crate::ResourceManifest::default())
+                        .peak_scratch_bytes = read_count(stream, val_type)?.into();
                 }
                 b"interos.resource.kv_cache_bytes" => {
-                    info.resource_manifest.get_or_insert(crate::ResourceManifest::default()).kv_cache_bytes = read_count(stream, val_type)?.into();
+                    info.resource_manifest
+                        .get_or_insert(crate::ResourceManifest::default())
+                        .kv_cache_bytes = read_count(stream, val_type)?.into();
                 }
                 b"interos.resource.peak_activations_bytes" => {
-                    info.resource_manifest.get_or_insert(crate::ResourceManifest::default()).peak_activations_bytes = read_count(stream, val_type)?.into();
+                    info.resource_manifest
+                        .get_or_insert(crate::ResourceManifest::default())
+                        .peak_activations_bytes = read_count(stream, val_type)?.into();
                 }
                 b"interos.resource.tensor_alignment" => {
-                    info.resource_manifest.get_or_insert(crate::ResourceManifest::default()).tensor_alignment = read_count(stream, val_type)? as u32;
+                    info.resource_manifest
+                        .get_or_insert(crate::ResourceManifest::default())
+                        .tensor_alignment = read_count(stream, val_type)? as u32;
                 }
                 b"interos.resource.quantization_format" => {
-                    info.resource_manifest.get_or_insert(crate::ResourceManifest::default()).quantization_format = read_count(stream, val_type)? as u32;
+                    info.resource_manifest
+                        .get_or_insert(crate::ResourceManifest::default())
+                        .quantization_format = read_count(stream, val_type)? as u32;
                 }
                 b"final_logit_softcapping" => {
                     info.final_logit_softcapping = Some(read_epsilon(stream, val_type)?)
@@ -1778,9 +1871,7 @@ impl GgufTokenizerInfo {
     pub fn vocab_size(&self) -> Option<u32> {
         match self.vocab {
             VocabReading::Counted { elements } => Some(elements),
-            VocabReading::Truncated {
-                stated,
-            } => Some(stated),
+            VocabReading::Truncated { stated } => Some(stated),
             _ => None,
         }
     }
@@ -1816,7 +1907,10 @@ impl GgufTokenizerInfo {
     pub fn active_chat_template(&self) -> (&[u8], TemplateSource) {
         match self.chat_template() {
             Some(template) => (template, TemplateSource::FromFile),
-            None => (DEFAULT_CHAT_TEMPLATE.as_bytes(), TemplateSource::BuiltInDefault),
+            None => (
+                DEFAULT_CHAT_TEMPLATE.as_bytes(),
+                TemplateSource::BuiltInDefault,
+            ),
         }
     }
 
@@ -1991,21 +2085,13 @@ fn walk_tokenizer_kv(
         if key_len == 0 || key_len > MAX_METADATA_KEY_LEN {
             tokenizer_pair!(stream.skip(key_len), KEY_PAIR, info);
             let val_type = tokenizer_pair!(stream.read_u32(), KEY_PAIR, info);
-            tokenizer_pair!(
-                skip_metadata_value_stream(stream, val_type),
-                KEY_PAIR,
-                info
-            );
+            tokenizer_pair!(skip_metadata_value_stream(stream, val_type), KEY_PAIR, info);
             info.pairs_walked = index + 1;
             continue;
         }
 
         let mut key_buf = [0u8; MAX_METADATA_KEY_LEN];
-        tokenizer_pair!(
-            stream.read_exact(&mut key_buf[..key_len]),
-            KEY_PAIR,
-            info
-        );
+        tokenizer_pair!(stream.read_exact(&mut key_buf[..key_len]), KEY_PAIR, info);
         let key = &key_buf[..key_len];
         let val_type = tokenizer_pair!(stream.read_u32(), KEY_PAIR, info);
 
@@ -2034,9 +2120,7 @@ fn walk_tokenizer_kv(
                     match e {
                         GgufError::BufferTooShort | GgufError::ReadFailed => {
                             info.truncated_in = Some(KEY_TOKENS);
-                            info.vocab = VocabReading::Truncated {
-                                stated: elements,
-                            };
+                            info.vocab = VocabReading::Truncated { stated: elements };
                             info.pairs_walked = index + 1;
                             return Ok(());
                         }
@@ -2063,7 +2147,11 @@ fn walk_tokenizer_kv(
                 info
             ));
         } else if key == KEY_ADD_BOS {
-            info.add_bos_token = Some(tokenizer_pair!(read_bool(stream, val_type), KEY_ADD_BOS, info));
+            info.add_bos_token = Some(tokenizer_pair!(
+                read_bool(stream, val_type),
+                KEY_ADD_BOS,
+                info
+            ));
         } else if key == KEY_PRE {
             info.pre_reading = tokenizer_pair!(
                 read_bounded_string(stream, val_type, &mut info.pre),
@@ -2077,11 +2165,7 @@ fn walk_tokenizer_kv(
                 info
             );
         } else {
-            tokenizer_pair!(
-                skip_metadata_value_stream(stream, val_type),
-                KEY_PAIR,
-                info
-            );
+            tokenizer_pair!(skip_metadata_value_stream(stream, val_type), KEY_PAIR, info);
         }
 
         info.pairs_walked = index + 1;
@@ -2097,7 +2181,9 @@ pub fn parse_tensor_info_stream(stream: &mut GgufStream) -> Result<GgufTensorInf
     let copy_len = name_len.min(MAX_TENSOR_NAME_LEN);
     stream.read_exact(&mut info.name[..copy_len])?;
     if name_len > copy_len {
-        let rem = name_len.checked_sub(copy_len).ok_or(GgufError::ArithmeticOverflow)?;
+        let rem = name_len
+            .checked_sub(copy_len)
+            .ok_or(GgufError::ArithmeticOverflow)?;
         stream.skip(rem)?;
     }
 
@@ -2298,9 +2384,7 @@ pub fn tensor_byte_size(
                 return Err(GgufError::CorruptedTensor);
             }
             let blocks = total_elements / 32;
-            blocks
-                .checked_mul(18)
-                .ok_or(GgufError::ArithmeticOverflow)
+            blocks.checked_mul(18).ok_or(GgufError::ArithmeticOverflow)
         }
         8 => {
             // Q8_0: 32 elements per 34 bytes
@@ -2308,9 +2392,7 @@ pub fn tensor_byte_size(
                 return Err(GgufError::CorruptedTensor);
             }
             let blocks = total_elements / 32;
-            blocks
-                .checked_mul(34)
-                .ok_or(GgufError::ArithmeticOverflow)
+            blocks.checked_mul(34).ok_or(GgufError::ArithmeticOverflow)
         }
         12 => {
             // Q4_K: 256 elements per 144 bytes
@@ -2318,9 +2400,7 @@ pub fn tensor_byte_size(
                 return Err(GgufError::CorruptedTensor);
             }
             let blocks = total_elements / 256;
-            blocks
-                .checked_mul(144)
-                .ok_or(GgufError::ArithmeticOverflow)
+            blocks.checked_mul(144).ok_or(GgufError::ArithmeticOverflow)
         }
         _ => Err(GgufError::InvalidMetadata),
     }
@@ -2359,8 +2439,14 @@ pub fn find_metadata_string<'a>(buf: &'a [u8], target_key: &[u8]) -> Option<&'a 
             return None;
         }
         let key_len = u64::from_le_bytes([
-            buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
-            buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
+            buf[offset],
+            buf[offset + 1],
+            buf[offset + 2],
+            buf[offset + 3],
+            buf[offset + 4],
+            buf[offset + 5],
+            buf[offset + 6],
+            buf[offset + 7],
         ]) as usize;
         offset += 8;
 
@@ -2375,7 +2461,10 @@ pub fn find_metadata_string<'a>(buf: &'a [u8], target_key: &[u8]) -> Option<&'a 
         offset += key_len;
 
         let val_type = u32::from_le_bytes([
-            buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
+            buf[offset],
+            buf[offset + 1],
+            buf[offset + 2],
+            buf[offset + 3],
         ]);
         offset += 4;
 
@@ -2384,11 +2473,19 @@ pub fn find_metadata_string<'a>(buf: &'a [u8], target_key: &[u8]) -> Option<&'a 
                 return None;
             }
             let str_len = u64::from_le_bytes([
-                buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
-                buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+                buf[offset + 4],
+                buf[offset + 5],
+                buf[offset + 6],
+                buf[offset + 7],
             ]) as usize;
             let data_start = offset.checked_add(8)?;
-            let end = data_start.checked_add(str_len).filter(|e| *e <= buf.len())?;
+            let end = data_start
+                .checked_add(str_len)
+                .filter(|e| *e <= buf.len())?;
             return Some(&buf[data_start..end]);
         }
 
@@ -2718,6 +2815,46 @@ pub(crate) mod tests {
         assert_eq!(header.version, 3);
         assert_eq!(header.tensor_count, 144);
         assert_eq!(header.kv_count, 32);
+    }
+
+    #[test]
+    fn test_hostile_u64_lengths_are_refused_not_wrapped() {
+        // Regression (15119a4d / 0ee7820f): a metadata key length or array
+        // element count near u64::MAX used to wrap the bounds check in release
+        // builds and read out of bounds. The stream must fail closed with an
+        // explicit overflow/skip error instead of trusting the stated length.
+        use super::skip_all_kv_pairs_stream;
+
+        let kv_count = 1u64;
+        // key_len = u64::MAX: `offset + key_len` overflows usize.
+        let mut buf = [0u8; 12];
+        buf[0..8].copy_from_slice(&u64::MAX.to_le_bytes());
+        buf[8..12].copy_from_slice(&0u32.to_le_bytes()); // val_type = UINT64
+
+        let mut stream = GgufStream::from_slice(&buf);
+        assert!(
+            skip_all_kv_pairs_stream(&mut stream, kv_count).is_err(),
+            "u64::MAX key length must be refused, never wrapped"
+        );
+
+        // Same class: an array whose element_count*u64 overflows usize.
+        // Same class: an array whose element_count*u64 overflows usize.
+        let mut buf2 = [0u8; 8 + 1 + 4 + 4 + 8];
+        let mut o = 0usize;
+        buf2[o..o + 8].copy_from_slice(&1u64.to_le_bytes()); // key_len = 1
+        o += 8;
+        buf2[o] = b'a';
+        o += 1;
+        buf2[o..o + 4].copy_from_slice(&9u32.to_le_bytes()); // ARRAY type
+        o += 4;
+        buf2[o..o + 4].copy_from_slice(&8u32.to_le_bytes()); // elem type UINT64
+        o += 4;
+        buf2[o..o + 8].copy_from_slice(&u64::MAX.to_le_bytes()); // elem count
+        let mut stream2 = GgufStream::from_slice(&buf2);
+        assert!(
+            skip_all_kv_pairs_stream(&mut stream2, 1).is_err(),
+            "overflowing array element count must be refused"
+        );
     }
 
     #[test]
@@ -3087,7 +3224,13 @@ pub(crate) mod tests {
 
     /// Writes a string array declaring `count` elements, whose element bytes the
     /// caller may leave unwritten when the reader is expected to stop at it.
-    pub(crate) fn put_vocab(buf: &mut [u8], off: &mut usize, key: &[u8], count: u64, tokens: &[&[u8]]) {
+    pub(crate) fn put_vocab(
+        buf: &mut [u8],
+        off: &mut usize,
+        key: &[u8],
+        count: u64,
+        tokens: &[&[u8]],
+    ) {
         put_key(buf, off, key);
         put_u32_at(buf, off, 9);
         put_u32_at(buf, off, 8);
@@ -3173,7 +3316,12 @@ pub(crate) mod tests {
         put_count(&mut buf, &mut off, b"gemma2.attention.head_count", 2);
         put_count(&mut buf, &mut off, b"gemma2.attention.head_count_kv", 1);
         put_count(&mut buf, &mut off, b"gemma2.attention.head_length", 32);
-        put_float(&mut buf, &mut off, b"gemma2.attention.layer_norm_rms_epsilon", 1e-6);
+        put_float(
+            &mut buf,
+            &mut off,
+            b"gemma2.attention.layer_norm_rms_epsilon",
+            1e-6,
+        );
         // The vocabulary is declared as 290 entries and none of them are written:
         // the reader takes the width from the array's header and stops, so a file
         // whose token list is absent past that header still configures the engine.
@@ -3229,7 +3377,12 @@ pub(crate) mod tests {
     fn test_read_model_info_configures_a_published_embedding_model() {
         let mut buf = [0u8; 1024];
         let mut off = begin_file(&mut buf, 10);
-        put_string(&mut buf, &mut off, b"general.architecture", b"gemma-embedding");
+        put_string(
+            &mut buf,
+            &mut off,
+            b"general.architecture",
+            b"gemma-embedding",
+        );
         put_count(&mut buf, &mut off, b"gemma-embedding.embedding_length", 768);
         put_count(
             &mut buf,
@@ -3279,7 +3432,8 @@ pub(crate) mod tests {
         // the shape -- so this is the difference between pricing the published
         // model and refusing it for a number the reader failed to pick up.
         assert_eq!(
-            info.num_kv_heads, Some(1),
+            info.num_kv_heads,
+            Some(1),
             "head_count_kv is the file's own"
         );
         assert_eq!(info.head_dim, Some(256), "key_length is the head width");
@@ -3320,7 +3474,10 @@ pub(crate) mod tests {
                 assert_eq!(partial.hidden_dim, Some(64));
                 assert_eq!(partial.vocab_size, Some(2));
             }
-            other => panic!("a file that states no feed-forward width must say so, got {:?}", other),
+            other => panic!(
+                "a file that states no feed-forward width must say so, got {:?}",
+                other
+            ),
         }
     }
 
@@ -3341,7 +3498,10 @@ pub(crate) mod tests {
                 assert_eq!(key, "<arch>.feed_forward_length");
                 assert_eq!(partial.vocab_size, Some(256_000));
             }
-            other => panic!("256,000 tokens must not be walked to reach one key, got {:?}", other),
+            other => panic!(
+                "256,000 tokens must not be walked to reach one key, got {:?}",
+                other
+            ),
         }
         // WHY this is the assertion that matters: the walk would cost two reads per
         // token, and on a file the kernel holds on the data disk every one of those
@@ -3370,7 +3530,14 @@ pub(crate) mod tests {
         // Three tensors are declared, and the section that holds them starts here.
         // Without even one byte of it the file would be a truncated one, and the
         // walk's answer would be about the fixture rather than about the model.
-        put_tensor(&mut buf, &mut off, b"token_output_weight", &[64, 290], 10, 0);
+        put_tensor(
+            &mut buf,
+            &mut off,
+            b"token_output_weight",
+            &[64, 290],
+            10,
+            0,
+        );
 
         let info = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]))
             .expect("the file declares every dimension and its own name");
@@ -3411,7 +3578,10 @@ pub(crate) mod tests {
         let result = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]));
         let partial = match result {
             Err(GgufError::MissingMetadata(key, info)) => {
-                assert_eq!(key, "general.architecture", "the omitted key is the one named");
+                assert_eq!(
+                    key, "general.architecture",
+                    "the omitted key is the one named"
+                );
                 info
             }
             other => panic!("a file that declares no architecture must say so, got {other:?}"),
@@ -3469,7 +3639,12 @@ pub(crate) mod tests {
         put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
         put_count(&mut buf, &mut off, b"gemma2.embedding_length", 64);
         put_vocab(&mut buf, &mut off, b"tokenizer.ggml.tokens", 256_000, &[]);
-        put_string(&mut buf, &mut off, b"general.name", b"Named After The Walk Stopped");
+        put_string(
+            &mut buf,
+            &mut off,
+            b"general.name",
+            b"Named After The Walk Stopped",
+        );
 
         let result = read_model_info_stream(&mut GgufStream::from_slice(&buf[..off]));
         let partial = match result {
@@ -3680,12 +3855,17 @@ pub(crate) mod tests {
         v_u32(&mut out, b"general.file_type", 2);
 
         let mut stream = GgufStream::buffered_from_slice(&out);
-        let info = read_tokenizer_info_stream(&mut stream).expect("a long template is refused, not fatal");
+        let info =
+            read_tokenizer_info_stream(&mut stream).expect("a long template is refused, not fatal");
         assert_eq!(
             info.template_reading,
             StringReading::RefusedTooLong(MAX_CHAT_TEMPLATE_LEN as u64 + 1)
         );
-        assert_eq!(info.chat_template(), None, "a cut template must not be quoted");
+        assert_eq!(
+            info.chat_template(),
+            None,
+            "a cut template must not be quoted"
+        );
         // The value was stepped past, so the walk kept going and read the next key.
         assert_eq!(info.pre_name(), Some("gemma"));
         assert_eq!(info.pairs_walked, 3);
@@ -3720,7 +3900,11 @@ pub(crate) mod tests {
         v_string(&mut out, KEY_CHAT_TEMPLATE, b"{prompt}");
         let mut stream = GgufStream::buffered_from_slice(&out);
         let info = read_tokenizer_info_stream(&mut stream).expect("a declared false is a reading");
-        assert_eq!(info.add_bos_token, Some(false), "type 7 must be read as a flag");
+        assert_eq!(
+            info.add_bos_token,
+            Some(false),
+            "type 7 must be read as a flag"
+        );
 
         // The same key declared as a float is not a boolean the reader will guess.
         let mut wide = host_std::vec::Vec::new();
@@ -3753,7 +3937,8 @@ pub(crate) mod tests {
         v_u32(&mut out, b"gemma2.embedding_length", 64);
 
         let mut stream = GgufStream::buffered_from_slice(&out);
-        let info = read_tokenizer_info_stream(&mut stream).expect("no tokenizer is a reading, not a failure");
+        let info = read_tokenizer_info_stream(&mut stream)
+            .expect("no tokenizer is a reading, not a failure");
         assert!(info.declares_no_tokenizer());
         assert_eq!(info.vocab, VocabReading::Absent);
         assert_eq!(info.truncated_in, None);
@@ -3774,7 +3959,8 @@ pub(crate) mod tests {
         v_string(&mut out, b"some.other.pre", b"not-the-tokenizer");
         v_u32(&mut out, b"tokenizer.ggml.something.padding_token_id", 7);
         let mut stream = GgufStream::buffered_from_slice(&out);
-        let info = read_tokenizer_info_stream(&mut stream).expect("unrelated keys cost a step, not a claim");
+        let info = read_tokenizer_info_stream(&mut stream)
+            .expect("unrelated keys cost a step, not a claim");
         assert_eq!(info.pre_name(), None);
         assert_eq!(info.pad_token_id, None);
         assert!(info.declares_no_tokenizer());
@@ -3804,7 +3990,10 @@ pub(crate) mod tests {
         v_string(&mut markerless, KEY_CHAT_TEMPLATE, b"<user> only a role");
         let info = read_tokenizer_info_stream(&mut GgufStream::buffered_from_slice(&markerless))
             .expect("a template without a marker still reads");
-        assert_eq!(info.format_prompt(b"hello", &mut out), Err(PromptFit::NoMarker));
+        assert_eq!(
+            info.format_prompt(b"hello", &mut out),
+            Err(PromptFit::NoMarker)
+        );
 
         // The built-in default applies to a file that named none, and says so.
         let none = GgufTokenizerInfo::empty();
@@ -3835,7 +4024,9 @@ pub(crate) mod tests {
         let mut stream = GgufStream::buffered_from_slice(&data);
 
         let mut head = [0u8; 4];
-        stream.read_exact(&mut head).expect("the window serves a read");
+        stream
+            .read_exact(&mut head)
+            .expect("the window serves a read");
         assert_eq!(head, [7u8; 4]);
 
         stream.skip(100).expect("a step is served from the window");
@@ -3843,7 +4034,9 @@ pub(crate) mod tests {
 
         // The whole source is 1576 bytes; the window touches it a handful of times.
         let mut rest = [0u8; 1_000];
-        stream.read_exact(&mut rest).expect("a request past the window still reads");
+        stream
+            .read_exact(&mut rest)
+            .expect("a request past the window still reads");
         assert_eq!(stream.position(), 1_104);
         // Between the requests a full window per pull allows and a small margin:
         // a reader that asked for one value at a time would be off by two orders.
@@ -3868,7 +4061,12 @@ pub(crate) mod tests {
     fn test_locate_tensor_adds_where_the_data_section_starts() {
         let mut buf = [0u8; 512];
         let mut off = begin_gguf(&mut buf, 1, 2);
-        put_string(&mut buf, &mut off, b"general.architecture", b"gemma-embedding");
+        put_string(
+            &mut buf,
+            &mut off,
+            b"general.architecture",
+            b"gemma-embedding",
+        );
         // Four dimensions with the trailing ones written out, as gguf-py emits for
         // some writers -- which is what leaves this table ending at 206 rather than
         // 190, and 206 is a position where rounding to 16, to 32 and to 64 give
@@ -3926,8 +4124,20 @@ pub(crate) mod tests {
         // 176, to 32 gives 192 and to 64 gives 192 -- so only a placement wider
         // than the default proves the declared number was consulted at all.
         put_count(&mut buf, &mut off, b"general.alignment", 256);
-        put_string(&mut buf, &mut off, b"general.architecture", b"gemma-embedding");
-        put_tensor(&mut buf, &mut off, b"dense_3.weight", &[3072, 768], 8, 2_506_752);
+        put_string(
+            &mut buf,
+            &mut off,
+            b"general.architecture",
+            b"gemma-embedding",
+        );
+        put_tensor(
+            &mut buf,
+            &mut off,
+            b"dense_3.weight",
+            &[3072, 768],
+            8,
+            2_506_752,
+        );
         assert_eq!(off, 166);
 
         let located = locate_tensor(&buf, b"dense_3.weight")
@@ -3971,7 +4181,12 @@ pub(crate) mod tests {
     fn test_locate_tensor_reports_a_tensor_the_file_does_not_hold() {
         let mut buf = [0u8; 512];
         let mut off = begin_gguf(&mut buf, 1, 1);
-        put_string(&mut buf, &mut off, b"general.architecture", b"gemma-embedding");
+        put_string(
+            &mut buf,
+            &mut off,
+            b"general.architecture",
+            b"gemma-embedding",
+        );
         put_tensor(&mut buf, &mut off, b"dense_2.weight", &[768, 3072], 8, 0);
         assert_eq!(locate_tensor(&buf, b"output.weight"), Ok(None));
     }
@@ -3988,7 +4203,13 @@ pub(crate) mod tests {
         v_string(&mut file, b"general.architecture", b"gemma-embedding");
         v_vocab(&mut file, VOCAB, 6);
         v_u32(&mut file, b"general.file_type", 7);
-        vt_tensor(&mut file, b"token_embd.weight", &[768, 262144], 8, 5_016_576);
+        vt_tensor(
+            &mut file,
+            b"token_embd.weight",
+            &[768, 262144],
+            8,
+            5_016_576,
+        );
 
         let table_end = file.len();
         let mut stream = GgufStream::buffered_from_slice(&file);
@@ -4176,7 +4397,12 @@ pub(crate) mod tests {
             b"general.architecture",
             b"gemma-embedding2",
         );
-        put_count(&mut buf, &mut off, b"gemma-embedding2.embedding_length", 512);
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding2.embedding_length",
+            512,
+        );
         put_count(
             &mut buf,
             &mut off,
@@ -4236,7 +4462,12 @@ pub(crate) mod tests {
             b"general.architecture",
             b"gemma-embedding2",
         );
-        put_count(&mut buf, &mut off, b"gemma-embedding2.embedding_length", 512);
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma-embedding2.embedding_length",
+            512,
+        );
         put_count(
             &mut buf,
             &mut off,
@@ -4340,7 +4571,11 @@ pub(crate) mod tests {
         let mut buf = [0u8; 512];
         let mut off = begin_file(&mut buf, 2);
         put_string(&mut buf, &mut off, b"general.architecture", b"gemma2");
-        put_key(&mut buf, &mut off, b"gemma2.attention.sliding_window_pattern");
+        put_key(
+            &mut buf,
+            &mut off,
+            b"gemma2.attention.sliding_window_pattern",
+        );
         put_u32_at(&mut buf, &mut off, 9);
         put_u32_at(&mut buf, &mut off, 7);
         put_u64_at(&mut buf, &mut off, 2);
@@ -4367,7 +4602,12 @@ pub(crate) mod tests {
         put_count(&mut buf, &mut off, b"gemma4.attention.key_length", 512);
         put_count(&mut buf, &mut off, b"gemma4.attention.key_length_swa", 256);
         put_count(&mut buf, &mut off, b"gemma4.attention.value_length", 512);
-        put_count(&mut buf, &mut off, b"gemma4.attention.value_length_swa", 256);
+        put_count(
+            &mut buf,
+            &mut off,
+            b"gemma4.attention.value_length_swa",
+            256,
+        );
         put_count(&mut buf, &mut off, b"gemma4.rope.dimension_count", 512);
         put_count(&mut buf, &mut off, b"gemma4.rope.dimension_count_swa", 256);
         put_float(&mut buf, &mut off, b"gemma4.rope.freq_base_swa", 10_000.0);
@@ -4468,7 +4708,10 @@ pub(crate) mod tests {
             Err(GgufError::BufferTooShort),
             "half a path is not a file the caller can open"
         );
-        assert_eq!(join_model_path("/data/models", &[b'x'; 200], &mut joined), None);
+        assert_eq!(
+            join_model_path("/data/models", &[b'x'; 200], &mut joined),
+            None
+        );
     }
 
     /// D7: the module's own comments must not invent a model. The "Mobile Lite"
@@ -4519,14 +4762,16 @@ pub(crate) mod tests {
     fn test_real_artifact_geometry_is_read_from_the_files_own_bytes() {
         use host_std::io::Read;
 
-        let path = match host_std::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
-            let candidate = "../../target/verify/models/embeddinggemma-2-UD-Q4_K_XL.gguf";
-            if host_std::path::Path::new(candidate).exists() {
-                Some(host_std::string::String::from(candidate))
-            } else {
-                None
-            }
-        }) {
+        let path = match host_std::env::var("INTEROS_REAL_GGUF_PATH")
+            .ok()
+            .or_else(|| {
+                let candidate = "../../target/verify/models/embeddinggemma-2-UD-Q4_K_XL.gguf";
+                if host_std::path::Path::new(candidate).exists() {
+                    Some(host_std::string::String::from(candidate))
+                } else {
+                    None
+                }
+            }) {
             Some(p) => p,
             None => {
                 host_std::println!(
@@ -4603,9 +4848,8 @@ pub(crate) mod tests {
                 assert_eq!(
                     info.sliding_window_pattern.as_slice(),
                     &[
-                        true, true, true, true, true, false, true, true, true, true, true,
-                        false, true, true, true, true, true, false, true, true, true, true,
-                        true, false,
+                        true, true, true, true, true, false, true, true, true, true, true, false,
+                        true, true, true, true, true, false, true, true, true, true, true, false,
                     ]
                 );
                 assert_eq!(info.head_dim_swa, Some(256));

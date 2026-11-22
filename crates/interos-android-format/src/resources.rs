@@ -90,15 +90,18 @@ impl StringPool {
             return Err(ResourceError::MalformedChunk);
         }
 
-        let chunk_size = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let chunk_size =
+            u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize;
         if offset + chunk_size > data.len() || chunk_size < 28 {
             return Err(ResourceError::MalformedChunk);
         }
 
-        let string_count = u32::from_le_bytes(data[offset + 8..offset + 12].try_into().unwrap()) as usize;
+        let string_count =
+            u32::from_le_bytes(data[offset + 8..offset + 12].try_into().unwrap()) as usize;
         let flags = u32::from_le_bytes(data[offset + 16..offset + 20].try_into().unwrap());
         let is_utf8 = (flags & (1 << 8)) != 0;
-        let strings_start = u32::from_le_bytes(data[offset + 20..offset + 24].try_into().unwrap()) as usize;
+        let strings_start =
+            u32::from_le_bytes(data[offset + 20..offset + 24].try_into().unwrap()) as usize;
 
         if offset + strings_start > data.len() {
             return Err(ResourceError::MalformedStringPool);
@@ -155,7 +158,8 @@ impl StringPool {
                 if abs_str_off + 2 > pool_data_end {
                     return Err(ResourceError::MalformedStringPool);
                 }
-                let len_code = u16::from_le_bytes([data[abs_str_off], data[abs_str_off + 1]]) as usize;
+                let len_code =
+                    u16::from_le_bytes([data[abs_str_off], data[abs_str_off + 1]]) as usize;
                 let mut cur = abs_str_off + 2;
                 let u16_len = if (len_code & 0x8000) != 0 {
                     if cur + 2 > pool_data_end {
@@ -168,8 +172,12 @@ impl StringPool {
                 } else {
                     len_code
                 };
-                let byte_len = u16_len.checked_mul(2).ok_or(ResourceError::MalformedStringPool)?;
-                let end = cur.checked_add(byte_len).ok_or(ResourceError::MalformedStringPool)?;
+                let byte_len = u16_len
+                    .checked_mul(2)
+                    .ok_or(ResourceError::MalformedStringPool)?;
+                let end = cur
+                    .checked_add(byte_len)
+                    .ok_or(ResourceError::MalformedStringPool)?;
                 if end > pool_data_end {
                     return Err(ResourceError::MalformedStringPool);
                 }
@@ -184,8 +192,11 @@ impl StringPool {
 
         for i in 0..string_count {
             let off_pos = offsets_start + i * 4;
-            let str_rel_off = u32::from_le_bytes(data[off_pos..off_pos + 4].try_into().unwrap()) as usize;
-            let abs_str_off = pool_data_start.checked_add(str_rel_off).ok_or(ResourceError::MalformedStringPool)?;
+            let str_rel_off =
+                u32::from_le_bytes(data[off_pos..off_pos + 4].try_into().unwrap()) as usize;
+            let abs_str_off = pool_data_start
+                .checked_add(str_rel_off)
+                .ok_or(ResourceError::MalformedStringPool)?;
             match decode_string_at(abs_str_off)? {
                 Some(s) => strings.push(s),
                 None => strings.push(String::new()),
@@ -270,7 +281,8 @@ impl ResourceTable {
                 break;
             }
             let sub_type = u16::from_le_bytes(data[cursor..cursor + 2].try_into().unwrap());
-            let sub_size = u32::from_le_bytes(data[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
+            let sub_size =
+                u32::from_le_bytes(data[cursor + 4..cursor + 8].try_into().unwrap()) as usize;
 
             if sub_size == 0 || cursor + sub_size > chunk_size {
                 return Err(ResourceError::MalformedChunk);
@@ -367,8 +379,10 @@ fn parse_package_chunk(
     }
     let pkg_name = String::from_utf16_lossy(&u16_chars);
 
-    let type_strings_off = u32::from_le_bytes(data[offset + 268..offset + 272].try_into().unwrap()) as usize;
-    let key_strings_off = u32::from_le_bytes(data[offset + 276..offset + 280].try_into().unwrap()) as usize;
+    let type_strings_off =
+        u32::from_le_bytes(data[offset + 268..offset + 272].try_into().unwrap()) as usize;
+    let key_strings_off =
+        u32::from_le_bytes(data[offset + 276..offset + 280].try_into().unwrap()) as usize;
 
     let mut pkg = ResourcePackage::new(pkg_id, pkg_name);
 
@@ -420,12 +434,16 @@ fn parse_type_chunk(
     }
 
     let type_id = data[offset + 8];
-    let entry_count = u32::from_le_bytes(data[offset + 12..offset + 16].try_into().unwrap()) as usize;
-    let entries_start = u32::from_le_bytes(data[offset + 16..offset + 20].try_into().unwrap()) as usize;
+    let entry_count =
+        u32::from_le_bytes(data[offset + 12..offset + 16].try_into().unwrap()) as usize;
+    let entries_start =
+        u32::from_le_bytes(data[offset + 16..offset + 20].try_into().unwrap()) as usize;
     let header_size = u16::from_le_bytes(data[offset + 2..offset + 4].try_into().unwrap()) as usize;
 
     let offsets_start = offset + header_size;
-    if offsets_start + entry_count * 4 > offset + entries_start || offset + entries_start > offset + chunk_size {
+    if offsets_start + entry_count * 4 > offset + entries_start
+        || offset + entries_start > offset + chunk_size
+    {
         return Err(ResourceError::MalformedChunk);
     }
 
@@ -444,9 +462,11 @@ fn parse_type_chunk(
             continue;
         }
 
-        let entry_size = u16::from_le_bytes(data[abs_entry..abs_entry + 2].try_into().unwrap()) as usize;
+        let entry_size =
+            u16::from_le_bytes(data[abs_entry..abs_entry + 2].try_into().unwrap()) as usize;
         let flags = u16::from_le_bytes(data[abs_entry + 2..abs_entry + 4].try_into().unwrap());
-        let key_idx = u32::from_le_bytes(data[abs_entry + 4..abs_entry + 8].try_into().unwrap()) as usize;
+        let key_idx =
+            u32::from_le_bytes(data[abs_entry + 4..abs_entry + 8].try_into().unwrap()) as usize;
 
         let key_name = pkg
             .key_strings
@@ -459,16 +479,16 @@ fn parse_type_chunk(
             let val_pos = abs_entry + entry_size;
             if val_pos + 8 <= chunk_end {
                 let data_type = data[val_pos + 3];
-                let raw_data = u32::from_le_bytes(data[val_pos + 4..val_pos + 8].try_into().unwrap());
+                let raw_data =
+                    u32::from_le_bytes(data[val_pos + 4..val_pos + 8].try_into().unwrap());
 
                 let value = match data_type {
                     TYPE_STRING => {
                         let s = global_strings.get(raw_data as usize).unwrap_or("");
                         ResourceValue::String(String::from(s))
                     }
-                    TYPE_INT_COLOR_ARGB8 | TYPE_INT_COLOR_RGB8 | TYPE_INT_COLOR_ARGB4 | TYPE_INT_COLOR_RGB4 => {
-                        ResourceValue::Color(raw_data)
-                    }
+                    TYPE_INT_COLOR_ARGB8 | TYPE_INT_COLOR_RGB8 | TYPE_INT_COLOR_ARGB4
+                    | TYPE_INT_COLOR_RGB4 => ResourceValue::Color(raw_data),
                     TYPE_INT_DEC | TYPE_INT_HEX => ResourceValue::Integer(raw_data as i32),
                     TYPE_INT_BOOLEAN => ResourceValue::Boolean(raw_data != 0),
                     TYPE_DIMENSION => ResourceValue::Dimension(raw_data),
@@ -476,7 +496,10 @@ fn parse_type_chunk(
                     _ => ResourceValue::Null,
                 };
 
-                pkg.entries.insert((type_id, entry_idx as u16), ResourceEntry { key_name, value });
+                pkg.entries.insert(
+                    (type_id, entry_idx as u16),
+                    ResourceEntry { key_name, value },
+                );
             }
         }
     }
@@ -488,7 +511,7 @@ fn parse_type_chunk(
 pub fn create_test_resources_arsc(
     package_name: &str,
     strings: &[(&str, &str)], // (key_name, string_value)
-    colors: &[(&str, u32)],    // (key_name, color_argb)
+    colors: &[(&str, u32)],   // (key_name, color_argb)
 ) -> Vec<u8> {
     let mut arsc = Vec::new();
 
@@ -536,7 +559,7 @@ pub fn create_test_resources_arsc(
     let pkg_id = 0x7fu32; // Standard application package ID
     pkg_chunk.extend_from_slice(&RES_TABLE_PACKAGE_TYPE.to_le_bytes());
     pkg_chunk.extend_from_slice(&288u16.to_le_bytes()); // header size = 288
-    pkg_chunk.extend_from_slice(&0u32.to_le_bytes());   // placeholder chunk size
+    pkg_chunk.extend_from_slice(&0u32.to_le_bytes()); // placeholder chunk size
     pkg_chunk.extend_from_slice(&pkg_id.to_le_bytes());
 
     // 128 UTF-16 characters for package name
@@ -563,7 +586,8 @@ pub fn create_test_resources_arsc(
     // Types pool: ["attr", "drawable", "layout", "string", "color"]
     let types = ["attr", "drawable", "layout", "string", "color"];
     let type_strings_start = pkg_chunk.len() as u32;
-    pkg_chunk[type_strings_off_pos..type_strings_off_pos + 4].copy_from_slice(&type_strings_start.to_le_bytes());
+    pkg_chunk[type_strings_off_pos..type_strings_off_pos + 4]
+        .copy_from_slice(&type_strings_start.to_le_bytes());
 
     let mut type_pool = Vec::new();
     type_pool.extend_from_slice(&RES_STRING_POOL_TYPE.to_le_bytes());
@@ -596,7 +620,8 @@ pub fn create_test_resources_arsc(
 
     // Key strings pool: all keys from strings and colors
     let key_strings_start = pkg_chunk.len() as u32;
-    pkg_chunk[key_strings_off_pos..key_strings_off_pos + 4].copy_from_slice(&key_strings_start.to_le_bytes());
+    pkg_chunk[key_strings_off_pos..key_strings_off_pos + 4]
+        .copy_from_slice(&key_strings_start.to_le_bytes());
 
     let mut keys = Vec::new();
     for (k, _) in strings {
@@ -756,16 +781,27 @@ mod tests {
         assert_eq!(table.get_string(res_id_welcome), Some("Hello InterOS"));
 
         let res_id_primary = 0x7F050000;
-        let val_primary = table.get_value(res_id_primary).expect("resolve primary_color");
+        let val_primary = table
+            .get_value(res_id_primary)
+            .expect("resolve primary_color");
         assert_eq!(val_primary, &ResourceValue::Color(0xFF2C6BED));
         assert_eq!(table.get_color(res_id_primary), Some(0xFF2C6BED));
     }
 
     #[test]
     fn test_resources_arsc_bounds_and_error_handling() {
-        assert_eq!(ResourceTable::parse(&[]).unwrap_err(), ResourceError::TooSmall);
-        assert_eq!(ResourceTable::parse(&[0u8; 10]).unwrap_err(), ResourceError::TooSmall);
-        assert_eq!(ResourceTable::parse(&[0x05, 0x00, 0x08, 0x00, 0x10, 0x00, 0x00, 0x00, 0, 0, 0, 0]).unwrap_err(), ResourceError::InvalidHeader);
+        assert_eq!(
+            ResourceTable::parse(&[]).unwrap_err(),
+            ResourceError::TooSmall
+        );
+        assert_eq!(
+            ResourceTable::parse(&[0u8; 10]).unwrap_err(),
+            ResourceError::TooSmall
+        );
+        assert_eq!(
+            ResourceTable::parse(&[0x05, 0x00, 0x08, 0x00, 0x10, 0x00, 0x00, 0x00, 0, 0, 0, 0])
+                .unwrap_err(),
+            ResourceError::InvalidHeader
+        );
     }
 }
-

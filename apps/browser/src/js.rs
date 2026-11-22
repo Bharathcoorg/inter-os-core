@@ -53,9 +53,7 @@ impl JsValue {
 
     pub fn as_str<'a>(&'a self) -> &'a str {
         match self {
-            JsValue::String(buf, len) => {
-                core::str::from_utf8(&buf[..*len as usize]).unwrap_or("")
-            }
+            JsValue::String(buf, len) => core::str::from_utf8(&buf[..*len as usize]).unwrap_or(""),
             JsValue::Boolean(true) => "true",
             JsValue::Boolean(false) => "false",
             JsValue::Null => "null",
@@ -79,7 +77,13 @@ impl JsValue {
     pub fn to_number(&self) -> i64 {
         match self {
             JsValue::Undefined | JsValue::Null => 0,
-            JsValue::Boolean(b) => if *b { 1 } else { 0 },
+            JsValue::Boolean(b) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
             JsValue::Number(n) => *n,
             JsValue::String(buf, len) => {
                 let s = core::str::from_utf8(&buf[..*len as usize]).unwrap_or("");
@@ -198,63 +202,177 @@ impl<'a> Lexer<'a> {
 
         // Delimiters & Single-char operators
         match b {
-            b';' => { self.pos += 1; return Ok(Token { kind: TokenKind::Semi, slice: &self.src[start..self.pos] }); }
-            b',' => { self.pos += 1; return Ok(Token { kind: TokenKind::Comma, slice: &self.src[start..self.pos] }); }
-            b'.' => { self.pos += 1; return Ok(Token { kind: TokenKind::Dot, slice: &self.src[start..self.pos] }); }
-            b'(' => { self.pos += 1; return Ok(Token { kind: TokenKind::LParen, slice: &self.src[start..self.pos] }); }
-            b')' => { self.pos += 1; return Ok(Token { kind: TokenKind::RParen, slice: &self.src[start..self.pos] }); }
-            b'{' => { self.pos += 1; return Ok(Token { kind: TokenKind::LBrace, slice: &self.src[start..self.pos] }); }
-            b'}' => { self.pos += 1; return Ok(Token { kind: TokenKind::RBrace, slice: &self.src[start..self.pos] }); }
-            b'[' => { self.pos += 1; return Ok(Token { kind: TokenKind::LBracket, slice: &self.src[start..self.pos] }); }
-            b']' => { self.pos += 1; return Ok(Token { kind: TokenKind::RBracket, slice: &self.src[start..self.pos] }); }
-            b'+' => { self.pos += 1; return Ok(Token { kind: TokenKind::Plus, slice: &self.src[start..self.pos] }); }
-            b'-' => { self.pos += 1; return Ok(Token { kind: TokenKind::Minus, slice: &self.src[start..self.pos] }); }
-            b'*' => { self.pos += 1; return Ok(Token { kind: TokenKind::Star, slice: &self.src[start..self.pos] }); }
-            b'/' => { self.pos += 1; return Ok(Token { kind: TokenKind::Slash, slice: &self.src[start..self.pos] }); }
-            b'%' => { self.pos += 1; return Ok(Token { kind: TokenKind::Percent, slice: &self.src[start..self.pos] }); }
+            b';' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::Semi,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b',' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::Comma,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b'.' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::Dot,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b'(' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::LParen,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b')' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::RParen,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b'{' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::LBrace,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b'}' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::RBrace,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b'[' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::LBracket,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b']' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::RBracket,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b'+' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::Plus,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b'-' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::Minus,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b'*' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::Star,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b'/' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::Slash,
+                    slice: &self.src[start..self.pos],
+                });
+            }
+            b'%' => {
+                self.pos += 1;
+                return Ok(Token {
+                    kind: TokenKind::Percent,
+                    slice: &self.src[start..self.pos],
+                });
+            }
             b'!' => {
                 if self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
                     self.pos += 2;
-                    return Ok(Token { kind: TokenKind::NotEq, slice: &self.src[start..self.pos] });
+                    return Ok(Token {
+                        kind: TokenKind::NotEq,
+                        slice: &self.src[start..self.pos],
+                    });
                 }
                 self.pos += 1;
-                return Ok(Token { kind: TokenKind::Bang, slice: &self.src[start..self.pos] });
+                return Ok(Token {
+                    kind: TokenKind::Bang,
+                    slice: &self.src[start..self.pos],
+                });
             }
             b'=' => {
                 if self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
                     self.pos += 2;
-                    return Ok(Token { kind: TokenKind::EqEq, slice: &self.src[start..self.pos] });
+                    return Ok(Token {
+                        kind: TokenKind::EqEq,
+                        slice: &self.src[start..self.pos],
+                    });
                 }
                 self.pos += 1;
-                return Ok(Token { kind: TokenKind::Eq, slice: &self.src[start..self.pos] });
+                return Ok(Token {
+                    kind: TokenKind::Eq,
+                    slice: &self.src[start..self.pos],
+                });
             }
             b'<' => {
                 if self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
                     self.pos += 2;
-                    return Ok(Token { kind: TokenKind::LtEq, slice: &self.src[start..self.pos] });
+                    return Ok(Token {
+                        kind: TokenKind::LtEq,
+                        slice: &self.src[start..self.pos],
+                    });
                 }
                 self.pos += 1;
-                return Ok(Token { kind: TokenKind::Lt, slice: &self.src[start..self.pos] });
+                return Ok(Token {
+                    kind: TokenKind::Lt,
+                    slice: &self.src[start..self.pos],
+                });
             }
             b'>' => {
                 if self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'=' {
                     self.pos += 2;
-                    return Ok(Token { kind: TokenKind::GtEq, slice: &self.src[start..self.pos] });
+                    return Ok(Token {
+                        kind: TokenKind::GtEq,
+                        slice: &self.src[start..self.pos],
+                    });
                 }
                 self.pos += 1;
-                return Ok(Token { kind: TokenKind::Gt, slice: &self.src[start..self.pos] });
+                return Ok(Token {
+                    kind: TokenKind::Gt,
+                    slice: &self.src[start..self.pos],
+                });
             }
             b'&' => {
                 if self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'&' {
                     self.pos += 2;
-                    return Ok(Token { kind: TokenKind::AmpAmp, slice: &self.src[start..self.pos] });
+                    return Ok(Token {
+                        kind: TokenKind::AmpAmp,
+                        slice: &self.src[start..self.pos],
+                    });
                 }
                 return Err(JsError::UnsupportedSyntax("bitwise & operator"));
             }
             b'|' => {
                 if self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'|' {
                     self.pos += 2;
-                    return Ok(Token { kind: TokenKind::PipePipe, slice: &self.src[start..self.pos] });
+                    return Ok(Token {
+                        kind: TokenKind::PipePipe,
+                        slice: &self.src[start..self.pos],
+                    });
                 }
                 return Err(JsError::UnsupportedSyntax("bitwise | operator"));
             }
@@ -270,7 +388,10 @@ impl<'a> Lexer<'a> {
                 }
                 let str_slice = &self.src[str_start..self.pos];
                 self.pos += 1; // skip closing quote
-                return Ok(Token { kind: TokenKind::String, slice: str_slice });
+                return Ok(Token {
+                    kind: TokenKind::String,
+                    slice: str_slice,
+                });
             }
             _ => {}
         }
@@ -283,7 +404,10 @@ impl<'a> Lexer<'a> {
             let num_slice = &self.src[start..self.pos];
             let num_str = core::str::from_utf8(num_slice).map_err(|_| JsError::UnexpectedToken)?;
             let n = parse_i64(num_str).ok_or(JsError::UnexpectedToken)?;
-            return Ok(Token { kind: TokenKind::Number(n), slice: num_slice });
+            return Ok(Token {
+                kind: TokenKind::Number(n),
+                slice: num_slice,
+            });
         }
 
         // Identifiers & Keywords
@@ -310,7 +434,8 @@ impl<'a> Lexer<'a> {
                 b"false" => TokenKind::False,
                 b"null" => TokenKind::Null,
                 b"undefined" => TokenKind::Undefined,
-                b"async" | b"await" | b"class" | b"import" | b"export" | b"throw" | b"try" | b"catch" => {
+                b"async" | b"await" | b"class" | b"import" | b"export" | b"throw" | b"try"
+                | b"catch" => {
                     return Err(JsError::UnsupportedSyntax("advanced ES6 syntax"));
                 }
                 _ => TokenKind::Ident,
@@ -327,13 +452,23 @@ fn parse_i64(s: &str) -> Option<i64> {
     let mut sign = 1i64;
     let bytes = s.as_bytes();
     let mut i = 0;
-    if bytes.is_empty() { return None; }
-    if bytes[0] == b'-' { sign = -1; i += 1; }
-    else if bytes[0] == b'+' { i += 1; }
-    if i >= bytes.len() { return None; }
+    if bytes.is_empty() {
+        return None;
+    }
+    if bytes[0] == b'-' {
+        sign = -1;
+        i += 1;
+    } else if bytes[0] == b'+' {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
     while i < bytes.len() {
         let b = bytes[i];
-        if !b.is_ascii_digit() { return None; }
+        if !b.is_ascii_digit() {
+            return None;
+        }
         val = val.checked_mul(10)?.checked_add((b - b'0') as i64)?;
         i += 1;
     }
@@ -367,22 +502,60 @@ pub enum UnOp {
 pub enum ExprKind {
     Literal(JsValue),
     Ident([u8; 32], u8),
-    Binary { op: BinOp, left: usize, right: usize },
-    Unary { op: UnOp, expr: usize },
-    Call { callee: usize, args_start: usize, args_count: u8 },
-    Member { object: usize, prop: [u8; 32], prop_len: u8 },
-    Index { object: usize, index: usize },
-    Array { elements_start: usize, elements_count: u8 },
+    Binary {
+        op: BinOp,
+        left: usize,
+        right: usize,
+    },
+    Unary {
+        op: UnOp,
+        expr: usize,
+    },
+    Call {
+        callee: usize,
+        args_start: usize,
+        args_count: u8,
+    },
+    Member {
+        object: usize,
+        prop: [u8; 32],
+        prop_len: u8,
+    },
+    Index {
+        object: usize,
+        index: usize,
+    },
+    Array {
+        elements_start: usize,
+        elements_count: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum StmtKind {
-    VarDecl { name: [u8; 32], name_len: u8, init: Option<usize> },
-    Assign { target: usize, value: usize },
-    If { cond: usize, then_stmt: usize, else_stmt: Option<usize> },
-    While { cond: usize, body: usize },
+    VarDecl {
+        name: [u8; 32],
+        name_len: u8,
+        init: Option<usize>,
+    },
+    Assign {
+        target: usize,
+        value: usize,
+    },
+    If {
+        cond: usize,
+        then_stmt: usize,
+        else_stmt: Option<usize>,
+    },
+    While {
+        cond: usize,
+        body: usize,
+    },
     Expr(usize),
-    Block { stmts_start: usize, stmts_count: usize },
+    Block {
+        stmts_start: usize,
+        stmts_count: usize,
+    },
     Return(Option<usize>),
     FunctionDecl {
         name: [u8; 32],
@@ -400,7 +573,10 @@ pub struct AstNode {
 }
 
 impl AstNode {
-    pub const EMPTY: Self = Self { expr: None, stmt: None };
+    pub const EMPTY: Self = Self {
+        expr: None,
+        stmt: None,
+    };
 }
 
 pub struct Parser<'a> {
@@ -453,7 +629,10 @@ impl<'a> Parser<'a> {
             return Err(JsError::CapacityExceeded);
         }
         let id = self.node_count;
-        self.nodes[id] = AstNode { expr: Some(expr), stmt: None };
+        self.nodes[id] = AstNode {
+            expr: Some(expr),
+            stmt: None,
+        };
         self.node_count += 1;
         Ok(id)
     }
@@ -463,7 +642,10 @@ impl<'a> Parser<'a> {
             return Err(JsError::CapacityExceeded);
         }
         let id = self.node_count;
-        self.nodes[id] = AstNode { expr: None, stmt: Some(stmt) };
+        self.nodes[id] = AstNode {
+            expr: None,
+            stmt: Some(stmt),
+        };
         self.node_count += 1;
         Ok(id)
     }
@@ -485,7 +667,10 @@ impl<'a> Parser<'a> {
         }
         self.stmts_pool[start..start + lcount].copy_from_slice(&local[..lcount]);
         self.stmts_count += lcount;
-        self.alloc_stmt(StmtKind::Block { stmts_start: start, stmts_count: lcount })
+        self.alloc_stmt(StmtKind::Block {
+            stmts_start: start,
+            stmts_count: lcount,
+        })
     }
 
     fn parse_stmt(&mut self) -> Result<usize, JsError> {
@@ -510,14 +695,22 @@ impl<'a> Parser<'a> {
                 if self.curr.kind == TokenKind::Semi {
                     self.advance()?;
                 }
-                self.alloc_stmt(StmtKind::VarDecl { name, name_len: nlen as u8, init })
+                self.alloc_stmt(StmtKind::VarDecl {
+                    name,
+                    name_len: nlen as u8,
+                    init,
+                })
             }
             TokenKind::If => {
                 self.advance()?;
-                if self.curr.kind != TokenKind::LParen { return Err(JsError::UnexpectedToken); }
+                if self.curr.kind != TokenKind::LParen {
+                    return Err(JsError::UnexpectedToken);
+                }
                 self.advance()?;
                 let cond = self.parse_expr()?;
-                if self.curr.kind != TokenKind::RParen { return Err(JsError::UnexpectedToken); }
+                if self.curr.kind != TokenKind::RParen {
+                    return Err(JsError::UnexpectedToken);
+                }
                 self.advance()?;
                 let then_stmt = self.parse_stmt()?;
                 let else_stmt = if self.curr.kind == TokenKind::Else {
@@ -526,14 +719,22 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                self.alloc_stmt(StmtKind::If { cond, then_stmt, else_stmt })
+                self.alloc_stmt(StmtKind::If {
+                    cond,
+                    then_stmt,
+                    else_stmt,
+                })
             }
             TokenKind::While => {
                 self.advance()?;
-                if self.curr.kind != TokenKind::LParen { return Err(JsError::UnexpectedToken); }
+                if self.curr.kind != TokenKind::LParen {
+                    return Err(JsError::UnexpectedToken);
+                }
                 self.advance()?;
                 let cond = self.parse_expr()?;
-                if self.curr.kind != TokenKind::RParen { return Err(JsError::UnexpectedToken); }
+                if self.curr.kind != TokenKind::RParen {
+                    return Err(JsError::UnexpectedToken);
+                }
                 self.advance()?;
                 let body = self.parse_stmt()?;
                 self.alloc_stmt(StmtKind::While { cond, body })
@@ -550,7 +751,9 @@ impl<'a> Parser<'a> {
                     local[lcount] = s;
                     lcount += 1;
                 }
-                if self.curr.kind != TokenKind::RBrace { return Err(JsError::UnexpectedToken); }
+                if self.curr.kind != TokenKind::RBrace {
+                    return Err(JsError::UnexpectedToken);
+                }
                 self.advance()?;
                 let start = self.stmts_count;
                 if self.stmts_count + lcount > self.stmts_pool.len() {
@@ -558,11 +761,17 @@ impl<'a> Parser<'a> {
                 }
                 self.stmts_pool[start..start + lcount].copy_from_slice(&local[..lcount]);
                 self.stmts_count += lcount;
-                self.alloc_stmt(StmtKind::Block { stmts_start: start, stmts_count: lcount })
+                self.alloc_stmt(StmtKind::Block {
+                    stmts_start: start,
+                    stmts_count: lcount,
+                })
             }
             TokenKind::Return => {
                 self.advance()?;
-                let val = if self.curr.kind != TokenKind::Semi && self.curr.kind != TokenKind::RBrace && self.curr.kind != TokenKind::Eof {
+                let val = if self.curr.kind != TokenKind::Semi
+                    && self.curr.kind != TokenKind::RBrace
+                    && self.curr.kind != TokenKind::Eof
+                {
                     Some(self.parse_expr()?)
                 } else {
                     None
@@ -633,7 +842,10 @@ impl<'a> Parser<'a> {
                     if self.curr.kind == TokenKind::Semi {
                         self.advance()?;
                     }
-                    self.alloc_stmt(StmtKind::Assign { target: expr, value: val })
+                    self.alloc_stmt(StmtKind::Assign {
+                        target: expr,
+                        value: val,
+                    })
                 } else {
                     if self.curr.kind == TokenKind::Semi {
                         self.advance()?;
@@ -653,7 +865,11 @@ impl<'a> Parser<'a> {
         while self.curr.kind == TokenKind::PipePipe {
             self.advance()?;
             let right = self.parse_logical_and()?;
-            left = self.alloc_expr(ExprKind::Binary { op: BinOp::Or, left, right })?;
+            left = self.alloc_expr(ExprKind::Binary {
+                op: BinOp::Or,
+                left,
+                right,
+            })?;
         }
         Ok(left)
     }
@@ -663,7 +879,11 @@ impl<'a> Parser<'a> {
         while self.curr.kind == TokenKind::AmpAmp {
             self.advance()?;
             let right = self.parse_equality()?;
-            left = self.alloc_expr(ExprKind::Binary { op: BinOp::And, left, right })?;
+            left = self.alloc_expr(ExprKind::Binary {
+                op: BinOp::And,
+                left,
+                right,
+            })?;
         }
         Ok(left)
     }
@@ -671,7 +891,11 @@ impl<'a> Parser<'a> {
     fn parse_equality(&mut self) -> Result<usize, JsError> {
         let mut left = self.parse_relational()?;
         while self.curr.kind == TokenKind::EqEq || self.curr.kind == TokenKind::NotEq {
-            let op = if self.curr.kind == TokenKind::EqEq { BinOp::EqEq } else { BinOp::NotEq };
+            let op = if self.curr.kind == TokenKind::EqEq {
+                BinOp::EqEq
+            } else {
+                BinOp::NotEq
+            };
             self.advance()?;
             let right = self.parse_relational()?;
             left = self.alloc_expr(ExprKind::Binary { op, left, right })?;
@@ -681,7 +905,10 @@ impl<'a> Parser<'a> {
 
     fn parse_relational(&mut self) -> Result<usize, JsError> {
         let mut left = self.parse_additive()?;
-        while matches!(self.curr.kind, TokenKind::Lt | TokenKind::LtEq | TokenKind::Gt | TokenKind::GtEq) {
+        while matches!(
+            self.curr.kind,
+            TokenKind::Lt | TokenKind::LtEq | TokenKind::Gt | TokenKind::GtEq
+        ) {
             let op = match self.curr.kind {
                 TokenKind::Lt => BinOp::Lt,
                 TokenKind::LtEq => BinOp::LtEq,
@@ -698,7 +925,11 @@ impl<'a> Parser<'a> {
     fn parse_additive(&mut self) -> Result<usize, JsError> {
         let mut left = self.parse_multiplicative()?;
         while self.curr.kind == TokenKind::Plus || self.curr.kind == TokenKind::Minus {
-            let op = if self.curr.kind == TokenKind::Plus { BinOp::Add } else { BinOp::Sub };
+            let op = if self.curr.kind == TokenKind::Plus {
+                BinOp::Add
+            } else {
+                BinOp::Sub
+            };
             self.advance()?;
             let right = self.parse_multiplicative()?;
             left = self.alloc_expr(ExprKind::Binary { op, left, right })?;
@@ -708,7 +939,10 @@ impl<'a> Parser<'a> {
 
     fn parse_multiplicative(&mut self) -> Result<usize, JsError> {
         let mut left = self.parse_unary()?;
-        while matches!(self.curr.kind, TokenKind::Star | TokenKind::Slash | TokenKind::Percent) {
+        while matches!(
+            self.curr.kind,
+            TokenKind::Star | TokenKind::Slash | TokenKind::Percent
+        ) {
             let op = match self.curr.kind {
                 TokenKind::Star => BinOp::Mul,
                 TokenKind::Slash => BinOp::Div,
@@ -727,14 +961,20 @@ impl<'a> Parser<'a> {
             self.advance()?;
             let expr = self.parse_unary()?;
             self.depth -= 1;
-            return self.alloc_expr(ExprKind::Unary { op: UnOp::Not, expr });
+            return self.alloc_expr(ExprKind::Unary {
+                op: UnOp::Not,
+                expr,
+            });
         }
         if self.curr.kind == TokenKind::Minus {
             self.enter_nested()?;
             self.advance()?;
             let expr = self.parse_unary()?;
             self.depth -= 1;
-            return self.alloc_expr(ExprKind::Unary { op: UnOp::Neg, expr });
+            return self.alloc_expr(ExprKind::Unary {
+                op: UnOp::Neg,
+                expr,
+            });
         }
         self.parse_postfix()
     }
@@ -745,11 +985,17 @@ impl<'a> Parser<'a> {
             if self.curr.kind == TokenKind::Dot {
                 self.advance()?;
                 let tok = self.advance()?;
-                if tok.kind != TokenKind::Ident { return Err(JsError::UnexpectedToken); }
+                if tok.kind != TokenKind::Ident {
+                    return Err(JsError::UnexpectedToken);
+                }
                 let mut prop = [0u8; 32];
                 let plen = tok.slice.len().min(32);
                 prop[..plen].copy_from_slice(&tok.slice[..plen]);
-                expr = self.alloc_expr(ExprKind::Member { object: expr, prop, prop_len: plen as u8 })?;
+                expr = self.alloc_expr(ExprKind::Member {
+                    object: expr,
+                    prop,
+                    prop_len: plen as u8,
+                })?;
             } else if self.curr.kind == TokenKind::LParen {
                 self.advance()?;
                 let args_start = self.args_count;
@@ -768,15 +1014,26 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
-                if self.curr.kind != TokenKind::RParen { return Err(JsError::UnexpectedToken); }
+                if self.curr.kind != TokenKind::RParen {
+                    return Err(JsError::UnexpectedToken);
+                }
                 self.advance()?;
-                expr = self.alloc_expr(ExprKind::Call { callee: expr, args_start, args_count: count })?;
+                expr = self.alloc_expr(ExprKind::Call {
+                    callee: expr,
+                    args_start,
+                    args_count: count,
+                })?;
             } else if self.curr.kind == TokenKind::LBracket {
                 self.advance()?;
                 let index = self.parse_expr()?;
-                if self.curr.kind != TokenKind::RBracket { return Err(JsError::UnexpectedToken); }
+                if self.curr.kind != TokenKind::RBracket {
+                    return Err(JsError::UnexpectedToken);
+                }
                 self.advance()?;
-                expr = self.alloc_expr(ExprKind::Index { object: expr, index })?;
+                expr = self.alloc_expr(ExprKind::Index {
+                    object: expr,
+                    index,
+                })?;
             } else {
                 break;
             }
@@ -854,7 +1111,10 @@ impl<'a> Parser<'a> {
                 }
                 self.advance()?;
                 self.depth -= 1;
-                self.alloc_expr(ExprKind::Array { elements_start: start, elements_count: count })
+                self.alloc_expr(ExprKind::Array {
+                    elements_start: start,
+                    elements_count: count,
+                })
             }
             _ => Err(JsError::UnexpectedToken),
         }
@@ -910,12 +1170,22 @@ pub struct JsRuntime<'a> {
 impl<'a> JsRuntime<'a> {
     pub fn new(dom: &'a mut Dom, step_budget: usize) -> Self {
         Self {
-            vars: [JsVar { name: [0; 32], name_len: 0, val: JsValue::Undefined }; MAX_VARS],
+            vars: [JsVar {
+                name: [0; 32],
+                name_len: 0,
+                val: JsValue::Undefined,
+            }; MAX_VARS],
             var_count: 0,
             arrays: [[JsValue::Undefined; MAX_ARRAY_ELEMS]; MAX_ARRAYS],
             array_lens: [0; MAX_ARRAYS],
             array_count: 0,
-            functions: [JsFunctionDef { name: [0; 32], name_len: 0, params_start: 0, params_count: 0, body: 0 }; MAX_FUNCTIONS],
+            functions: [JsFunctionDef {
+                name: [0; 32],
+                name_len: 0,
+                params_start: 0,
+                params_count: 0,
+                body: 0,
+            }; MAX_FUNCTIONS],
             function_count: 0,
             call_depth: 0,
             dom,
@@ -981,7 +1251,11 @@ impl<'a> JsRuntime<'a> {
         let stmt = node.stmt.as_ref().ok_or(JsError::UnexpectedToken)?;
 
         match stmt {
-            StmtKind::VarDecl { name, name_len, init } => {
+            StmtKind::VarDecl {
+                name,
+                name_len,
+                init,
+            } => {
                 let val = match init {
                     Some(expr_id) => self.eval_expr(parser, *expr_id)?,
                     None => JsValue::Undefined,
@@ -997,7 +1271,11 @@ impl<'a> JsRuntime<'a> {
                         self.set_var(&name[..*nlen as usize], val)?;
                         Ok(StmtResult::Normal(val))
                     }
-                    Some(ExprKind::Member { object, prop, prop_len }) => {
+                    Some(ExprKind::Member {
+                        object,
+                        prop,
+                        prop_len,
+                    }) => {
                         let obj_val = self.eval_expr(parser, *object)?;
                         if let JsValue::Element(node_id) = obj_val {
                             let prop_slice = &prop[..*prop_len as usize];
@@ -1010,7 +1288,11 @@ impl<'a> JsRuntime<'a> {
                     _ => Err(JsError::TypeError),
                 }
             }
-            StmtKind::If { cond, then_stmt, else_stmt } => {
+            StmtKind::If {
+                cond,
+                then_stmt,
+                else_stmt,
+            } => {
                 let cond_val = self.eval_expr(parser, *cond)?;
                 if cond_val.to_bool() {
                     self.eval_stmt(parser, *then_stmt)
@@ -1027,18 +1309,25 @@ impl<'a> JsRuntime<'a> {
                     let res = self.eval_stmt(parser, *body)?;
                     match res {
                         StmtResult::Return(v) => return Ok(StmtResult::Return(v)),
-                        StmtResult::Normal(v) => { last = v; }
+                        StmtResult::Normal(v) => {
+                            last = v;
+                        }
                     }
                 }
                 Ok(StmtResult::Normal(last))
             }
-            StmtKind::Block { stmts_start, stmts_count } => {
+            StmtKind::Block {
+                stmts_start,
+                stmts_count,
+            } => {
                 let mut last = JsValue::Undefined;
                 for i in 0..*stmts_count {
                     let sid = parser.stmts_pool[*stmts_start + i];
                     match self.eval_stmt(parser, sid)? {
                         StmtResult::Return(v) => return Ok(StmtResult::Return(v)),
-                        StmtResult::Normal(v) => { last = v; }
+                        StmtResult::Normal(v) => {
+                            last = v;
+                        }
                     }
                 }
                 Ok(StmtResult::Normal(last))
@@ -1054,7 +1343,13 @@ impl<'a> JsRuntime<'a> {
                 };
                 Ok(StmtResult::Return(val))
             }
-            StmtKind::FunctionDecl { name, name_len, params_start, params_count, body } => {
+            StmtKind::FunctionDecl {
+                name,
+                name_len,
+                params_start,
+                params_count,
+                body,
+            } => {
                 if self.function_count >= MAX_FUNCTIONS {
                     return Err(JsError::CapacityExceeded);
                 }
@@ -1121,25 +1416,30 @@ impl<'a> JsRuntime<'a> {
                     BinOp::Mul => Ok(JsValue::Number(l.to_number().wrapping_mul(r.to_number()))),
                     BinOp::Div => {
                         let rn = r.to_number();
-                        if rn == 0 { Ok(JsValue::Number(0)) } else { Ok(JsValue::Number(l.to_number() / rn)) }
+                        if rn == 0 {
+                            Ok(JsValue::Number(0))
+                        } else {
+                            Ok(JsValue::Number(l.to_number() / rn))
+                        }
                     }
                     BinOp::Mod => {
                         let rn = r.to_number();
-                        if rn == 0 { Ok(JsValue::Number(0)) } else { Ok(JsValue::Number(l.to_number() % rn)) }
-                    }
-                    BinOp::EqEq => {
-                        match (l, r) {
-                            (JsValue::Number(a), JsValue::Number(b)) => Ok(JsValue::Boolean(a == b)),
-                            (JsValue::Boolean(a), JsValue::Boolean(b)) => Ok(JsValue::Boolean(a == b)),
-                            (JsValue::String(a, la), JsValue::String(b, lb)) => {
-                                Ok(JsValue::Boolean(la == lb && a[..la as usize] == b[..lb as usize]))
-                            }
-                            (JsValue::Null, JsValue::Null) | (JsValue::Undefined, JsValue::Undefined) => {
-                                Ok(JsValue::Boolean(true))
-                            }
-                            _ => Ok(JsValue::Boolean(false)),
+                        if rn == 0 {
+                            Ok(JsValue::Number(0))
+                        } else {
+                            Ok(JsValue::Number(l.to_number() % rn))
                         }
                     }
+                    BinOp::EqEq => match (l, r) {
+                        (JsValue::Number(a), JsValue::Number(b)) => Ok(JsValue::Boolean(a == b)),
+                        (JsValue::Boolean(a), JsValue::Boolean(b)) => Ok(JsValue::Boolean(a == b)),
+                        (JsValue::String(a, la), JsValue::String(b, lb)) => Ok(JsValue::Boolean(
+                            la == lb && a[..la as usize] == b[..lb as usize],
+                        )),
+                        (JsValue::Null, JsValue::Null)
+                        | (JsValue::Undefined, JsValue::Undefined) => Ok(JsValue::Boolean(true)),
+                        _ => Ok(JsValue::Boolean(false)),
+                    },
                     BinOp::NotEq => {
                         let eq = self.eval_expr_bin_eq(l, r);
                         Ok(JsValue::Boolean(!eq))
@@ -1152,7 +1452,11 @@ impl<'a> JsRuntime<'a> {
                     BinOp::Or => Ok(JsValue::Boolean(l.to_bool() || r.to_bool())),
                 }
             }
-            ExprKind::Member { object, prop, prop_len } => {
+            ExprKind::Member {
+                object,
+                prop,
+                prop_len,
+            } => {
                 let obj = self.eval_expr(parser, *object)?;
                 let prop_slice = &prop[..*prop_len as usize];
                 match obj {
@@ -1179,10 +1483,18 @@ impl<'a> JsRuntime<'a> {
                     _ => Err(JsError::TypeError),
                 }
             }
-            ExprKind::Call { callee, args_start, args_count } => {
+            ExprKind::Call {
+                callee,
+                args_start,
+                args_count,
+            } => {
                 let callee_node = parser.nodes.get(*callee).ok_or(JsError::UnexpectedToken)?;
                 match callee_node.expr.as_ref() {
-                    Some(ExprKind::Member { object, prop, prop_len }) => {
+                    Some(ExprKind::Member {
+                        object,
+                        prop,
+                        prop_len,
+                    }) => {
                         let _obj = self.eval_expr(parser, *object)?;
                         let method = &prop[..*prop_len as usize];
 
@@ -1226,8 +1538,13 @@ impl<'a> JsRuntime<'a> {
 
                             for i in 0..fndef.params_count as usize {
                                 let pidx = fndef.params_start + i;
-                                let pname = &parser.params_pool[pidx][..parser.params_lens[pidx] as usize];
-                                let pval = if i < arg_take { evaled_args[i] } else { JsValue::Undefined };
+                                let pname =
+                                    &parser.params_pool[pidx][..parser.params_lens[pidx] as usize];
+                                let pval = if i < arg_take {
+                                    evaled_args[i]
+                                } else {
+                                    JsValue::Undefined
+                                };
                                 self.set_var(pname, pval)?;
                             }
 
@@ -1251,7 +1568,10 @@ impl<'a> JsRuntime<'a> {
                 match obj {
                     JsValue::Array(aid) => {
                         let aid_usize = aid as usize;
-                        if aid_usize < self.array_count && i >= 0 && (i as usize) < self.array_lens[aid_usize] as usize {
+                        if aid_usize < self.array_count
+                            && i >= 0
+                            && (i as usize) < self.array_lens[aid_usize] as usize
+                        {
                             Ok(self.arrays[aid_usize][i as usize])
                         } else {
                             Ok(JsValue::Undefined)
@@ -1268,7 +1588,10 @@ impl<'a> JsRuntime<'a> {
                     _ => Err(JsError::TypeError),
                 }
             }
-            ExprKind::Array { elements_start, elements_count } => {
+            ExprKind::Array {
+                elements_start,
+                elements_count,
+            } => {
                 if self.array_count >= MAX_ARRAYS {
                     return Err(JsError::CapacityExceeded);
                 }
@@ -1324,17 +1647,20 @@ impl<'a> JsRuntime<'a> {
                 let txt = self.dom.text_of(node_id);
                 Ok(JsValue::string_from_slice(txt))
             }
-            b"checked" => {
-                Ok(JsValue::Boolean(self.dom.has_attr(node_id, b"checked")))
-            }
-            b"disabled" => {
-                Ok(JsValue::Boolean(self.dom.has_attr(node_id, b"disabled")))
-            }
-            _ => Err(JsError::UnsupportedSyntax("unsupported DOM property getter")),
+            b"checked" => Ok(JsValue::Boolean(self.dom.has_attr(node_id, b"checked"))),
+            b"disabled" => Ok(JsValue::Boolean(self.dom.has_attr(node_id, b"disabled"))),
+            _ => Err(JsError::UnsupportedSyntax(
+                "unsupported DOM property getter",
+            )),
         }
     }
 
-    fn set_element_prop(&mut self, node_id: NodeId, prop: &[u8], val: JsValue) -> Result<(), JsError> {
+    fn set_element_prop(
+        &mut self,
+        node_id: NodeId,
+        prop: &[u8],
+        val: JsValue,
+    ) -> Result<(), JsError> {
         match prop {
             b"value" => {
                 let bytes = val.as_str().as_bytes();
@@ -1355,7 +1681,9 @@ impl<'a> JsRuntime<'a> {
                 self.mutated = true;
                 Ok(())
             }
-            _ => Err(JsError::UnsupportedSyntax("unsupported DOM property setter")),
+            _ => Err(JsError::UnsupportedSyntax(
+                "unsupported DOM property setter",
+            )),
         }
     }
 }
@@ -1434,6 +1762,41 @@ mod tests {
     }
 
     #[test]
+    fn test_deeply_nested_expression_is_bounded_not_stack_exhaustion() {
+        // A hostile page nesting 20_000 parens deep used to drive unbounded
+        // parse_expr recursion (stack exhaustion); it must be refused through
+        // the parse-depth budget instead of crashing the parser.
+        let mut src = [0u8; 40_002];
+        let half = src.len() / 2;
+        for b in src[..half].iter_mut() {
+            *b = b'(';
+        }
+        src[half] = b'1';
+        for b in src[half + 1..].iter_mut() {
+            *b = b')';
+        }
+        let mut dom = Dom::new();
+        let err = execute_script(&src, &mut dom, usize::MAX).expect_err("deep nesting refused");
+        assert_eq!(err, JsError::CapacityExceeded);
+    }
+
+    #[test]
+    fn test_prefix_unary_recursion_is_bounded() {
+        // `!!!!...!x` recursion: each unary prefix must count against the
+        // nesting budget rather than recursing per-operator unbounded.
+        let mut src = [0u8; 20_002];
+        let bangs = src.len() - 2;
+        for b in src[..bangs].iter_mut() {
+            *b = b'!';
+        }
+        src[bangs] = b'1';
+        src[bangs + 1] = b';';
+        let mut dom = Dom::new();
+        let err = execute_script(&src, &mut dom, usize::MAX).expect_err("unary chain refused");
+        assert_eq!(err, JsError::CapacityExceeded);
+    }
+
+    #[test]
     fn test_unsupported_syntax_fails_truthfully() {
         let mut dom = Dom::new();
         let src = b"async function fetchUserData() { return null; }";
@@ -1453,7 +1816,9 @@ mod tests {
     #[test]
     fn test_dom_set_element_property_mutation() {
         let mut dom = Dom::new();
-        dom.parse(b"<div><input id=\"username\" value=\"alice\"></input><p id=\"status\">idle</p></div>");
+        dom.parse(
+            b"<div><input id=\"username\" value=\"alice\"></input><p id=\"status\">idle</p></div>",
+        );
         assert!(dom.node_count() > 0);
 
         let src = b"let input = document.getElementById('username'); input.value = 'bob';";
@@ -1501,7 +1866,8 @@ mod tests {
         let mut dom = Dom::new();
         dom.parse(b"<div><p id=\"msg\">hello</p></div>");
         let src = b"let p = document.getElementById('msg'); p.textContent = 'world';";
-        let (res, mutated) = execute_script_with_mutations(src, &mut dom, 1000).expect("script succeeds");
+        let (res, mutated) =
+            execute_script_with_mutations(src, &mut dom, 1000).expect("script succeeds");
         let _ = res;
         assert!(mutated);
     }
