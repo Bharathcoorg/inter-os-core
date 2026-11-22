@@ -18,8 +18,8 @@ use crate::crypto::sha384::Sha384;
 use crate::crypto::x25519::{x25519, x25519_base};
 use super::certificate::{
     declares_advertised_scheme, is_supported_sig_scheme, spki_is_verifiable, transcript_hash_len,
-    verify_link, CertificateVerifier, ParsedCertificate, MAX_REFERENCE_IDENTITY_LEN,
-    SUPPORTED_SIG_SCHEMES,
+    enforce_ca_constraints, verify_link, CertificateVerifier, ParsedCertificate,
+    MAX_REFERENCE_IDENTITY_LEN, SUPPORTED_SIG_SCHEMES,
 };
 use super::ed25519::Sha512;
 use super::record::{ContentType, RecordCipher, RECORD_HEADER_LEN};
@@ -454,8 +454,16 @@ impl HandshakeClient {
                     // A server picking a group we never advertised is a hard
                     // rejection: accepted groups == advertised groups.
                     if SUPPORTED_GROUPS.contains(&group) && key_len == self.server_public_key.len() {
-                        self.server_public_key
-                            .copy_from_slice(&ext_data[4..4 + key_len]);
+                        // Reject a small-order/zero peer share before any state
+                        // changes: the DHE output would carry no entropy, and a
+                        // refused handshake must leave no trace.
+                        let candidate: [u8; 32] = ext_data[4..4 + key_len]
+                            .try_into()
+                            .map_err(|_| TlsError::BadHandshakeMessage)?;
+                        if x25519(&self.client_private_key, &candidate) == [0u8; 32] {
+                            return Err(TlsError::KeyDerivationError);
+                        }
+                        self.server_public_key.copy_from_slice(&ext_data[4..4 + key_len]);
                         found_key_share = true;
                     }
                 }
@@ -480,8 +488,14 @@ impl HandshakeClient {
     }
 
     fn derive_handshake_keys(&mut self) -> Result<(), TlsError> {
-        // 1. Shared secret via X25519
+        // 1. Shared secret via X25519. An all-zero result means the peer's
+        // share was a small-order point (or the zero key): the ECDH output
+        // carries no entropy, so the handshake aborts before any derivation
+        // rather than building keys an attacker can also compute.
         let dhe = x25519(&self.client_private_key, &self.server_public_key);
+        if dhe == [0u8; 32] {
+            return Err(TlsError::KeyDerivationError);
+        }
 
         // 2. Early Secret = HKDF-Extract(0, 0)
         let early_secret = hkdf_extract(&[0u8; 32], &[0u8; 32]);
@@ -587,6 +601,7 @@ impl HandshakeClient {
         let mut leaf: Option<ParsedCertificate<'a>> = None;
         let mut previous: Option<ParsedCertificate<'a>> = None;
         let mut depth = 0usize;
+        let mut issuer_count = 0usize;
 
         while !chain.is_empty() {
             if depth >= MAX_CHAIN_DEPTH {
@@ -665,6 +680,11 @@ impl HandshakeClient {
                         return Err(TlsError::CertificateVerificationFailed);
                     }
                     verify_link(&prev, &parsed)?;
+                    // Every issuer must be a CA with keyCertSign, inside the
+                    // pathLenConstraint of the CAs above it -- enforced by the
+                    // walk itself, so no verifier can wave it through.
+                    enforce_ca_constraints(&parsed, issuer_count)?;
+                    issuer_count += 1;
                     if chain.is_empty() {
                         // The head of the path must reach the trust store, whether
                         // the server sent a root or stopped at an intermediate.

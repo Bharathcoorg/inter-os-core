@@ -294,6 +294,10 @@ pub const TAG_SET: u8 = 0x31;
 pub const BASIC_CONSTRAINTS_OID: [u8; 3] = [0x55, 0x1d, 0x13];
 /// keyUsage (RFC 5280 §4.2.1.3), OID 2.5.29.15.
 pub const KEY_USAGE_OID: [u8; 3] = [0x55, 0x1d, 0x0f];
+/// subjectAltName (RFC 5280 §4.2.1.6), OID 2.5.29.17. Decoded by the
+/// reference-identity reader; listed here so a critical SAN is honoured
+/// rather than rejected.
+pub const SUBJECT_ALT_NAME_OID: [u8; 3] = [0x55, 0x1d, 0x11];
 /// keyCertSign is bit 5 of the keyUsage BIT STRING, numbered from the MSB of
 /// the first content octet (bit 0 = digitalSignature). The bits are stored
 /// MSB-first in a `u16`, so bit n is `bits & (0x8000 >> n)` and keyCertSign is
@@ -410,6 +414,9 @@ fn parse_key_usage(der: &[u8]) -> Result<u16, TlsError> {
 /// basicConstraints and keyUsage are decoded, duplicates of either are refused,
 /// and any malformed or truncated extension is a parse error. Other extensions
 /// keep their content for the readers that own them (e.g. `SubjectAltNames`).
+/// Per RFC 5280 §4.2 an extension marked critical that this implementation
+/// does not decode (basicConstraints, keyUsage, subjectAltName) is a
+/// verification failure, never an ignore.
 fn parse_extensions(
     mut cur: &[u8],
     basic_constraints: &mut Option<BasicConstraints>,
@@ -443,6 +450,17 @@ fn parse_extensions(
         } else {
             return Err(TlsError::CertificateParsingError);
         };
+        // RFC 5280 §4.2: "A certificate MUST be rejected if it contains a
+        // critical extension that is not recognised." Fail closed: only the
+        // extensions this implementation decodes may be marked critical.
+        let critical = tag1 == TAG_BOOLEAN && val1[0] == 0xff;
+        if critical
+            && oid != BASIC_CONSTRAINTS_OID
+            && oid != KEY_USAGE_OID
+            && oid != SUBJECT_ALT_NAME_OID
+        {
+            return Err(TlsError::CertificateVerificationFailed);
+        }
         if oid == BASIC_CONSTRAINTS_OID {
             if basic_constraints.is_some() {
                 return Err(TlsError::CertificateParsingError);
@@ -1624,5 +1642,45 @@ impl<'a> CertificateVerifier for DefaultCertVerifier<'a> {
             context_and_hash,
             signature,
         )
+    }
+}
+
+#[cfg(test)]
+mod extension_critical_tests {
+    use super::*;
+
+    /// One `Extension`: unknown OID 2.5.29.99, marked critical.
+    const UNKNOWN_CRITICAL: &[u8] = &[
+        0x30, 0x0c, 0x06, 0x03, 0x55, 0x1d, 0x63, 0x01, 0x01, 0xff, 0x04, 0x02, 0x12, 0x34,
+    ];
+    /// The same unknown extension, not marked critical: must stay acceptable.
+    const UNKNOWN_NON_CRITICAL: &[u8] = &[
+        0x30, 0x09, 0x06, 0x03, 0x55, 0x1d, 0x63, 0x04, 0x02, 0x12, 0x34,
+    ];
+    /// subjectAltName marked critical: a decoded extension may be critical.
+    const SAN_CRITICAL: &[u8] = &[
+        0x30, 0x0c, 0x06, 0x03, 0x55, 0x1d, 0x11, 0x01, 0x01, 0xff, 0x04, 0x02, 0x12, 0x34,
+    ];
+
+    fn walk(der: &[u8]) -> Result<(), TlsError> {
+        parse_extensions(der, &mut None, &mut None)
+    }
+
+    #[test]
+    fn unknown_critical_extension_is_rejected() {
+        assert_eq!(
+            walk(UNKNOWN_CRITICAL),
+            Err(TlsError::CertificateVerificationFailed)
+        );
+    }
+
+    #[test]
+    fn unknown_non_critical_extension_is_ignored() {
+        assert_eq!(walk(UNKNOWN_NON_CRITICAL), Ok(()));
+    }
+
+    #[test]
+    fn critical_subject_alt_name_is_accepted() {
+        assert_eq!(walk(SAN_CRITICAL), Ok(()));
     }
 }
