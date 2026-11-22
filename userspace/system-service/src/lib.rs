@@ -7876,6 +7876,14 @@ mod tests {
     /// only claim this host case is allowed to make.
     #[test]
     fn test_a_token_id_stream_takes_the_file_backed_branch_not_the_baseline() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+        // The arm reserves its session from the BrokerLedger before it opens the
+        // file. Left unseeded, the ledger's host fallback budget depends on the
+        // machine and the session can be refused for RAM, which would send a
+        // non-strict request to the baseline for a reason this test does not
+        // test. Seed a fixed budget so the reservation always succeeds and the
+        // reply is decided by fs_open alone.
+        reset_broker_ledger(64 * 1024 * 1024, 0, 16 * 1024 * 1024);
         let mut tx_buf = [0u8; 1024];
         let models = probed_embedding_models();
         let ids: alloc::vec::Vec<u8> = [1701u32, 4423, 88]
