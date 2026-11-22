@@ -342,6 +342,17 @@ def main():
         print(f"\n[TEST FAILED] {e}")
         import traceback
         traceback.print_exc()
+        # Dump the captured serial log tail so boot/timeout failures are diagnosable.
+        try:
+            if client and client.captured_logs:
+                tail = client.captured_logs[-60:]
+                print("\n[SERIAL TAIL] Last 60 lines captured on COM1:")
+                for line in tail:
+                    print(f"  | {line}")
+            else:
+                print("\n[SERIAL TAIL] (no serial output captured before failure)")
+        except Exception:
+            pass
         return 1
 
     finally:
