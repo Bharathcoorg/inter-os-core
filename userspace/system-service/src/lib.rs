@@ -8034,6 +8034,7 @@ mod tests {
 
     #[test]
     fn test_authoritative_broker_ledger_reservation_and_reclamation() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
         // Configure ledger: 100 MiB free, 0 storage, 20 MiB reserve => 80 MiB available for AI
         reset_broker_ledger(100 * 1024 * 1024, 0, 20 * 1024 * 1024);
 
