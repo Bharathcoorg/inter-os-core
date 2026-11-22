@@ -24,6 +24,7 @@ pub mod services;
 pub mod allocator;
 pub mod display;
 pub mod pcie;
+pub mod settings;
 
 use core::panic::PanicInfo;
 

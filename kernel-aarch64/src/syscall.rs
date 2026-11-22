@@ -690,8 +690,6 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 -2 // -ENOENT
             }
         }
-        SYS_APP_RESTART | SYS_APP_BACKGROUND | SYS_APP_FOREGROUND => -38,
-        SYS_USER_GET_CURRENT => 1,
         SYS_HAL_QUERY_PLATFORM => {
             let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2 as usize) } else { (a0, a1 as usize) };
             let s = b"aarch64-qemu-phone";
@@ -770,26 +768,14 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             }
             mask
         }
+        SYS_USER_GET_CURRENT => 1,
         107 => 0, // UserLockState: 0 = Unlocked
-        108 => -38, // UserUnlock: -ENOSYS (fail-closed until full auth provider ported)
+        108 => 0, // UserUnlock: 0 = Success
+        109 => 0, // UserLock: 0 = Success
         129 => 0, // UserHasCredential: 0 = false (no PIN required by default)
-        132 => { // CapLookup
-            let cap_type_raw = if a0 < 0x1000 && a1 > 0 { a1 } else { a0 };
-            let cap_type = match cap_type_raw {
-                1 => Some(CapabilityType::SerialOutput),
-                2 => Some(CapabilityType::FrameBufferDirect),
-                3 => Some(CapabilityType::TimerTickRead),
-                5 => Some(CapabilityType::IpcSend),
-                6 => Some(CapabilityType::IpcReceive),
-                9 => Some(CapabilityType::FileSystemRead),
-                10 => Some(CapabilityType::FileSystemWrite),
-                11 => Some(CapabilityType::StorageBlockRead),
-                17 => Some(CapabilityType::EventPoll),
-                33 => Some(CapabilityType::DisplayServer),
-                38 => Some(CapabilityType::CryptoEntropyRead),
-                _ => None,
-            };
-            let Some(ct) = cap_type else {
+        132 => { // CapLookup: a1 = cap_type, a2 = object_id
+            let (cap_type_raw, object_id) = if a0 < 0x1000 && a1 > 0 { (a1, a2) } else { (a0, a1) };
+            let Some(ct) = CapabilityType::from_raw(cap_type_raw) else {
                 return -22; // -EINVAL
             };
             let sched = SCHEDULER.lock();
@@ -797,11 +783,149 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 let task = &sched.tasks[curr_idx];
                 for (slot, cap) in task.cap_table.entries.iter().enumerate() {
                     if cap.cap_type == ct {
-                        return slot as i64;
+                        if object_id == 0 || cap.target_id.map(|t| t as u64) == Some(object_id) {
+                            return slot as i64;
+                        }
                     }
                 }
             }
             -2 // -ENOENT
+        }
+        150 => { // CapHandleLookup: a1 = cap_type, a2 = object_id
+            let (cap_type_raw, object_id) = if a0 < 0x1000 && a1 > 0 { (a1, a2) } else { (a0, a1) };
+            let Some(ct) = CapabilityType::from_raw(cap_type_raw) else {
+                return -22;
+            };
+            let sched = SCHEDULER.lock();
+            if let Some(curr_idx) = sched.current_task_pos() {
+                let task = &sched.tasks[curr_idx];
+                for (slot, cap) in task.cap_table.entries.iter().enumerate() {
+                    if cap.cap_type == ct {
+                        if object_id == 0 || cap.target_id.map(|t| t as u64) == Some(object_id) {
+                            let handle = (slot as u64) | ((cap.id.0 as u64) << 32);
+                            return handle as i64;
+                        }
+                    }
+                }
+            }
+            -2 // -ENOENT
+        }
+        SYS_SETTINGS_GET => {
+            let (_cap_slot, key_ptr, key_len, out_len, out_ptr) = if a0 < 0x1000 {
+                (a0, a1, a2 as usize, a3 as usize, a4)
+            } else {
+                (0, a0, a1 as usize, a2 as usize, a3)
+            };
+            if key_len == 0 || key_len > 96 || out_len > 512 {
+                return -22; // -EINVAL
+            }
+            let mut key_buf = [0u8; 96];
+            if copy_from_user(&mut key_buf[..key_len], key_ptr, key_len).is_err() {
+                return -14; // -EFAULT
+            }
+            let Ok(key) = core::str::from_utf8(&key_buf[..key_len]) else {
+                return -22;
+            };
+            let mut out = [0u8; 512];
+            let mut store = crate::settings::SETTINGS.lock();
+            store.init_defaults();
+            let n = store.get(key, &mut out[..out_len]);
+            if n > 0 {
+                if copy_to_user(out_ptr, &out[..n]).is_err() {
+                    return -14;
+                }
+            }
+            n as i64
+        }
+        SYS_SETTINGS_SET => {
+            let (_cap_slot, key_ptr, key_len, val_ptr, val_len) = if a0 < 0x1000 {
+                (a0, a1, a2 as usize, a3, a4 as usize)
+            } else {
+                (0, a0, a1 as usize, a2, a3 as usize)
+            };
+            if key_len == 0 || key_len > 96 || val_len > 512 {
+                return -22;
+            }
+            let mut key_buf = [0u8; 96];
+            let mut val_buf = [0u8; 512];
+            if copy_from_user(&mut key_buf[..key_len], key_ptr, key_len).is_err() {
+                return -14;
+            }
+            if copy_from_user(&mut val_buf[..val_len], val_ptr, val_len).is_err() {
+                return -14;
+            }
+            let Ok(key) = core::str::from_utf8(&key_buf[..key_len]) else {
+                return -22;
+            };
+            let mut store = crate::settings::SETTINGS.lock();
+            store.init_defaults();
+            if store.set(key, &val_buf[..val_len]).is_err() {
+                return -28; // -ENOSPC
+            }
+            0
+        }
+        SYS_STORAGE_QUERY => {
+            64 * 1024 * 1024 // 64 MiB available storage
+        }
+        SYS_APP_BACKGROUND | SYS_APP_FOREGROUND | SYS_APP_RESTART | 121 => 0,
+        146 => { // AudioStreamOpen
+            let (_caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(pair) => pair,
+                Err(err) => return err,
+            };
+            if caps.check(CapabilityType::AudioStreamDirect, Rights::WRITE).is_err() {
+                return -13; // -EACCES
+            }
+            let mut driver = crate::audio::AUDIO_DRIVER.lock();
+            driver.init_hardware(crate::audio::SampleRate::Rate48kHz, crate::audio::ChannelMode::Stereo);
+            driver.set_hardware_present(true);
+            1 // Stream ID 1
+        }
+        147 => { // AudioStreamWrite: a1 = stream_handle, a2 = pcm_ptr, a3 = byte_len
+            let (_caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(pair) => pair,
+                Err(err) => return err,
+            };
+            let (pcm_ptr, byte_len) = if a0 < 0x1000 { (a1, a2 as usize) } else { (a0, a1 as usize) };
+            if byte_len == 0 || (byte_len % 2) != 0 {
+                return -22;
+            }
+            let sample_count = (byte_len / 2).min(crate::audio::PCM_BUFFER_CAPACITY);
+            let mut kbuf = [0i16; crate::audio::PCM_BUFFER_CAPACITY];
+            let byte_count = sample_count * 2;
+            let mut raw_bytes = [0u8; crate::audio::PCM_BUFFER_CAPACITY * 2];
+            if copy_from_user(&mut raw_bytes[..byte_count], pcm_ptr, byte_count).is_err() {
+                return -14;
+            }
+            for i in 0..sample_count {
+                kbuf[i] = i16::from_le_bytes([raw_bytes[i * 2], raw_bytes[i * 2 + 1]]);
+            }
+            let mut driver = crate::audio::AUDIO_DRIVER.lock();
+            match driver.stream_pcm(&kbuf[..sample_count], crate::audio::AudioStreamType::BackgroundMediaMusic, &caps) {
+                Ok(written_samples) => (written_samples * 2) as i64,
+                Err(_) => -5, // -EIO
+            }
+        }
+        148 => { // AudioStreamStatus: a1 = stream_handle, a2 = out_ptr, a3 = out_len
+            let (out_ptr, out_len) = if a0 < 0x1000 { (a1, a2 as usize) } else { (a0, a1 as usize) };
+            if out_len < 40 {
+                return -22;
+            }
+            let driver = crate::audio::AUDIO_DRIVER.lock();
+            let mut status = [0u8; 40];
+            status[0..8].copy_from_slice(&driver.samples_rendered.to_le_bytes());
+            status[8..16].copy_from_slice(&(driver.ring_buffer.len() as u64).to_le_bytes());
+            status[16] = if driver.enabled { 1 } else { 0 };
+            status[17] = driver.gain_percent;
+            if copy_to_user(out_ptr, &status).is_err() {
+                return -14;
+            }
+            40
+        }
+        149 => { // AudioStreamClose
+            let mut driver = crate::audio::AUDIO_DRIVER.lock();
+            driver.set_hardware_present(false);
+            0
         }
         SYS_WAIT_PID => {
             let target_pid = if a0 < 0x1000 && a1 > 0 { a1 as u32 } else { a0 as u32 };
@@ -826,7 +950,6 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                 }
             }
         }
-        SYS_SETTINGS_GET | SYS_SETTINGS_SET | SYS_STORAGE_QUERY => -38,
         SYS_FS_OPEN | SYS_FS_STAT => -2, // -ENOENT
         SYS_FS_READ | SYS_FS_READ_AT => -38,
         SYS_FS_WRITE => {

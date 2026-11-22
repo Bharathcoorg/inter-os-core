@@ -191,7 +191,7 @@ pub struct AudioDriver {
 
 impl AudioDriver {
     /// Creates a new audio driver instance.
-    pub fn new(mmio_base: usize) -> Self {
+    pub const fn new(mmio_base: usize) -> Self {
         Self {
             mmio_base,
             sample_rate: SampleRate::Rate48kHz,
@@ -287,3 +287,5 @@ impl AudioDriver {
         tone
     }
 }
+
+pub static AUDIO_DRIVER: spin::Mutex<AudioDriver> = spin::Mutex::new(AudioDriver::new(0x0902_0000));

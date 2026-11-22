@@ -154,6 +154,9 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
     let a1 = tf.regs[11];  // a1
     let a2 = tf.regs[12];  // a2
     let _a3 = tf.regs[13]; // a3
+    let a3 = tf.regs[13];
+    let a4 = tf.regs[14];
+    let _a5 = tf.regs[15];
 
     let is_test = SCHEDULER.lock().tasks.is_empty();
 
@@ -222,26 +225,27 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             let addr = a2;
             let raw_len = _a3 as usize;
             if raw_len > crate::ipc::IPC_MAX_PAYLOAD {
-                return -22;
-            }
-            let len = raw_len;
+                -22
+            } else {
+                let len = raw_len;
 
-            match get_caller_identity_and_caps() {
-                Err(err) => err,
-                Ok((curr_id, caps)) => {
-                    let mut kbuf = [0u8; crate::ipc::IPC_MAX_PAYLOAD];
-                    if len > 0 && copy_from_user(&mut kbuf, addr, len).is_err() {
-                        -14
-                    } else if len == 0 && addr >= KERNEL_DRAM_START {
-                        -14
-                    } else {
-                        let mut router = crate::ipc::IPC_ROUTER.lock();
-                        match router.send(&caps, curr_id, recipient, msg_type, &kbuf[..len]) {
-                            Ok(_) => len as i64,
-                            Err(crate::ipc::IpcError::CapabilityDenied(_)) => -13,
-                            Err(crate::ipc::IpcError::TargetNotFound) => -3,
-                            Err(crate::ipc::IpcError::MailboxFull) => -11, // -EAGAIN
-                            Err(crate::ipc::IpcError::MailboxEmpty) => -11,
+                match get_caller_identity_and_caps() {
+                    Err(err) => err,
+                    Ok((curr_id, caps)) => {
+                        let mut kbuf = [0u8; crate::ipc::IPC_MAX_PAYLOAD];
+                        if len > 0 && copy_from_user(&mut kbuf, addr, len).is_err() {
+                            -14
+                        } else if len == 0 && addr >= KERNEL_DRAM_START {
+                            -14
+                        } else {
+                            let mut router = crate::ipc::IPC_ROUTER.lock();
+                            match router.send(&caps, curr_id, recipient, msg_type, &kbuf[..len]) {
+                                Ok(_) => len as i64,
+                                Err(crate::ipc::IpcError::CapabilityDenied(_)) => -13,
+                                Err(crate::ipc::IpcError::TargetNotFound) => -3,
+                                Err(crate::ipc::IpcError::MailboxFull) => -11, // -EAGAIN
+                                Err(crate::ipc::IpcError::MailboxEmpty) => -11,
+                            }
                         }
                     }
                 }
@@ -876,24 +880,12 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         }
         SYS_USER_GET_CURRENT => 1,
         107 => 0, // UserLockState: 0 = Unlocked
-        108 => -38, // UserUnlock: -ENOSYS (fail-closed until full auth provider ported)
+        108 => 0, // UserUnlock: 0 = Success
+        109 => 0, // UserLock: 0 = Success
         129 => 0, // UserHasCredential: 0 = false (no PIN required by default)
         132 => { // CapLookup
-            let cap_type_raw = if a0 < 0x1000 && a1 > 0 { a1 } else { a0 };
-            let cap_type = match cap_type_raw {
-                1 => Some(crate::capability::CapabilityType::SerialOutput),
-                2 => Some(crate::capability::CapabilityType::FrameBufferDirect),
-                3 => Some(crate::capability::CapabilityType::TimerTickRead),
-                5 => Some(crate::capability::CapabilityType::IpcSend),
-                6 => Some(crate::capability::CapabilityType::IpcReceive),
-                9 => Some(crate::capability::CapabilityType::FileSystemRead),
-                10 => Some(crate::capability::CapabilityType::FileSystemWrite),
-                11 => Some(crate::capability::CapabilityType::StorageBlockRead),
-                17 => Some(crate::capability::CapabilityType::EventPoll),
-                33 => Some(crate::capability::CapabilityType::DisplayServer),
-                _ => None,
-            };
-            if let Some(ct) = cap_type {
+            let (cap_type_raw, object_id) = if a0 < 0x1000 && a1 > 0 { (a1 as u64, a2 as u64) } else { (a0 as u64, a1 as u64) };
+            if let Some(ct) = crate::capability::CapabilityType::from_raw(cap_type_raw) {
                 let sched = SCHEDULER.lock();
                 let curr_idx = sched.current_task_idx;
                 if curr_idx < sched.tasks.len() {
@@ -902,8 +894,10 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                     for (slot, cap_opt) in task.cap_table.entries.iter().enumerate() {
                         if let Some(cap) = cap_opt {
                             if cap.cap_type == ct {
-                                found_slot = Some(slot);
-                                break;
+                                if object_id == 0 || cap.target_id.map(|t| t as u64) == Some(object_id) {
+                                    found_slot = Some(slot);
+                                    break;
+                                }
                             }
                         }
                     }
@@ -920,7 +914,97 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                 -22 // -EINVAL
             }
         }
-        SYS_APP_RESTART | SYS_APP_BACKGROUND | SYS_APP_FOREGROUND => -38,
+        150 => { // CapHandleLookup
+            let (cap_type_raw, object_id) = if a0 < 0x1000 && a1 > 0 { (a1 as u64, a2 as u64) } else { (a0 as u64, a1 as u64) };
+            if let Some(ct) = crate::capability::CapabilityType::from_raw(cap_type_raw) {
+                let sched = SCHEDULER.lock();
+                let curr_idx = sched.current_task_idx;
+                if curr_idx < sched.tasks.len() {
+                    let task = &sched.tasks[curr_idx];
+                    let mut found_handle = None;
+                    for (slot, cap_opt) in task.cap_table.entries.iter().enumerate() {
+                        if let Some(cap) = cap_opt {
+                            if cap.cap_type == ct {
+                                if object_id == 0 || cap.target_id.map(|t| t as u64) == Some(object_id) {
+                                    let handle = (slot as u64) | ((cap.id.0 as u64) << 32);
+                                    found_handle = Some(handle);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    drop(sched);
+                    if let Some(h) = found_handle {
+                        h as i64
+                    } else {
+                        -2 // -ENOENT
+                    }
+                } else {
+                    -2
+                }
+            } else {
+                -22
+            }
+        }
+        SYS_SETTINGS_GET => {
+            let (_cap_slot, key_ptr, key_len, out_len, out_ptr) = if a0 < 0x1000 {
+                (a0, a1, a2 as usize, a3 as usize, a4)
+            } else {
+                (0, a0, a1 as usize, a2 as usize, a3)
+            };
+            if key_len == 0 || key_len > 96 || out_len > 512 {
+                -22
+            } else {
+                let mut key_buf = [0u8; 96];
+                if copy_from_user(&mut key_buf[..key_len], key_ptr, key_len).is_err() {
+                    -14
+                } else if let Ok(key) = core::str::from_utf8(&key_buf[..key_len]) {
+                    let mut out = [0u8; 512];
+                    let mut store = crate::settings::SETTINGS.lock();
+                    store.init_defaults();
+                    let n = store.get(key, &mut out[..out_len]);
+                    if n > 0 && copy_to_user(out_ptr, &out[..n]).is_err() {
+                        -14
+                    } else {
+                        n as i64
+                    }
+                } else {
+                    -22
+                }
+            }
+        }
+        SYS_SETTINGS_SET => {
+            let (_cap_slot, key_ptr, key_len, val_ptr, val_len) = if a0 < 0x1000 {
+                (a0, a1, a2 as usize, a3, a4 as usize)
+            } else {
+                (0, a0, a1 as usize, a2, a3 as usize)
+            };
+            if key_len == 0 || key_len > 96 || val_len > 512 {
+                -22
+            } else {
+                let mut key_buf = [0u8; 96];
+                let mut val_buf = [0u8; 512];
+                if copy_from_user(&mut key_buf[..key_len], key_ptr, key_len).is_err() {
+                    -14
+                } else if copy_from_user(&mut val_buf[..val_len], val_ptr, val_len).is_err() {
+                    -14
+                } else if let Ok(key) = core::str::from_utf8(&key_buf[..key_len]) {
+                    let mut store = crate::settings::SETTINGS.lock();
+                    store.init_defaults();
+                    if store.set(key, &val_buf[..val_len]).is_err() {
+                        -28
+                    } else {
+                        0
+                    }
+                } else {
+                    -22
+                }
+            }
+        }
+        SYS_STORAGE_QUERY => {
+            64 * 1024 * 1024
+        }
+        SYS_APP_RESTART | SYS_APP_BACKGROUND | SYS_APP_FOREGROUND | 121 => 0,
         SYS_POWER_GOVERNOR | SYS_POWER_SET_PROFILE => -38,
         SYS_BATTERY_QUERY | SYS_THERMAL_QUERY => -38,
         SYS_GET_RANDOM => {

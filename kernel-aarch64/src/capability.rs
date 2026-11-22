@@ -56,6 +56,27 @@ pub enum CapabilityType {
     SystemResource,
 }
 
+impl CapabilityType {
+    pub fn from_raw(val: u64) -> Option<Self> {
+        match val {
+            1 => Some(CapabilityType::SerialOutput),
+            2 => Some(CapabilityType::FrameBufferDirect),
+            3 => Some(CapabilityType::TimerTickRead),
+            5 => Some(CapabilityType::IpcSend),
+            6 => Some(CapabilityType::IpcReceive),
+            9 => Some(CapabilityType::FileSystemRead),
+            10 => Some(CapabilityType::FileSystemWrite),
+            11 => Some(CapabilityType::StorageBlockRead),
+            17 => Some(CapabilityType::EventPoll),
+            18 => Some(CapabilityType::SystemResource),
+            28 => Some(CapabilityType::AudioStreamDirect),
+            33 => Some(CapabilityType::DisplayServer),
+            38 => Some(CapabilityType::CryptoEntropyRead),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Rights(pub u32);
 

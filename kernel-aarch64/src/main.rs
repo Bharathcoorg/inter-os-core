@@ -17,6 +17,7 @@ pub mod elf;
 pub mod images;
 pub mod input_queue;
 pub mod services;
+pub mod settings;
 pub mod allocator;
 pub mod capability;
 pub mod console_sink;
