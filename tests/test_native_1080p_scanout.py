@@ -47,7 +47,14 @@ def kill_proc_on_port(p):
         pass
 
 
-def find_qemu(binary="qemu-system-x86_64.exe"):
+def find_qemu(binary="qemu-system-x86_64"):
+    """Locate the QEMU binary on any host OS.
+
+    POSIX uses `qemu-system-x86_64`, Windows `qemu-system-x86_64.exe`; both
+    are honoured via QEMU_PATH, PATH or common install locations.
+    """
+    if sys.platform == "win32":
+        binary = "qemu-system-x86_64.exe"
     if "QEMU_PATH" in os.environ and os.path.exists(os.path.join(os.environ["QEMU_PATH"], binary)):
         return os.path.join(os.environ["QEMU_PATH"], binary)
     found = shutil.which(binary)
@@ -55,6 +62,8 @@ def find_qemu(binary="qemu-system-x86_64.exe"):
         return found
     candidates = [
         os.path.expanduser(f"~/qemu/{binary}"),
+        os.path.expanduser(f"~/.local/bin/{binary}"),
+        os.path.expanduser(f"/usr/local/bin/{binary}"),
         rf"C:\Program Files\qemu\{binary}",
         rf"C:\qemu\{binary}"
     ]
@@ -179,15 +188,7 @@ def analyze_ppm(ppm_path):
 
 
 def main():
-    if sys.platform != "win32":
-        print("SKIP: this audit boots qemu-system-x86_64.exe and reads a COM port; "
-              "it is a Windows-host contract.")
-        return
-    print("=" * 72)
-    print("  InterOS Core Native 1080x2400 Scanout & Framebuffer Safety Audit")
-    print("=" * 72)
-
-    qemu_exe = find_qemu("qemu-system-x86_64.exe")
+    qemu_exe = find_qemu()
     kernel_img = ROOT / "target" / "inter-os-bios.img"
     assert kernel_img.exists(), f"Kernel image not found: {kernel_img}"
 
