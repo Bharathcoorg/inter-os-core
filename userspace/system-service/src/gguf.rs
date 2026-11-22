@@ -665,52 +665,59 @@ pub fn skip_metadata_value(buf: &[u8], offset: &mut usize, val_type: u32) -> Res
     match val_type {
         0 | 1 | 7 => {
             // Uint8, Int8, Bool: 1 byte
-            if *offset + 1 > buf.len() {
-                return Err(GgufError::BufferTooShort);
-            }
+            let needed = (*offset).checked_add(1).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
             *offset += 1;
         }
         2 | 3 => {
             // Uint16, Int16: 2 bytes
-            if *offset + 2 > buf.len() {
-                return Err(GgufError::BufferTooShort);
-            }
+            let needed = (*offset).checked_add(2).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
             *offset += 2;
         }
         4 | 5 | 6 => {
             // Uint32, Int32, Float32: 4 bytes
-            if *offset + 4 > buf.len() {
-                return Err(GgufError::BufferTooShort);
-            }
+            let needed = (*offset).checked_add(4).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
             *offset += 4;
         }
         10 | 11 | 12 => {
             // Uint64, Int64, Float64: 8 bytes
-            if *offset + 8 > buf.len() {
-                return Err(GgufError::BufferTooShort);
-            }
+            let needed = (*offset).checked_add(8).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
             *offset += 8;
         }
         8 => {
             // String: 8 bytes length + string bytes
-            if *offset + 8 > buf.len() {
-                return Err(GgufError::BufferTooShort);
-            }
+            let needed = (*offset).checked_add(8).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
             let str_len = u64::from_le_bytes([
                 buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
                 buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
             ]) as usize;
             *offset += 8;
-            if *offset + str_len > buf.len() {
-                return Err(GgufError::BufferTooShort);
-            }
+            let needed = (*offset).checked_add(str_len).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
             *offset += str_len;
         }
         9 => {
             // Array: 4 bytes element_type + 8 bytes element_count + elements
-            if *offset + 12 > buf.len() {
-                return Err(GgufError::BufferTooShort);
-            }
+            let needed = (*offset).checked_add(12).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
             let elem_type = u32::from_le_bytes([
                 buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
             ]);
@@ -723,46 +730,52 @@ pub fn skip_metadata_value(buf: &[u8], offset: &mut usize, val_type: u32) -> Res
             match elem_type {
                 0 | 1 | 7 => {
                     let total = elem_count;
-                    if *offset + total > buf.len() {
-                        return Err(GgufError::BufferTooShort);
-                    }
+                    let needed = (*offset).checked_add(total).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
                     *offset += total;
                 }
                 2 | 3 => {
                     let total = elem_count.checked_mul(2).ok_or(GgufError::InvalidMetadata)?;
-                    if *offset + total > buf.len() {
-                        return Err(GgufError::BufferTooShort);
-                    }
+                    let needed = (*offset).checked_add(total).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
                     *offset += total;
                 }
                 4 | 5 | 6 => {
                     let total = elem_count.checked_mul(4).ok_or(GgufError::InvalidMetadata)?;
-                    if *offset + total > buf.len() {
-                        return Err(GgufError::BufferTooShort);
-                    }
+                    let needed = (*offset).checked_add(total).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
                     *offset += total;
                 }
                 10 | 11 | 12 => {
                     let total = elem_count.checked_mul(8).ok_or(GgufError::InvalidMetadata)?;
-                    if *offset + total > buf.len() {
-                        return Err(GgufError::BufferTooShort);
-                    }
+                    let needed = (*offset).checked_add(total).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
                     *offset += total;
                 }
                 8 => {
                     // Array of strings
                     for _ in 0..elem_count {
-                        if *offset + 8 > buf.len() {
-                            return Err(GgufError::BufferTooShort);
-                        }
+                        let needed = (*offset).checked_add(8).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
                         let s_len = u64::from_le_bytes([
                             buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
                             buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
                         ]) as usize;
                         *offset += 8;
-                        if *offset + s_len > buf.len() {
-                            return Err(GgufError::BufferTooShort);
-                        }
+                        let needed = (*offset).checked_add(s_len).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
                         *offset += s_len;
                     }
                 }
@@ -777,9 +790,10 @@ pub fn skip_metadata_value(buf: &[u8], offset: &mut usize, val_type: u32) -> Res
 /// Zero-allocation helper to skip all key-value pairs in a GGUF buffer.
 pub fn skip_all_kv_pairs(buf: &[u8], offset: &mut usize, kv_count: u64) -> Result<(), GgufError> {
     for _ in 0..kv_count {
-        if *offset + 8 > buf.len() {
-            return Err(GgufError::BufferTooShort);
-        }
+        let needed = (*offset).checked_add(8).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
         let key_len = u64::from_le_bytes([
             buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
             buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
@@ -810,9 +824,10 @@ pub fn skip_all_kv_pairs(buf: &[u8], offset: &mut usize, kv_count: u64) -> Resul
 
 /// Parses a single GGUF tensor info entry from a byte buffer at `offset`, advancing `offset`.
 pub fn parse_tensor_info(buf: &[u8], offset: &mut usize) -> Result<GgufTensorInfo, GgufError> {
-    if *offset + 8 > buf.len() {
-        return Err(GgufError::BufferTooShort);
-    }
+    let needed = (*offset).checked_add(8).ok_or(GgufError::BufferTooShort)?;
+   if needed > buf.len() {
+       return Err(GgufError::BufferTooShort);
+   }
     let name_len = u64::from_le_bytes([
         buf[*offset], buf[*offset + 1], buf[*offset + 2], buf[*offset + 3],
         buf[*offset + 4], buf[*offset + 5], buf[*offset + 6], buf[*offset + 7],
@@ -2339,7 +2354,8 @@ pub fn find_metadata_string<'a>(buf: &'a [u8], target_key: &[u8]) -> Option<&'a 
     let mut offset = GgufHeader::HEADER_SIZE;
 
     for _ in 0..header.kv_count {
-        if offset + 8 > buf.len() {
+        let need8 = offset.checked_add(8).filter(|e| *e <= buf.len())?;
+        if need8 != offset + 8 {
             return None;
         }
         let key_len = u64::from_le_bytes([
@@ -2350,10 +2366,10 @@ pub fn find_metadata_string<'a>(buf: &'a [u8], target_key: &[u8]) -> Option<&'a 
 
         let needed = key_len
             .checked_add(4)
-            .and_then(|n| n.checked_add(offset));
-        match needed {
-            Some(n) if n <= buf.len() => {}
-            _ => return None,
+            .and_then(|n| n.checked_add(offset))
+            .filter(|n| *n <= buf.len());
+        if needed.is_none() {
+            return None;
         }
         let key = &buf[offset..offset + key_len];
         offset += key_len;
@@ -2364,18 +2380,16 @@ pub fn find_metadata_string<'a>(buf: &'a [u8], target_key: &[u8]) -> Option<&'a 
         offset += 4;
 
         if key == target_key && val_type == 8 {
-            if offset + 8 > buf.len() {
+            if offset.checked_add(8).filter(|e| *e <= buf.len()).is_none() {
                 return None;
             }
             let str_len = u64::from_le_bytes([
                 buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3],
                 buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7],
             ]) as usize;
-            offset += 8;
-            if offset + str_len > buf.len() {
-                return None;
-            }
-            return Some(&buf[offset..offset + str_len]);
+            let data_start = offset.checked_add(8)?;
+            let end = data_start.checked_add(str_len).filter(|e| *e <= buf.len())?;
+            return Some(&buf[data_start..end]);
         }
 
         if skip_metadata_value(buf, &mut offset, val_type).is_err() {

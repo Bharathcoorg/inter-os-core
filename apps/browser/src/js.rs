@@ -723,13 +723,17 @@ impl<'a> Parser<'a> {
 
     fn parse_unary(&mut self) -> Result<usize, JsError> {
         if self.curr.kind == TokenKind::Bang {
+            self.enter_nested()?;
             self.advance()?;
             let expr = self.parse_unary()?;
+            self.depth -= 1;
             return self.alloc_expr(ExprKind::Unary { op: UnOp::Not, expr });
         }
         if self.curr.kind == TokenKind::Minus {
+            self.enter_nested()?;
             self.advance()?;
             let expr = self.parse_unary()?;
+            self.depth -= 1;
             return self.alloc_expr(ExprKind::Unary { op: UnOp::Neg, expr });
         }
         self.parse_postfix()
