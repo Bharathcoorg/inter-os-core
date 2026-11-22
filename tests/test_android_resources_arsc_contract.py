@@ -44,8 +44,7 @@ def test_kernel_resources_arsc_constants_and_types():
 
 def test_real_apk_resources_arsc_parsing():
     apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.exists():
-        pytest.skip("Fossify File Manager APK not found")
+    assert apk_path.is_file(), "Fossify File Manager APK is required in emulator/data/apps"
 
     report = analyze_apk(apk_path)
     arsc = report["resources_arsc"]

@@ -28,8 +28,7 @@ def test_android_apk_tool_exists_and_runs():
 
 def test_real_apk_container_structure():
     apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.exists():
-        pytest.skip("Fossify File Manager APK not found in emulator/data/apps")
+    assert apk_path.is_file(), "Fossify File Manager APK is required in emulator/data/apps"
     raw_data = apk_path.read_bytes()
     container = parse_pkzip_container(raw_data)
     assert container["total_entries"] == 1947
@@ -41,8 +40,7 @@ def test_real_apk_container_structure():
 
 def test_real_apk_manifest_decoding_without_fabrication():
     apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.exists():
-        pytest.skip("Fossify File Manager APK not found in emulator/data/apps")
+    assert apk_path.is_file(), "Fossify File Manager APK is required in emulator/data/apps"
     report = analyze_apk(apk_path)
     manifest = report["manifest"]
     assert manifest["package_name"] == "org.fossify.filemanager"
@@ -55,8 +53,7 @@ def test_real_apk_manifest_decoding_without_fabrication():
 
 def test_real_apk_dex_header_and_adler32_integrity():
     apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.exists():
-        pytest.skip("Fossify File Manager APK not found in emulator/data/apps")
+    assert apk_path.is_file(), "Fossify File Manager APK is required in emulator/data/apps"
     report = analyze_apk(apk_path)
     dex = report["dex"]
     assert dex is not None
@@ -68,8 +65,7 @@ def test_real_apk_dex_header_and_adler32_integrity():
 
 def test_real_apk_zero_trust_security_attestation_fails_closed():
     apk_path = ROOT / "emulator/data/apps/fossify_file_manager.apk"
-    if not apk_path.exists():
-        pytest.skip("Fossify File Manager APK not found in emulator/data/apps")
+    assert apk_path.is_file(), "Fossify File Manager APK is required in emulator/data/apps"
     report = analyze_apk(apk_path)
     audit = report["audit"]
     assert audit["status"] == "AttestationFailed"
