@@ -113,27 +113,25 @@ impl StringPool {
         let pool_data_end = offset + chunk_size;
         let mut strings = Vec::with_capacity(string_count);
 
-        for i in 0..string_count {
-            let off_pos = offsets_start + i * 4;
-            let str_rel_off = u32::from_le_bytes(data[off_pos..off_pos + 4].try_into().unwrap()) as usize;
-            let abs_str_off = pool_data_start + str_rel_off;
-
+        // Fail closed on malformed pools: an entry whose offset or declared
+        // length escapes the chunk is a parse error, not a silently empty
+        // string. A padded empty pool would mislabel resources (permissions,
+        // activities) while appearing to parse successfully.
+        let decode_string_at = |abs_str_off: usize| -> Result<Option<String>, ResourceError> {
             if abs_str_off >= pool_data_end {
-                strings.push(String::new());
-                continue;
+                return Err(ResourceError::MalformedStringPool);
             }
-
             if is_utf8 {
-                // UTF-8 string format: [char_len][byte_len][chars][null]
                 let mut cur = abs_str_off;
-                // Skip character length (1 or 2 bytes)
                 if cur < pool_data_end && (data[cur] & 0x80) != 0 {
                     cur += 2;
                 } else {
                     cur += 1;
                 }
-                // Byte length (1 or 2 bytes)
                 let byte_len = if cur < pool_data_end && (data[cur] & 0x80) != 0 {
+                    if cur + 2 > pool_data_end {
+                        return Err(ResourceError::MalformedStringPool);
+                    }
                     let len = (((data[cur] & 0x7F) as usize) << 8) | (data[cur + 1] as usize);
                     cur += 2;
                     len
@@ -142,46 +140,55 @@ impl StringPool {
                     cur += 1;
                     len
                 } else {
-                    0
+                    return Err(ResourceError::MalformedStringPool);
                 };
-
-                let end = cur + byte_len;
-                if end <= pool_data_end {
-                    let s = core::str::from_utf8(&data[cur..end]).unwrap_or("");
-                    strings.push(String::from(s));
-                } else {
-                    strings.push(String::new());
+                let end = cur
+                    .checked_add(byte_len)
+                    .ok_or(ResourceError::MalformedStringPool)?;
+                if end > pool_data_end {
+                    return Err(ResourceError::MalformedStringPool);
                 }
+                core::str::from_utf8(&data[cur..end])
+                    .map(|s| Some(String::from(s)))
+                    .map_err(|_| ResourceError::MalformedStringPool)
             } else {
-                // UTF-16 string format: [char_len: 2 bytes][chars: char_len * 2 bytes][null: 2 bytes]
-                let mut cur = abs_str_off;
-                if cur + 2 <= pool_data_end {
-                    let len_code = u16::from_le_bytes([data[cur], data[cur + 1]]) as usize;
-                    cur += 2;
-                    let u16_len = if (len_code & 0x8000) != 0 && cur + 2 <= pool_data_end {
-                        let high = (len_code & 0x7FFF) << 16;
-                        let low = u16::from_le_bytes([data[cur], data[cur + 1]]) as usize;
-                        cur += 2;
-                        high | low
-                    } else {
-                        len_code
-                    };
-
-                    let byte_len = u16_len * 2;
-                    if cur + byte_len <= pool_data_end {
-                        let mut u16_chars = Vec::with_capacity(u16_len);
-                        for c_idx in 0..u16_len {
-                            let ch = u16::from_le_bytes([data[cur + c_idx * 2], data[cur + c_idx * 2 + 1]]);
-                            u16_chars.push(ch);
-                        }
-                        let s = String::from_utf16_lossy(&u16_chars);
-                        strings.push(s);
-                    } else {
-                        strings.push(String::new());
-                    }
-                } else {
-                    strings.push(String::new());
+                if abs_str_off + 2 > pool_data_end {
+                    return Err(ResourceError::MalformedStringPool);
                 }
+                let len_code = u16::from_le_bytes([data[abs_str_off], data[abs_str_off + 1]]) as usize;
+                let mut cur = abs_str_off + 2;
+                let u16_len = if (len_code & 0x8000) != 0 {
+                    if cur + 2 > pool_data_end {
+                        return Err(ResourceError::MalformedStringPool);
+                    }
+                    let high = (len_code & 0x7FFF) << 16;
+                    let low = u16::from_le_bytes([data[cur], data[cur + 1]]) as usize;
+                    cur += 2;
+                    high | low
+                } else {
+                    len_code
+                };
+                let byte_len = u16_len.checked_mul(2).ok_or(ResourceError::MalformedStringPool)?;
+                let end = cur.checked_add(byte_len).ok_or(ResourceError::MalformedStringPool)?;
+                if end > pool_data_end {
+                    return Err(ResourceError::MalformedStringPool);
+                }
+                let mut u16_chars = Vec::with_capacity(u16_len);
+                for c_idx in 0..u16_len {
+                    let ch = u16::from_le_bytes([data[cur + c_idx * 2], data[cur + c_idx * 2 + 1]]);
+                    u16_chars.push(ch);
+                }
+                Ok(Some(String::from_utf16_lossy(&u16_chars)))
+            }
+        };
+
+        for i in 0..string_count {
+            let off_pos = offsets_start + i * 4;
+            let str_rel_off = u32::from_le_bytes(data[off_pos..off_pos + 4].try_into().unwrap()) as usize;
+            let abs_str_off = pool_data_start.checked_add(str_rel_off).ok_or(ResourceError::MalformedStringPool)?;
+            match decode_string_at(abs_str_off)? {
+                Some(s) => strings.push(s),
+                None => strings.push(String::new()),
             }
         }
 
@@ -380,7 +387,6 @@ fn parse_package_chunk(
     // Parse TYPE and TYPE_SPEC chunks
     let mut cur = offset + 288;
     let end = offset + chunk_size;
-
     while cur < end {
         if cur + 8 > end {
             break;

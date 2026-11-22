@@ -85,10 +85,13 @@ pub struct AxmlDocument {
     pub root: Option<AxmlElement>,
 }
 
+/// Element-nesting ceiling for AXML documents. Real manifests nest a few
+/// levels deep; anything beyond this is crafted input.
+const MAX_ELEMENT_DEPTH: usize = 256;
+
 impl AxmlDocument {
     /// Parses an in-memory binary XML buffer.
-    pub fn parse(data: &[u8]) -> Result<Self, AxmlError> {
-        if data.len() < 8 {
+    pub fn parse(data: &[u8]) -> Result<Self, AxmlError> {        if data.len() < 8 {
             return Err(AxmlError::TooSmall);
         }
 
@@ -137,6 +140,12 @@ impl AxmlDocument {
                 }
                 RES_XML_START_ELEMENT_TYPE => {
                     if sub_size < 36 {
+                        return Err(AxmlError::MalformedChunk);
+                    }
+                    // Fail closed on pathological nesting: the element stack
+                    // grows with the document, so a crafted deeply nested
+                    // AXML must be refused, not trusted to terminate.
+                    if element_stack.len() >= MAX_ELEMENT_DEPTH {
                         return Err(AxmlError::MalformedChunk);
                     }
                     let ns_idx = u32::from_le_bytes(data[cursor + 16..cursor + 20].try_into().unwrap());
