@@ -13,32 +13,48 @@
 
 extern crate alloc;
 
-pub mod elf;
-pub mod images;
-pub mod input_queue;
-pub mod services;
-pub mod settings;
 pub mod allocator;
+pub mod audio;
+pub mod biometrics;
+pub mod bluetooth;
+pub mod camera;
 pub mod capability;
 pub mod console_sink;
 pub mod crypto;
 pub mod display;
+pub mod display_hal;
+pub mod elf;
 pub mod entry;
 pub mod exceptions;
 pub mod fdt;
 pub mod gic;
+pub mod gps;
+pub mod haptics;
+pub mod images;
+pub mod input_queue;
 pub mod ipc;
+pub mod killswitch;
 pub mod mesh;
 pub mod mmu;
+pub mod nfc;
+pub mod ota;
+pub mod pci_bars;
+pub mod pci_bus;
+pub mod pcie;
 pub mod power;
 pub mod probe;
 pub mod psci;
-pub mod pcie;
-pub mod pci_bars;
-pub mod pci_bus;
+pub mod recovery;
 pub mod sandbox;
+pub mod sensors;
+pub mod services;
+pub mod settings;
 pub mod shell;
+pub mod sim;
+pub mod smp;
+pub mod sms;
 pub mod storage;
+pub mod strongbox;
 pub mod sync;
 pub mod syscall;
 pub mod task;
@@ -46,28 +62,12 @@ pub mod telephony;
 pub mod timer;
 pub mod touch;
 pub mod uart;
-pub mod virtio;
-pub mod user;
-pub mod wasm;
-pub mod recovery;
-pub mod ota;
-pub mod audio;
-pub mod camera;
-pub mod sms;
-pub mod nfc;
-pub mod sensors;
-pub mod bluetooth;
-pub mod wifi;
-pub mod vfs;
-pub mod gps;
-pub mod haptics;
-pub mod biometrics;
 pub mod usb;
-pub mod smp;
-pub mod sim;
-pub mod display_hal;
-pub mod strongbox;
-pub mod killswitch;
+pub mod user;
+pub mod vfs;
+pub mod virtio;
+pub mod wasm;
+pub mod wifi;
 
 use capability::{CapabilityTable, CapabilityType, Rights};
 use core::panic::PanicInfo;
@@ -91,7 +91,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     if dtb_phys_addr != 0 {
         if let Ok(parser) = unsafe { ArmFdtParser::from_raw_ptr(dtb_phys_addr as *const u8) } {
             early_is_pinephone = parser.is_pinephone()
-                || parser.find_node_by_compatible("allwinner,sun50i-a64-uart").is_ok()
+                || parser
+                    .find_node_by_compatible("allwinner,sun50i-a64-uart")
+                    .is_ok()
                 || parser.find_node_by_compatible("snps,dw-apb-uart").is_ok();
         }
     }
@@ -125,7 +127,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("  Inter OS — AArch64 Sovereign Smartphone Microkernel 0.1.0");
     kprintln!("============================================================");
     kprintln!("[AArch64] Execution Level: EL1 (Drop from EL2 verified)");
-    kprintln!("[AArch64] Device Tree Blob physical base: 0x{:016X}", dtb_phys_addr);
+    kprintln!(
+        "[AArch64] Device Tree Blob physical base: 0x{:016X}",
+        dtb_phys_addr
+    );
 
     // 2. Initialize Kernel Dynamic Heap Allocator (8 MiB) & CPU 0 Per-CPU state
     allocator::init_heap();
@@ -145,11 +150,18 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         unsafe {
             if let Ok(parser) = ArmFdtParser::from_raw_ptr(dtb_phys_addr as *const u8) {
                 has_valid_fdt = true;
-                kprintln!("[AArch64] Valid DTB discovered (magic 0xD00DFEED, size: {} bytes).", parser.total_size());
+                kprintln!(
+                    "[AArch64] Valid DTB discovered (magic 0xD00DFEED, size: {} bytes).",
+                    parser.total_size()
+                );
                 if let Ok((base, size)) = parser.parse_memory_range() {
                     ram_base = base;
                     ram_size = size;
-                    kprintln!("[AArch64] Physical RAM discovered: 0x{:016X} ({} MiB)", ram_base, ram_size / (1024 * 1024));
+                    kprintln!(
+                        "[AArch64] Physical RAM discovered: 0x{:016X} ({} MiB)",
+                        ram_base,
+                        ram_size / (1024 * 1024)
+                    );
                 }
                 if let Ok(bootargs) = parser.get_bootargs() {
                     kprintln!("[AArch64] Kernel bootargs: '{}'", bootargs);
@@ -168,13 +180,19 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     let is_pinephone = early_is_pinephone || dtb.as_ref().map_or(false, |p| p.is_pinephone());
     if is_pinephone {
-        kprintln!("[AArch64] Target Platform: Pine64 PinePhone A64 (Allwinner A64 Quad Cortex-A53).");
+        kprintln!(
+            "[AArch64] Target Platform: Pine64 PinePhone A64 (Allwinner A64 Quad Cortex-A53)."
+        );
     } else {
         kprintln!("[AArch64] Target Platform: QEMU ARM64 Virtual Machine (`virt`).");
     }
 
     if !has_valid_fdt {
-        kprintln!("[AArch64] Using built-in hardware topology (RAM: 0x{:016X}, {} MiB).", ram_base, ram_size / (1024 * 1024));
+        kprintln!(
+            "[AArch64] Using built-in hardware topology (RAM: 0x{:016X}, {} MiB).",
+            ram_base,
+            ram_size / (1024 * 1024)
+        );
     }
 
     // 4. Interrupt Controller
@@ -182,9 +200,14 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let gic;
     if let Some(parser) = dtb.as_ref() {
         match gic::describe_interrupt_controller(parser) {
-            gic::IntcDescription::Gicv2 { distributor, cpu_interface } => {
+            gic::IntcDescription::Gicv2 {
+                distributor,
+                cpu_interface,
+            } => {
                 gic = Gicv2::new(distributor, cpu_interface);
-                unsafe { gic.init(); }
+                unsafe {
+                    gic.init();
+                }
                 // Enable Virtual Timer PPI (IRQ 27)
                 gic.enable_irq(27);
                 gic::register_active_gicv2(gic);
@@ -192,8 +215,18 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 kprintln!("[OK] GICv2 from device tree: distributor @ 0x{:08X}, CPU interface @ 0x{:08X}, IRQ 27 enabled.",
                     distributor, cpu_interface);
             }
-            gic::IntcDescription::Gicv3 { distributor, distributor_size, redistributors, redistributors_size } => {
-                let mut gicv3 = gic::Gicv3::with_sizes(distributor, distributor_size, redistributors, redistributors_size);
+            gic::IntcDescription::Gicv3 {
+                distributor,
+                distributor_size,
+                redistributors,
+                redistributors_size,
+            } => {
+                let mut gicv3 = gic::Gicv3::with_sizes(
+                    distributor,
+                    distributor_size,
+                    redistributors,
+                    redistributors_size,
+                );
                 if let Err(e) = unsafe { gicv3.init() } {
                     kprintln!("[WARN] GICv3 initialization failed: {:?}", e);
                 } else {
@@ -216,7 +249,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             gic::IntcDescription::Absent => {
                 if is_pinephone {
                     gic = Gicv2::new(gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
-                    unsafe { gic.init(); }
+                    unsafe {
+                        gic.init();
+                    }
                     gic.enable_irq(27);
                     gic::register_active_gicv2(gic);
                     gic::set_pe_online(0, true);
@@ -230,7 +265,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     } else {
         if is_pinephone {
             gic = Gicv2::new(gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
-            unsafe { gic.init(); }
+            unsafe {
+                gic.init();
+            }
             gic.enable_irq(27);
             gic::register_active_gicv2(gic);
             gic::set_pe_online(0, true);
@@ -238,7 +275,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 gic::PINEPHONE_GICD_BASE, gic::PINEPHONE_GICC_BASE);
         } else {
             gic = Gicv2::new(gic::DEFAULT_GICD_BASE, gic::DEFAULT_GICC_BASE);
-            unsafe { gic.init(); }
+            unsafe {
+                gic.init();
+            }
             gic.enable_irq(27);
             gic::register_active_gicv2(gic);
             gic::set_pe_online(0, true);
@@ -251,7 +290,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("--- [Initializing ARM Generic Timer] ---");
     let mut timer = ArmGenericTimer::new();
     let freq = timer.read_frequency();
-    kprintln!("[AArch64] Timer frequency: {} MHz (CNTFRQ_EL0)", freq / 1_000_000);
+    kprintln!(
+        "[AArch64] Timer frequency: {} MHz (CNTFRQ_EL0)",
+        freq / 1_000_000
+    );
     // Program 100 Hz interval (freq / 100 ticks)
     if freq > 0 {
         timer.program_countdown((freq / 100) as u32);
@@ -273,7 +315,11 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     };
     let psci = PsciController::new(psci_conduit);
     let psci_ver = psci.invoke_psci(psci::PSCI_FN_VERSION, 0, 0, 0);
-    kprintln!("[OK] ARM PSCI: Firmware interface v{:X}.{:X} verified.", (psci_ver >> 16) & 0xFFFF, psci_ver & 0xFFFF);
+    kprintln!(
+        "[OK] ARM PSCI: Firmware interface v{:X}.{:X} verified.",
+        (psci_ver >> 16) & 0xFFFF,
+        psci_ver & 0xFFFF
+    );
 
     // 7. Smartphone Display Pipeline (U-Boot Simple-Framebuffer Hand-off)
     kprintln!("--- [Testing SimpleFB display rasteriser] ---");
@@ -331,25 +377,65 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     fb.clear(10, 15, 29);
     fb.fill_rect(0, 0, fb.width, 48, 0, 229, 255);
     fb.draw_string(20, 16, "INTER OS  |  AARCH64", (10, 15, 29), (0, 229, 255));
-    fb.draw_string(140, 200, "INTER OS -- MOBILE v4.0", (0, 229, 255), (10, 15, 29));
-    fb.draw_string(110, 230, "AArch64 Sovereign Smartphone OS", (255, 255, 255), (10, 15, 29));
-    fb.draw_string(120, 260, "Zero-Trust Capability Microkernel", (160, 175, 195), (10, 15, 29));
+    fb.draw_string(
+        140,
+        200,
+        "INTER OS -- MOBILE v4.0",
+        (0, 229, 255),
+        (10, 15, 29),
+    );
+    fb.draw_string(
+        110,
+        230,
+        "AArch64 Sovereign Smartphone OS",
+        (255, 255, 255),
+        (10, 15, 29),
+    );
+    fb.draw_string(
+        120,
+        260,
+        "Zero-Trust Capability Microkernel",
+        (160, 175, 195),
+        (10, 15, 29),
+    );
     fb.fill_rect(40, fb.height - 120, fb.width - 80, 80, 22, 27, 46);
-    fb.draw_string(80, fb.height - 85, "[DIALER]  [VAULT]  [AI ASSISTANT]  [SETTINGS]", (0, 229, 255), (22, 27, 46));
+    fb.draw_string(
+        80,
+        fb.height - 85,
+        "[DIALER]  [VAULT]  [AI ASSISTANT]  [SETTINGS]",
+        (0, 229, 255),
+        (22, 27, 46),
+    );
 
     // Prove the rasteriser actually produced pixels rather than trusting the log.
     let expected_bar = fb.pack_rgb(0, 229, 255);
-    assert_eq!(fb.get_pixel(0, 24), Some(expected_bar), "status bar row must be the cyan accent");
+    assert_eq!(
+        fb.get_pixel(0, 24),
+        Some(expected_bar),
+        "status bar row must be the cyan accent"
+    );
     assert_eq!(fb.get_pixel(0, 0), Some(fb.pack_rgb(0, 229, 255)));
-    assert_eq!(fb.get_pixel(0, 60), Some(fb.pack_rgb(10, 15, 29)), "below the bar must be the background");
-    assert_eq!(fb.get_pixel(fb.width, 0), None, "reads outside the surface must be rejected");
+    assert_eq!(
+        fb.get_pixel(0, 60),
+        Some(fb.pack_rgb(10, 15, 29)),
+        "below the bar must be the background"
+    );
+    assert_eq!(
+        fb.get_pixel(fb.width, 0),
+        None,
+        "reads outside the surface must be rejected"
+    );
 
     if display_from_fdt {
         kprintln!("[OK] Display: {}x{} simple-framebuffer from DTB mapped at physical 0x{:08X} -> virtual 0x{:08X} ({} KiB).",
             fb.width, fb.height, fb.base_paddr, fb.base_vaddr, fb.buffer_size() / 1024);
     } else {
-        kprintln!("[TEST] SimpleFB rasteriser: {}x{} RGB565 surface rendered ({} KiB) and sampled back.",
-            fb.width, fb.height, fb.buffer_size() / 1024);
+        kprintln!(
+            "[TEST] SimpleFB rasteriser: {}x{} RGB565 surface rendered ({} KiB) and sampled back.",
+            fb.width,
+            fb.height,
+            fb.buffer_size() / 1024
+        );
         kprintln!("[OK] Display: no framebuffer node in the device tree, so no panel or scanout is claimed.");
     }
     let _ = fb_vaddr;
@@ -402,24 +488,40 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // taken from a digitizer.
     let mut touch_frame = [0u8; 1 + 2 * touch::BYTES_PER_POINT];
     touch_frame[0] = 0x82; // Ready bit (0x80) | 2 contacts (0x02)
-    // Point 0: slot 0, x=360 (0x0168), y=640 (0x0280), size=100
+                           // Point 0: slot 0, x=360 (0x0168), y=640 (0x0280), size=100
     touch_frame[1] = 0;
-    touch_frame[2] = 0x68; touch_frame[3] = 0x01;
-    touch_frame[4] = 0x80; touch_frame[5] = 0x02;
-    touch_frame[6] = 100;  touch_frame[7] = 0;
+    touch_frame[2] = 0x68;
+    touch_frame[3] = 0x01;
+    touch_frame[4] = 0x80;
+    touch_frame[5] = 0x02;
+    touch_frame[6] = 100;
+    touch_frame[7] = 0;
     // Point 1: slot 1, x=500 (0x01F4), y=1000 (0x03E8), size=120
     touch_frame[9] = 1;
-    touch_frame[10] = 0xF4; touch_frame[11] = 0x01;
-    touch_frame[12] = 0xE8; touch_frame[13] = 0x03;
-    touch_frame[14] = 120;  touch_frame[15] = 0;
+    touch_frame[10] = 0xF4;
+    touch_frame[11] = 0x01;
+    touch_frame[12] = 0xE8;
+    touch_frame[13] = 0x03;
+    touch_frame[14] = 120;
+    touch_frame[15] = 0;
 
-    let mut out_points = [TouchPoint { slot: 0, x: 0, y: 0, pressure: 0, phase: TouchPhase::Down }; MAX_TOUCH_SLOTS];
+    let mut out_points = [TouchPoint {
+        slot: 0,
+        x: 0,
+        y: 0,
+        pressure: 0,
+        phase: TouchPhase::Down,
+    }; MAX_TOUCH_SLOTS];
     let pt_count = touch_driver.parse_frame(&touch_frame, &mut out_points);
     assert_eq!(pt_count, 2);
     assert_eq!((out_points[0].x, out_points[0].y), (360, 640));
     assert_eq!((out_points[1].x, out_points[1].y), (500, 1000));
-    kprintln!("[TEST] GT911 decoder: 2 contacts decoded from a known-good frame ({} px @ {}, {} px).",
-        pt_count, out_points[0].x, out_points[0].y);
+    kprintln!(
+        "[TEST] GT911 decoder: 2 contacts decoded from a known-good frame ({} px @ {}, {} px).",
+        pt_count,
+        out_points[0].x,
+        out_points[0].y
+    );
     kprintln!("[OK] Touch: decoder validated; no digitizer is attached, so no contact is claimed.");
 
     // 10. Streaming Serial RIL Telephony Protocol
@@ -441,12 +543,16 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let framed = ril.feed_rx_bytes(at_stream);
     assert_eq!(framed, 2);
     assert_eq!(ril.pending_urcs.len(), 2);
-    kprintln!("[TEST] RIL framer: {} AT lines framed from a recorded stream.", framed);
+    kprintln!(
+        "[TEST] RIL framer: {} AT lines framed from a recorded stream.",
+        framed
+    );
     kprintln!("[OK] Telephony: framer validated; no modem is bound, so no signal or registration is claimed.");
 
     // 11. Multi-Tasking Scheduler & Register Context Switching
     task::test_context_switching();
     task::test_task_lifecycle();
+    syscall::test_user_copy_epoch_bounds();
 
     // 12. Bring up Sovereign Background Daemons with Explicit Capabilities
     {
@@ -456,31 +562,41 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         let mut telem_caps = CapabilityTable::new();
         telem_caps.mint(CapabilityType::TimerTickRead, Rights::READ, None);
         telem_caps.mint(CapabilityType::IpcSend, Rights::INVOKE, Some(2));
-        sched.spawn_with_caps("telemetry_daemon", || {
-            loop {
+        sched.spawn_with_caps(
+            "telemetry_daemon",
+            || loop {
                 task::yield_now();
-            }
-        }, telem_caps);
+            },
+            telem_caps,
+        );
 
         // Daemon 1: Telephony Service (Granted TelephonyModem and IpcSend -> UI Compositor ID 2)
         let mut tel_caps = CapabilityTable::new();
-        tel_caps.mint(CapabilityType::TelephonyModem, Rights::READ | Rights::WRITE, None);
+        tel_caps.mint(
+            CapabilityType::TelephonyModem,
+            Rights::READ | Rights::WRITE,
+            None,
+        );
         tel_caps.mint(CapabilityType::IpcSend, Rights::INVOKE, Some(2));
-        sched.spawn_with_caps("telephony_service", || {
-            loop {
+        sched.spawn_with_caps(
+            "telephony_service",
+            || loop {
                 task::yield_now();
-            }
-        }, tel_caps);
+            },
+            tel_caps,
+        );
 
         // Daemon 2: UI Compositor (Granted FrameBufferDirect and IpcReceive)
         let mut comp_caps = CapabilityTable::new();
         comp_caps.mint(CapabilityType::FrameBufferDirect, Rights::WRITE, None);
         comp_caps.mint(CapabilityType::IpcReceive, Rights::READ, None);
-        sched.spawn_with_caps("ui_compositor", || {
-            loop {
+        sched.spawn_with_caps(
+            "ui_compositor",
+            || loop {
                 task::yield_now();
-            }
-        }, comp_caps);
+            },
+            comp_caps,
+        );
 
         kprintln!("[OK] AArch64 Multi-Tasking Scheduler: Spawned 3 sovereign daemons with zero-trust capability tables.");
     }
@@ -495,13 +611,20 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     receiver_caps.mint(CapabilityType::IpcReceive, Rights::READ, None);
 
     let test_payload = b"BATTERY_100_PCT";
-    let send_res = ipc::IPC_ROUTER.lock().send(&sender_caps, 0, 2, 0x101, test_payload);
+    let send_res = ipc::IPC_ROUTER
+        .lock()
+        .send(&sender_caps, 0, 2, 0x101, test_payload);
     assert!(send_res.is_ok(), "Authorized IPC send failed");
 
-    let unauth_res = ipc::IPC_ROUTER.lock().send(&sender_caps, 0, 99, 0x101, test_payload);
+    let unauth_res = ipc::IPC_ROUTER
+        .lock()
+        .send(&sender_caps, 0, 99, 0x101, test_payload);
     assert!(unauth_res.is_err(), "Unauthorized IPC send must be denied");
 
-    let recv_msg = ipc::IPC_ROUTER.lock().receive(&receiver_caps, 2).expect("IPC receive failed");
+    let recv_msg = ipc::IPC_ROUTER
+        .lock()
+        .receive(&receiver_caps, 2)
+        .expect("IPC receive failed");
     assert_eq!(recv_msg.sender, 0);
     assert_eq!(recv_msg.msg_type, 0x101);
     assert_eq!(&recv_msg.payload[..recv_msg.len], test_payload);
@@ -516,11 +639,20 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // Verify uncredentialed calls fail closed (-13)
     let denied_touch = syscall::sys_dispatch(syscall::SYS_TOUCH_POLL, 0, 0, 0, 0, 0);
-    assert_eq!(denied_touch, -13, "TouchPoll without InputDevice cap must return -EACCES");
+    assert_eq!(
+        denied_touch, -13,
+        "TouchPoll without InputDevice cap must return -EACCES"
+    );
     let denied_surf = syscall::sys_dispatch(syscall::SYS_SURFACE_CREATE, 0, 100, 100, 0, 0);
-    assert_eq!(denied_surf, -13, "SurfaceCreate without DisplayServer cap must return -EACCES");
+    assert_eq!(
+        denied_surf, -13,
+        "SurfaceCreate without DisplayServer cap must return -EACCES"
+    );
     let denied_event = syscall::sys_dispatch(syscall::SYS_EVENT_POLL, 0, 0, 0, 0, 0);
-    assert_eq!(denied_event, -13, "EventPoll without EventPoll cap must return -EACCES");
+    assert_eq!(
+        denied_event, -13,
+        "EventPoll without EventPoll cap must return -EACCES"
+    );
 
     // Verify SYS_EXIT_WITH_CODE records exit code
     let exit_res = syscall::sys_dispatch(syscall::SYS_EXIT_WITH_CODE, 0, 0, 0, 0, 0);
@@ -530,14 +662,27 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     {
         let mut sched = task::SCHEDULER.lock();
         let curr_idx = sched.current_task_idx;
-        sched.tasks[curr_idx].cap_table.mint(capability::CapabilityType::DisplayServer, capability::Rights::READ | capability::Rights::WRITE, None);
+        sched.tasks[curr_idx].cap_table.mint(
+            capability::CapabilityType::DisplayServer,
+            capability::Rights::READ | capability::Rights::WRITE,
+            None,
+        );
     }
     let surf_id = syscall::sys_dispatch(syscall::SYS_SURFACE_CREATE, 0, 100, 100, 0, 0);
-    assert_eq!(surf_id, 1, "SurfaceCreate with DisplayServer cap should succeed");
+    assert_eq!(
+        surf_id, 1,
+        "SurfaceCreate with DisplayServer cap should succeed"
+    );
     let flip_res = syscall::sys_dispatch(syscall::SYS_SURFACE_FLIP, 0, 0, 0, 0, 0);
-    assert_eq!(flip_res, 1, "SurfaceFlip with DisplayServer cap should succeed");
+    assert_eq!(
+        flip_res, 1,
+        "SurfaceFlip with DisplayServer cap should succeed"
+    );
     let destroy_res = syscall::sys_dispatch(syscall::SYS_SURFACE_DESTROY, 0, 1, 0, 0, 0);
-    assert_eq!(destroy_res, 0, "SurfaceDestroy with DisplayServer cap should succeed");
+    assert_eq!(
+        destroy_res, 0,
+        "SurfaceDestroy with DisplayServer cap should succeed"
+    );
 
     // 13b. Test surface authorization & capability separation
     {
@@ -569,11 +714,17 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[TEST] AArch64 Vector Table (VBAR_EL1): Hardware 'svc #0' trap -> sys_get_ticks (x0={}), sys_get_task_id (x0={}) VERIFIED.", svc_ticks, svc_task_id);
 
     // 14b. AArch64 Architectural Timer & Real IRQ Delivery
-    let has_active_gic = gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) != gic::ACTIVE_GIC_KIND_NONE;
+    let has_active_gic = gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire)
+        != gic::ACTIVE_GIC_KIND_NONE;
     if has_active_gic {
         kprintln!("--- [Testing AArch64 Architectural Timer & Real IRQ Delivery] ---");
-        let timer_irq_before = exceptions::TIMER_INTERRUPT_COUNT.load(core::sync::atomic::Ordering::Acquire);
-        let countdown = if freq > 0 { (freq / 500).max(10_000) as u32 } else { 62_500 };
+        let timer_irq_before =
+            exceptions::TIMER_INTERRUPT_COUNT.load(core::sync::atomic::Ordering::Acquire);
+        let countdown = if freq > 0 {
+            (freq / 500).max(10_000) as u32
+        } else {
+            62_500
+        };
         timer.program_countdown(countdown);
         #[cfg(target_arch = "aarch64")]
         unsafe {
@@ -581,7 +732,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             core::arch::asm!("isb", options(nomem, nostack));
         }
         let mut spins = 0u64;
-        while exceptions::TIMER_INTERRUPT_COUNT.load(core::sync::atomic::Ordering::Acquire) < timer_irq_before + 3 && spins < 20_000_000 {
+        while exceptions::TIMER_INTERRUPT_COUNT.load(core::sync::atomic::Ordering::Acquire)
+            < timer_irq_before + 3
+            && spins < 20_000_000
+        {
             core::hint::spin_loop();
             spins += 1;
         }
@@ -590,8 +744,14 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             core::arch::asm!("msr daifset, #2", options(nomem, nostack));
             core::arch::asm!("isb", options(nomem, nostack));
         }
-        let timer_irq_after = exceptions::TIMER_INTERRUPT_COUNT.load(core::sync::atomic::Ordering::Acquire);
-        assert!(timer_irq_after >= timer_irq_before + 3, "Timer IRQs failed to deliver: before={}, after={}", timer_irq_before, timer_irq_after);
+        let timer_irq_after =
+            exceptions::TIMER_INTERRUPT_COUNT.load(core::sync::atomic::Ordering::Acquire);
+        assert!(
+            timer_irq_after >= timer_irq_before + 3,
+            "Timer IRQs failed to deliver: before={}, after={}",
+            timer_irq_before,
+            timer_irq_after
+        );
         kprintln!("[TEST] AArch64 Architectural Timer: Virtual Timer PPI (IRQ 27) generated, acknowledged, and handled repeatedly (delivered {} interrupts) VERIFIED.", timer_irq_after - timer_irq_before);
     } else {
         kprintln!("[TEST] AArch64 Architectural Timer: Interrupt controller left unconfigured by platform contract; interrupt delivery skipped.");
@@ -600,11 +760,23 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // 14c. Generic GICv3 MMIO Bounds, Discovery & Per-CPU Robustness
     kprintln!("--- [Testing Generic GICv3 MMIO Bounds, Discovery & Per-CPU Robustness] ---");
     let invalid_gic = gic::Gicv3::with_size(0, 0, 0);
-    assert_eq!(invalid_gic.discover_redistributor_for_affinity(0), Err(gic::GicError::InvalidMmioRange));
+    assert_eq!(
+        invalid_gic.discover_redistributor_for_affinity(0),
+        Err(gic::GicError::InvalidMmioRange)
+    );
     let truncated_gic = gic::Gicv3::with_size(0x08000000, 0x080A0000, 0x1000);
-    assert_eq!(truncated_gic.discover_redistributor_for_affinity(0), Err(gic::GicError::InvalidMmioRange));
-    assert_eq!(invalid_gic.set_spi_routing(16, 0, true), Err(gic::GicError::InvalidMmioRange));
-    assert_eq!(invalid_gic.set_spi_routing(32, 0, true), Err(gic::GicError::InvalidMmioRange));
+    assert_eq!(
+        truncated_gic.discover_redistributor_for_affinity(0),
+        Err(gic::GicError::InvalidMmioRange)
+    );
+    assert_eq!(
+        invalid_gic.set_spi_routing(16, 0, true),
+        Err(gic::GicError::InvalidMmioRange)
+    );
+    assert_eq!(
+        invalid_gic.set_spi_routing(32, 0, true),
+        Err(gic::GicError::InvalidMmioRange)
+    );
     kprintln!("[TEST] GICv3 Robustness: Bounds enforcement, truncated window rejection, and SPI routing validation VERIFIED.");
 
     // 15. Mobile Shell Hit-Testing & Touch-Initiated Preemption
@@ -615,24 +787,51 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let mut mobile_shell = shell::MobileShell::new();
 
     // Synthetic tap on the [SETTINGS] dock button at (580, 1360)
-    let tap_down = TouchPoint { slot: 0, x: 580, y: 1360, pressure: 750, phase: TouchPhase::Down };
-    let tap_up = TouchPoint { slot: 0, x: 580, y: 1360, pressure: 0, phase: TouchPhase::Up };
+    let tap_down = TouchPoint {
+        slot: 0,
+        x: 580,
+        y: 1360,
+        pressure: 750,
+        phase: TouchPhase::Down,
+    };
+    let tap_up = TouchPoint {
+        slot: 0,
+        x: 580,
+        y: 1360,
+        pressure: 0,
+        phase: TouchPhase::Up,
+    };
     mobile_shell.process_touch(&tap_down, &mut fb);
     let action1 = mobile_shell.process_touch(&tap_up, &mut fb);
     assert_eq!(action1, Some(shell::MobileAction::LaunchSettings));
-    kprintln!("[TEST] Mobile Shell Hit-Testing: synthetic tap @ (580, 1360) -> LaunchSettings VERIFIED.");
-    kprintln!("[TEST] SimpleFB Mobile Display: Settings Surface rendered ({} KiB surface).", fb.buffer_size() / 1024);
+    kprintln!(
+        "[TEST] Mobile Shell Hit-Testing: synthetic tap @ (580, 1360) -> LaunchSettings VERIFIED."
+    );
+    kprintln!(
+        "[TEST] SimpleFB Mobile Display: Settings Surface rendered ({} KiB surface).",
+        fb.buffer_size() / 1024
+    );
 
     // Synthetic tap on the [DIALER] dock button at (100, 1360)
-    let dialer_up = TouchPoint { slot: 0, x: 100, y: 1360, pressure: 0, phase: TouchPhase::Up };
+    let dialer_up = TouchPoint {
+        slot: 0,
+        x: 100,
+        y: 1360,
+        pressure: 0,
+        phase: TouchPhase::Up,
+    };
     let action2 = mobile_shell.process_touch(&dialer_up, &mut fb);
     assert_eq!(action2, Some(shell::MobileAction::LaunchDialer));
-    kprintln!("[TEST] Mobile Shell Hit-Testing: synthetic tap @ (100, 1360) -> LaunchDialer VERIFIED.");
+    kprintln!(
+        "[TEST] Mobile Shell Hit-Testing: synthetic tap @ (100, 1360) -> LaunchDialer VERIFIED."
+    );
 
     // Touch-initiated intent routes via capability-guarded IPC to telephony_service
     sender_caps.mint(CapabilityType::IpcSend, Rights::INVOKE, Some(1));
     let dial_intent = b"DIAL_+15550199234";
-    let dial_ipc_res = ipc::IPC_ROUTER.lock().send(&sender_caps, 0, 1, 0x201, dial_intent);
+    let dial_ipc_res = ipc::IPC_ROUTER
+        .lock()
+        .send(&sender_caps, 0, 1, 0x201, dial_intent);
     assert!(dial_ipc_res.is_ok(), "Touch intent dispatch failed");
     kprintln!("[TEST] Touch Force-Takeover Preemption: Touch intent dispatched to telephony daemon (msg_type=0x201) VERIFIED.");
 
@@ -690,27 +889,52 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     mmu::ArmMmu::switch_to_task(user_ttbr0);
     kprintln!("[OK] AArch64 Per-Task MMU: Dedicated TTBR0_EL1 tree allocated at 0x{:08X} (AP_RW_EL0 user isolation active).", user_ttbr0);
 
-    let user_proc = user::UserProcess::new(user::USER_CODE_VADDR, user::USER_STACK_VADDR + user::USER_STACK_SIZE);
+    let user_proc = user::UserProcess::new(
+        user::USER_CODE_VADDR,
+        user::USER_STACK_VADDR + user::USER_STACK_SIZE,
+    );
     let payload_bytes = user::get_el0_payload();
     unsafe {
         user_proc.load_code(payload_bytes);
     }
-    kprintln!("[OK] AArch64 EL0 Userspace: Loaded {}-byte native binary at VA 0x{:08X} (PA 0x{:08X}).", payload_bytes.len(), user::USER_CODE_VADDR, user::USER_CODE_PADDR);
+    kprintln!(
+        "[OK] AArch64 EL0 Userspace: Loaded {}-byte native binary at VA 0x{:08X} (PA 0x{:08X}).",
+        payload_bytes.len(),
+        user::USER_CODE_VADDR,
+        user::USER_CODE_PADDR
+    );
 
     kprintln!("[INIT] Dropping CPU execution privilege from EL1 to EL0 via hardware eret...");
 
     // Execute real hardware privilege transition to EL0
     unsafe {
-        user::enter_user_mode(user::USER_CODE_VADDR, user::USER_STACK_VADDR + user::USER_STACK_SIZE);
+        user::enter_user_mode(
+            user::USER_CODE_VADDR,
+            user::USER_STACK_VADDR + user::USER_STACK_SIZE,
+        );
     }
 
     // After return_to_kernel_mode(), verify all hardware EL0 invariants
-    assert!(unsafe { user::EL0_HARDWARE_ENTERED }, "EL0 hardware entry not observed");
-    assert!(unsafe { user::EL0_PRIVILEGE_TRAP_VERIFIED }, "EL0 CurrentEL privilege trap not observed");
-    assert!(unsafe { user::EL0_MMU_TRAP_VERIFIED }, "EL0 MMU kernel memory trap not observed");
+    assert!(
+        unsafe { user::EL0_HARDWARE_ENTERED },
+        "EL0 hardware entry not observed"
+    );
+    assert!(
+        unsafe { user::EL0_PRIVILEGE_TRAP_VERIFIED },
+        "EL0 CurrentEL privilege trap not observed"
+    );
+    assert!(
+        unsafe { user::EL0_MMU_TRAP_VERIFIED },
+        "EL0 MMU kernel memory trap not observed"
+    );
     assert_eq!(unsafe { user::EL0_EXIT_CODE }, 42, "EL0 exit code mismatch");
-    assert!(unsafe { user::EL0_TEST_COMPLETED }, "EL0 test loop incomplete");
-    unsafe { user::IN_SECTION17_SMOKE = false; }
+    assert!(
+        unsafe { user::EL0_TEST_COMPLETED },
+        "EL0 test loop incomplete"
+    );
+    unsafe {
+        user::IN_SECTION17_SMOKE = false;
+    }
 
     kprintln!(
         "[TEST] AArch64 EL0 Userspace Syscall Loop: sys_get_ticks (x0={}), sys_get_task_id (x0={}), sys_exit (code=42) VERIFIED.",
@@ -748,21 +972,28 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // DID derivation is reproducible, NOT a device root of trust: a real device
     // key is generated inside a secure element and never exists in ROM.
     let vault_test_seed: [u8; 32] = [
-        0x13, 0x37, 0x42, 0x69, 0xAA, 0x55, 0xDE, 0xAD,
-        0xBE, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB,
-        0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54,
-        0x32, 0x10, 0x42, 0x42, 0x13, 0x37, 0x77, 0x88,
+        0x13, 0x37, 0x42, 0x69, 0xAA, 0x55, 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
+        0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10, 0x42, 0x42, 0x13, 0x37,
+        0x77, 0x88,
     ];
     let mut vault = crypto::IdentityVault::new(vault_test_seed);
     let device_did = vault.device_did().clone();
-    kprintln!("[TEST] Identity Vault: DID derivation from a test seed -> {}", device_did.as_str());
-    kprintln!("[OK] Device identity: no secure element is bound, so no attested device DID is claimed.");
+    kprintln!(
+        "[TEST] Identity Vault: DID derivation from a test seed -> {}",
+        device_did.as_str()
+    );
+    kprintln!(
+        "[OK] Device identity: no secure element is bound, so no attested device DID is claimed."
+    );
 
     // Cryptographic state commitment signing
     let state_commitment_data = b"STATE_COMMITMENT_BLOCK_001_MERKLE_ROOT";
     let state_sig = vault.sign(state_commitment_data);
     let sig_valid = vault.verify_signature(state_commitment_data, &state_sig);
-    assert!(sig_valid, "Cryptographic state signature verification failed");
+    assert!(
+        sig_valid,
+        "Cryptographic state signature verification failed"
+    );
     kprintln!("[OK] State Delta Commitment: Signed & verified via HMAC-SHA256 (32-byte MAC tag).");
 
     // Cryptographically attested capability delegation token issuance
@@ -770,7 +1001,12 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let duration_ticks = 500u64;
     let target_task_id = 1u64;
     let capability_mask = 0x07u32; // Read | Write | Execute
-    let token = vault.issue_delegation_token(target_task_id, capability_mask, duration_ticks, current_ticks);
+    let token = vault.issue_delegation_token(
+        target_task_id,
+        capability_mask,
+        duration_ticks,
+        current_ticks,
+    );
 
     // Verify valid token within expiration window
     assert!(vault.verify_delegation_token(&token, 1200));
@@ -792,16 +1028,16 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // 20. Sovereign Decentralized P2P Mesh Network & Offline Sync Engine
     kprintln!("--- [Testing Sovereign Decentralized P2P Mesh Network & Offline Sync] ---");
     let shared_mesh_key: [u8; 32] = [
-        0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-        0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
+        0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+        0xFF, 0x00,
     ];
     let local_node_id = 0x1122_3344_5566_7788u64;
     let peer_node_id = 0xAABB_CCDD_EEFF_0011u64;
     let initial_merkle_state: [u8; 32] = [0x5A; 32];
 
-    let mut mesh_ctrl = mesh::MeshController::new(local_node_id, shared_mesh_key, initial_merkle_state);
+    let mut mesh_ctrl =
+        mesh::MeshController::new(local_node_id, shared_mesh_key, initial_merkle_state);
 
     // Capability setup for mesh operations
     let mut mesh_caps = CapabilityTable::new();
@@ -810,12 +1046,24 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // Test 1: Authenticated P2P packet transmission
     let p2p_payload = b"OFFLINE_INTENT_DISPATCH_ENCRYPTED_CALL";
-    let sent_packet = mesh_ctrl.transmit(&mesh_caps, mesh::MeshPacketType::EncryptedPayload, peer_node_id, p2p_payload)
+    let sent_packet = mesh_ctrl
+        .transmit(
+            &mesh_caps,
+            mesh::MeshPacketType::EncryptedPayload,
+            peer_node_id,
+            p2p_payload,
+        )
         .expect("Mesh transmit failed");
     assert_eq!(sent_packet.header.src_node_id, local_node_id);
     assert_eq!(sent_packet.header.dest_node_id, peer_node_id);
-    assert!(sent_packet.verify_signature(&shared_mesh_key), "Packet signature verification failed");
-    kprintln!("[OK] Mesh Packet Transmit: Authenticated payload to peer 0x{:016X} (seq=1, TTL=16).", peer_node_id);
+    assert!(
+        sent_packet.verify_signature(&shared_mesh_key),
+        "Packet signature verification failed"
+    );
+    kprintln!(
+        "[OK] Mesh Packet Transmit: Authenticated payload to peer 0x{:016X} (seq=1, TTL=16).",
+        peer_node_id
+    );
 
     // Test 2: Ingest incoming peer packet from physical radio FIFO
     let peer_hello_payload = b"PEER_HELLO_DID_INTER_40109BA3";
@@ -827,15 +1075,23 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         16,  // ttl
         peer_hello_payload,
         &shared_mesh_key,
-    ).expect("Creating peer packet failed");
+    )
+    .expect("Creating peer packet failed");
 
-    let received = mesh_ctrl.receive(&mesh_caps, incoming_packet)
+    let received = mesh_ctrl
+        .receive(&mesh_caps, incoming_packet)
         .expect("Mesh receive failed");
     assert!(received.is_some(), "Valid packet was incorrectly dropped");
     let rx_pkt = received.unwrap();
     assert_eq!(rx_pkt.header.src_node_id, peer_node_id);
-    assert_eq!(rx_pkt.header.packet_type, mesh::MeshPacketType::PeerDiscovery);
-    kprintln!("[OK] Mesh Packet Receive: Ingested & verified PeerDiscovery from 0x{:016X}.", peer_node_id);
+    assert_eq!(
+        rx_pkt.header.packet_type,
+        mesh::MeshPacketType::PeerDiscovery
+    );
+    kprintln!(
+        "[OK] Mesh Packet Receive: Ingested & verified PeerDiscovery from 0x{:016X}.",
+        peer_node_id
+    );
 
     // Test 3: Anti-replay protection (duplicate seq=100 from peer must be dropped)
     let duplicate_packet = mesh::MeshPacket::new(
@@ -846,8 +1102,11 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         16,
         peer_hello_payload,
         &shared_mesh_key,
-    ).expect("Duplicate packet creation failed");
-    let replay_result = mesh_ctrl.receive(&mesh_caps, duplicate_packet).expect("Receive call failed");
+    )
+    .expect("Duplicate packet creation failed");
+    let replay_result = mesh_ctrl
+        .receive(&mesh_caps, duplicate_packet)
+        .expect("Receive call failed");
     assert!(replay_result.is_none(), "Replay attack must be dropped");
     kprintln!("[TEST] Anti-Replay Sliding Window: Duplicate packet (seq=100) dropped VERIFIED.");
 
@@ -855,10 +1114,15 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let next_hop = mesh_ctrl.routing_table.find_next_hop(peer_node_id);
     assert_eq!(next_hop, Some(peer_node_id));
     // Link quality has no radio attached, so only the route itself is claimed.
-    kprintln!("[OK] Mesh Routing Table: Discovered direct 1-hop route to peer 0x{:016X}.", peer_node_id);
+    kprintln!(
+        "[OK] Mesh Routing Table: Discovered direct 1-hop route to peer 0x{:016X}.",
+        peer_node_id
+    );
 
     // Test 5: Offline-First Merkle State Sync
-    let remote_synced = mesh_ctrl.sync_engine.evaluate_peer_state(&initial_merkle_state);
+    let remote_synced = mesh_ctrl
+        .sync_engine
+        .evaluate_peer_state(&initial_merkle_state);
     assert!(remote_synced, "Initial states must match");
 
     let delta_data = b"STATE_DELTA_CONTACT_ADDED_+15550199234";
@@ -867,8 +1131,6 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert_eq!(mesh_ctrl.sync_engine.sync_version, 2);
     kprintln!("[OK] Offline-First Merkle Sync: State delta applied -> Sync Version 2 (New Root: {:02X}{:02X}{:02X}{:02X}...).",
         new_merkle_root[0], new_merkle_root[1], new_merkle_root[2], new_merkle_root[3]);
-
-
 
     // 22. Sovereign Android Untrusted Compatibility Sandbox (APK Container & Syscall Gate)
     kprintln!("--- [Testing Sovereign Android Untrusted Compatibility Sandbox] ---");
@@ -927,12 +1189,30 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[TEST] Zone 4 Sandbox Boundary: 3/3 Unauthorized host/cross-app breach attempts TRAPPED (-EACCES) VERIFIED.");
 
     // Test 3: Zero-Trust Binder Mediation
-    let guest_caps = android_runtime.active_apps.get(&guest_pid).unwrap().cap_table.clone();
-    let binder_vault = android_runtime.binder.mediate_transaction(guest_pid, "inter.identity.vault", &guest_caps);
-    assert!(binder_vault.is_err(), "Binder call to sovereign vault must be blocked");
+    let guest_caps = android_runtime
+        .active_apps
+        .get(&guest_pid)
+        .unwrap()
+        .cap_table
+        .clone();
+    let binder_vault =
+        android_runtime
+            .binder
+            .mediate_transaction(guest_pid, "inter.identity.vault", &guest_caps);
+    assert!(
+        binder_vault.is_err(),
+        "Binder call to sovereign vault must be blocked"
+    );
 
-    let binder_activity = android_runtime.binder.mediate_transaction(guest_pid, "android.app.ActivityManager", &guest_caps);
-    assert!(binder_activity.is_ok(), "Standard Android activity manager call allowed");
+    let binder_activity = android_runtime.binder.mediate_transaction(
+        guest_pid,
+        "android.app.ActivityManager",
+        &guest_caps,
+    );
+    assert!(
+        binder_activity.is_ok(),
+        "Standard Android activity manager call allowed"
+    );
     kprintln!("[TEST] Zero-Trust Binder Mediator: Sovereign service call blocked, guest call mediated VERIFIED.");
 
     // 23. Sovereign WebAssembly (WASM) / Bytecode Micro-Runtime
@@ -947,10 +1227,13 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // Bytecode:
     // LOCAL_GET 0, LOCAL_GET 1, I32_ADD, I32_CONST 3, I32_MUL, END
     let math_code: alloc::vec::Vec<u8> = alloc::vec![
-        wasm::opcodes::LOCAL_GET, 0x00,
-        wasm::opcodes::LOCAL_GET, 0x01,
+        wasm::opcodes::LOCAL_GET,
+        0x00,
+        wasm::opcodes::LOCAL_GET,
+        0x01,
         wasm::opcodes::I32_ADD,
-        wasm::opcodes::I32_CONST, 0x03,
+        wasm::opcodes::I32_CONST,
+        0x03,
         wasm::opcodes::I32_MUL,
         wasm::opcodes::END,
     ];
@@ -961,10 +1244,14 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // Bytecode:
     // I32_CONST 0 (src), I32_CONST 3 (len), I32_CONST 32 (dest), CALL 0 (inter_crypto_hash), END
     let hash_code: alloc::vec::Vec<u8> = alloc::vec![
-        wasm::opcodes::I32_CONST, 0x00,
-        wasm::opcodes::I32_CONST, 0x03,
-        wasm::opcodes::I32_CONST, 0x20, // 32
-        wasm::opcodes::CALL, 0x00,
+        wasm::opcodes::I32_CONST,
+        0x00,
+        wasm::opcodes::I32_CONST,
+        0x03,
+        wasm::opcodes::I32_CONST,
+        0x20, // 32
+        wasm::opcodes::CALL,
+        0x00,
         wasm::opcodes::END,
     ];
     let hash_idx = wasm_mod.add_function("hash_and_store", 0, 0, hash_code);
@@ -977,10 +1264,18 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // Test 1: Stack machine execution of compute_math(15, 25) -> (15 + 25) * 3 = 120
     let wasm_mem = wasm::WasmMemory::new(1, 2); // 1 page (64 KiB), max 2 pages
     let mut vm = wasm::WasmVm::new(wasm_mod.clone(), wasm_mem, 1000); // 1000 fuel units
-    let math_res = vm.call_export("compute_math", &[wasm::Value::I32(15), wasm::Value::I32(25)], &wasm_caps)
+    let math_res = vm
+        .call_export(
+            "compute_math",
+            &[wasm::Value::I32(15), wasm::Value::I32(25)],
+            &wasm_caps,
+        )
         .expect("WASM math execution failed");
     assert_eq!(math_res, Some(wasm::Value::I32(120)));
-    kprintln!("[OK] WASM Stack Machine: Executed compute_math(15, 25) -> 120 (Fuel remaining: {}).", vm.fuel);
+    kprintln!(
+        "[OK] WASM Stack Machine: Executed compute_math(15, 25) -> 120 (Fuel remaining: {}).",
+        vm.fuel
+    );
 
     // Test 2: Sandboxed linear memory bounds protection (attempt write beyond 64 KiB)
     let oob_write = vm.memory.write_u8(0x10000, 0xFF); // 65536 is beyond 1 page!
@@ -989,27 +1284,33 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // Test 3: CPU Fuel metering (prevent infinite loop)
     let mut fuel_starved_vm = wasm::WasmVm::new(wasm_mod.clone(), wasm::WasmMemory::new(1, 1), 2); // only 2 fuel units!
-    let fuel_err = fuel_starved_vm.call_export("compute_math", &[wasm::Value::I32(1), wasm::Value::I32(2)], &wasm_caps);
+    let fuel_err = fuel_starved_vm.call_export(
+        "compute_math",
+        &[wasm::Value::I32(1), wasm::Value::I32(2)],
+        &wasm_caps,
+    );
     assert_eq!(fuel_err, Err(wasm::WasmError::FuelExhausted));
-    kprintln!("[TEST] CPU Fuel Metering: Runaway execution aborted safely (FuelExhausted) VERIFIED.");
+    kprintln!(
+        "[TEST] CPU Fuel Metering: Runaway execution aborted safely (FuelExhausted) VERIFIED."
+    );
 
     // Test 4: Host function call from WASM (compute SHA-256 of "abc" at offset 0 into offset 32)
-    vm.memory.write_slice(0, b"abc").expect("Writing 'abc' to memory failed");
-    let hash_call_res = vm.call_export("hash_and_store", &[], &wasm_caps)
+    vm.memory
+        .write_slice(0, b"abc")
+        .expect("Writing 'abc' to memory failed");
+    let hash_call_res = vm
+        .call_export("hash_and_store", &[], &wasm_caps)
         .expect("WASM host call execution failed");
     assert_eq!(hash_call_res, Some(wasm::Value::I32(32))); // 32 bytes written
 
     let digest_out = vm.memory.read_slice(32, 32).expect("Reading digest failed");
     let expected_abc_digest = [
-        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
-        0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
-        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
-        0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22,
+        0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00,
+        0x15, 0xad,
     ];
     assert_eq!(digest_out, &expected_abc_digest);
     kprintln!("[OK] WASM Host Integration: Called inter_crypto_hash -> Verified SHA-256 ('abc' -> BA7816BF...) in linear memory.");
-
-
 
     // 25. Sovereign Decentralized Identity Peer Attestation & Social Recovery Enclave
     kprintln!("--- [Testing Sovereign DID Peer Attestation & Social Recovery Enclave] ---");
@@ -1022,11 +1323,21 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let dave_key = [0x44u8; 32];
     let eve_key = [0x55u8; 32];
 
-    policy.add_guardian("did:inter:guardian_alice", alice_key).expect("Add alice failed");
-    policy.add_guardian("did:inter:guardian_bob", bob_key).expect("Add bob failed");
-    policy.add_guardian("did:inter:guardian_charlie", charlie_key).expect("Add charlie failed");
-    policy.add_guardian("did:inter:guardian_dave", dave_key).expect("Add dave failed");
-    policy.add_guardian("did:inter:guardian_eve", eve_key).expect("Add eve failed");
+    policy
+        .add_guardian("did:inter:guardian_alice", alice_key)
+        .expect("Add alice failed");
+    policy
+        .add_guardian("did:inter:guardian_bob", bob_key)
+        .expect("Add bob failed");
+    policy
+        .add_guardian("did:inter:guardian_charlie", charlie_key)
+        .expect("Add charlie failed");
+    policy
+        .add_guardian("did:inter:guardian_dave", dave_key)
+        .expect("Add dave failed");
+    policy
+        .add_guardian("did:inter:guardian_eve", eve_key)
+        .expect("Add eve failed");
     assert_eq!(policy.active_guardian_count(), 5);
     kprintln!("[OK] Recovery Policy Setup: Registered 5 guardians with 3-of-5 threshold and 3600s timelock.");
 
@@ -1034,22 +1345,31 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // Test 2: Zero Ambient Authority: Uncredentialed claim initiation rejected
     let empty_caps = CapabilityTable::new();
-    let unauth_claim = enclave.initiate_claim("did:inter:owner_loss", [0x77; 32], 1000, 101, &empty_caps);
+    let unauth_claim =
+        enclave.initiate_claim("did:inter:owner_loss", [0x77; 32], 1000, 101, &empty_caps);
     assert_eq!(unauth_claim, Err(recovery::RecoveryError::CapabilityDenied));
     kprintln!("[TEST] Zero Ambient Authority: Uncredentialed recovery claim initiation REJECTED (CapabilityDenied) VERIFIED.");
 
     // Mint valid capability for recovery enclave
     let mut recovery_caps = CapabilityTable::new();
-    recovery_caps.mint(CapabilityType::SocialRecoveryEnclave, Rights::INVOKE | Rights::WRITE, None);
+    recovery_caps.mint(
+        CapabilityType::SocialRecoveryEnclave,
+        Rights::INVOKE | Rights::WRITE,
+        None,
+    );
 
     // Test 3: Authorized recovery claim initiation
     let target_did = "did:inter:lost_phone_owner";
     let new_owner_key = [0x77u8; 32];
     let original_owner_key = [0x99u8; 32];
-    let claim_id = enclave.initiate_claim(target_did, new_owner_key, 1000, 42, &recovery_caps)
+    let claim_id = enclave
+        .initiate_claim(target_did, new_owner_key, 1000, 42, &recovery_caps)
         .expect("Initiate claim failed");
     assert_eq!(claim_id, 1);
-    kprintln!("[OK] Recovery Claim: Initiated Claim #1 for '{}'.", target_did);
+    kprintln!(
+        "[OK] Recovery Claim: Initiated Claim #1 for '{}'.",
+        target_did
+    );
 
     // Test 4: Anti-tamper signature validation (reject forged signature)
     let bad_signature = [0xEEu8; 32];
@@ -1064,7 +1384,12 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[TEST] Cryptographic Enclave: Forged guardian signature REJECTED (InvalidSignature) VERIFIED.");
 
     // Test 5: Valid Guardian 1 (Alice) attestation submission
-    let payload = recovery::SocialRecoveryEnclave::compute_attestation_payload(claim_id, target_did, &new_owner_key, 42);
+    let payload = recovery::SocialRecoveryEnclave::compute_attestation_payload(
+        claim_id,
+        target_did,
+        &new_owner_key,
+        42,
+    );
     let alice_sig = crypto::HmacSha256::mac(&alice_key, &payload);
     let alice_res = enclave.submit_guardian_attestation(
         claim_id,
@@ -1099,7 +1424,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // Test 8: Premature finalization attempt before reaching threshold quorum
     let premature_final = enclave.finalize_recovery(claim_id, 5000, &recovery_caps);
-    assert_eq!(premature_final, Err(recovery::RecoveryError::QuorumNotReached));
+    assert_eq!(
+        premature_final,
+        Err(recovery::RecoveryError::QuorumNotReached)
+    );
     kprintln!("[TEST] Quorum Gate: Premature recovery finalization (2/3 signatures) REJECTED (QuorumNotReached) VERIFIED.");
 
     // Test 9: Valid Guardian 3 (Charlie) attestation -> Reaches 3-of-5 threshold!
@@ -1116,7 +1444,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // Test 10: Anti-theft timelock protection: Attempt to finalize before 3600s delay expires
     let timelock_premature = enclave.finalize_recovery(claim_id, 2000, &recovery_caps); // 2000 < 1000 + 3600
-    assert_eq!(timelock_premature, Err(recovery::RecoveryError::TimelockNotExpired));
+    assert_eq!(
+        timelock_premature,
+        Err(recovery::RecoveryError::TimelockNotExpired)
+    );
     kprintln!("[TEST] Coercion Defense: Finalization during active timelock window REJECTED (TimelockNotExpired) VERIFIED.");
 
     // Test 11: Authentic owner cancellation during timelock window (anti-coercion mechanism)
@@ -1125,30 +1456,82 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     cancel_payload.extend_from_slice(&claim_id.to_be_bytes());
     let cancel_mac = crypto::HmacSha256::mac(&original_owner_key, &cancel_payload);
 
-    let cancel_res = enclave.cancel_claim_by_owner(claim_id, &original_owner_key, &cancel_mac, &recovery_caps);
+    let cancel_res =
+        enclave.cancel_claim_by_owner(claim_id, &original_owner_key, &cancel_mac, &recovery_caps);
     assert!(cancel_res.is_ok());
-    assert_eq!(enclave.active_claim.as_ref().unwrap().state, recovery::ClaimState::Cancelled);
+    assert_eq!(
+        enclave.active_claim.as_ref().unwrap().state,
+        recovery::ClaimState::Cancelled
+    );
     kprintln!("[TEST] Sovereign Owner Anti-Coercion: Original owner cancelled fraudulent claim during timelock VERIFIED.");
 
     // Test 12: Immediate emergency recovery (0s timelock) with full finalization and key rotation
     let mut instant_policy = recovery::RecoveryPolicy::new(3, 0); // 0s timelock
-    instant_policy.add_guardian("did:inter:guardian_alice", alice_key).unwrap();
-    instant_policy.add_guardian("did:inter:guardian_bob", bob_key).unwrap();
-    instant_policy.add_guardian("did:inter:guardian_charlie", charlie_key).unwrap();
+    instant_policy
+        .add_guardian("did:inter:guardian_alice", alice_key)
+        .unwrap();
+    instant_policy
+        .add_guardian("did:inter:guardian_bob", bob_key)
+        .unwrap();
+    instant_policy
+        .add_guardian("did:inter:guardian_charlie", charlie_key)
+        .unwrap();
     let mut instant_enclave = recovery::SocialRecoveryEnclave::new(instant_policy);
 
     let target_key2 = [0x88u8; 32];
-    let claim_id2 = instant_enclave.initiate_claim("did:inter:migrated_phone", target_key2, 5000, 999, &recovery_caps).unwrap();
-    let payload2 = recovery::SocialRecoveryEnclave::compute_attestation_payload(claim_id2, "did:inter:migrated_phone", &target_key2, 999);
+    let claim_id2 = instant_enclave
+        .initiate_claim(
+            "did:inter:migrated_phone",
+            target_key2,
+            5000,
+            999,
+            &recovery_caps,
+        )
+        .unwrap();
+    let payload2 = recovery::SocialRecoveryEnclave::compute_attestation_payload(
+        claim_id2,
+        "did:inter:migrated_phone",
+        &target_key2,
+        999,
+    );
 
-    instant_enclave.submit_guardian_attestation(claim_id2, "did:inter:guardian_alice", crypto::HmacSha256::mac(&alice_key, &payload2), 5010, &recovery_caps).unwrap();
-    instant_enclave.submit_guardian_attestation(claim_id2, "did:inter:guardian_bob", crypto::HmacSha256::mac(&bob_key, &payload2), 5020, &recovery_caps).unwrap();
-    let q_res = instant_enclave.submit_guardian_attestation(claim_id2, "did:inter:guardian_charlie", crypto::HmacSha256::mac(&charlie_key, &payload2), 5030, &recovery_caps).unwrap();
+    instant_enclave
+        .submit_guardian_attestation(
+            claim_id2,
+            "did:inter:guardian_alice",
+            crypto::HmacSha256::mac(&alice_key, &payload2),
+            5010,
+            &recovery_caps,
+        )
+        .unwrap();
+    instant_enclave
+        .submit_guardian_attestation(
+            claim_id2,
+            "did:inter:guardian_bob",
+            crypto::HmacSha256::mac(&bob_key, &payload2),
+            5020,
+            &recovery_caps,
+        )
+        .unwrap();
+    let q_res = instant_enclave
+        .submit_guardian_attestation(
+            claim_id2,
+            "did:inter:guardian_charlie",
+            crypto::HmacSha256::mac(&charlie_key, &payload2),
+            5030,
+            &recovery_caps,
+        )
+        .unwrap();
     assert_eq!(q_res, recovery::ClaimState::QuorumReached);
 
-    let rotated_key = instant_enclave.finalize_recovery(claim_id2, 5040, &recovery_caps).expect("Instant recovery finalization failed");
+    let rotated_key = instant_enclave
+        .finalize_recovery(claim_id2, 5040, &recovery_caps)
+        .expect("Instant recovery finalization failed");
     assert_eq!(rotated_key, target_key2);
-    assert_eq!(instant_enclave.active_claim.as_ref().unwrap().state, recovery::ClaimState::Finalized);
+    assert_eq!(
+        instant_enclave.active_claim.as_ref().unwrap().state,
+        recovery::ClaimState::Finalized
+    );
     kprintln!("[OK] Sovereign Identity Migration: Identity rotated to new owner key [0x88; 32] via 3-of-3 peer attestation.");
 
     // 26. Cryptographically Signed Sovereign OTA Updates & A/B Partition Rollback Engine
@@ -1159,10 +1542,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // keypair, not a device secret and not an update-authorisation credential:
     // a real publisher keeps its Ed25519 secret key offline and never ships it.
     let publisher_seed: [u8; 32] = [
-        0x0D, 0x0E, 0x0A, 0x0D, 0x00, 0x0D, 0x0E, 0x0A,
-        0x0D, 0x00, 0x0D, 0x0E, 0x0A, 0x0D, 0x00, 0x0D,
-        0x0E, 0x0A, 0x0D, 0x00, 0x0D, 0x0E, 0x0A, 0x0D,
-        0x00, 0x0D, 0x0E, 0x0A, 0x0D, 0x00, 0x0D, 0x0E,
+        0x0D, 0x0E, 0x0A, 0x0D, 0x00, 0x0D, 0x0E, 0x0A, 0x0D, 0x00, 0x0D, 0x0E, 0x0A, 0x0D, 0x00,
+        0x0D, 0x0E, 0x0A, 0x0D, 0x00, 0x0D, 0x0E, 0x0A, 0x0D, 0x00, 0x0D, 0x0E, 0x0A, 0x0D, 0x00,
+        0x0D, 0x0E,
     ];
     let publisher_pubkey = crypto::ed25519_public_key(&publisher_seed);
     let mut ota = ota::OtaManager::new(540, publisher_pubkey, board_id); // Version 540 active on Slot A
@@ -1205,7 +1587,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[TEST] Hardware Cross-Flashing Trap: Incompatible device target board REJECTED (TargetHardwareMismatch) VERIFIED.");
 
     // Test 4: Payload Digest Mismatch & Forged Signature rejected
-    let sample_payload = b"Inter OS Sovereign Smartphone Microkernel Binary v5.5.0 Staged Payload Data";
+    let sample_payload =
+        b"Inter OS Sovereign Smartphone Microkernel Binary v5.5.0 Staged Payload Data";
     let valid_digest = crypto::sha256(sample_payload);
     let forged_hdr = ota::OtaPackageHeader {
         magic: ota::OTA_MAGIC,
@@ -1223,11 +1606,16 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // Test 5: Valid Staging into Slot B
     let preimage = forged_hdr.compute_signature_preimage();
     let valid_signature = crypto::sign_ed25519_signature(&publisher_seed, &preimage);
-    assert!(crypto::verify_ed25519_signature(&preimage, &publisher_pubkey, &valid_signature));
+    assert!(crypto::verify_ed25519_signature(
+        &preimage,
+        &publisher_pubkey,
+        &valid_signature
+    ));
     let mut valid_hdr = forged_hdr;
     valid_hdr.signature = valid_signature;
 
-    let staged_slot = ota.verify_and_stage_update(&valid_hdr, sample_payload, &ota_caps)
+    let staged_slot = ota
+        .verify_and_stage_update(&valid_hdr, sample_payload, &ota_caps)
         .expect("Valid OTA update staging failed");
     assert_eq!(staged_slot, ota::PartitionSlot::SlotB);
     assert_eq!(ota.active_slot, ota::PartitionSlot::SlotB);
@@ -1254,7 +1642,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // Test 7: Successful Update Commit
     // Stage v5.6.0 update to Slot B and commit after successful boot
-    let sample_payload2 = b"Inter OS Sovereign Smartphone Microkernel Binary v5.6.0 Certified Production Release";
+    let sample_payload2 =
+        b"Inter OS Sovereign Smartphone Microkernel Binary v5.6.0 Certified Production Release";
     let valid_digest2 = crypto::sha256(sample_payload2);
     let mut valid_hdr2 = ota::OtaPackageHeader {
         magic: ota::OTA_MAGIC,
@@ -1268,16 +1657,21 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let preimage2 = valid_hdr2.compute_signature_preimage();
     valid_hdr2.signature = crypto::sign_ed25519_signature(&publisher_seed, &preimage2);
 
-    let staged_slot2 = ota.verify_and_stage_update(&valid_hdr2, sample_payload2, &ota_caps).unwrap();
+    let staged_slot2 = ota
+        .verify_and_stage_update(&valid_hdr2, sample_payload2, &ota_caps)
+        .unwrap();
     assert_eq!(staged_slot2, ota::PartitionSlot::SlotB);
     assert_eq!(ota.active_slot, ota::PartitionSlot::SlotB);
 
     // Commit boot
-    ota.commit_successful_boot(&ota_caps).expect("Commit boot failed");
+    ota.commit_successful_boot(&ota_caps)
+        .expect("Commit boot failed");
     assert_eq!(ota.slot_b.status, ota::SlotStatus::Valid);
     assert_eq!(ota.slot_b.boot_tries_left, 3);
     assert_eq!(ota.slot_b.version, 560);
-    kprintln!("[OK] OTA Commit: Successfully marked Slot B as Valid (v5.6.0 active production release).");
+    kprintln!(
+        "[OK] OTA Commit: Successfully marked Slot B as Valid (v5.6.0 active production release)."
+    );
 
     // 27. Sovereign Audio Architecture & I2S PCM Codec Driver
     kprintln!("--- [Testing Sovereign Audio Architecture & I2S PCM Codec Driver] ---");
@@ -1286,7 +1680,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     audio_driver.init_hardware(audio::SampleRate::Rate48kHz, audio::ChannelMode::Stereo);
     assert!(audio_driver.enabled);
     assert!(!audio_driver.hardware_present);
-    kprintln!("[OK] I2S Audio Codec: configuration parsed; physical codec backend remains unbound.");
+    kprintln!(
+        "[OK] I2S Audio Codec: configuration parsed; physical codec backend remains unbound."
+    );
 
     let tone_samples = audio::AudioDriver::generate_tone_440hz(128, 48000);
     let mut audio_caps = CapabilityTable::new();
@@ -1307,14 +1703,20 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("--- [Testing Sovereign Mobile Camera & Hardware ISP Driver] ---");
 
     let mut camera = camera::CameraDriver::new(0x0903_0000);
-    camera.init_hardware(camera::SensorResolution::Res1920x1080, camera::PixelFormat::Rgb565);
+    camera.init_hardware(
+        camera::SensorResolution::Res1920x1080,
+        camera::PixelFormat::Rgb565,
+    );
     assert!(!camera.enabled);
     assert!(!camera.hardware_present);
     kprintln!("[OK] MIPI CSI-2 Camera configuration loaded; no physical backend is claimed.");
 
     // Test 1: Zero Ambient Authority: Uncredentialed camera frame capture rejected
     let unauth_capture = camera.capture_frame(200, &empty_caps);
-    assert_eq!(unauth_capture.err(), Some(camera::CameraError::CapabilityDenied));
+    assert_eq!(
+        unauth_capture.err(),
+        Some(camera::CameraError::CapabilityDenied)
+    );
     kprintln!("[TEST] Zero Ambient Authority: Uncredentialed camera frame read REJECTED (CapabilityDenied) VERIFIED.");
 
     // Mint camera capture capability
@@ -1324,7 +1726,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // Test 2: Hardware Privacy Killswitch (Principle #17)
     camera.set_privacy_killswitch(true);
     let killswitch_res = camera.capture_frame(201, &camera_caps);
-    assert_eq!(killswitch_res.err(), Some(camera::CameraError::PrivacyKillswitchEngaged));
+    assert_eq!(
+        killswitch_res.err(),
+        Some(camera::CameraError::PrivacyKillswitchEngaged)
+    );
     kprintln!("[TEST] Hardware Privacy Killswitch: Sensor power severed (PrivacyKillswitchEngaged) VERIFIED.");
 
     // Disengage killswitch to resume normal camera operations
@@ -1334,7 +1739,6 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let capture = camera.capture_frame(202, &camera_caps);
     assert_eq!(capture.err(), Some(camera::CameraError::HardwareDisabled));
     kprintln!("[TEST] Camera hardware truth: authorized capture rejected without backend.");
-
 
     // 30. Sovereign Cellular SMS & Emergency PDU Dispatcher
     kprintln!("--- [Testing Sovereign Cellular SMS & Emergency PDU Dispatcher] ---");
@@ -1352,33 +1756,55 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
     // Mint SMS capability
     let mut sms_caps = CapabilityTable::new();
-    sms_caps.mint(CapabilityType::SmsDispatchDirect, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
+    sms_caps.mint(
+        CapabilityType::SmsDispatchDirect,
+        Rights::READ | Rights::WRITE | Rights::INVOKE,
+        None,
+    );
 
     // Test 2: Authorized 3GPP TS 23.040 SMS-SUBMIT PDU Composition & 7-bit packing
-    let (submit_pdu, cmgs_len) = sms_dispatcher.compose_submit_pdu(
-        "+15550199234",
-        "Hello from sovereign Inter OS kernel!",
-        &sms_caps,
-    ).expect("SMS SUBMIT PDU compose failed");
+    let (submit_pdu, cmgs_len) = sms_dispatcher
+        .compose_submit_pdu(
+            "+15550199234",
+            "Hello from sovereign Inter OS kernel!",
+            &sms_caps,
+        )
+        .expect("SMS SUBMIT PDU compose failed");
 
     assert!(submit_pdu.len() > 15);
     assert_eq!(submit_pdu[0], 0x00); // SMSC len 0
     assert_eq!(submit_pdu[1], 0x01); // TP-MTI = SMS-SUBMIT
     assert_eq!(sms_dispatcher.total_messages_sent, 1);
     assert_eq!(sms_dispatcher.outbound_queue.len(), 1);
-    kprintln!("[OK] 3GPP SMS-SUBMIT Encoder: Generated valid binary PDU ({} octets, AT+CMGS={}).", submit_pdu.len(), cmgs_len);
+    kprintln!(
+        "[OK] 3GPP SMS-SUBMIT Encoder: Generated valid binary PDU ({} octets, AT+CMGS={}).",
+        submit_pdu.len(),
+        cmgs_len
+    );
 
     // Test 3: Ingest and decode valid incoming SMS-DELIVER PDU
     let test_msg = "Meeting at 3 PM";
     let packed_msg = sms::pack_7bit(test_msg);
     let mut raw_deliver = alloc::vec![
-        0x00,             // SMSC len
-        0x00,             // TP-MTI: SMS-DELIVER
-        11, 0x91,         // Length 11, international
-        0x51, 0x55, 0x90, 0x78, 0x56, 0xF4, // +15550987654 swapped BCD
-        0x00,             // TP-PID
-        0x00,             // TP-DCS
-        0x62, 0x90, 0x12, 0x41, 0x03, 0x00, 0x00, // Timestamp 2026-09-21 14:30:00 (swapped BCD)
+        0x00, // SMSC len
+        0x00, // TP-MTI: SMS-DELIVER
+        11,
+        0x91, // Length 11, international
+        0x51,
+        0x55,
+        0x90,
+        0x78,
+        0x56,
+        0xF4, // +15550987654 swapped BCD
+        0x00, // TP-PID
+        0x00, // TP-DCS
+        0x62,
+        0x90,
+        0x12,
+        0x41,
+        0x03,
+        0x00,
+        0x00,                 // Timestamp 2026-09-21 14:30:00 (swapped BCD)
         test_msg.len() as u8, // TP-UDL
     ];
     raw_deliver.extend_from_slice(&packed_msg);
@@ -1389,11 +1815,19 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[TEST] Zero Ambient Authority: Uncredentialed SMS-DELIVER decode REJECTED (CapabilityDenied) VERIFIED.");
 
     // Authorized ingest
-    let delivered = sms_dispatcher.ingest_deliver_pdu(&raw_deliver, &sms_caps)
+    let delivered = sms_dispatcher
+        .ingest_deliver_pdu(&raw_deliver, &sms_caps)
         .expect("SMS-DELIVER ingestion failed");
     assert_eq!(delivered.originating_number, "+15550987654");
     assert_eq!(delivered.message_text, test_msg);
-    assert_eq!((delivered.timestamp_year, delivered.timestamp_month, delivered.timestamp_day), (26, 9, 21));
+    assert_eq!(
+        (
+            delivered.timestamp_year,
+            delivered.timestamp_month,
+            delivered.timestamp_day
+        ),
+        (26, 9, 21)
+    );
     assert_eq!(delivered.threat_level, sms::ThreatLevel::Safe);
     assert_eq!(sms_dispatcher.total_messages_received, 1);
     kprintln!("[OK] 3GPP SMS-DELIVER Decoder: Parsed inbound SMS from '{}' ('{}', Timestamp: 20{:02}-{:02}-{:02} {:02}:{:02}).",
@@ -1403,31 +1837,50 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let phishing_msg = "URGENT: Bank account locked! Login immediately at http://secure-bank.xyz to verify password";
     let packed_phishing = sms::pack_7bit(phishing_msg);
     let mut phishing_pdu = alloc::vec![
-        0x00, 0x00,
-        10, 0x81,
-        0x99, 0x88, 0x77, 0x66, 0x55, // 9988776655
-        0x00, 0x00,
-        0x62, 0x90, 0x12, 0x41, 0x53, 0x00, 0x00, // 2026-09-21 14:35:00
+        0x00,
+        0x00,
+        10,
+        0x81,
+        0x99,
+        0x88,
+        0x77,
+        0x66,
+        0x55, // 9988776655
+        0x00,
+        0x00,
+        0x62,
+        0x90,
+        0x12,
+        0x41,
+        0x53,
+        0x00,
+        0x00, // 2026-09-21 14:35:00
         phishing_msg.len() as u8,
     ];
     phishing_pdu.extend_from_slice(&packed_phishing);
 
-    let phishing_deliver = sms_dispatcher.ingest_deliver_pdu(&phishing_pdu, &sms_caps)
+    let phishing_deliver = sms_dispatcher
+        .ingest_deliver_pdu(&phishing_pdu, &sms_caps)
         .expect("Phishing SMS ingestion failed");
-    assert_eq!(phishing_deliver.threat_level, sms::ThreatLevel::HighPhishingRisk);
+    assert_eq!(
+        phishing_deliver.threat_level,
+        sms::ThreatLevel::HighPhishingRisk
+    );
     assert!(phishing_deliver.threat_score >= 60);
     assert_eq!(sms_dispatcher.total_phishing_blocked, 1);
     kprintln!("[TEST] On-Device Anti-Phishing Filter: Detected fraudulent bank spoof (Threat Score: {}) -> FLAGGED HighPhishingRisk VERIFIED.", phishing_deliver.threat_score);
 
     // Test 5: 3GPP TS 23.041 Cell Broadcast Service (CMAS / ETWS Emergency Alert)
-    let alert = sms_dispatcher.dispatch_emergency_broadcast(
-        0x1112,
-        0x0001,
-        sms::EmergencySeverity::SevereThreat,
-        42,
-        "TSUNAMI WARNING: Evacuate coastal lowlands immediately! Seek high ground.",
-        &sms_caps,
-    ).expect("Emergency broadcast dispatch failed");
+    let alert = sms_dispatcher
+        .dispatch_emergency_broadcast(
+            0x1112,
+            0x0001,
+            sms::EmergencySeverity::SevereThreat,
+            42,
+            "TSUNAMI WARNING: Evacuate coastal lowlands immediately! Seek high ground.",
+            &sms_caps,
+        )
+        .expect("Emergency broadcast dispatch failed");
 
     assert_eq!(alert.message_id, 0x1112);
     assert_eq!(alert.severity, sms::EmergencySeverity::SevereThreat);
@@ -1444,10 +1897,23 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(nfc.enabled);
     assert!(!nfc.hardware_present);
     let mut nfc_caps = CapabilityTable::new();
-    nfc_caps.mint(CapabilityType::NfcSecureElement, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-    let nfc_select = nfc.process_apdu(&alloc::vec![0x00, 0xA4, 0x04, 0x00, 0x0A, 0xF0, 0x49, 0x4E, 0x54, 0x45, 0x52, 0x44, 0x49, 0x44, 0x01], &nfc_caps);
+    nfc_caps.mint(
+        CapabilityType::NfcSecureElement,
+        Rights::READ | Rights::WRITE | Rights::INVOKE,
+        None,
+    );
+    let nfc_select = nfc.process_apdu(
+        &alloc::vec![
+            0x00, 0xA4, 0x04, 0x00, 0x0A, 0xF0, 0x49, 0x4E, 0x54, 0x45, 0x52, 0x44, 0x49, 0x44,
+            0x01
+        ],
+        &nfc_caps,
+    );
     assert_eq!(nfc_select.err(), Some(nfc::NfcError::HardwareDisabled));
-    let ndef = alloc::vec![0xD1, 0x01, 13, b'U', 0x04, b'i', b'n', b't', b'e', b'r', b'-', b'o', b's', b'.', b'o', b'r', b'g'];
+    let ndef = alloc::vec![
+        0xD1, 0x01, 13, b'U', 0x04, b'i', b'n', b't', b'e', b'r', b'-', b'o', b's', b'.', b'o',
+        b'r', b'g'
+    ];
     assert!(nfc::NfcController::parse_ndef(&ndef, &nfc_caps).is_ok());
     kprintln!("[OK] NFC: protocol parser works; physical controller remains unbound.");
 
@@ -1457,9 +1923,26 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(!sensors.hardware_present);
     let mut sensor_caps = CapabilityTable::new();
     sensor_caps.mint(CapabilityType::SensorTelemetryRead, Rights::READ, None);
-    let sample = sensors::ImuSample { accel_x_mg: 0, accel_y_mg: -1000, accel_z_mg: 0, gyro_x_dps: 0, gyro_y_dps: 0, gyro_z_dps: 0 };
-    let env = sensors::EnvironmentSample { proximity_mm: 80, ambient_lux: 450, pressure_pa: sensors::STANDARD_SEA_LEVEL_PRESSURE_PA, altitude_meters: 0 };
-    assert_eq!(sensors.feed_hardware_telemetry(sample, env, false, &sensor_caps).err(), Some(sensors::SensorError::HardwareDisabled));
+    let sample = sensors::ImuSample {
+        accel_x_mg: 0,
+        accel_y_mg: -1000,
+        accel_z_mg: 0,
+        gyro_x_dps: 0,
+        gyro_y_dps: 0,
+        gyro_z_dps: 0,
+    };
+    let env = sensors::EnvironmentSample {
+        proximity_mm: 80,
+        ambient_lux: 450,
+        pressure_pa: sensors::STANDARD_SEA_LEVEL_PRESSURE_PA,
+        altitude_meters: 0,
+    };
+    assert_eq!(
+        sensors
+            .feed_hardware_telemetry(sample, env, false, &sensor_caps)
+            .err(),
+        Some(sensors::SensorError::HardwareDisabled)
+    );
     kprintln!("[OK] Sensors: telemetry path fails closed without a concrete driver.");
 
     let mut bt = bluetooth::BluetoothController::new(0x0906_0000);
@@ -1467,10 +1950,23 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(bt.powered);
     assert!(!bt.hardware_present);
     let mut bt_caps = CapabilityTable::new();
-    bt_caps.mint(CapabilityType::BluetoothDirect, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-    assert_eq!(bt.rotate_private_address(0, &bt_caps).err(), Some(bluetooth::BluetoothError::HardwareDisabled));
-    assert_eq!(bt.process_incoming_event(&[0x04, 0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00], &bt_caps).err(), Some(bluetooth::BluetoothError::HardwareDisabled));
-    let reset = bt.cmd_reset(&bt_caps).expect("HCI packet serialization failed");
+    bt_caps.mint(
+        CapabilityType::BluetoothDirect,
+        Rights::READ | Rights::WRITE | Rights::INVOKE,
+        None,
+    );
+    assert_eq!(
+        bt.rotate_private_address(0, &bt_caps).err(),
+        Some(bluetooth::BluetoothError::HardwareDisabled)
+    );
+    assert_eq!(
+        bt.process_incoming_event(&[0x04, 0x0E, 0x04, 0x01, 0x03, 0x0C, 0x00], &bt_caps)
+            .err(),
+        Some(bluetooth::BluetoothError::HardwareDisabled)
+    );
+    let reset = bt
+        .cmd_reset(&bt_caps)
+        .expect("HCI packet serialization failed");
     assert_eq!(reset, alloc::vec![0x01, 0x03, 0x0C, 0x00]);
     kprintln!("[OK] Bluetooth: HCI serialization works; controller operations require hardware.");
 
@@ -1484,20 +1980,40 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(gnss.enabled);
     assert!(!gnss.hardware_present);
     let valid_nmea = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47";
-    let fix = gnss.parse_gpgga(valid_nmea).expect("NMEA parser rejected valid sentence");
+    let fix = gnss
+        .parse_gpgga(valid_nmea)
+        .expect("NMEA parser rejected valid sentence");
     assert_eq!(fix.satellites_tracked, 8);
     let mut gps_caps = CapabilityTable::new();
-    gps_caps.mint(CapabilityType::GpsTelemetryRead, Rights::READ | Rights::INVOKE, None);
-    assert_eq!(gnss.get_location(gps::AccuracyLevel::Precise, &gps_caps).err(), Some(gps::GpsError::HardwareDisabled));
+    gps_caps.mint(
+        CapabilityType::GpsTelemetryRead,
+        Rights::READ | Rights::INVOKE,
+        None,
+    );
+    assert_eq!(
+        gnss.get_location(gps::AccuracyLevel::Precise, &gps_caps)
+            .err(),
+        Some(gps::GpsError::HardwareDisabled)
+    );
     kprintln!("[OK] GNSS: NMEA parser works; location access requires a physical receiver.");
 
     let mut haptics = haptics::HapticsController::new(0x0909_0000);
     haptics.init_hardware();
     assert!(!haptics.hardware_present);
-    assert_eq!(haptics.synthesize_effect(haptics::TactileEffect::LightClick).len(), 1);
+    assert_eq!(
+        haptics
+            .synthesize_effect(haptics::TactileEffect::LightClick)
+            .len(),
+        1
+    );
     let mut haptic_caps = CapabilityTable::new();
     haptic_caps.mint(CapabilityType::HapticsActuatorDirect, Rights::WRITE, None);
-    assert_eq!(haptics.play_effect(haptics::TactileEffect::LightClick, &haptic_caps).err(), Some(haptics::HapticError::HardwareDisabled));
+    assert_eq!(
+        haptics
+            .play_effect(haptics::TactileEffect::LightClick, &haptic_caps)
+            .err(),
+        Some(haptics::HapticError::HardwareDisabled)
+    );
     kprintln!("[OK] Haptics: waveform generation is software-only; actuator output is unbound.");
 
     let mut bio = biometrics::BiometricsController::new(0x090A_0000);
@@ -1505,21 +2021,30 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(!bio.hardware_present);
     let mut bio_caps = CapabilityTable::new();
     bio_caps.mint(CapabilityType::BiometricAuthEnclave, Rights::INVOKE, None);
-    assert_eq!(bio.enroll_finger(1, alloc::vec![], &bio_caps).err(), Some(biometrics::BiometricError::HardwareDisabled));
+    assert_eq!(
+        bio.enroll_finger(1, alloc::vec![], &bio_caps).err(),
+        Some(biometrics::BiometricError::HardwareDisabled)
+    );
     kprintln!("[OK] Biometrics: no software-fabricated secure enclave.");
 
     let mut usb_pd = usb::UsbPdController::new(0x090B_0000);
     usb_pd.init_hardware();
     assert!(!usb_pd.hardware_present);
     usb_pd.attach_cable(usb::TypeCPolarity::Cc1Active);
-    usb_pd.ingest_source_capabilities(&[usb::PowerDataObject { position: 1, voltage_mv: 5000, max_current_ma: 3000 }]);
+    usb_pd.ingest_source_capabilities(&[usb::PowerDataObject {
+        position: 1,
+        voltage_mv: 5000,
+        max_current_ma: 3000,
+    }]);
     let mut usb_caps = CapabilityTable::new();
     usb_caps.mint(CapabilityType::UsbPowerDeliveryDirect, Rights::WRITE, None);
-    assert_eq!(usb_pd.negotiate_power_contract(5000, 30, &usb_caps).err(), Some(usb::UsbError::NoPortConnected));
+    assert_eq!(
+        usb_pd.negotiate_power_contract(5000, 30, &usb_caps).err(),
+        Some(usb::UsbError::NoPortConnected)
+    );
     kprintln!("[OK] USB-PD: protocol state is isolated from absent physical TCPC hardware.");
 
-    
-// 40. Sovereign Mobile Multi-Core SMP, IPI & big.LITTLE Scheduler
+    // 40. Sovereign Mobile Multi-Core SMP, IPI & big.LITTLE Scheduler
     kprintln!("--- [Testing Sovereign Mobile Multi-Core SMP Subsystem] ---");
 
     // No GIC distributor base is claimed: PSCI and GIC MMIO are only touched
@@ -1531,7 +2056,11 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("[OK] SMP topology model loaded; physical PSCI/GIC backend remains unbound.");
 
     let mut smp_caps = CapabilityTable::new();
-    smp_caps.mint(CapabilityType::CpuSmpGovernorDirect, Rights::WRITE | Rights::INVOKE, None);
+    smp_caps.mint(
+        CapabilityType::CpuSmpGovernorDirect,
+        Rights::WRITE | Rights::INVOKE,
+        None,
+    );
 
     // No PSCI CPU_ON or GIC SGI MMIO is attempted until a real topology and
     // interrupt-controller backend are discovered and explicitly attached.
@@ -1540,7 +2069,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         Some(smp::SmpError::HardwareDisabled)
     );
     assert_eq!(
-        smp.dispatch_ipi(0b0000_0010, smp::IpiKind::Reschedule, &smp_caps).err(),
+        smp.dispatch_ipi(0b0000_0010, smp::IpiKind::Reschedule, &smp_caps)
+            .err(),
         Some(smp::SmpError::HardwareDisabled)
     );
     assert_eq!(
@@ -1548,7 +2078,9 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         Some(smp::SmpError::HardwareDisabled)
     );
     assert_eq!(smp.total_ipis_sent, 0);
-    kprintln!("[OK] SMP: CPU_ON, IPI and hotplug operations fail closed without real PSCI/GIC hardware.");
+    kprintln!(
+        "[OK] SMP: CPU_ON, IPI and hotplug operations fail closed without real PSCI/GIC hardware."
+    );
 
     // 40b. Multicore SMP Bring-up, GICv3 Redistributor Discovery & SGI/IPI Verification
     kprintln!("--- [Testing Multicore SMP Bring-up, Per-PE Redistributor & GICv3 SGI IPI] ---");
@@ -1592,7 +2124,11 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             secondary_targets.push(fallback_id);
         }
     }
-    kprintln!("[AArch64] DTB CPU discovery: boot MPIDR=0x{:016X}, {} secondary candidate(s).", boot_mpidr, secondary_targets.len());
+    kprintln!(
+        "[AArch64] DTB CPU discovery: boot MPIDR=0x{:016X}, {} secondary candidate(s).",
+        boot_mpidr,
+        secondary_targets.len()
+    );
 
     let secondary_entry = crate::entry::secondary_cpu_entry as *const () as usize as u64;
     gic::set_pe_online(0, true);
@@ -1606,7 +2142,12 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         if logical_id >= gic::MAX_GIC_PES {
             break;
         }
-        let psci_ret = psci.invoke_psci(psci::PSCI_FN_CPU_ON, target_mpidr, secondary_entry, logical_id as u64);
+        let psci_ret = psci.invoke_psci(
+            psci::PSCI_FN_CPU_ON,
+            target_mpidr,
+            secondary_entry,
+            logical_id as u64,
+        );
         if psci_ret == psci::PSCI_SUCCESS as i64 {
             psci_dispatched_any = true;
             kprintln!("[AArch64] PSCI CPU_ON dispatched for secondary PE {} (MPIDR=0x{:016X}, entry @ 0x{:016X}).", logical_id, target_mpidr, secondary_entry);
@@ -1624,7 +2165,12 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             }
         } else {
             // Core not present or unavailable in current machine topology
-            kprintln!("[AArch64] PSCI CPU_ON skipped/rejected for PE {} MPIDR=0x{:016X} (ret={}).", logical_id, target_mpidr, psci_ret);
+            kprintln!(
+                "[AArch64] PSCI CPU_ON skipped/rejected for PE {} MPIDR=0x{:016X} (ret={}).",
+                logical_id,
+                target_mpidr,
+                psci_ret
+            );
         }
     }
 
@@ -1636,7 +2182,8 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             if !online_cpus[target_id] {
                 continue;
             }
-            let target_mpidr = gic::get_pe_mpidr_by_logical_id(target_id).unwrap_or(target_id as u64);
+            let target_mpidr =
+                gic::get_pe_mpidr_by_logical_id(target_id).unwrap_or(target_id as u64);
             let (aff3, aff2, aff1, aff0) = gic::decode_mpidr_affinity(target_mpidr);
             let mut before = [0u64; gic::MAX_GIC_PES];
             for idx in 0..gic::MAX_GIC_PES {
@@ -1646,10 +2193,16 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             let target_list = 1u16 << (aff0 & 0x0F);
             let sgi_val = gic::encode_sgi1r(aff3, aff2, aff1, target_list, 1, false);
             gic::send_sgi(sgi_val);
-            kprintln!("[AArch64] CPU 0 sent GICv3 SGI 1 to CPU {} (ICC_SGI1R_EL1 = 0x{:016X}).", target_id, sgi_val);
+            kprintln!(
+                "[AArch64] CPU 0 sent GICv3 SGI 1 to CPU {} (ICC_SGI1R_EL1 = 0x{:016X}).",
+                target_id,
+                sgi_val
+            );
 
             let mut sgi_spins = 0;
-            while gic::pe_sgi_interrupt_count(target_id) <= before[target_id] && sgi_spins < 1_000_000 {
+            while gic::pe_sgi_interrupt_count(target_id) <= before[target_id]
+                && sgi_spins < 1_000_000
+            {
                 core::hint::spin_loop();
                 sgi_spins += 1;
             }
@@ -1659,8 +2212,12 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 if other_id != target_id && online_cpus[other_id] {
                     if gic::pe_sgi_interrupt_count(other_id) != before[other_id] {
                         isolated = false;
-                        kprintln!("[ERROR] SGI 1 leaked to unintended PE {} (before={}, after={})!",
-                            other_id, before[other_id], gic::pe_sgi_interrupt_count(other_id));
+                        kprintln!(
+                            "[ERROR] SGI 1 leaked to unintended PE {} (before={}, after={})!",
+                            other_id,
+                            before[other_id],
+                            gic::pe_sgi_interrupt_count(other_id)
+                        );
                     }
                 }
             }
@@ -1675,7 +2232,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                     target_id, target_id, target_sgi, cpu0_sgi);
             } else {
                 sgi_delivery_verified = false;
-                kprintln!("[ERROR] Targeted SGI 1 verification failed for PE {}.", target_id);
+                kprintln!(
+                    "[ERROR] Targeted SGI 1 verification failed for PE {}.",
+                    target_id
+                );
             }
         }
 
@@ -1719,7 +2279,11 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
                 for prev in 0..idx {
                     if online_cpus[prev] && (mpidrs[prev] == mpidr || rdbases[prev] == rdbase) {
                         distinct_identities_ok = false;
-                        kprintln!("[ERROR] Duplicate MPIDR or redistributor between PE {} and PE {}!", prev, idx);
+                        kprintln!(
+                            "[ERROR] Duplicate MPIDR or redistributor between PE {} and PE {}!",
+                            prev,
+                            idx
+                        );
                     }
                 }
 
@@ -1753,8 +2317,15 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(sim.enabled);
     assert!(!sim.hardware_present);
     let mut sim_caps = CapabilityTable::new();
-    sim_caps.mint(CapabilityType::SimCardSecureElement, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-    assert_eq!(sim.read_iccid(&sim_caps).err(), Some(sim::SimError::HardwareDisabled));
+    sim_caps.mint(
+        CapabilityType::SimCardSecureElement,
+        Rights::READ | Rights::WRITE | Rights::INVOKE,
+        None,
+    );
+    assert_eq!(
+        sim.read_iccid(&sim_caps).err(),
+        Some(sim::SimError::HardwareDisabled)
+    );
     kprintln!("[OK] SIM/eSIM: no fabricated ICCID or card presence.");
 
     // 42. Display backend boundary
@@ -1767,9 +2338,20 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(!display_hal.enabled);
     assert!(!display_hal.hardware_present);
     let mut disp_caps = CapabilityTable::new();
-    disp_caps.mint(CapabilityType::DisplayControllerDirect, Rights::READ | Rights::WRITE, None);
-    assert_eq!(display_hal.set_refresh_rate(display_hal::RefreshRateHz::Hz120, 85, &disp_caps).err(), Some(display_hal::DisplayError::HardwareDisabled));
-    kprintln!("[OK] Display: panel timing is not exposed as physical hardware without a bound backend.");
+    disp_caps.mint(
+        CapabilityType::DisplayControllerDirect,
+        Rights::READ | Rights::WRITE,
+        None,
+    );
+    assert_eq!(
+        display_hal
+            .set_refresh_rate(display_hal::RefreshRateHz::Hz120, 85, &disp_caps)
+            .err(),
+        Some(display_hal::DisplayError::HardwareDisabled)
+    );
+    kprintln!(
+        "[OK] Display: panel timing is not exposed as physical hardware without a bound backend."
+    );
 
     // 43. StrongBox backend boundary
     kprintln!("--- [Testing AArch64 StrongBox backend boundary] ---");
@@ -1778,8 +2360,17 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(strongbox.enabled);
     assert!(!strongbox.hardware_present);
     let mut sb_caps = CapabilityTable::new();
-    sb_caps.mint(CapabilityType::StrongBoxSecureEnclave, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-    assert_eq!(strongbox.generate_key(strongbox::KeyAlgorithm::Ed25519, &sb_caps).err(), Some(strongbox::StrongBoxError::HardwareDisabled));
+    sb_caps.mint(
+        CapabilityType::StrongBoxSecureEnclave,
+        Rights::READ | Rights::WRITE | Rights::INVOKE,
+        None,
+    );
+    assert_eq!(
+        strongbox
+            .generate_key(strongbox::KeyAlgorithm::Ed25519, &sb_caps)
+            .err(),
+        Some(strongbox::StrongBoxError::HardwareDisabled)
+    );
     kprintln!("[OK] StrongBox: no software-generated secure-element keys or attestations.");
 
     // 44. Remote killswitch backend boundary
@@ -1789,8 +2380,22 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     assert!(killswitch.enabled);
     assert!(!killswitch.hardware_present);
     let mut ks_caps = CapabilityTable::new();
-    ks_caps.mint(CapabilityType::RemoteKillSwitchDirect, Rights::READ | Rights::WRITE | Rights::INVOKE, None);
-    assert_eq!(killswitch.execute_kill_command(killswitch::KillAction::LockdownScreen, killswitch.current_nonce, &[0u8; 64], &ks_caps).err(), Some(killswitch::KillswitchError::HardwareDisabled));
+    ks_caps.mint(
+        CapabilityType::RemoteKillSwitchDirect,
+        Rights::READ | Rights::WRITE | Rights::INVOKE,
+        None,
+    );
+    assert_eq!(
+        killswitch
+            .execute_kill_command(
+                killswitch::KillAction::LockdownScreen,
+                killswitch.current_nonce,
+                &[0u8; 64],
+                &ks_caps
+            )
+            .err(),
+        Some(killswitch::KillswitchError::HardwareDisabled)
+    );
     kprintln!("[OK] Remote killswitch: command execution requires a concrete hardware controller.");
 
     kprintln!();
@@ -1803,12 +2408,20 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("--- [Testing AArch64 50-Cycle Memory Stability] ---");
     let baseline_frames = mmu::active_allocated_frames();
     for cycle in 0..50 {
-        let mut aspace = mmu::UserAddressSpace::new().expect("Address space allocation in stability cycle");
+        let mut aspace =
+            mmu::UserAddressSpace::new().expect("Address space allocation in stability cycle");
         let test_frame = mmu::allocate_frame().expect("Frame allocation in stability cycle");
-        aspace.map_user_page(0x0040_0000, test_frame, true, false).expect("Mapping page in stability cycle");
+        aspace
+            .map_user_page(0x0040_0000, test_frame, true, false)
+            .expect("Mapping page in stability cycle");
         assert!(mmu::active_allocated_frames() > baseline_frames);
         assert!(aspace.destroy().is_ok());
-        assert_eq!(mmu::active_allocated_frames(), baseline_frames, "Memory leak detected at cycle {}", cycle);
+        assert_eq!(
+            mmu::active_allocated_frames(),
+            baseline_frames,
+            "Memory leak detected at cycle {}",
+            cycle
+        );
     }
     kprintln!("[TEST] 50-Cycle Memory Stability: Free/used frame count returned to baseline ({}) across 50 cycles without leakage VERIFIED.", baseline_frames);
 
@@ -1816,37 +2429,79 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     kprintln!("--- [Testing AArch64 50-Cycle Real Process Lifecycle] ---");
     static TEST_PROC_AARCH64_ELF: [u8; 4096] = {
         let mut b = [0u8; 4096];
-        b[0] = 0x7f; b[1] = 0x45; b[2] = 0x4c; b[3] = 0x46;
-        b[4] = 0x02; b[5] = 0x01; b[6] = 0x01;
-        b[16] = 0x02; b[18] = 0xb7; b[20] = 0x01;
-        b[24] = 0x78; b[26] = 0x40; b[32] = 0x40;
-        b[52] = 0x40; b[54] = 0x38; b[56] = 0x01; b[58] = 0x40;
-        b[64] = 0x01; b[68] = 0x05; b[82] = 0x40; b[90] = 0x40;
-        b[97] = 0x10; b[105] = 0x10; b[113] = 0x10;
+        b[0] = 0x7f;
+        b[1] = 0x45;
+        b[2] = 0x4c;
+        b[3] = 0x46;
+        b[4] = 0x02;
+        b[5] = 0x01;
+        b[6] = 0x01;
+        b[16] = 0x02;
+        b[18] = 0xb7;
+        b[20] = 0x01;
+        b[24] = 0x78;
+        b[26] = 0x40;
+        b[32] = 0x40;
+        b[52] = 0x40;
+        b[54] = 0x38;
+        b[56] = 0x01;
+        b[58] = 0x40;
+        b[64] = 0x01;
+        b[68] = 0x05;
+        b[82] = 0x40;
+        b[90] = 0x40;
+        b[97] = 0x10;
+        b[105] = 0x10;
+        b[113] = 0x10;
         // Code at offset 120 (0x78)
-        b[120] = 0xe8; b[122] = 0x80; b[123] = 0xd2; // mov x8, #7 (SYS_GET_TASK_ID)
-        b[124] = 0x01; b[127] = 0xd4;               // svc #0
-        b[128] = 0x48; b[130] = 0x80; b[131] = 0xd2; // mov x8, #2 (SYS_EXIT)
-        b[134] = 0x80; b[135] = 0xd2;               // mov x0, #0 (exit code 0)
-        b[136] = 0x01; b[139] = 0xd4;               // svc #0
-        b[143] = 0x14;                               // b .
+        b[120] = 0xe8;
+        b[122] = 0x80;
+        b[123] = 0xd2; // mov x8, #7 (SYS_GET_TASK_ID)
+        b[124] = 0x01;
+        b[127] = 0xd4; // svc #0
+        b[128] = 0x48;
+        b[130] = 0x80;
+        b[131] = 0xd2; // mov x8, #2 (SYS_EXIT)
+        b[134] = 0x80;
+        b[135] = 0xd2; // mov x0, #0 (exit code 0)
+        b[136] = 0x01;
+        b[139] = 0xd4; // svc #0
+        b[143] = 0x14; // b .
         b
     };
 
     let proc_baseline_frames = mmu::active_allocated_frames();
     let proc_baseline_tasks = task::SCHEDULER.lock().tasks.len();
-    unsafe { user::IN_LIFECYCLE_TEST = true; }
+    unsafe {
+        user::IN_LIFECYCLE_TEST = true;
+    }
     for cycle in 0..50 {
-        let loaded = elf::load_elf(&TEST_PROC_AARCH64_ELF).expect("Loading test ELF for lifecycle cycle");
+        let loaded =
+            elf::load_elf(&TEST_PROC_AARCH64_ELF).expect("Loading test ELF for lifecycle cycle");
         let parent_id = 1;
         let mut caps = capability::CapabilityTable::new();
-        caps.mint(capability::CapabilityType::IpcSend, capability::Rights::INVOKE, None);
-        caps.mint(capability::CapabilityType::IpcReceive, capability::Rights::READ, None);
+        caps.mint(
+            capability::CapabilityType::IpcSend,
+            capability::Rights::INVOKE,
+            None,
+        );
+        caps.mint(
+            capability::CapabilityType::IpcReceive,
+            capability::Rights::READ,
+            None,
+        );
 
         let (child_pid, child_ttbr0) = {
             let mut sched = task::SCHEDULER.lock();
             let ttbr0 = loaded.address_space.ttbr0;
-            let pid = sched.spawn_user_process(parent_id, "test_child", loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
+            let pid = sched.spawn_user_process(
+                parent_id,
+                "test_child",
+                loaded.entry_point,
+                loaded.stack_top,
+                Some(loaded.address_space),
+                caps,
+            );
             assert!(pid > 0);
             (pid, ttbr0)
         };
@@ -1877,15 +2532,35 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             }
         }
 
-        assert_eq!(task::reap_task_locksafe(999, false, child_pid), Err(-13), "Non-child reap without supervisor rights must fail");
-        let reaped_code = task::reap_task_locksafe(parent_id, false, child_pid).expect("Parent reap of terminated child must succeed");
+        assert_eq!(
+            task::reap_task_locksafe(999, false, child_pid),
+            Err(-13),
+            "Non-child reap without supervisor rights must fail"
+        );
+        let reaped_code = task::reap_task_locksafe(parent_id, false, child_pid)
+            .expect("Parent reap of terminated child must succeed");
         assert_eq!(reaped_code, 0);
-        assert!(task::reap_task_locksafe(parent_id, false, child_pid).is_err(), "Double reap must fail");
+        assert!(
+            task::reap_task_locksafe(parent_id, false, child_pid).is_err(),
+            "Double reap must fail"
+        );
 
-        assert_eq!(mmu::active_allocated_frames(), proc_baseline_frames, "Process frame leak at cycle {}", cycle);
-        assert_eq!(task::SCHEDULER.lock().tasks.len(), proc_baseline_tasks, "Process task leak at cycle {}", cycle);
+        assert_eq!(
+            mmu::active_allocated_frames(),
+            proc_baseline_frames,
+            "Process frame leak at cycle {}",
+            cycle
+        );
+        assert_eq!(
+            task::SCHEDULER.lock().tasks.len(),
+            proc_baseline_tasks,
+            "Process task leak at cycle {}",
+            cycle
+        );
     }
-    unsafe { user::IN_LIFECYCLE_TEST = false; }
+    unsafe {
+        user::IN_LIFECYCLE_TEST = false;
+    }
     kprintln!("[TEST] 50-Cycle Real Process Lifecycle: Spawn, execute, parent waitpid & zero frame/task leakage VERIFIED.");
 
     // 45c. Process Safety Invariants & Allocator Exhaustion/Rollback
@@ -1894,9 +2569,18 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         let mut sched = task::SCHEDULER.lock();
         let orig_len = sched.tasks.len();
         while sched.tasks.len() < task::MAX_TASKS {
-            sched.spawn("filler", || loop { task::yield_now(); });
+            sched.spawn("filler", || loop {
+                task::yield_now();
+            });
         }
-        let excess_pid = sched.spawn_user_process(1, "overflow", 0x1000, 0x2000, None, capability::CapabilityTable::new());
+        let excess_pid = sched.spawn_user_process(
+            1,
+            "overflow",
+            0x1000,
+            0x2000,
+            None,
+            capability::CapabilityTable::new(),
+        );
         assert_eq!(excess_pid, 0, "Spawn beyond MAX_TASKS must return 0");
         while sched.tasks.len() > orig_len {
             if let Some(popped) = sched.tasks.pop() {
@@ -1907,12 +2591,22 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
 
         // Active process reap denial (-EBUSY)
         let mut sched = task::SCHEDULER.lock();
-        let active_pid = sched.spawn_user_process(1, "active_proc", 0x1000, 0x2000, None, capability::CapabilityTable::new());
+        let active_pid = sched.spawn_user_process(
+            1,
+            "active_proc",
+            0x1000,
+            0x2000,
+            None,
+            capability::CapabilityTable::new(),
+        );
         if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == active_pid) {
             t.state = task::TaskState::Running;
         }
         let reap_active_res = sched.reap_task(1, false, active_pid);
-        assert!(reap_active_res == Err(-16) || reap_active_res == Err(-30), "Reaping non-terminated/running task must be rejected (-EBUSY or -30)");
+        assert!(
+            reap_active_res == Err(-16) || reap_active_res == Err(-30),
+            "Reaping non-terminated/running task must be rejected (-EBUSY or -30)"
+        );
         if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == active_pid) {
             t.state = task::TaskState::Terminated;
         }
@@ -1937,12 +2631,18 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         // 1) Unaligned e_entry
         let mut unaligned_elf = TEST_PROC_AARCH64_ELF;
         write_u64(&mut unaligned_elf, 24, 0x40_007A);
-        assert!(elf::load_elf(&unaligned_elf).is_err(), "Unaligned AArch64 e_entry must fail");
+        assert!(
+            elf::load_elf(&unaligned_elf).is_err(),
+            "Unaligned AArch64 e_entry must fail"
+        );
 
         // 2) p_offset + p_filesz overflow / OOB
         let mut oob_elf = TEST_PROC_AARCH64_ELF;
         write_u64(&mut oob_elf, 96, u64::MAX - 16);
-        assert!(elf::load_elf(&oob_elf).is_err(), "Overflowing p_filesz must fail");
+        assert!(
+            elf::load_elf(&oob_elf).is_err(),
+            "Overflowing p_filesz must fail"
+        );
 
         // 3) Partial multi-segment rollback: seg0 maps valid 4 KiB page + L2/L3 tables; seg1 fails W^X
         let mut partial_elf = TEST_PROC_AARCH64_ELF;
@@ -1957,26 +2657,43 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         write_u64(&mut partial_elf, 152, 0x1000);
         write_u64(&mut partial_elf, 160, 0x1000);
         write_u64(&mut partial_elf, 168, 0x1000);
-        assert!(elf::load_elf(&partial_elf).is_err(), "W^X second segment must fail after seg0 maps");
+        assert!(
+            elf::load_elf(&partial_elf).is_err(),
+            "W^X second segment must fail after seg0 maps"
+        );
 
         // 4) Overlapping 4 KiB page segments (disjoint VAs in same 4 KiB page)
         let mut overlap_elf = partial_elf;
-        write_u64(&mut overlap_elf, 96, 0x200);       // Phdr0 p_filesz = 0x200
-        write_u64(&mut overlap_elf, 104, 0x200);      // Phdr0 p_memsz  = 0x200
-        write_u32(&mut overlap_elf, 124, 4);          // PF_R
-        write_u64(&mut overlap_elf, 128, 0x800);      // p_offset aligned with p_vaddr mod 4KiB
-        write_u64(&mut overlap_elf, 136, 0x40_0800);  // collides with page 0x40_0000
+        write_u64(&mut overlap_elf, 96, 0x200); // Phdr0 p_filesz = 0x200
+        write_u64(&mut overlap_elf, 104, 0x200); // Phdr0 p_memsz  = 0x200
+        write_u32(&mut overlap_elf, 124, 4); // PF_R
+        write_u64(&mut overlap_elf, 128, 0x800); // p_offset aligned with p_vaddr mod 4KiB
+        write_u64(&mut overlap_elf, 136, 0x40_0800); // collides with page 0x40_0000
         write_u64(&mut overlap_elf, 144, 0x40_0800);
         write_u64(&mut overlap_elf, 152, 0x100);
         write_u64(&mut overlap_elf, 160, 0x100);
-        assert!(elf::load_elf(&overlap_elf).is_err(), "Overlapping 4 KiB PT_LOAD page must fail");
+        assert!(
+            elf::load_elf(&overlap_elf).is_err(),
+            "Overlapping 4 KiB PT_LOAD page must fail"
+        );
 
-        assert_eq!(mmu::active_allocated_frames(), baseline, "ELF load failure must roll back all frames");
+        assert_eq!(
+            mmu::active_allocated_frames(),
+            baseline,
+            "ELF load failure must roll back all frames"
+        );
 
         // Verify power_off_core refuses CoreBusy when a task holds running_cpu = Some(1)
         let busy_pid = {
             let mut sched = task::SCHEDULER.lock();
-            let pid = sched.spawn_user_process(1, "core1_busy_probe", 0x1000, 0x2000, None, capability::CapabilityTable::new());
+            let pid = sched.spawn_user_process(
+                1,
+                "core1_busy_probe",
+                0x1000,
+                0x2000,
+                None,
+                capability::CapabilityTable::new(),
+            );
             if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == pid) {
                 t.running_cpu = Some(1);
                 t.state = task::TaskState::Running;
@@ -1986,7 +2703,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         let mut busy_smp = smp::SmpController::new(0, psci);
         busy_smp.hardware_present = true;
         busy_smp.cores[1].state = smp::CoreState::Online;
-        assert_eq!(busy_smp.power_off_core(1, &smp_caps), Err(smp::SmpError::CoreBusy));
+        assert_eq!(
+            busy_smp.power_off_core(1, &smp_caps),
+            Err(smp::SmpError::CoreBusy)
+        );
         {
             let mut sched = task::SCHEDULER.lock();
             if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == busy_pid) {
@@ -2024,11 +2744,15 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             fail_stubs[i * 2 + 1] = 0x1400_0000 | imm26; // b exit_stub
         }
         emit_u32_vec(&mut syscall_elf, 0x400, &fail_stubs[..24]);
-        emit_u32_vec(&mut syscall_elf, 0x480, &[
-            0xD280_0048, // mov x8, #2 (SYS_EXIT)
-            0xD400_0001, // svc #0
-            0x1400_0000, // b .
-        ]);
+        emit_u32_vec(
+            &mut syscall_elf,
+            0x480,
+            &[
+                0xD280_0048, // mov x8, #2 (SYS_EXIT)
+                0xD400_0001, // svc #0
+                0x1400_0000, // b .
+            ],
+        );
 
         let bne_to_fail = |pc_byte: usize, fail_idx: usize| -> u32 {
             let target = 0x400 + fail_idx * 8;
@@ -2041,85 +2765,163 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         let pc = |idx: usize| 0x100 + idx * 4;
 
         // Allocate stack frame: sub sp, sp, #64
-        insns[n] = 0xD101_03FF; n += 1;
+        insns[n] = 0xD101_03FF;
+        n += 1;
         // 1) Unknown syscall (999) -> -38 (fail 0 -> code 11)
-        insns[n] = 0xD280_7CE8; n += 1; // mov x8, #999
-        insns[n] = 0xD400_0001; n += 1; // svc #0
-        insns[n] = 0xB100_981F; n += 1; // cmn x0, #38
-        insns[n] = bne_to_fail(pc(n), 0); n += 1;
+        insns[n] = 0xD280_7CE8;
+        n += 1; // mov x8, #999
+        insns[n] = 0xD400_0001;
+        n += 1; // svc #0
+        insns[n] = 0xB100_981F;
+        n += 1; // cmn x0, #38
+        insns[n] = bne_to_fail(pc(n), 0);
+        n += 1;
         // 2) SYS_GET_RANDOM (31) without CryptoEntropyRead -> -13 (fail 1 -> code 12)
-        insns[n] = 0xD280_03E8; n += 1; // mov x8, #31
-        insns[n] = 0x9100_03E0; n += 1; // add x0, sp, #0
-        insns[n] = 0xD280_0201; n += 1; // mov x1, #16
-        insns[n] = 0xD400_0001; n += 1; // svc #0
-        insns[n] = 0xB100_341F; n += 1; // cmn x0, #13
-        insns[n] = bne_to_fail(pc(n), 1); n += 1;
+        insns[n] = 0xD280_03E8;
+        n += 1; // mov x8, #31
+        insns[n] = 0x9100_03E0;
+        n += 1; // add x0, sp, #0
+        insns[n] = 0xD280_0201;
+        n += 1; // mov x1, #16
+        insns[n] = 0xD400_0001;
+        n += 1; // svc #0
+        insns[n] = 0xB100_341F;
+        n += 1; // cmn x0, #13
+        insns[n] = bne_to_fail(pc(n), 1);
+        n += 1;
         // 3) SYS_SERVICE_QUERY (102, id=1, addr=sp, len=12) -> 12 & rec[0]==1 (fails 2,3)
-        insns[n] = 0xD280_0CC8; n += 1; // mov x8, #102
-        insns[n] = 0xD280_0020; n += 1; // mov x0, #1
-        insns[n] = 0x9100_03E1; n += 1; // add x1, sp, #0
-        insns[n] = 0xD280_0182; n += 1; // mov x2, #12
-        insns[n] = 0xD400_0001; n += 1; // svc #0
-        insns[n] = 0xF100_301F; n += 1; // cmp x0, #12
-        insns[n] = bne_to_fail(pc(n), 2); n += 1;
-        insns[n] = 0x3940_03E0; n += 1; // ldrb w0, [sp, #0]
-        insns[n] = 0xF100_041F; n += 1; // cmp x0, #1
-        insns[n] = bne_to_fail(pc(n), 3); n += 1;
+        insns[n] = 0xD280_0CC8;
+        n += 1; // mov x8, #102
+        insns[n] = 0xD280_0020;
+        n += 1; // mov x0, #1
+        insns[n] = 0x9100_03E1;
+        n += 1; // add x1, sp, #0
+        insns[n] = 0xD280_0182;
+        n += 1; // mov x2, #12
+        insns[n] = 0xD400_0001;
+        n += 1; // svc #0
+        insns[n] = 0xF100_301F;
+        n += 1; // cmp x0, #12
+        insns[n] = bne_to_fail(pc(n), 2);
+        n += 1;
+        insns[n] = 0x3940_03E0;
+        n += 1; // ldrb w0, [sp, #0]
+        insns[n] = 0xF100_041F;
+        n += 1; // cmp x0, #1
+        insns[n] = bne_to_fail(pc(n), 3);
+        n += 1;
         // 4) SYS_IPC_RECV (6, a0=0, a1=0x10000 unmapped, a2=16) -> -14 (fail 4)
-        insns[n] = 0xD280_00C8; n += 1; // mov x8, #6
-        insns[n] = 0xD280_0000; n += 1; // mov x0, #0
-        insns[n] = 0xD2A0_0021; n += 1; // mov x1, #0x10000
-        insns[n] = 0xD280_0202; n += 1; // mov x2, #16
-        insns[n] = 0xD400_0001; n += 1; // svc #0
-        insns[n] = 0xB100_381F; n += 1; // cmn x0, #14
-        insns[n] = bne_to_fail(pc(n), 4); n += 1;
+        insns[n] = 0xD280_00C8;
+        n += 1; // mov x8, #6
+        insns[n] = 0xD280_0000;
+        n += 1; // mov x0, #0
+        insns[n] = 0xD2A0_0021;
+        n += 1; // mov x1, #0x10000
+        insns[n] = 0xD280_0202;
+        n += 1; // mov x2, #16
+        insns[n] = 0xD400_0001;
+        n += 1; // svc #0
+        insns[n] = 0xB100_381F;
+        n += 1; // cmn x0, #14
+        insns[n] = bne_to_fail(pc(n), 4);
+        n += 1;
         // 5) SYS_GET_TASK_ID (7) -> x20, then SYS_IPC_SEND (5) & SYS_IPC_RECV_META (103, a0=0)
-        insns[n] = 0xD280_00E8; n += 1; // mov x8, #7
-        insns[n] = 0xD400_0001; n += 1; // svc #0
-        insns[n] = 0xAA00_03F4; n += 1; // mov x20, x0
-        insns[n] = 0xD280_0541; n += 1; // mov x1, #42
-        insns[n] = 0xB900_0BE1; n += 1; // str w1, [sp, #8]
-        insns[n] = 0xD280_00A8; n += 1; // mov x8, #5 (SYS_IPC_SEND)
-        insns[n] = 0xAA14_03E0; n += 1; // mov x0, x20
-        insns[n] = 0xD280_0121; n += 1; // mov x1, #9 (msg_type)
-        insns[n] = 0x9100_23E2; n += 1; // add x2, sp, #8
-        insns[n] = 0xD280_0083; n += 1; // mov x3, #4
-        insns[n] = 0xD400_0001; n += 1; // svc #0
-        insns[n] = 0xF100_101F; n += 1; // cmp x0, #4
-        insns[n] = bne_to_fail(pc(n), 5); n += 1;
-        insns[n] = 0xD280_0CE8; n += 1; // mov x8, #103 (SYS_IPC_RECV_META)
-        insns[n] = 0xD280_0000; n += 1; // mov x0, #0 (RESERVED_CAP_SLOT)
-        insns[n] = 0x9100_43E1; n += 1; // add x1, sp, #16
-        insns[n] = 0xD280_0202; n += 1; // mov x2, #16
-        insns[n] = 0x9100_83E3; n += 1; // add x3, sp, #32
-        insns[n] = 0x9100_A3E4; n += 1; // add x4, sp, #40
-        insns[n] = 0xD400_0001; n += 1; // svc #0
-        insns[n] = 0xF100_101F; n += 1; // cmp x0, #4
-        insns[n] = bne_to_fail(pc(n), 6); n += 1;
-        insns[n] = 0x3940_43E0; n += 1; // ldrb w0, [sp, #16]
-        insns[n] = 0xF100_A81F; n += 1; // cmp x0, #42
-        insns[n] = bne_to_fail(pc(n), 7); n += 1;
-        insns[n] = 0xF940_13E0; n += 1; // ldr x0, [sp, #32]
-        insns[n] = 0xEB14_001F; n += 1; // cmp x0, x20
-        insns[n] = bne_to_fail(pc(n), 8); n += 1;
-        insns[n] = 0xB940_2BE0; n += 1; // ldr w0, [sp, #40]
-        insns[n] = 0xF100_241F; n += 1; // cmp x0, #9
-        insns[n] = bne_to_fail(pc(n), 9); n += 1;
+        insns[n] = 0xD280_00E8;
+        n += 1; // mov x8, #7
+        insns[n] = 0xD400_0001;
+        n += 1; // svc #0
+        insns[n] = 0xAA00_03F4;
+        n += 1; // mov x20, x0
+        insns[n] = 0xD280_0541;
+        n += 1; // mov x1, #42
+        insns[n] = 0xB900_0BE1;
+        n += 1; // str w1, [sp, #8]
+        insns[n] = 0xD280_00A8;
+        n += 1; // mov x8, #5 (SYS_IPC_SEND)
+        insns[n] = 0xAA14_03E0;
+        n += 1; // mov x0, x20
+        insns[n] = 0xD280_0121;
+        n += 1; // mov x1, #9 (msg_type)
+        insns[n] = 0x9100_23E2;
+        n += 1; // add x2, sp, #8
+        insns[n] = 0xD280_0083;
+        n += 1; // mov x3, #4
+        insns[n] = 0xD400_0001;
+        n += 1; // svc #0
+        insns[n] = 0xF100_101F;
+        n += 1; // cmp x0, #4
+        insns[n] = bne_to_fail(pc(n), 5);
+        n += 1;
+        insns[n] = 0xD280_0CE8;
+        n += 1; // mov x8, #103 (SYS_IPC_RECV_META)
+        insns[n] = 0xD280_0000;
+        n += 1; // mov x0, #0 (RESERVED_CAP_SLOT)
+        insns[n] = 0x9100_43E1;
+        n += 1; // add x1, sp, #16
+        insns[n] = 0xD280_0202;
+        n += 1; // mov x2, #16
+        insns[n] = 0x9100_83E3;
+        n += 1; // add x3, sp, #32
+        insns[n] = 0x9100_A3E4;
+        n += 1; // add x4, sp, #40
+        insns[n] = 0xD400_0001;
+        n += 1; // svc #0
+        insns[n] = 0xF100_101F;
+        n += 1; // cmp x0, #4
+        insns[n] = bne_to_fail(pc(n), 6);
+        n += 1;
+        insns[n] = 0x3940_43E0;
+        n += 1; // ldrb w0, [sp, #16]
+        insns[n] = 0xF100_A81F;
+        n += 1; // cmp x0, #42
+        insns[n] = bne_to_fail(pc(n), 7);
+        n += 1;
+        insns[n] = 0xF940_13E0;
+        n += 1; // ldr x0, [sp, #32]
+        insns[n] = 0xEB14_001F;
+        n += 1; // cmp x0, x20
+        insns[n] = bne_to_fail(pc(n), 8);
+        n += 1;
+        insns[n] = 0xB940_2BE0;
+        n += 1; // ldr w0, [sp, #40]
+        insns[n] = 0xF100_241F;
+        n += 1; // cmp x0, #9
+        insns[n] = bne_to_fail(pc(n), 9);
+        n += 1;
         // All passed -> exit 0
-        insns[n] = 0xD280_0000; n += 1; // mov x0, #0
-        insns[n] = 0xD280_0048; n += 1; // mov x8, #2
-        insns[n] = 0xD400_0001; n += 1; // svc #0
-        insns[n] = 0x1400_0000; n += 1; // b .
+        insns[n] = 0xD280_0000;
+        n += 1; // mov x0, #0
+        insns[n] = 0xD280_0048;
+        n += 1; // mov x8, #2
+        insns[n] = 0xD400_0001;
+        n += 1; // svc #0
+        insns[n] = 0x1400_0000;
+        n += 1; // b .
         emit_u32_vec(&mut syscall_elf, 0x100, &insns[..n]);
 
         let loaded = elf::load_elf(&syscall_elf).expect("Load EL0 syscall test ELF");
         let mut caps = capability::CapabilityTable::new();
-        caps.mint(capability::CapabilityType::IpcSend, capability::Rights::INVOKE, None);
-        caps.mint(capability::CapabilityType::IpcReceive, capability::Rights::READ, None);
+        caps.mint(
+            capability::CapabilityType::IpcSend,
+            capability::Rights::INVOKE,
+            None,
+        );
+        caps.mint(
+            capability::CapabilityType::IpcReceive,
+            capability::Rights::READ,
+            None,
+        );
         let (pid_ok, ttbr0_ok) = {
             let mut sched = task::SCHEDULER.lock();
             let tt = loaded.address_space.ttbr0;
-            let pid = sched.spawn_user_process(1, "el0_syscall_verify", loaded.entry_point, loaded.stack_top, Some(loaded.address_space), caps);
+            let pid = sched.spawn_user_process(
+                1,
+                "el0_syscall_verify",
+                loaded.entry_point,
+                loaded.stack_top,
+                Some(loaded.address_space),
+                caps,
+            );
             if let Some(pos) = sched.tasks.iter().position(|t| t.id == pid) {
                 sched.current_task_idx = pos;
                 sched.tasks[pos].state = task::TaskState::Running;
@@ -2133,23 +2935,38 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             user::enter_user_mode(loaded.entry_point, loaded.stack_top);
             mmu::ArmMmu::switch_to_kernel();
         }
-        assert_eq!(task::reap_task_locksafe(1, false, pid_ok), Ok(0), "EL0 syscall/IPC/capability/fault checks must exit(0)");
+        assert_eq!(
+            task::reap_task_locksafe(1, false, pid_ok),
+            Ok(0),
+            "EL0 syscall/IPC/capability/fault checks must exit(0)"
+        );
 
         // Unrecoverable EL0 unmapped memory fault must terminate only faulting task (-11)
         let mut fault_elf = TEST_PROC_AARCH64_ELF;
-        emit_u32_vec(&mut fault_elf, 120, &[
-            0xD282_0000, // mov x0, #0x1000 (unmapped in child TTBR0)
-            0xF940_0001, // ldr x1, [x0] -> EL0 Data Abort EC=0x24
-            0xD280_0048, // mov x8, #2
-            0xD280_0000, // mov x0, #0
-            0xD400_0001, // svc #0
-            0x1400_0000, // b .
-        ]);
+        emit_u32_vec(
+            &mut fault_elf,
+            120,
+            &[
+                0xD282_0000, // mov x0, #0x1000 (unmapped in child TTBR0)
+                0xF940_0001, // ldr x1, [x0] -> EL0 Data Abort EC=0x24
+                0xD280_0048, // mov x8, #2
+                0xD280_0000, // mov x0, #0
+                0xD400_0001, // svc #0
+                0x1400_0000, // b .
+            ],
+        );
         let loaded_f = elf::load_elf(&fault_elf).expect("Load EL0 fault test ELF");
         let (pid_f, ttbr0_f) = {
             let mut sched = task::SCHEDULER.lock();
             let tt = loaded_f.address_space.ttbr0;
-            let pid = sched.spawn_user_process(1, "el0_fault_verify", loaded_f.entry_point, loaded_f.stack_top, Some(loaded_f.address_space), capability::CapabilityTable::new());
+            let pid = sched.spawn_user_process(
+                1,
+                "el0_fault_verify",
+                loaded_f.entry_point,
+                loaded_f.stack_top,
+                Some(loaded_f.address_space),
+                capability::CapabilityTable::new(),
+            );
             if let Some(pos) = sched.tasks.iter().position(|t| t.id == pid) {
                 sched.current_task_idx = pos;
                 sched.tasks[pos].state = task::TaskState::Running;
@@ -2162,8 +2979,16 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             mmu::ArmMmu::switch_to_kernel();
             user::IN_LIFECYCLE_TEST = false;
         }
-        assert_eq!(task::reap_task_locksafe(1, false, pid_f), Ok(-11), "Faulting EL0 task must terminate with SIGSEGV (-11)");
-        assert_eq!(mmu::active_allocated_frames(), baseline, "EL0 syscall & fault verification must leak zero frames");
+        assert_eq!(
+            task::reap_task_locksafe(1, false, pid_f),
+            Ok(-11),
+            "Faulting EL0 task must terminate with SIGSEGV (-11)"
+        );
+        assert_eq!(
+            mmu::active_allocated_frames(),
+            baseline,
+            "EL0 syscall & fault verification must leak zero frames"
+        );
         kprintln!("[TEST] AArch64 EL0 Syscall ABI (IPC Meta, ServiceQuery, Entropy Deny, EFAULT & Fault Containment) VERIFIED.");
     }
 
@@ -2183,39 +3008,82 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         assert_eq!(aspace_a.is_active_on_any_cpu(), false);
 
         // Private mapping
-        assert_eq!(aspace_a.map_private_frame(0x0040_0000, frame1, true, false), Ok(()));
-        assert_eq!(mmu::frame_ownership(frame1), Some(mmu::FrameOwnership::PrivateOwned));
+        assert_eq!(
+            aspace_a.map_private_frame(0x0040_0000, frame1, true, false),
+            Ok(())
+        );
+        assert_eq!(
+            mmu::frame_ownership(frame1),
+            Some(mmu::FrameOwnership::PrivateOwned)
+        );
         // Private frame already mapped must be rejected from being mapped in another address space
-        assert!(aspace_b.map_private_frame(0x0040_0000, frame1, true, false).is_err(), "Private frame already mapped must be rejected");
+        assert!(
+            aspace_b
+                .map_private_frame(0x0040_0000, frame1, true, false)
+                .is_err(),
+            "Private frame already mapped must be rejected"
+        );
 
         // Shared mapping: frame2 mapped into A (refcount 1), then into B (refcount 2)
-        let frame2 = mmu::allocate_frame_with_ownership(mmu::FrameOwnership::Shared).expect("Frame alloc");
-        assert_eq!(aspace_a.map_shared_frame(0x0050_0000, frame2, false, false), Ok(()));
-        assert_eq!(aspace_b.map_shared_frame(0x0050_0000, frame2, false, false), Ok(()));
-        assert_eq!(mmu::frame_ownership(frame2), Some(mmu::FrameOwnership::Shared));
+        let frame2 =
+            mmu::allocate_frame_with_ownership(mmu::FrameOwnership::Shared).expect("Frame alloc");
+        assert_eq!(
+            aspace_a.map_shared_frame(0x0050_0000, frame2, false, false),
+            Ok(())
+        );
+        assert_eq!(
+            aspace_b.map_shared_frame(0x0050_0000, frame2, false, false),
+            Ok(())
+        );
+        assert_eq!(
+            mmu::frame_ownership(frame2),
+            Some(mmu::FrameOwnership::Shared)
+        );
         assert_eq!(mmu::frame_refcount(frame2), 2);
 
         // Borrowed mapping: registered physical MMIO frame
-        assert_eq!(aspace_a.map_borrowed_frame(0x0060_0000, 0x0a00_0000, true, false), Ok(()));
+        assert_eq!(
+            aspace_a.map_borrowed_frame(0x0060_0000, 0x0a00_0000, true, false),
+            Ok(())
+        );
 
         // Rejection of invalid unregistered MMIO address
-        assert!(aspace_a.map_borrowed_frame(0x0070_0000, 0x0005_0000, true, false).is_err(), "Unregistered MMIO address must be rejected");
+        assert!(
+            aspace_a
+                .map_borrowed_frame(0x0070_0000, 0x0005_0000, true, false)
+                .is_err(),
+            "Unregistered MMIO address must be rejected"
+        );
 
         // Destroy Aspace A: private frame1 freed, shared frame2 retained (refcount 1), borrowed not freed
         assert!(aspace_a.destroy().is_ok());
-        assert_eq!(mmu::frame_ownership(frame2), Some(mmu::FrameOwnership::Shared));
+        assert_eq!(
+            mmu::frame_ownership(frame2),
+            Some(mmu::FrameOwnership::Shared)
+        );
         assert_eq!(mmu::frame_refcount(frame2), 1);
         // Activation after close/destroy must be rejected
-        assert_eq!(aspace_a.try_activate(), Err(mmu::ActivationError::ClosingOrDestroyed));
+        assert_eq!(
+            aspace_a.try_activate(),
+            Err(mmu::ActivationError::ClosingOrDestroyed)
+        );
 
         // Destroy Aspace B: shared frame2 drops to 0 and is freed
         assert!(aspace_b.destroy().is_ok());
 
-        assert_eq!(mmu::active_allocated_frames(), baseline, "All owned frames must return to baseline");
+        assert_eq!(
+            mmu::active_allocated_frames(),
+            baseline,
+            "All owned frames must return to baseline"
+        );
 
         // Quarantine metadata & diagnostic tracking verification
         let q_before = mmu::quarantined_frame_count();
-        mmu::quarantine_frame_with_meta(0x1234_0000, mmu::FrameOwnership::PrivateOwned, "test quarantine metadata");
+        mmu::quarantine_frame_with_meta(
+            0x1234_0000,
+            mmu::FrameOwnership::PrivateOwned,
+            "test quarantine metadata",
+        );
         assert_eq!(mmu::quarantined_frame_count(), q_before + 1);
         {
             let q_lock = mmu::QUARANTINED_FRAMES.lock();
@@ -2240,40 +3108,115 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     let orig_pid = services::start(test_svc_id).expect("Service start failed in heartbeat test");
     assert!(orig_pid > 0);
     let cur_gen = services::service_generation(test_svc_id).expect("valid service generation");
-    assert_eq!(services::start(test_svc_id), Err(()), "Duplicate start of running service must be rejected");
-    assert_eq!(services::heartbeat(9999, cur_gen), Err(()), "Heartbeat with spoofed PID must be rejected");
-    assert_eq!(services::heartbeat(orig_pid, cur_gen), Ok(()), "Heartbeat with owning PID and valid generation must be accepted");
-    assert_eq!(services::heartbeat(orig_pid, 0), Err(()), "Heartbeat with unvalidated/zero generation must be rejected");
-    assert_eq!(services::heartbeat(orig_pid, cur_gen.wrapping_add(999)), Err(()), "Heartbeat with stale generation must be rejected");
-    assert_eq!(services::stop(test_svc_id), Ok(()), "Service clean-up stop must succeed");
+    assert_eq!(
+        services::start(test_svc_id),
+        Err(()),
+        "Duplicate start of running service must be rejected"
+    );
+    assert_eq!(
+        services::heartbeat(9999, cur_gen),
+        Err(()),
+        "Heartbeat with spoofed PID must be rejected"
+    );
+    assert_eq!(
+        services::heartbeat(orig_pid, cur_gen),
+        Ok(()),
+        "Heartbeat with owning PID and valid generation must be accepted"
+    );
+    assert_eq!(
+        services::heartbeat(orig_pid, 0),
+        Err(()),
+        "Heartbeat with unvalidated/zero generation must be rejected"
+    );
+    assert_eq!(
+        services::heartbeat(orig_pid, cur_gen.wrapping_add(999)),
+        Err(()),
+        "Heartbeat with stale generation must be rejected"
+    );
+    assert_eq!(
+        services::stop(test_svc_id),
+        Ok(()),
+        "Service clean-up stop must succeed"
+    );
     kprintln!("[TEST] Service Supervisor Lifecycle: Stopped -> Running -> Heartbeat -> Crashed -> Recover(Restarting -> Running) -> Stopped VERIFIED.");
 
     // 46b. True Multicore SMP Scheduler, Preemption, Migration & Cross-CPU TLB Shootdown
-    let has_timer_irq = gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire) != gic::ACTIVE_GIC_KIND_NONE;
-    run_smp_scheduler_verification(&online_cpus, online_count, has_timer_irq, &TEST_PROC_AARCH64_ELF);
+    let has_timer_irq = gic::ACTIVE_GIC_KIND.load(core::sync::atomic::Ordering::Acquire)
+        != gic::ACTIVE_GIC_KIND_NONE;
+    run_smp_scheduler_verification(
+        &online_cpus,
+        online_count,
+        has_timer_irq,
+        &TEST_PROC_AARCH64_ELF,
+    );
 
     // 47. Spawn userspace PID 1 (init) at EL0
     kprintln!();
     kprintln!("--- [Spawning Userspace PID 1 (init) at EL0] ---");
-    kprintln!("[BOOT] Loading userspace PID 1 init ELF ({} bytes)...", images::USER_INIT_ELF.len());
+    kprintln!(
+        "[BOOT] Loading userspace PID 1 init ELF ({} bytes)...",
+        images::USER_INIT_ELF.len()
+    );
     match elf::load_elf(images::USER_INIT_ELF) {
         Ok(l) => {
-            kprintln!("[BOOT] PID 1 ELF loaded: entry 0x{:08X}, sp 0x{:08X}", l.entry_point, l.stack_top);
+            kprintln!(
+                "[BOOT] PID 1 ELF loaded: entry 0x{:08X}, sp 0x{:08X}",
+                l.entry_point,
+                l.stack_top
+            );
             kprintln!("[BOOT] Entering PID 1 (init) at EL0 via scheduled context switch...");
             {
                 let mut sched = task::SCHEDULER.lock();
                 sched.tasks.clear();
                 sched.next_pid = 1;
                 let mut init_caps = capability::CapabilityTable::new();
-                init_caps.mint(capability::CapabilityType::IpcSend, capability::Rights::INVOKE, None);
-                init_caps.mint(capability::CapabilityType::IpcReceive, capability::Rights::READ, None);
-                init_caps.mint(capability::CapabilityType::SerialOutput, capability::Rights::WRITE, None);
-                init_caps.mint(capability::CapabilityType::EventPoll, capability::Rights::READ, None);
-                init_caps.mint(capability::CapabilityType::DisplayServer, capability::Rights(capability::Rights::WRITE.0 | capability::Rights::ADMIN.0), None);
-                init_caps.mint(capability::CapabilityType::SystemResource, capability::Rights(capability::Rights::READ.0 | capability::Rights::WRITE.0 | capability::Rights::ADMIN.0), None);
-                let pid1 = sched.spawn_user_process(0, "init", l.entry_point, l.stack_top, Some(l.address_space), init_caps);
+                init_caps.mint(
+                    capability::CapabilityType::IpcSend,
+                    capability::Rights::INVOKE,
+                    None,
+                );
+                init_caps.mint(
+                    capability::CapabilityType::IpcReceive,
+                    capability::Rights::READ,
+                    None,
+                );
+                init_caps.mint(
+                    capability::CapabilityType::SerialOutput,
+                    capability::Rights::WRITE,
+                    None,
+                );
+                init_caps.mint(
+                    capability::CapabilityType::EventPoll,
+                    capability::Rights::READ,
+                    None,
+                );
+                init_caps.mint(
+                    capability::CapabilityType::DisplayServer,
+                    capability::Rights(capability::Rights::WRITE.0 | capability::Rights::ADMIN.0),
+                    None,
+                );
+                init_caps.mint(
+                    capability::CapabilityType::SystemResource,
+                    capability::Rights(
+                        capability::Rights::READ.0
+                            | capability::Rights::WRITE.0
+                            | capability::Rights::ADMIN.0,
+                    ),
+                    None,
+                );
+                let pid1 = sched.spawn_user_process(
+                    0,
+                    "init",
+                    l.entry_point,
+                    l.stack_top,
+                    Some(l.address_space),
+                    init_caps,
+                );
                 sched.current_task_idx = 0;
-                kprintln!("[BOOT] PID 1 queued Ready for scheduled EL0 entry (PID {})", pid1);
+                kprintln!(
+                    "[BOOT] PID 1 queued Ready for scheduled EL0 entry (PID {})",
+                    pid1
+                );
             }
             task::set_smp_scheduling_enabled(true);
             let online_sec_mask = (0u32..gic::MAX_GIC_PES as u32)
@@ -2297,7 +3240,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         #[cfg(target_arch = "aarch64")]
         unsafe {
             core::arch::asm!("msr daifset, #2", options(nomem, nostack));
-            if !task::per_cpu(0).need_resched.load(core::sync::atomic::Ordering::Acquire) {
+            if !task::per_cpu(0)
+                .need_resched
+                .load(core::sync::atomic::Ordering::Acquire)
+            {
                 core::arch::asm!("dsb sy", "wfi", options(nomem, nostack));
             }
             core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
@@ -2314,17 +3260,22 @@ static SMP_WORKER_HITS: [core::sync::atomic::AtomicU64; 4] = [
 static SMP_WORKER_CPU_MASK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static SMP_TEST_STOP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static SMP_MIGRATE_STAGE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static SMP_MIGRATE_ERROR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SMP_MIGRATE_ERROR: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 static SMP_COORD_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-static SMP_COORD_HAS_TIMER_IRQ: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SMP_COORD_HAS_TIMER_IRQ: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 static SMP_COORD_ONLINE_MASK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static SMP_COORD_ONLINE_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(1);
+static SMP_COORD_ONLINE_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(1);
 static SMP_COORD_ELF_PTR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static SMP_COORD_ELF_LEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 fn smp_mark_self_done(code: i32) -> ! {
     let cid = task::current_cpu_logical_id();
-    let pid = task::per_cpu(cid).current_pid.load(core::sync::atomic::Ordering::Acquire);
+    let pid = task::per_cpu(cid)
+        .current_pid
+        .load(core::sync::atomic::Ordering::Acquire);
     {
         let mut sched = task::SCHEDULER.lock();
         if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == pid) {
@@ -2337,10 +3288,18 @@ fn smp_mark_self_done(code: i32) -> ! {
     }
 }
 
-fn smp_tight_worker_0() -> ! { smp_tight_worker_body(0) }
-fn smp_tight_worker_1() -> ! { smp_tight_worker_body(1) }
-fn smp_tight_worker_2() -> ! { smp_tight_worker_body(2) }
-fn smp_tight_worker_3() -> ! { smp_tight_worker_body(3) }
+fn smp_tight_worker_0() -> ! {
+    smp_tight_worker_body(0)
+}
+fn smp_tight_worker_1() -> ! {
+    smp_tight_worker_body(1)
+}
+fn smp_tight_worker_2() -> ! {
+    smp_tight_worker_body(2)
+}
+fn smp_tight_worker_3() -> ! {
+    smp_tight_worker_body(3)
+}
 
 fn smp_tight_worker_body(slot: usize) -> ! {
     let timer_irq = SMP_COORD_HAS_TIMER_IRQ.load(core::sync::atomic::Ordering::Acquire);
@@ -2375,24 +3334,34 @@ fn smp_migration_simd_worker() -> ! {
         }
         if cid == 1 && !seen_cpu1 {
             seen_cpu1 = true;
-            SMP_MIGRATE_STAGE.compare_exchange(
-                0,
-                1,
-                core::sync::atomic::Ordering::AcqRel,
-                core::sync::atomic::Ordering::Acquire,
-            ).ok();
+            SMP_MIGRATE_STAGE
+                .compare_exchange(
+                    0,
+                    1,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Acquire,
+                )
+                .ok();
         } else if seen_cpu1 && cid == 0 {
-            SMP_MIGRATE_STAGE.compare_exchange(
-                1,
-                2,
-                core::sync::atomic::Ordering::AcqRel,
-                core::sync::atomic::Ordering::Acquire,
-            ).ok();
+            SMP_MIGRATE_STAGE
+                .compare_exchange(
+                    1,
+                    2,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Acquire,
+                )
+                .ok();
             break;
         }
         core::hint::spin_loop();
     }
-    smp_mark_self_done(if SMP_MIGRATE_ERROR.load(core::sync::atomic::Ordering::Acquire) { -1 } else { 0 })
+    smp_mark_self_done(
+        if SMP_MIGRATE_ERROR.load(core::sync::atomic::Ordering::Acquire) {
+            -1
+        } else {
+            0
+        },
+    )
 }
 
 fn smp_coordinator_worker() -> ! {
@@ -2438,9 +3407,15 @@ fn smp_coordinator_worker() -> ! {
     // Wait for all 4 tight compute workers to make real progress via timer preemption & multi-CPU execution
     let mut spins = 0u32;
     loop {
-        let all_ran = SMP_WORKER_HITS.iter().all(|h| h.load(Ordering::Acquire) > 0);
+        let all_ran = SMP_WORKER_HITS
+            .iter()
+            .all(|h| h.load(Ordering::Acquire) > 0);
         let cpus_seen = SMP_WORKER_CPU_MASK.load(Ordering::Acquire);
-        let multi_cpu_ok = if online_count >= 2 { cpus_seen.count_ones() >= 2 } else { cpus_seen != 0 };
+        let multi_cpu_ok = if online_count >= 2 {
+            cpus_seen.count_ones() >= 2
+        } else {
+            cpus_seen != 0
+        };
         if (all_ran && multi_cpu_ok) || spins >= 400_000 {
             break;
         }
@@ -2455,7 +3430,9 @@ fn smp_coordinator_worker() -> ! {
     }
     for &pid in &worker_pids {
         let mut reap_spins = 0;
-        while task::reap_task_locksafe(task::SUPERVISOR_PID, true, pid).is_err() && reap_spins < 200_000 {
+        while task::reap_task_locksafe(task::SUPERVISOR_PID, true, pid).is_err()
+            && reap_spins < 200_000
+        {
             task::yield_now();
             core::hint::spin_loop();
             reap_spins += 1;
@@ -2463,14 +3440,23 @@ fn smp_coordinator_worker() -> ! {
     }
 
     let cpus_seen = SMP_WORKER_CPU_MASK.load(Ordering::Acquire);
-    let total_hits: u64 = SMP_WORKER_HITS.iter().map(|h| h.load(Ordering::Acquire)).sum();
+    let total_hits: u64 = SMP_WORKER_HITS
+        .iter()
+        .map(|h| h.load(Ordering::Acquire))
+        .sum();
     kprintln!(
         "[TEST] Multicore SMP Worker Execution: cpus_seen_mask=0x{:02X} (online={}), total_hits={}, context_switches_cpu0={}.",
         cpus_seen, online_count, total_hits, task::per_cpu(0).context_switches.load(Ordering::Acquire)
     );
-    assert!(total_hits >= 4, "SMP tight workers must all run via timer preemption");
+    assert!(
+        total_hits >= 4,
+        "SMP tight workers must all run via timer preemption"
+    );
     if online_count >= 2 {
-        assert!(cpus_seen.count_ones() >= 2, "SMP scheduler must run tasks across multiple CPUs");
+        assert!(
+            cpus_seen.count_ones() >= 2,
+            "SMP scheduler must run tasks across multiple CPUs"
+        );
     }
 
     if online_count >= 2 {
@@ -2496,7 +3482,11 @@ fn smp_coordinator_worker() -> ! {
             core::hint::spin_loop();
             wait_stage1 += 1;
         }
-        assert_eq!(SMP_MIGRATE_STAGE.load(Ordering::Acquire), 1, "Migrator must begin on CPU 1");
+        assert_eq!(
+            SMP_MIGRATE_STAGE.load(Ordering::Acquire),
+            1,
+            "Migrator must begin on CPU 1"
+        );
 
         // Now force migration from CPU 1 -> CPU 0 by flipping affinity to CPU 0
         {
@@ -2517,7 +3507,12 @@ fn smp_coordinator_worker() -> ! {
         SMP_TEST_STOP.store(true, Ordering::Release);
         let mig_count = {
             let sched = task::SCHEDULER.lock();
-            sched.tasks.iter().find(|t| t.id == mig_pid).map(|t| t.migrations).unwrap_or(0)
+            sched
+                .tasks
+                .iter()
+                .find(|t| t.id == mig_pid)
+                .map(|t| t.migrations)
+                .unwrap_or(0)
         };
         let mig_exit = {
             let mut res = Err(-30i64);
@@ -2530,9 +3525,16 @@ fn smp_coordinator_worker() -> ! {
             }
             res.expect("Migrator reap")
         };
-        assert_eq!(SMP_MIGRATE_STAGE.load(Ordering::Acquire), 2, "Task must migrate to CPU 0");
+        assert_eq!(
+            SMP_MIGRATE_STAGE.load(Ordering::Acquire),
+            2,
+            "Task must migrate to CPU 0"
+        );
         assert!(mig_count >= 1, "Task migration counter must increment");
-        assert!(!SMP_MIGRATE_ERROR.load(Ordering::Acquire), "FP/GPR integrity failed across migration");
+        assert!(
+            !SMP_MIGRATE_ERROR.load(Ordering::Acquire),
+            "FP/GPR integrity failed across migration"
+        );
         assert_eq!(mig_exit, 0);
         kprintln!("[TEST] Multicore Cross-CPU Migration & SIMD/GPR Preservation (migrations={}) VERIFIED.", mig_count);
 
@@ -2595,10 +3597,18 @@ fn smp_coordinator_worker() -> ! {
                     Err(_) => break,
                 }
             }
-            assert_eq!(reaped, Ok(0), "Scheduled EL0 SMP child PID {} must exit(0) and reap cleanly", pid);
+            assert_eq!(
+                reaped,
+                Ok(0),
+                "Scheduled EL0 SMP child PID {} must exit(0) and reap cleanly",
+                pid
+            );
         }
         let tlb_ipis_after = task::per_cpu(1).tlb_ipis.load(Ordering::Acquire);
-        assert!(tlb_ipis_after > tlb_ipis_before, "CPU 1 must receive cross-CPU TLB shootdown SGI 1");
+        assert!(
+            tlb_ipis_after > tlb_ipis_before,
+            "CPU 1 must receive cross-CPU TLB shootdown SGI 1"
+        );
 
         kprintln!("[TEST] Multicore Scheduled EL0 & Cross-CPU TLB Shootdown (CPU 1 TLB IPIs {} -> {}) VERIFIED.",
             tlb_ipis_before, tlb_ipis_after);
@@ -2616,7 +3626,9 @@ fn run_smp_scheduler_verification(
 ) {
     use core::sync::atomic::Ordering;
     kprintln!();
-    kprintln!("--- [Testing True Multicore SMP Scheduler, Preemption, Migration & TLB Shootdown] ---");
+    kprintln!(
+        "--- [Testing True Multicore SMP Scheduler, Preemption, Migration & TLB Shootdown] ---"
+    );
 
     // Reset early boot daemons cleanly before activating SMP scheduling.
     {
@@ -2628,8 +3640,14 @@ fn run_smp_scheduler_verification(
     let baseline_frames = mmu::active_allocated_frames();
 
     // Validate secondary stack bounds helper edge cases
-    assert_eq!(crate::entry::validate_secondary_stack_slot(1, 0x4008_0000, 0x400F_0000), Some((0x4008_0000, 0x4009_0000)));
-    assert_eq!(crate::entry::validate_secondary_stack_slot(7, 0x4008_0000, 0x400F_0000), Some((0x400E_0000, 0x400F_0000)));
+    assert_eq!(
+        crate::entry::validate_secondary_stack_slot(1, 0x4008_0000, 0x400F_0000),
+        Some((0x4008_0000, 0x4009_0000))
+    );
+    assert_eq!(
+        crate::entry::validate_secondary_stack_slot(7, 0x4008_0000, 0x400F_0000),
+        Some((0x400E_0000, 0x400F_0000))
+    );
     assert!(crate::entry::validate_secondary_stack_slot(0, 0x4008_0000, 0x400F_0000).is_none());
     assert!(crate::entry::validate_secondary_stack_slot(8, 0x4008_0000, 0x400F_0000).is_none());
     assert!(crate::entry::validate_secondary_stack_slot(1, 0x4008_0008, 0x400F_0000).is_none());
@@ -2666,7 +3684,11 @@ fn run_smp_scheduler_verification(
     let coord_exit = task::reap_task_locksafe(task::SUPERVISOR_PID, true, coord_pid)
         .expect("SMP coordinator reap");
     assert_eq!(coord_exit, 0);
-    assert_eq!(mmu::active_allocated_frames(), baseline_frames, "SMP stress must leave zero leaked frames");
+    assert_eq!(
+        mmu::active_allocated_frames(),
+        baseline_frames,
+        "SMP stress must leave zero leaked frames"
+    );
     kprintln!("[TEST] AArch64 True Multicore SMP Scheduling VERIFIED.");
 }
 
@@ -2704,10 +3726,19 @@ pub extern "C" fn secondary_cpu_main(logical_id: usize) -> ! {
     if gic_kind == gic::ACTIVE_GIC_KIND_GICV3 {
         let active = *gic::ACTIVE_GIC.lock();
         if let gic::ActiveGic::Gicv3(g) = active {
-            let mut local_gicv3 = gic::Gicv3::with_sizes(g.distributor_base, g.distributor_size, g.redistributors_base, g.redistributors_size);
+            let mut local_gicv3 = gic::Gicv3::with_sizes(
+                g.distributor_base,
+                g.distributor_size,
+                g.redistributors_base,
+                g.redistributors_size,
+            );
             unsafe {
                 if let Err(e) = local_gicv3.init_redistributor_for_logical_id(logical_id) {
-                    kprintln!("[FATAL] Secondary CPU {} failed to initialize redistributor: {:?}", logical_id, e);
+                    kprintln!(
+                        "[FATAL] Secondary CPU {} failed to initialize redistributor: {:?}",
+                        logical_id,
+                        e
+                    );
                     loop {
                         #[cfg(target_arch = "aarch64")]
                         core::arch::asm!("wfe");
