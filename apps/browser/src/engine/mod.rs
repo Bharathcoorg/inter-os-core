@@ -262,8 +262,8 @@ mod tests {
     fn native_flow_capabilities_match_contract() {
         let engine = NativeFlowEngine::new(720, 1234);
         let caps = engine.capabilities();
-        assert!(!caps.supports_css_flexbox);
-        assert!(!caps.supports_css_grid);
+        assert!(caps.supports_css_flexbox);
+        assert!(caps.supports_css_grid);
         assert!(!caps.supports_full_js);
         assert!(caps.supports_cookies);
     }

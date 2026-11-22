@@ -34,6 +34,7 @@ pub enum Display {
     TableCell,
     Field,
     Flex,
+    Grid,
 }
 
 /// Direction of flex items.
@@ -185,6 +186,7 @@ pub struct BoxStyle {
     pub flex_direction: FlexDirection,
     pub justify_content: JustifyContent,
     pub gap: u16,
+    pub grid_columns: u8,
     pub box_sizing: BoxSizing,
     pub has_width: bool,
     pub has_height: bool,
@@ -234,6 +236,7 @@ impl BoxStyle {
         flex_direction: FlexDirection::Row,
         justify_content: JustifyContent::FlexStart,
         gap: 0,
+        grid_columns: 2,
         box_sizing: BoxSizing::ContentBox,
         has_width: false,
         has_height: false,
@@ -791,6 +794,8 @@ fn apply_single_declaration(style: &mut BoxStyle, prop: &[u8], val: &[u8]) {
     } else if prop.eq_ignore_ascii_case(b"display") {
         if val.eq_ignore_ascii_case(b"flex") {
             style.display = Display::Flex;
+        } else if val.eq_ignore_ascii_case(b"grid") {
+            style.display = Display::Grid;
         } else if val.eq_ignore_ascii_case(b"block") {
             style.display = Display::Block;
         } else if val.eq_ignore_ascii_case(b"inline") {
@@ -800,6 +805,10 @@ fn apply_single_declaration(style: &mut BoxStyle, prop: &[u8], val: &[u8]) {
             style.hidden = true;
         } else {
             style.record_unsupported(prop);
+        }
+    } else if prop.eq_ignore_ascii_case(b"grid-template-columns") {
+        if let Some(cols) = parse_grid_template_columns(val) {
+            style.grid_columns = cols;
         }
     } else if prop.eq_ignore_ascii_case(b"width") {
         if let Some(n) = parse_css_length(val) {
@@ -823,7 +832,7 @@ fn apply_single_declaration(style: &mut BoxStyle, prop: &[u8], val: &[u8]) {
         } else {
             style.record_unsupported(prop);
         }
-    } else if prop.eq_ignore_ascii_case(b"gap") {
+    } else if prop.eq_ignore_ascii_case(b"gap") || prop.eq_ignore_ascii_case(b"grid-gap") {
         if let Some(n) = parse_css_length(val) {
             if n >= 0 {
                 style.gap = n as u16;
@@ -882,6 +891,52 @@ fn is_known_css_property(prop: &[u8]) -> bool {
         || prop.eq_ignore_ascii_case(b"flex-direction")
         || prop.eq_ignore_ascii_case(b"justify-content")
         || prop.eq_ignore_ascii_case(b"box-sizing")
+        || prop.eq_ignore_ascii_case(b"grid-template-columns")
+        || prop.eq_ignore_ascii_case(b"grid-gap")
+}
+
+fn parse_grid_template_columns(val: &[u8]) -> Option<u8> {
+    let val = trim_ascii(val);
+    if val.is_empty() {
+        return None;
+    }
+    if val.len() >= 7 && val[..7].eq_ignore_ascii_case(b"repeat(") {
+        let inner = &val[7..];
+        if let Some(comma_pos) = inner.iter().position(|&b| b == b',') {
+            let count_str = trim_ascii(&inner[..comma_pos]);
+            let mut num = 0u8;
+            for &b in count_str {
+                if b.is_ascii_digit() {
+                    num = num.saturating_mul(10).saturating_add(b - b'0');
+                } else {
+                    break;
+                }
+            }
+            if num > 0 {
+                return Some(num.min(16));
+            }
+        }
+    }
+    let mut count = 0u8;
+    let mut in_token = false;
+    for &b in val {
+        if b == b' ' || b == b'\t' {
+            if in_token {
+                count = count.saturating_add(1);
+                in_token = false;
+            }
+        } else {
+            in_token = true;
+        }
+    }
+    if in_token {
+        count = count.saturating_add(1);
+    }
+    if count > 0 {
+        Some(count.min(16))
+    } else {
+        None
+    }
 }
 
 fn parse_css_length(val: &[u8]) -> Option<i16> {

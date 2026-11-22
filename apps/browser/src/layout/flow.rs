@@ -930,6 +930,45 @@ impl<'a, 's> Builder<'a, 's> {
             return result;
         }
 
+        if style.display == Display::Grid {
+            let bottom = self.layout_grid(node, &style, content_x, top, inner_w, depth + 1);
+            let mut final_bottom = bottom + style.padding_bottom as i32 + border;
+            if style.has_height && style.height > 0 {
+                final_bottom = final_bottom.max(top + style.height as i32);
+            }
+            if style.css.has_background {
+                self.push_rect(
+                    box_x,
+                    top,
+                    (inner_w as i32
+                        + style.padding_left as i32
+                        + style.padding_right as i32
+                        + border * 2) as u16,
+                    (final_bottom - top).max(1) as u16,
+                    style.css.background,
+                    RectKind::Fill,
+                );
+            }
+            if border > 0 {
+                if let Some(color) = style.border_color() {
+                    self.push_rect(
+                        box_x,
+                        top,
+                        (inner_w as i32
+                            + style.padding_left as i32
+                            + style.padding_right as i32
+                            + border * 2) as u16,
+                        (final_bottom - top).max(1) as u16,
+                        color,
+                        RectKind::Outline,
+                    );
+                }
+            }
+            let result = final_bottom + margin_bottom;
+            self.bump(result);
+            return result;
+        }
+
         let top_pad = top + style.padding_top as i32 + border;
         if marker != Marker::None {
             self.push_marker(marker, content_x, top_pad, &style);
@@ -1117,6 +1156,63 @@ impl<'a, 's> Builder<'a, 's> {
                 max_bottom
             }
         }
+    }
+
+    fn layout_grid(
+        &mut self,
+        node: NodeId,
+        parent_style: &BoxStyle,
+        content_x: i32,
+        top: i32,
+        inner_w: usize,
+        depth: usize,
+    ) -> i32 {
+        if depth > MAX_LAYOUT_DEPTH {
+            self.note(OVERFLOW_BLOCK_DEPTH);
+            return top;
+        }
+        let mut children = [super::dom::NO_NODE; 64];
+        let mut child_count = 0usize;
+        let mut child = self.dom.first_child(node);
+        while let Some(c) = child {
+            if self.dom.node(c).is_element() {
+                let s = style::compute(self.dom, c, self.sheet, Some(parent_style));
+                if s.display != Display::None {
+                    if child_count < children.len() {
+                        children[child_count] = c;
+                        child_count += 1;
+                    }
+                }
+            }
+            child = self.dom.next_sibling(c);
+        }
+
+        if child_count == 0 {
+            return top;
+        }
+
+        let cols = (parent_style.grid_columns as usize).max(1).min(16);
+        let gap = parent_style.gap as i32;
+        let total_gaps = (cols.saturating_sub(1) as i32) * gap;
+        let avail_w = (inner_w as i32).saturating_sub(total_gaps).max(16) as usize;
+        let col_w = (avail_w / cols).max(16);
+
+        let mut curr_row_top = top;
+        let mut row_max_bottom = top;
+
+        for (i, &c) in children[..child_count].iter().enumerate() {
+            let col = i % cols;
+            if i > 0 && col == 0 {
+                curr_row_top = row_max_bottom + gap;
+                row_max_bottom = curr_row_top;
+            }
+
+            let child_x = content_x + (col as i32) * (col_w as i32 + gap);
+            let child_bottom = self.layout_block(c, child_x, curr_row_top, col_w, parent_style, depth, Marker::None);
+            row_max_bottom = row_max_bottom.max(child_bottom);
+        }
+
+        row_max_bottom
     }
 
     fn layout_table(
@@ -2713,6 +2809,18 @@ mod tests {
                 assert_eq!(bit & other, 0, "budget {:#x} is claimed twice", bit);
             }
         }
+    }
+
+    #[test]
+    fn test_grid_layout_columns_and_gap() {
+        let mut dom = crate::layout::dom::Dom::new();
+        let html = b"<div style=\"display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px;\"><div>A</div><div>B</div><div>C</div><div>D</div></div>";
+        dom.parse(html);
+        let sheet = crate::css::Stylesheet::empty();
+        let mut layout = TextLayout::new();
+        super::build(&dom, &sheet, 400, &mut layout);
+        assert!(layout.run_count >= 4);
+        assert!(layout.height > 0);
     }
 }
 
