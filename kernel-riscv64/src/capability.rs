@@ -52,6 +52,7 @@ pub enum CapabilityType {
     EventPoll,
     SystemResource,
     MemoryHeap,
+    CryptoEntropyRead,
 }
 
 impl CapabilityType {
@@ -70,6 +71,7 @@ impl CapabilityType {
             28 => Some(CapabilityType::AudioStreamDirect),
             29 => Some(CapabilityType::MemoryHeap),
             33 => Some(CapabilityType::DisplayServer),
+            38 => Some(CapabilityType::CryptoEntropyRead),
             _ => None,
         }
     }

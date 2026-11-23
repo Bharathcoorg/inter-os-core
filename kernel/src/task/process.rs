@@ -123,10 +123,13 @@ pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
 /// `Err(())` is not an answer, and a caller that turns it into `Ok(None)` is
 /// deciding that an unreadable table means an unowned task.
 fn try_process_for_task(task: TaskId) -> Result<Option<ProcessId>, ()> {
-    for _ in 0..10_000 {
+    for _ in 0..500_000 {
         if let Some(threads) = THREAD_TABLE.try_lock() {
             return Ok(threads.iter().flatten().find(|r| r.task == task).map(|r| r.process));
         }
+        #[cfg(test)]
+        std::thread::yield_now();
+        #[cfg(not(test))]
         core::hint::spin_loop();
     }
     Err(())
@@ -186,20 +189,26 @@ pub fn task_is_application(task: TaskId) -> Option<bool> {
         Ok(None) => return Some(false),
         Err(()) => return None,
     };
-    for _ in 0..10_000 {
+    for _ in 0..500_000 {
         if let Some(table) = PROCESS_TABLE.try_lock() {
             return table.iter().flatten().find(|r| r.id == process).map(|r| r.is_application);
         }
+        #[cfg(test)]
+        std::thread::yield_now();
+        #[cfg(not(test))]
         core::hint::spin_loop();
     }
     None
 }
 
 pub fn record_for_process(process: ProcessId) -> Option<ProcessRecord> {
-    for _ in 0..10_000 {
+    for _ in 0..500_000 {
         if let Some(table) = PROCESS_TABLE.try_lock() {
             return table.iter().flatten().find(|r| r.id == process).copied();
         }
+        #[cfg(test)]
+        std::thread::yield_now();
+        #[cfg(not(test))]
         core::hint::spin_loop();
     }
     None

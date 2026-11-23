@@ -402,6 +402,7 @@ def main():
             ("Physical Frame Allocator", r"Page tables and physical frame allocator initialized"),
             ("Microkernel Memory/Hardware", r"Serial COM1 online|Hardware Drivers, Memory Management"),
             ("Persistent VFS Storage", r"Persistent storage encryption root initialized|VFS"),
+            ("Authenticated Embedded Images", r"Authenticated Boot: verified SHA-256 and ET_EXEC headers"),
             ("PID1 Userspace Service Manager", r"PID1 userspace service manager spawned|userspace init started in Ring 3"),
             ("Launcher / UI Canvas Online", r"render_full complete|home screen canvas initialized|Step 5: Initial presentation complete"),
         ]

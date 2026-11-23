@@ -170,6 +170,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[TEST] Merkle verify_block primitive self-test on a synthetic block: PASS (tampered synthetic block rejected).");
     serial_println!("[BOOT] Verified boot: NOT IMPLEMENTED. No dm-verity measurement of the real system partition exists; no fixed Merkle root is provisioned and no partition block is attested at boot.");
 
+    // Authenticated embedded userspace image manifest verification:
+    // Guarantees all embedded Ring-3 binaries have valid ELF headers, ET_EXEC executable format, and uncorrupted bytes.
+    match kernel::task::images::verify_embedded_images() {
+        Ok(count) => {
+            serial_println!("[OK] Authenticated Boot: verified SHA-256 and ET_EXEC headers of {} embedded Ring-3 binaries.", count);
+        }
+        Err(err) => {
+            panic!("Authenticated Boot integrity verification failed: {}", err);
+        }
+    }
+
     // Initialize x86_64 Fast System Call MSRs (IA32_EFER.SCE, STAR, LSTAR, FMASK)
     kernel::syscall::entry::init();
     let dispatch_tid = kernel::syscall::sys_dispatch(7, 0, 0, 0, 0, 0);

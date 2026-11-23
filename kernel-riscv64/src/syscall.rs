@@ -62,6 +62,8 @@ pub const SYS_APP_BACKGROUND: usize = 116;
 pub const SYS_APP_FOREGROUND: usize = 117;
 pub const SYS_APP_RESTART: usize = 122;
 pub const SYS_FS_SYNC: usize = 125;
+pub const SYS_FS_UNLINK: usize = 133;
+pub const SYS_FS_MKDIR: usize = 135;
 pub const SYS_FS_READ_AT: usize = 164;
 /// Cross-architecture MMU memory lending/transfer syscall numbers.
 /// Hardware MMU page table lending is currently implemented for x86_64;
@@ -604,6 +606,52 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
             match crate::vfs::GLOBAL_VFS.lock().sync() {
                 Ok(()) => 0,
                 Err(e) => e,
+            }
+        }
+
+        SYS_FS_UNLINK => {
+            let (path_ptr, path_len) = if a0 < 0x1000 && a2 > 0 {
+                (a1, a2)
+            } else {
+                (a0, a1)
+            };
+            if path_len == 0 || path_len > 256 {
+                -22
+            } else {
+                let mut pbuf = [0u8; 256];
+                match read_user_string(path_ptr, path_len, &mut pbuf) {
+                    Ok(path) => match get_caller_identity_and_caps() {
+                        Ok((_caller_pid, caps)) => match crate::vfs::GLOBAL_VFS.lock().unlink(path, &caps) {
+                            Ok(()) => 0,
+                            Err(e) => e,
+                        },
+                        Err(e) => e,
+                    },
+                    Err(e) => e,
+                }
+            }
+        }
+
+        SYS_FS_MKDIR => {
+            let (path_ptr, path_len) = if a0 < 0x1000 && a2 > 0 {
+                (a1, a2)
+            } else {
+                (a0, a1)
+            };
+            if path_len == 0 || path_len > 256 {
+                -22
+            } else {
+                let mut pbuf = [0u8; 256];
+                match read_user_string(path_ptr, path_len, &mut pbuf) {
+                    Ok(path) => match get_caller_identity_and_caps() {
+                        Ok((_caller_pid, caps)) => match crate::vfs::GLOBAL_VFS.lock().mkdir(path, &caps) {
+                            Ok(_) => 0,
+                            Err(e) => e,
+                        },
+                        Err(e) => e,
+                    },
+                    Err(e) => e,
+                }
             }
         }
 
@@ -1188,8 +1236,29 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
         SYS_POWER_GOVERNOR | SYS_POWER_SET_PROFILE => -38,
         SYS_BATTERY_QUERY | SYS_THERMAL_QUERY => -38,
         SYS_GET_RANDOM => {
-            let (_addr, _len) = if a0 < 0x1000 && a2 > 0 { (a1, a2) } else { (a0, a1) };
-            -1 // Fail closed: no hardware CSPRNG/entropy source bound on RISC-V virt yet
+            let (_, caps) = match get_caller_identity_and_caps() {
+                Ok(pair) => pair,
+                Err(err) => return { tf.regs[10] = err as usize; },
+            };
+            if caps
+                .check(crate::capability::CapabilityType::CryptoEntropyRead, crate::capability::Rights::READ)
+                .is_err()
+            {
+                -13 // -EACCES: missing CryptoEntropyRead capability
+            } else {
+                let (addr, len) = if a0 < 0x1000 && a2 > 0 { (a1, a2) } else { (a0, a1) };
+                if len == 0 {
+                    0
+                } else {
+                    let to_fill = (len as usize).min(64);
+                    if let Err(err) = validate_user_range(addr, to_fill, true) {
+                        err
+                    } else {
+                        // Fail closed: no hardware CSPRNG/entropy source bound on RISC-V virt yet
+                        -1
+                    }
+                }
+            }
         }
         SYS_BLOCK_READ => -13,
         SYS_VERIFY_PACKAGE => {
