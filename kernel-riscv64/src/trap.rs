@@ -19,8 +19,13 @@ pub struct TrapFrame {
     pub stval: usize,
 }
 
-// Global kernel stack for trap handling if task stack is unavailable
-static mut TRAP_KERNEL_STACK: [u8; 16384] = [0; 16384];
+// Global kernel stack for trap handling if task stack is unavailable.
+// Must be word-aligned: fat pointers formed on this stack (e.g. the `&[fmt::rt::Argument]`
+// slice a `println!` builds in a trap handler) must never be odd, or `core::fmt`'s
+// tagged-pointer encoding reads the pointer as a literal length and floods the console.
+#[repr(C, align(16))]
+struct TrapKernelStack([u8; 16384]);
+static mut TRAP_KERNEL_STACK: TrapKernelStack = TrapKernelStack([0; 16384]);
 
 /// Initializes RISC-V trap vectors by setting `stvec` and clearing `sscratch`.
 /// `sscratch == 0` indicates S-mode execution; non-zero holds the active U-mode task kernel stack.

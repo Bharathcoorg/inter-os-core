@@ -47,8 +47,12 @@ static GDT: Lazy<(GlobalDescriptorTable, Selectors)> = Lazy::new(|| {
     let user_data_selector = gdt.append(Descriptor::user_data_segment());
     let user_code_selector = gdt.append(Descriptor::user_code_segment());
 
-    static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-    static mut PRIV_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+    // Word-aligned so fat pointers formed on these stacks are never odd
+    // (core::fmt's tagged-pointer encoding misreads odd pointers as lengths).
+    #[repr(C, align(16))]
+    struct AlignedStack([u8; STACK_SIZE]);
+    static mut STACK: AlignedStack = AlignedStack([0; STACK_SIZE]);
+    static mut PRIV_STACK: AlignedStack = AlignedStack([0; STACK_SIZE]);
 
     let tss_mut = unsafe { &mut *TSS.0.get() };
     let stack_start = VirtAddr::from_ptr(&raw const STACK);
