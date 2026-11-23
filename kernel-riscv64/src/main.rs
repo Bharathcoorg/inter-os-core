@@ -658,8 +658,12 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     }
 }
 
+static PANICKING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    println!("\n[KERNEL PANIC] RISC-V 64 Kernel halted: {}", info);
+    if !PANICKING.swap(true, core::sync::atomic::Ordering::SeqCst) {
+        println!("\n[KERNEL PANIC] RISC-V 64 Kernel halted: {}", info);
+    }
     sbi::shutdown();
 }

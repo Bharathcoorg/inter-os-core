@@ -271,7 +271,11 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                     panic!("Supervisor page fault at sepc=0x{:016x} stval=0x{:016x} cause={}", tf.sepc, tf.stval, code);
                 }
                 tf.regs[10] = (-14isize) as usize; // -EFAULT
-                let exited = crate::task::SCHEDULER.lock().exit_current();
+                let exited = if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                    sched.exit_current()
+                } else {
+                    false
+                };
                 println!("[TRAP] Faulted userspace task marked exited: {}", exited);
                 if unsafe { IN_LIFECYCLE_TEST } {
                     LAST_USER_FAULT_CODE.store(-11, core::sync::atomic::Ordering::Release);
@@ -297,7 +301,11 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 if !from_user {
                     panic!("Supervisor illegal instruction at sepc=0x{:016x}", tf.sepc);
                 }
-                let exited = crate::task::SCHEDULER.lock().exit_current();
+                let exited = if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                    sched.exit_current()
+                } else {
+                    false
+                };
                 println!("[TRAP] Illegal-instruction task marked exited: {}", exited);
                 if unsafe { IN_LIFECYCLE_TEST } {
                     LAST_USER_FAULT_CODE.store(-4, core::sync::atomic::Ordering::Release);
@@ -323,7 +331,9 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 if !from_user {
                     panic!("Unhandled supervisor exception scause={} at sepc=0x{:016x}", code, tf.sepc);
                 }
-                let _ = crate::task::SCHEDULER.lock().exit_current();
+                if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
+                    let _ = sched.exit_current();
+                }
                 if unsafe { IN_LIFECYCLE_TEST } {
                     LAST_USER_FAULT_CODE.store(-1, core::sync::atomic::Ordering::Release);
                     unsafe {
@@ -380,7 +390,8 @@ pub unsafe extern "C" fn enter_user_mode_with_args(
         "fmv.d.x f24, zero", "fmv.d.x f25, zero", "fmv.d.x f26, zero", "fmv.d.x f27, zero",
         "fmv.d.x f28, zero", "fmv.d.x f29, zero", "fmv.d.x f30, zero", "fmv.d.x f31, zero",
         "csrw sstatus, t0",
-        // 2. Initialize sscratch with kernel stack for handling traps from U-mode
+        // 2. Initialize sscratch with kernel stack for handling traps from U-mode (16-byte aligned)
+        "andi a2, a2, -16",
         "csrw sscratch, a2",
         // 3. Set sepc = entry_point (a0)
         "csrw sepc, a0",
@@ -495,7 +506,8 @@ pub unsafe extern "C" fn enter_user_mode_with_return(entry_point: usize, user_sp
         "fmv.d.x f24, zero", "fmv.d.x f25, zero", "fmv.d.x f26, zero", "fmv.d.x f27, zero",
         "fmv.d.x f28, zero", "fmv.d.x f29, zero", "fmv.d.x f30, zero", "fmv.d.x f31, zero",
         "csrw sstatus, t0",
-        // 2. Initialize sscratch with kernel stack for handling traps from U-mode
+        // 2. Initialize sscratch with kernel stack for handling traps from U-mode (16-byte aligned)
+        "andi a2, a2, -16",
         "csrw sscratch, a2",
         // 3. Set sepc = entry_point (a0)
         "csrw sepc, a0",
