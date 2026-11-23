@@ -3,10 +3,9 @@
 
 //! Fastboot Android Boot Image Specification (Header v2 / v3)
 //!
-//! Provides bare-metal parsing, cryptographic verification, and synthesis
-//! of standard Android Boot Images (`boot.img`) flashable to physical smartphones
-//! (Google Pixel, PinePhone Pro, Qualcomm Snapdragon mobile devboards)
-//! via `fastboot flash boot boot.img`.
+//! Provides bare-metal parsing, SHA-256 partition integrity verification, and
+//! synthesis of standard Android Boot Images (`boot.img`) for QEMU smartphone
+//! emulation and standard fastboot boot image tooling.
 //!
 //! Follows the AOSP `bootimg.h` specification with zero ambient authority.
 
@@ -211,7 +210,7 @@ impl FastbootBootImage {
         Ok((kernel_slice, ramdisk_slice, dtb_slice))
     }
 
-    /// Synthesizes a valid, cryptographically signed Android Boot Image v2.
+    /// Synthesizes a valid Android Boot Image v2 with SHA-256 partition digests in hdr.id.
     pub fn synthesize(
         kernel: &[u8],
         ramdisk: &[u8],
@@ -312,7 +311,7 @@ fn pad_to_page(vec: &mut Vec<u8>, page_size: usize) {
 pub fn test_fastboot_boot_image() {
     let dummy_kernel = b"\x7fELF\x02\x01\x01\x00_INTER_OS_AARCH64_MICROKERNEL_ENTRY_POINT";
     let dummy_ramdisk = b"070701_CPIO_INITRAMFS_SOVEREIGN_SYSTEM_APPS_RETAIL_APK";
-    let dummy_dtb = b"\xd0\x0d\xfe\xed_AARCH64_DEVICE_TREE_BLOB_QUALCOMM_SM8450";
+    let dummy_dtb = b"\xd0\x0d\xfe\xed_INTER_OS_AARCH64_DEVICE_TREE_BLOB_QEMU_VIRT";
 
     let boot_img = FastbootBootImage::synthesize(
         dummy_kernel,
@@ -343,6 +342,6 @@ pub fn test_fastboot_boot_image() {
     assert_eq!(d, dummy_dtb, "DTB partition payload mismatch");
 
     crate::serial_println!(
-        "[TEST] Fastboot Boot Image: v2 header parsed, SHA-256 partition integrity verified, ready for 'fastboot flash boot boot.img'."
+        "[TEST] Fastboot Boot Image: v2 header parsed, SHA-256 partition integrity verified."
     );
 }

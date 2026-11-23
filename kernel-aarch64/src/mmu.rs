@@ -1327,6 +1327,7 @@ pub struct UserAddressSpace {
     pub lifecycle: core::sync::atomic::AtomicU32,
     pub executed_cpus: core::sync::atomic::AtomicU32,
     pub acknowledged_cpus: core::sync::atomic::AtomicU32,
+    pub in_user_copy: core::sync::atomic::AtomicU32,
 }
 
 impl UserAddressSpace {
@@ -1494,6 +1495,7 @@ impl UserAddressSpace {
             lifecycle: core::sync::atomic::AtomicU32::new(0),
             executed_cpus: core::sync::atomic::AtomicU32::new(0),
             acknowledged_cpus: core::sync::atomic::AtomicU32::new(0),
+            in_user_copy: core::sync::atomic::AtomicU32::new(0),
         })
     }
 

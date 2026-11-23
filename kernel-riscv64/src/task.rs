@@ -367,9 +367,17 @@ impl Scheduler {
     }
 
     pub fn exit_current(&mut self) -> bool {
+        self.exit_current_with_code(0)
+    }
+
+    pub fn exit_current_with_code(&mut self, code: i32) -> bool {
         if self.current_task_idx < self.tasks.len() {
             let task = &mut self.tasks[self.current_task_idx];
             task.state = TaskState::Exited;
+            task.generation = task.generation.wrapping_add(1);
+            if task.exit_code.is_none() {
+                task.exit_code = Some(code);
+            }
             true
         } else {
             false

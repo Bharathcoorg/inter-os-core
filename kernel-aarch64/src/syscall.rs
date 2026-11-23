@@ -131,10 +131,34 @@ fn validate_user_range(addr: u64, len: usize, write: bool) -> Result<(), i64> {
 /// attacker-chosen duration (e.g. the 1 MiB SYS_FS_WRITE path).
 const USER_COPY_CHUNK: usize = 32 * 1024;
 
+/// RAII guard preventing premature address-space evacuation and frame recycling
+/// while an in-flight user memory copy is executing across chunk boundaries.
+struct UserCopyGuard(Option<u32>);
+
+impl UserCopyGuard {
+    fn new() -> Result<Self, i64> {
+        let opt_pid = {
+            let mut sched = SCHEDULER.lock();
+            sched.begin_current_user_copy()?
+        };
+        Ok(Self(opt_pid))
+    }
+}
+
+impl Drop for UserCopyGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            let mut sched = SCHEDULER.lock();
+            sched.end_user_copy_for_pid(pid);
+        }
+    }
+}
+
 pub(crate) fn copy_from_user(dst: &mut [u8], addr: u64, len: usize) -> Result<(), i64> {
     if len > dst.len() {
         return Err(-22);
     }
+    let _copy_guard = UserCopyGuard::new()?;
     let mut done = 0usize;
     while done < len {
         // Validation and the copy must observe one epoch of the address space.
@@ -159,6 +183,7 @@ pub(crate) fn copy_from_user(dst: &mut [u8], addr: u64, len: usize) -> Result<()
 }
 
 fn copy_to_user(addr: u64, src: &[u8]) -> Result<(), i64> {
+    let _copy_guard = UserCopyGuard::new()?;
     let mut done = 0usize;
     while done < src.len() {
         let chunk = (src.len() - done).min(USER_COPY_CHUNK);

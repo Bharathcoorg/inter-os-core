@@ -271,11 +271,7 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                     panic!("Supervisor page fault at sepc=0x{:016x} stval=0x{:016x} cause={}", tf.sepc, tf.stval, code);
                 }
                 tf.regs[10] = (-14isize) as usize; // -EFAULT
-                let exited = if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
-                    sched.exit_current()
-                } else {
-                    false
-                };
+                let exited = crate::task::SCHEDULER.lock().exit_current_with_code(-11);
                 println!("[TRAP] Faulted userspace task marked exited: {}", exited);
                 if unsafe { IN_LIFECYCLE_TEST } {
                     LAST_USER_FAULT_CODE.store(-11, core::sync::atomic::Ordering::Release);
@@ -301,11 +297,7 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 if !from_user {
                     panic!("Supervisor illegal instruction at sepc=0x{:016x}", tf.sepc);
                 }
-                let exited = if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
-                    sched.exit_current()
-                } else {
-                    false
-                };
+                let exited = crate::task::SCHEDULER.lock().exit_current_with_code(-4);
                 println!("[TRAP] Illegal-instruction task marked exited: {}", exited);
                 if unsafe { IN_LIFECYCLE_TEST } {
                     LAST_USER_FAULT_CODE.store(-4, core::sync::atomic::Ordering::Release);
@@ -331,9 +323,8 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 if !from_user {
                     panic!("Unhandled supervisor exception scause={} at sepc=0x{:016x}", code, tf.sepc);
                 }
-                if let Some(mut sched) = crate::task::SCHEDULER.try_lock() {
-                    let _ = sched.exit_current();
-                }
+                let exited = crate::task::SCHEDULER.lock().exit_current_with_code(-1);
+                println!("[TRAP] Unhandled exception task marked exited: {}", exited);
                 if unsafe { IN_LIFECYCLE_TEST } {
                     LAST_USER_FAULT_CODE.store(-1, core::sync::atomic::Ordering::Release);
                     unsafe {

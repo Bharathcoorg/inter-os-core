@@ -711,10 +711,12 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Returns true only when no CPU is actively using `aspace` and every CPU
-    /// that executed in `aspace` has acknowledged evacuation.
+    /// Returns true only when no CPU is actively using `aspace`, no user-copy
+    /// is in flight, and every CPU that executed in `aspace` has acknowledged evacuation.
     pub fn is_aspace_evacuated(aspace: &crate::mmu::UserAddressSpace) -> bool {
-        if aspace.is_active_on_any_cpu() {
+        if aspace.is_active_on_any_cpu()
+            || aspace.in_user_copy.load(core::sync::atomic::Ordering::Acquire) != 0
+        {
             return false;
         }
         let executed = aspace
@@ -724,6 +726,38 @@ impl Scheduler {
             .acknowledged_cpus
             .load(core::sync::atomic::Ordering::Acquire);
         (executed & !acknowledged) == 0
+    }
+
+    /// Registers the beginning of an in-flight user memory copy for the active task.
+    /// Returns the PID whose address space is protected against concurrent reaping,
+    /// or None if the current context has no attached user address space.
+    pub fn begin_current_user_copy(&mut self) -> Result<Option<u32>, i64> {
+        let pos = match self.current_task_pos() {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let tcb = &mut self.tasks[pos];
+        if tcb.state != TaskState::Running {
+            return Err(-14);
+        }
+        if let Some(ref aspace) = tcb.address_space {
+            if aspace.is_closing() || aspace.is_destroyed() {
+                return Err(-14);
+            }
+            aspace.in_user_copy.fetch_add(1, core::sync::atomic::Ordering::Release);
+            Ok(Some(tcb.id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Unregisters an in-flight user memory copy for the specified PID.
+    pub fn end_user_copy_for_pid(&mut self, pid: u32) {
+        if let Some(pos) = self.tasks.iter().position(|t| t.id == pid) {
+            if let Some(ref aspace) = self.tasks[pos].address_space {
+                aspace.in_user_copy.fetch_sub(1, core::sync::atomic::Ordering::Release);
+            }
+        }
     }
 
     /// Stage 1 of the 5-stage reaping protocol (must be called with `SCHEDULER.lock()` held):
