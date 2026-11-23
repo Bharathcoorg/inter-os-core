@@ -119,23 +119,7 @@ fn validate_user_range(addr: u64, len: usize, write: bool) -> Result<(), i64> {
             None
         }
     };
-    let ttbr0 = match ttbr0_from_task {
-        Some(t) => t,
-        None => {
-            #[cfg(target_arch = "aarch64")]
-            {
-                let t: u64;
-                unsafe {
-                    core::arch::asm!("mrs {}, ttbr0_el1", out(reg) t, options(nostack, nomem));
-                }
-                t & 0x0000_FFFF_FFFF_F000
-            }
-            #[cfg(not(target_arch = "aarch64"))]
-            {
-                return Err(-14);
-            }
-        }
-    };
+    let ttbr0 = ttbr0_from_task.ok_or(-14i64)?;
     crate::mmu::validate_ttbr0_user_range(ttbr0, addr, len, write)
 }
 
