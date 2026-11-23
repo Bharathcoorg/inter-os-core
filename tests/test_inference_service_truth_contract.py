@@ -215,7 +215,7 @@ def test_a_file_that_ends_inside_the_array_reports_the_key_not_a_panic():
     assert "VocabReading::Truncated {" in walk
     # A read that ran out inside the vocabulary still reports the count the file
     # gave, so the engine is not told a truncated file declared no vocabulary.
-    assert "stated: elements," in walk
+    assert "stated: elements" in walk
 
 
 def test_an_over_long_template_is_refused_whole_by_the_length_the_file_stated():
@@ -1085,7 +1085,7 @@ def test_the_ranged_read_contract_can_fail():
     assert _ranged_read_defects(gguf, lib, sdk, kernel) == []
 
     stepping = gguf.replace(
-        "                *pos = pos.checked_add(count).ok_or(GgufError::ArithmeticOverflow)?;\n                Ok(())",
+        "                *pos = pos\n                    .checked_add(count)\n                    .ok_or(GgufError::ArithmeticOverflow)?;\n                Ok(())",
         "                let mut scratch = [0u8; 512];\n"
         "                while count > 0 {\n"
         "                    let chunk = count.min(512);\n"

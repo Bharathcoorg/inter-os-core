@@ -543,8 +543,8 @@ impl ArmMmu {
             // leaf at physical zero, which made the mapped window read back
             // whatever happened to be there.
             for step in 0..count {
-                L2_HIGH_TABLE.entries[(first_in_gib + step) as usize] = (start_paddr
-                    + step * L2_BLOCK)
+                let leaf_paddr = start_paddr + step * L2_BLOCK;
+                L2_HIGH_TABLE.entries[(first_in_gib + step) as usize] = leaf_paddr
                     | DESC_AF
                     | DESC_SH_OUTER
                     | DESC_AP_RW_EL1

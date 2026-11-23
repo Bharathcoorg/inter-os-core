@@ -361,7 +361,7 @@ class PlatformRealityTests(unittest.TestCase):
         # A level 1 table pointer means each leaf descriptor must carry the full
         # physical address. Writing the offset within the gigabyte instead points
         # every leaf at physical zero, so the window reads back as empty.
-        self.assertIn("(start_paddr + step * L2_BLOCK)", mmu)
+        self.assertIn("start_paddr + step * L2_BLOCK", mmu)
         self.assertNotIn("let base = start_paddr - l1_index * L1_BLOCK;", mmu)
         # Enumeration must report rather than assume.
         self.assertIn("enumerate_bus0", ecam)
