@@ -1229,5 +1229,11 @@ def main():
     return exit_code
 
 
+def test_tls_trust_runtime():
+    """Runs the full TLS trust runtime suite as a pytest case."""
+    exit_code = main()
+    assert exit_code == 0, "TLS trust runtime suite reported failures"
+
+
 if __name__ == "__main__":
     sys.exit(main())
