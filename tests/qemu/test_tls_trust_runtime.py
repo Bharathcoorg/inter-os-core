@@ -273,7 +273,7 @@ def have_qemu():
     when it finds nothing, so the string it returns tells you nothing about whether
     QEMU can actually be run here.
     """
-    exe = find_qemu("qemu-system-x86_64.exe")
+    exe = find_qemu("qemu-system-x86_64.exe" if os.name == "nt" else "qemu-system-x86_64")
     try:
         subprocess.run([exe, "--version"], capture_output=True, check=True, timeout=30)
         return True
@@ -541,7 +541,7 @@ class Guest:
         self._stop = threading.Event()
 
     def start(self):
-        qemu = find_qemu("qemu-system-x86_64.exe")
+        qemu = find_qemu("qemu-system-x86_64.exe" if os.name == "nt" else "qemu-system-x86_64")
         args = [
             qemu,
             "-machine", "q35",
@@ -642,7 +642,8 @@ class Guest:
     def shutdown(self):
         """Power the guest off and make sure the process is really gone."""
         try:
-            self.send("POWEROFF")
+            if self.reader is not None:
+                self.send("POWEROFF")
         except OSError:
             pass
         deadline = time.time() + 15
@@ -891,15 +892,15 @@ def main():
 
     if not os.path.exists(BOOT_IMAGE):
         print("SKIP: boot image missing: %s" % BOOT_IMAGE)
-        return 0
+        return 2
     if not have_qemu():
         print("SKIP: qemu-system-x86_64 is not available on this machine")
-        return 0
+        return 2
     try:
         import cryptography  # noqa: F401
     except ImportError:
         print("SKIP: the local test CA needs the `cryptography` module, absent here")
-        return 0
+        return 2
 
     # Preflight opt-in detection. The install/revoke dials drive TLS_TRUST_BEGIN /
     # CHUNK / COMMIT / REVOKE, which are compiled OUT of production images behind the
@@ -911,12 +912,12 @@ def main():
     # so skip loudly and name the opt-in rather than certify a confusing failure.
     with open(BOOT_IMAGE, "rb") as handle:
         image_blob = handle.read()
-    if b"TLS_TRUST_BEGIN" not in image_blob:
+    if b"[TLS_TRUST] READY bytes=" not in image_blob:
         print("SKIP: production image (debug-control-plane OFF): the TLS_TRUST_BEGIN /")
         print("      CHUNK / COMMIT / REVOKE verbs are compiled out, so the trust dials")
         print("      cannot run. Rebuild with INTEROS_DEBUG_CONTROL_PLANE=1")
         print("      (`python tools/interos.py build demo`) and re-run. SKIP, not a pass.")
-        return 0
+        return 2
 
     if DATA_DISK == MASTER_DISK:
         print("FAIL: DATA_DISK_PATH points at the 6 GiB master image, which this "
@@ -1229,9 +1230,81 @@ def main():
     return exit_code
 
 
+def test_qemu_probe_and_launch_use_platform_binary(monkeypatch):
+    import pytest
+
+    requested = []
+    executable = "/private/qemu-system-x86_64"
+    expected = "qemu-system-x86_64.exe" if os.name == "nt" else "qemu-system-x86_64"
+    monkeypatch.setattr(sys.modules[__name__], "find_qemu",
+                        lambda name: requested.append(name) or executable)
+    probes = []
+    monkeypatch.setattr(subprocess, "run", lambda args, **kwargs: probes.append(args))
+    assert have_qemu()
+    assert requested == [expected]
+    assert probes == [[executable, "--version"]]
+    monkeypatch.setattr(sys.modules[__name__], "qemu_x86_audio_args", lambda exe: [])
+    launches = []
+
+    def launch(args, **kwargs):
+        launches.append(args)
+        raise RuntimeError("launch intercepted")
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    with pytest.raises(RuntimeError, match="launch intercepted"):
+        Guest().start()
+    assert requested == [expected, expected]
+    assert launches[0][0] == executable
+
+
+def test_unavailable_prerequisites_are_not_cli_success(monkeypatch, tmp_path):
+    import builtins
+
+    module = sys.modules[__name__]
+    image = tmp_path / "boot.img"
+    monkeypatch.setattr(module, "BOOT_IMAGE", str(image))
+    assert main() != 0
+    image.write_bytes(b"TLS_TRUST_BEGIN")
+    monkeypatch.setattr(module, "have_qemu", lambda: False)
+    assert main() != 0
+    monkeypatch.setattr(module, "have_qemu", lambda: True)
+    original_import = builtins.__import__
+
+    def without_cryptography(name, *args, **kwargs):
+        if name == "cryptography":
+            raise ImportError("cryptography unavailable")
+        return original_import(name, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "__import__", without_cryptography)
+        assert main() != 0
+    image.write_bytes(b"production image")
+    assert main() != 0
+
+
+def test_pytest_wrapper_skips_unavailable_prerequisites(monkeypatch, tmp_path):
+    import pytest
+
+    monkeypatch.setattr(sys.modules[__name__], "BOOT_IMAGE", str(tmp_path / "missing.img"))
+    with pytest.raises(pytest.skip.Exception):
+        test_tls_trust_runtime()
+
+
+def test_pytest_wrapper_rejects_runtime_failure(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(sys.modules[__name__], "main", lambda: 1)
+    with pytest.raises(AssertionError, match="reported failures"):
+        test_tls_trust_runtime()
+
+
 def test_tls_trust_runtime():
     """Runs the full TLS trust runtime suite as a pytest case."""
+    import pytest
+
     exit_code = main()
+    if exit_code == 2:
+        pytest.skip("TLS trust runtime prerequisites unavailable; see preflight output")
     assert exit_code == 0, "TLS trust runtime suite reported failures"
 
 
