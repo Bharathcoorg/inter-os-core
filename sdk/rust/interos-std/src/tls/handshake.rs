@@ -534,25 +534,25 @@ impl HandshakeClient {
             b"key",
             &[],
             &mut self.client_handshake_key,
-        );
+        ).map_err(|_| TlsError::KeyDerivationError)?;
         hkdf_expand_label(
             &self.client_handshake_traffic_secret,
             b"iv",
             &[],
             &mut self.client_handshake_iv,
-        );
+        ).map_err(|_| TlsError::KeyDerivationError)?;
         hkdf_expand_label(
             &self.server_handshake_traffic_secret,
             b"key",
             &[],
             &mut self.server_handshake_key,
-        );
+        ).map_err(|_| TlsError::KeyDerivationError)?;
         hkdf_expand_label(
             &self.server_handshake_traffic_secret,
             b"iv",
             &[],
             &mut self.server_handshake_iv,
-        );
+        ).map_err(|_| TlsError::KeyDerivationError)?;
 
         // Store handshake secret in temporary slot for master secret derivation later
         // We can store master secret derivation base:
@@ -845,7 +845,7 @@ impl HandshakeClient {
             b"finished",
             &[],
             &mut finished_key,
-        );
+        ).map_err(|_| TlsError::KeyDerivationError)?;
         let th = self.transcript.finalize();
         let expected = HmacSha256::compute(&finished_key, &th);
 
@@ -883,25 +883,25 @@ impl HandshakeClient {
             b"key",
             &[],
             &mut self.client_application_key,
-        );
+        ).map_err(|_| TlsError::KeyDerivationError)?;
         hkdf_expand_label(
             &self.client_application_traffic_secret,
             b"iv",
             &[],
             &mut self.client_application_iv,
-        );
+        ).map_err(|_| TlsError::KeyDerivationError)?;
         hkdf_expand_label(
             &self.server_application_traffic_secret,
             b"key",
             &[],
             &mut self.server_application_key,
-        );
+        ).map_err(|_| TlsError::KeyDerivationError)?;
         hkdf_expand_label(
             &self.server_application_traffic_secret,
             b"iv",
             &[],
             &mut self.server_application_iv,
-        );
+        ).map_err(|_| TlsError::KeyDerivationError)?;
 
         Ok(())
     }
@@ -919,7 +919,7 @@ impl HandshakeClient {
             b"finished",
             &[],
             &mut finished_key,
-        );
+        ).map_err(|_| TlsError::KeyDerivationError)?;
 
         let th = self.transcript.finalize();
         let verify_data = HmacSha256::compute(&finished_key, &th);
