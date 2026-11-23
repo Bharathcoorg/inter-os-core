@@ -50,10 +50,27 @@ def get_free_port():
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
 
-def find_qemu(binary="qemu-system-x86_64.exe"):
-    if "QEMU_PATH" in os.environ and os.path.exists(os.path.join(os.environ["QEMU_PATH"], binary)):
-        return os.path.join(os.environ["QEMU_PATH"], binary)
+def find_qemu(binary=None):
+    # Platform-correct default (same contract as tests/test_serial_tcp.py):
+    # Windows names the binary qemu-system-x86_64.exe, POSIX qemu-system-x86_64.
+    # QEMU_PATH is an authoritative pin (same contract as emulator/server.py:
+    # run exactly the pinned build rather than silently substituting a
+    # different one found on PATH), so it is checked first for either naming
+    # convention. A POSIX host is then never handed a bare ".exe" filename
+    # to exec: the other convention is tried via shutil.which and under
+    # QEMU_PATH before the hardcoded candidate paths.
+    if binary is None:
+        binary = "qemu-system-x86_64.exe" if os.name == "nt" else "qemu-system-x86_64"
+    alt = binary[:-4] if binary.endswith(".exe") else binary + ".exe"
+    if "QEMU_PATH" in os.environ:
+        for name in (binary, alt):
+            candidate = os.path.join(os.environ["QEMU_PATH"], name)
+            if os.path.exists(candidate):
+                return candidate
     found = shutil.which(binary)
+    if found:
+        return found
+    found = shutil.which(alt)
     if found:
         return found
     candidates = [

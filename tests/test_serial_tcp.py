@@ -15,17 +15,24 @@ def find_qemu(binary=None):
     # Platform-correct default: Windows ships qemu-system-x86_64.exe, Linux
     # qemu-system-x86_64. Try the requested name, then the other convention,
     # so a POSIX CI host is not handed a bare ".exe" filename to exec.
+    # QEMU_PATH is an authoritative pin (same contract as emulator/server.py:
+    # run exactly the pinned build rather than silently substituting a
+    # different one found on PATH), so it is checked first for either naming
+    # convention.
     if binary is None:
         binary = "qemu-system-x86_64.exe" if os.name == "nt" else "qemu-system-x86_64"
+    alt = binary[:-4] if binary.endswith(".exe") else binary + ".exe"
+    if "QEMU_PATH" in os.environ:
+        for name in (binary, alt):
+            candidate = os.path.join(os.environ["QEMU_PATH"], name)
+            if os.path.exists(candidate):
+                return candidate
     found = shutil.which(binary)
     if found:
         return found
-    alt = binary[:-4] if binary.endswith(".exe") else binary + ".exe"
     found = shutil.which(alt)
     if found:
         return found
-    if "QEMU_PATH" in os.environ and os.path.exists(os.path.join(os.environ["QEMU_PATH"], binary)):
-        return os.path.join(os.environ["QEMU_PATH"], binary)
     candidates = [
         os.path.expanduser(f"~/qemu/{binary}"),
         rf"C:\Program Files\qemu\{binary}",

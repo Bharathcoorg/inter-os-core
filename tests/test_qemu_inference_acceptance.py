@@ -93,7 +93,25 @@ def run_inference_acceptance_test():
         "-mon", "chardev=mon0,mode=readline",
         "-no-reboot",
     ]
-    args.extend(qemu_x86_audio_args(qemu_exe))
+    # This suite runs headless (`-display none`) and its contract is VFS model
+    # import plus guest inference, not host audio. The audio probe proves a
+    # driver is compiled in, not that its backend initializes: on a headless
+    # host PulseAudio exits QEMU with "XDG_RUNTIME_DIR not set" before the
+    # guest boots. Default to the null backend so AC97 still attaches; an
+    # operator-set INTEROS_AUDIODEV or INTEROS_DISABLE_AUDIO wins, and the
+    # default is removed again after the helper reads it so the mutation does
+    # not outlive this call.
+    saved_audiodev = os.environ.get("INTEROS_AUDIODEV")
+    if saved_audiodev is None:
+        os.environ["INTEROS_AUDIODEV"] = "none"
+    audio_args = qemu_x86_audio_args(qemu_exe)
+    if saved_audiodev is None:
+        del os.environ["INTEROS_AUDIODEV"]
+    args.extend(audio_args)
+    if audio_args:
+        print("[ACCEPTANCE TEST] AC97 attached (audio backend args present).")
+    else:
+        print("[ACCEPTANCE TEST] WARNING: audio card omitted (no backend available); PCI topology differs from production.")
 
     print(f"[ACCEPTANCE TEST] Spawning QEMU with boot image and provisioned model disk...")
     proc = subprocess.Popen(args)
