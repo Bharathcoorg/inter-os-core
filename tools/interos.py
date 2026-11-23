@@ -335,6 +335,45 @@ def _load_x86_userspace_manifest():
     return data
 
 
+def _resolve_llvm_strip():
+    """Find llvm-strip (rustc sysroot first, then PATH)."""
+    try:
+        r = subprocess.run(["rustc", "--print", "sysroot"], capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        r = None
+    if r is not None:
+        matches = list((Path(r.stdout.strip())).glob("lib/rustlib/**/llvm-strip"))
+        if matches:
+            return matches[0]
+    on_path = shutil.which("llvm-strip")
+    if on_path:
+        return Path(on_path)
+    return None
+
+
+def _strip_embedded_elf(elf_path):
+    """Strip debuginfo from one userspace ELF before the kernel embeds it.
+
+    The kernel embeds every daemon ELF into its .rodata, so any debuginfo here
+    is copied verbatim into the boot image: a 314MB image and a multi-minute
+    int13h boot under TCG (see the [profile.dev] comment in Cargo.toml).
+    Stripping lives in this artifact pipeline, NOT in [profile.dev]: ordinary
+    developer builds keep their symbols for GDB.
+    """
+    strip_tool = _resolve_llvm_strip() or shutil.which("strip")
+    if strip_tool is None:
+        log_error("No llvm-strip/strip found; refusing to embed unstripped debuginfo into the kernel image")
+        return False
+    res = subprocess.run(
+        [str(strip_tool), "--strip-debug", "--strip-unneeded", str(elf_path)],
+        capture_output=True, text=True, check=False,
+    )
+    if res.returncode != 0:
+        log_error(f"strip failed on {elf_path}: {res.stderr}")
+        return False
+    return True
+
+
 def _cargo_build_manifest(manifest_path, target, bin_name=None):
     cmd = [
         "cargo", "build", "--locked",
@@ -380,6 +419,9 @@ def _build_x86_userspace():
                 built = alt
         if not built.exists():
             log_error(f"Expected userspace ELF was not produced: {built}")
+            return False
+
+        if not _strip_embedded_elf(built):
             return False
 
         # Keep the exact path consumed by kernel/src/task/images.rs.

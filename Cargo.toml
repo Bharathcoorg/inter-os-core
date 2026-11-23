@@ -38,14 +38,17 @@ resolver = "2"
 opt-level = 3
 panic = "abort"
 incremental = false
-# The kernel embeds every userspace daemon ELF into its .rodata
-# (kernel/src/task/images.rs). Without this, ~20 debug ELFs of ~15MB each put
-# ~300MB of debuginfo into the kernel image: the BIOS image grows to 314MB and
-# the bootloader's second stage spends many minutes reading it through BIOS
-# int13h under TCG, which looks like a boot hang. Measured with
-# `strip --strip-debug`: launcher 15.1MB -> 1.4MB.
-debug = false
-strip = "debuginfo"
+# WHY debuginfo stays ON here: ordinary developer builds (kernel + userspace
+# daemons) keep their symbols so GDB, QEMU -s and backtraces stay useful, and
+# `INTEROS_KERNEL_PROFILE=debug` remains meaningful. The embedded-image size
+# problem is solved where it belongs, in the artifact pipeline: the userspace
+# ELFs the kernel embeds into .rodata (kernel/src/task/images.rs) are stripped
+# per-binary by tools/build_userspace.py and by the manifest fallback builder
+# in tools/interos.py (llvm-strip --strip-debug --strip-unneeded). Without
+# stripping, ~20 debug ELFs of ~15MB each put ~300MB of debuginfo into the
+# BIOS image: it grows to 314MB and the bootloader's second stage spends many
+# minutes reading it through BIOS int13h under TCG, which looks like a boot
+# hang. Measured with `strip --strip-debug`: launcher 15.1MB -> 1.4MB.
 
 [profile.release]
 panic = "abort"
