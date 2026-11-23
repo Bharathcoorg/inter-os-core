@@ -173,7 +173,9 @@ impl AxmlDocument {
                         u16::from_le_bytes([data[cursor + 24], data[cursor + 25]]) as usize;
                     let attr_size =
                         u16::from_le_bytes([data[cursor + 26], data[cursor + 27]]) as usize;
-                    let mut attr_cur = cursor + attr_start;
+                    let mut attr_cur = cursor
+                        .checked_add(attr_start)
+                        .ok_or(AxmlError::MalformedChunk)?;
 
                     for _i in 0..attr_count {
                         if attr_cur + 20 > cursor + sub_size {
