@@ -309,6 +309,26 @@ def run_app_lifecycle(reader, monitor_sock, operation_num, app_name, app_id, tap
     else:
         time.sleep(0.8)
 
+def kill_proc_on_port(p):
+    """Frees a TCP port by killing a stale QEMU that still owns it.
+
+    A process owned by anything else (another device/server on this port) is
+    left running so the caller's bind fails loudly instead of killing a
+    foreign service.
+    """
+    try:
+        import psutil
+        for conn in psutil.net_connections():
+            if conn.laddr and conn.laddr.port == p and conn.pid:
+                try:
+                    proc = psutil.Process(conn.pid)
+                    if "qemu" in proc.name().lower():
+                        proc.kill()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 def main():
     qemu_exe = find_qemu("qemu-system-x86_64.exe")
     kernel_img = os.path.abspath(r"target\inter-os-bios.img")

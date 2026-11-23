@@ -11,12 +11,33 @@ import sys
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
 
-def find_qemu(binary="qemu-system-x86_64.exe"):
-    if "QEMU_PATH" in os.environ and os.path.exists(os.path.join(os.environ["QEMU_PATH"], binary)):
-        return os.path.join(os.environ["QEMU_PATH"], binary)
+# This file is a script contract, not a pytest module: the walkthrough boots the
+# full x86 guest at import time. Running it under pytest collection would launch
+# QEMU per collected file, so pytest skips it here; the contract runner
+# (tests/run_all_contracts.py) executes it as a script via `python3`, which
+# reaches the walkthrough through __main__ below.
+if __name__ != "__main__":
+    import pytest
+    pytest.skip(
+        "script-style QEMU walkthrough; run directly or via tests/run_all_contracts.py",
+        allow_module_level=True,
+    )
+
+def find_qemu(binary=None):
+    # Platform-correct default: Windows ships qemu-system-x86_64.exe, Linux
+    # qemu-system-x86_64. Try the requested name, then the other convention,
+    # so a POSIX CI host is not handed a bare ".exe" filename to exec.
+    if binary is None:
+        binary = "qemu-system-x86_64.exe" if os.name == "nt" else "qemu-system-x86_64"
     found = shutil.which(binary)
     if found:
         return found
+    alt = binary[:-4] if binary.endswith(".exe") else binary + ".exe"
+    found = shutil.which(alt)
+    if found:
+        return found
+    if "QEMU_PATH" in os.environ and os.path.exists(os.path.join(os.environ["QEMU_PATH"], binary)):
+        return os.path.join(os.environ["QEMU_PATH"], binary)
     candidates = [
         os.path.expanduser(f"~/qemu/{binary}"),
         rf"C:\Program Files\qemu\{binary}",
@@ -27,9 +48,9 @@ def find_qemu(binary="qemu-system-x86_64.exe"):
             return c
     return binary
 
-qemu_exe = find_qemu("qemu-system-x86_64.exe")
-kernel_img = os.path.abspath(r"target\inter-os-bios.img")
-data_img = os.path.abspath(r"target\test_serial_data.img")
+qemu_exe = find_qemu()
+kernel_img = os.path.abspath(os.path.join("target", "inter-os-bios.img"))
+data_img = os.path.abspath(os.path.join("target", "test_serial_data.img"))
 if not os.path.exists(data_img):
     # The gallery writes its capture under /storage, which only exists once a
     # data disk is attached, so the walkthrough boots with one. It is snapshotted
@@ -38,13 +59,13 @@ if not os.path.exists(data_img):
         fh.write(b"\0" * (64 * 1024 * 1024))
 
 
-k1 = os.path.abspath(r"kernel\target\x86_64-unknown-none\debug\kernel")
-k2 = os.path.abspath(r"target\x86_64-unknown-none\debug\kernel")
+k1 = os.path.abspath(os.path.join("kernel", "target", "x86_64-unknown-none", "debug", "kernel"))
+k2 = os.path.abspath(os.path.join("target", "x86_64-unknown-none", "debug", "kernel"))
 kernel_elf = k1 if os.path.exists(k1) else k2
 if os.path.exists(kernel_elf):
     if not os.path.exists(kernel_img) or os.path.getmtime(kernel_elf) > os.path.getmtime(kernel_img):
         print("[TEST SETUP] Updating bootable disk image with latest kernel ELF...")
-        subprocess.run(["cargo", "+nightly", "run", "--manifest-path", "boot/Cargo.toml", "--", kernel_elf, kernel_img], check=True)
+        subprocess.run(["cargo", "run", "--manifest-path", "boot/Cargo.toml", "--", kernel_elf, kernel_img], check=True)
 
 def kill_proc_on_port(p):
     try:
@@ -70,7 +91,7 @@ time.sleep(0.5)
 args = [
     qemu_exe,
     "-machine", "q35",
-    "-cpu", "qemu64",
+    "-cpu", "qemu64,+rdrand",
     "-device", "piix3-ide,id=ide",
     "-drive", f"file={kernel_img},format=raw,if=none,id=bootd,snapshot=on",
     "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",
