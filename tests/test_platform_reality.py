@@ -197,17 +197,13 @@ class PlatformRealityTests(unittest.TestCase):
 
         # The status register is hardware-owned and write-1-to-clear. Setting a
         # completion bit would manufacture command completion; acknowledging one
-        # by clearing it is the only legitimate write.
-        writes = re.findall(
-            r"mmio_write\d+\(\s*self\.base_vaddr,\s*SDHCI_INT_STATUS,\s*(?P<value>[^;]*)\)",
-            storage,
-        )
-        self.assertTrue(writes, "no SDHCI status-register writes found to audit")
-        for value in writes:
-            self.assertIn("&", value)
-            self.assertNotIn("|", value, f"SDHCI status write sets a bit: {value}")
+        # by clearing it via W1C semantics (writing exact bits) is the only legitimate write.
+        self.assertIn("fn clear_interrupts(&self, bits: u32)", storage)
+        self.assertIn("mmio_write32(self.base_vaddr, SDHCI_INT_STATUS, bits);", storage)
+        # The inverted read-modify-write patterns must not be present
+        self.assertNotIn("cur & !INT_CMD_COMPLETE", storage)
+        self.assertNotIn("cur & !INT_TRANSFER_COMPLETE", storage)
         self.assertNotIn("(cur & !INT_ERROR) | INT_CMD_COMPLETE", storage)
-        self.assertNotIn("SDHCI_INT_STATUS, INT_CMD_COMPLETE", storage)
 
     def test_aarch64_power_requires_real_telemetry(self):
         power = self.read("kernel-aarch64/src/power.rs")

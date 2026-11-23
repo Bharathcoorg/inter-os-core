@@ -101,6 +101,13 @@ impl SdhciController {
         }
     }
 
+    /// Clears exactly the given interrupt-status bits using W1C semantics.
+    fn clear_interrupts(&self, bits: u32) {
+        unsafe {
+            mmio_write32(self.base_vaddr, SDHCI_INT_STATUS, bits);
+        }
+    }
+
     pub fn set_hardware_present(&mut self, present: bool) {
         self.hardware_present = present;
         if !present {
@@ -155,7 +162,7 @@ impl SdhciController {
 
             let pending = mmio_read32(self.base_vaddr, SDHCI_INT_STATUS);
             if (pending & INT_ERROR) != 0 {
-                mmio_write32(self.base_vaddr, SDHCI_INT_STATUS, pending & INT_ERROR);
+                self.clear_interrupts(pending & INT_ERROR);
             }
 
             mmio_write32(self.base_vaddr, SDHCI_ARGUMENT, arg);
@@ -168,8 +175,7 @@ impl SdhciController {
                     return Err("SDHCI Device Error");
                 }
                 if (int_stat & INT_CMD_COMPLETE) != 0 {
-                    let cur = mmio_read32(self.base_vaddr, SDHCI_INT_STATUS);
-                    mmio_write32(self.base_vaddr, SDHCI_INT_STATUS, cur & !INT_CMD_COMPLETE);
+                    self.clear_interrupts(INT_CMD_COMPLETE);
                     let resp0 = mmio_read32(self.base_vaddr, SDHCI_RESPONSE_0);
                     return Ok(resp0);
                 }
@@ -179,7 +185,11 @@ impl SdhciController {
     }
 
     pub fn read_block(&self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), &'static str> {
-        let addr_arg = if self.high_capacity { lba } else { lba * 512 };
+        let addr_arg = if self.high_capacity {
+            lba
+        } else {
+            lba.checked_mul(SECTOR_SIZE as u32).ok_or("LBA overflow")?
+        };
 
         unsafe {
             mmio_write16(self.base_vaddr, SDHCI_BLOCK_SIZE, 512);
@@ -200,25 +210,23 @@ impl SdhciController {
                 return Err("SDHCI Read Buffer Not Ready");
             }
 
-            let u32_ptr = buf.as_mut_ptr() as *mut u32;
             for i in 0..128 {
                 let dword = mmio_read32(self.base_vaddr, SDHCI_BUFFER_PORT);
-                core::ptr::write(u32_ptr.add(i), dword);
+                core::ptr::write_unaligned(buf.as_mut_ptr().add(i * 4) as *mut u32, dword);
             }
 
-            let cur = mmio_read32(self.base_vaddr, SDHCI_INT_STATUS);
-            mmio_write32(
-                self.base_vaddr,
-                SDHCI_INT_STATUS,
-                cur & !INT_TRANSFER_COMPLETE,
-            );
+            self.clear_interrupts(INT_TRANSFER_COMPLETE);
         }
 
         Ok(())
     }
 
     pub fn write_block(&self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
-        let addr_arg = if self.high_capacity { lba } else { lba * 512 };
+        let addr_arg = if self.high_capacity {
+            lba
+        } else {
+            lba.checked_mul(SECTOR_SIZE as u32).ok_or("LBA overflow")?
+        };
 
         unsafe {
             mmio_write16(self.base_vaddr, SDHCI_BLOCK_SIZE, 512);
@@ -239,18 +247,12 @@ impl SdhciController {
                 return Err("SDHCI Write Buffer Not Ready");
             }
 
-            let u32_ptr = buf.as_ptr() as *const u32;
             for i in 0..128 {
-                let dword = core::ptr::read(u32_ptr.add(i));
+                let dword = core::ptr::read_unaligned(buf.as_ptr().add(i * 4) as *const u32);
                 mmio_write32(self.base_vaddr, SDHCI_BUFFER_PORT, dword);
             }
 
-            let cur = mmio_read32(self.base_vaddr, SDHCI_INT_STATUS);
-            mmio_write32(
-                self.base_vaddr,
-                SDHCI_INT_STATUS,
-                cur & !INT_TRANSFER_COMPLETE,
-            );
+            self.clear_interrupts(INT_TRANSFER_COMPLETE);
         }
 
         Ok(())
