@@ -78,13 +78,14 @@ function Invoke-Build {
         "audiod", "camerad", "sensord", "compositor", "launcher", "settings",
         "dialer", "vault", "camera", "calculator", "browser",
         "messages", "calendar", "music", "file_manager", "gallery",
-        "notes"
+        "notes", "agent_manager", "video_player", "webview_demo",
+        "aid", "searchd", "agentd", "acrd", "acr-app-runtime"
     )
 
     $needsUserspaceBuild = $false
     $badImages = @()
     # Resolved once, not per image: the walk touches every source file and the
-    # answer is the same for all 25 images.
+    # answer is the same for all 32 images.
     $newestSourceUtc = Get-NewestUserspaceSourceUtc -Root $rootDir
     foreach ($image in $embeddedImages) {
         $imagePath = Join-Path $embeddedDir $image
