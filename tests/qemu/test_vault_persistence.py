@@ -84,10 +84,10 @@ def read_sector(lba):
 def main():
     if not os.path.exists(IMAGE):
         print(f"SKIP: boot image missing: {IMAGE}")
-        return 0
+        return 2
     if not have_qemu():
         print("SKIP: qemu-system-x86_64 not available")
-        return 0
+        return 2
     if not os.path.exists(DATA) or os.path.getsize(DATA) < DATA_BYTES:
         os.makedirs(os.path.dirname(DATA), exist_ok=True)
         subprocess.run(["qemu-img", "create", "-f", "raw", DATA, str(DATA_BYTES)],
@@ -119,6 +119,20 @@ def main():
 
     print("FAIL: vault region holds unexpected data:", magic.hex())
     return 1
+
+
+def test_vault_persistence():
+    try:
+        import pytest
+    except ImportError:
+        pytest = None
+
+    exit_code = main()
+    if exit_code == 2:
+        if pytest:
+            pytest.skip("Prerequisites missing (boot image or QEMU)")
+        return
+    assert exit_code == 0, "Vault persistence test failed"
 
 
 if __name__ == "__main__":

@@ -50,10 +50,10 @@ def have_qemu():
 def main():
     if not os.path.exists(IMAGE):
         print(f"SKIP: boot image missing: {IMAGE}")
-        return 0
+        return 2
     if not have_qemu():
         print("SKIP: qemu-system-x86_64 not available")
-        return 0
+        return 2
 
     if not os.path.exists(DATA) or os.path.getsize(DATA) < DATA_BYTES:
         os.makedirs(os.path.dirname(DATA), exist_ok=True)
@@ -110,8 +110,8 @@ def main():
     print(f"guest reported a fault    : {paged_out}")
 
     if not booted and not paged_out:
-        print("SKIP: guest produced no decisive output in the boot window")
-        return 0
+        print("FAIL: guest produced no decisive output in the boot window")
+        return 1
 
     if before != after:
         print("FAIL: the guest wrote to its own boot image")
@@ -121,6 +121,20 @@ def main():
 
     print("PASS: boot image unchanged after boot")
     return 0
+
+
+def test_boot_image_immutable():
+    try:
+        import pytest
+    except ImportError:
+        pytest = None
+
+    exit_code = main()
+    if exit_code == 2:
+        if pytest:
+            pytest.skip("Prerequisites missing (boot image or QEMU)")
+        return
+    assert exit_code == 0, "Boot image immutability test failed"
 
 
 if __name__ == "__main__":

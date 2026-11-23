@@ -34,7 +34,7 @@ def test_ac97_qemu_audio():
     qemu_exe = find_qemu()
     if not qemu_exe:
         print("[SKIP] qemu-system-x86_64 not found.")
-        sys.exit(0)
+        sys.exit(2)
 
     kernel_img = os.path.join(ROOT, "target", "inter-os-bios.img")
     if not os.path.exists(kernel_img):
