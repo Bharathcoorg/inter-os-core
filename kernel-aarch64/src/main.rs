@@ -461,6 +461,13 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
     // "nothing has been committed".
     storage::bind_journal_device();
     storage::report_journal_rollback_floor();
+    // Prove the whole storage vertical against the device that just bound:
+    // commit one record and read it back. On a second boot over the same disk
+    // this recovers the previous generation and commits the next, which is the
+    // persistence evidence a single boot cannot provide.
+    if storage::journal_selftest().is_err() {
+        kprintln!("[WARN] kernel-core journal selftest FAILED — see the report above.");
+    }
 
     // 9. Goodix GT911 / GT917D Multi-Touch Digitizer Protocol
     kprintln!("--- [Testing Goodix GT911/GT917D multi-touch protocol] ---");

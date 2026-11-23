@@ -66,7 +66,11 @@ SECTIONS
 
     . = ALIGN(16);
 
-    .stack : ALIGN(16) {
+    /* NOLOAD: the stack is scratch memory, not image content. A PROGBITS
+     * section here would force the linker to materialize the preceding .bss
+     * zeros into the file, and every binary linked with this script (the
+     * kernels and all userspace daemons) would carry megabytes of dead zeros. */
+    .stack (NOLOAD) : ALIGN(16) {
         . += 0x10000; /* 64 KiB Primordial Boot Stack (CPU 0) */
         __stack_top = .;
         __secondary_stacks_start = .;

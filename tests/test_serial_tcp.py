@@ -29,7 +29,7 @@ def find_qemu(binary="qemu-system-x86_64.exe"):
 
 qemu_exe = find_qemu("qemu-system-x86_64.exe")
 kernel_img = os.path.abspath(r"target\inter-os-bios.img")
-data_img = os.path.abspath(r"target\\test_serial_data.img")
+data_img = os.path.abspath(r"target\test_serial_data.img")
 if not os.path.exists(data_img):
     # The gallery writes its capture under /storage, which only exists once a
     # data disk is attached, so the walkthrough boots with one. It is snapshotted

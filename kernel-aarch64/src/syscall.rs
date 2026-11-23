@@ -1970,8 +1970,10 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
 ///    raw copy, an out-of-range tail aborts before touching its bytes, and a
 ///    length that overflows the user address range is refused outright.
 pub fn test_user_copy_epoch_bounds() {
-    // (2) Overflowing range refused outright, before any copy attempt.
-    let mut sink = [0u8; 8];
+    // (2) Overflowing range refused outright, before any copy attempt. The
+    // sink is a full chunk's worth so the lengths below reach the validation
+    // loop instead of tripping the caller error `len > dst.len()` (-22).
+    let mut sink = [0u8; 0x2000];
     assert_eq!(copy_from_user(&mut sink, u64::MAX - 4, 8), Err(-14));
 
     // (2) An in-range prefix with an out-of-range tail must fail closed and

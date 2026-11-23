@@ -22,6 +22,7 @@ pub mod images;
 pub mod input_queue;
 pub mod services;
 pub mod allocator;
+pub mod storage;
 pub mod display;
 pub mod pcie;
 pub mod settings;
@@ -70,6 +71,19 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     // 2b. Initialize Dynamic Heap & Bochs Display Scanout
     allocator::init_heap();
     println!("[BOOT] RISC-V 32 MiB Dynamic Heap Allocator initialized.");
+
+    // 2c. Persistent storage: the image extent for the boot guard (linker
+    // bounds, because a -kernel-loaded image has no ELF header in RAM to
+    // walk), then the virtio-blk binding for the shared core's journal, then
+    // the rollback-floor report and a commit/read-back selftest against the
+    // real device.
+    storage::install_boot_guard_extent();
+    storage::bind_journal_device();
+    storage::diagnose_bound_device();
+    storage::report_journal_rollback_floor();
+    if let Err(err) = storage::journal_selftest() {
+        println!("[BOOT] persistent storage selftest FAILED: {:?}.", err);
+    }
     pcie::probe_and_init_display();
 
     // Supervisor user-memory access must be off: firmware leaves SUM set, and

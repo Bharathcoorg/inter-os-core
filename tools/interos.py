@@ -389,6 +389,22 @@ def _cargo_build_manifest(manifest_path, target, bin_name=None):
     return subprocess.run(cmd, cwd=str(WORKSPACE_ROOT), env=env).returncode
 
 
+def _build_arch_userspace(arch):
+    """Build and strip the userspace graph for aarch64/riscv64 before the
+    kernel build: both kernels embed these ELFs into .rodata via
+    include_bytes!, so an unstripped artifact ships its debuginfo in every
+    boot image (the x86_64 path enforces the same rule in _build_x86_userspace)."""
+    log(f"Building canonical {arch} userspace via tools/build_userspace.py...")
+    rc = subprocess.run(
+        [sys.executable, str(WORKSPACE_ROOT / "tools" / "build_userspace.py"), "--arch", arch],
+        cwd=str(WORKSPACE_ROOT),
+    ).returncode
+    if rc != 0:
+        log_error(f"{arch} userspace build failed")
+        return False
+    return True
+
+
 def _build_x86_userspace():
     ps1 = WORKSPACE_ROOT / "tools" / "build_userspace.ps1"
     if sys.platform == "win32" and ps1.exists():
@@ -597,11 +613,12 @@ def pack_aarch64_flat_image(elf_path, image_path):
     """Relays an AArch64 ELF's PT_LOAD segments as a flat arm64 Image.
 
     The image's byte 0 is the byte the linker placed at the lowest physical
-    address, so the flat file occupies exactly the physical window the kernel was
-    linked for; gaps between segments are zero-filled and a segment's `memsz`
-    beyond its `filesz` stays zero, because that region is `.bss` -- `_start`
-    clears it, but it still has to be present for the stack and heap that follow
-    it to sit at their linked addresses.
+    address, so the flat file occupies the initialized part of the physical
+    window the kernel was linked for; gaps between segments are zero-filled and
+    a segment's `memsz` beyond its `filesz` is omitted entirely, because that
+    region is `.bss`/stack scratch -- `_start` clears it, and the boot header's
+    `image_size` reserves the full window so the stack and heap that follow sit
+    at their linked addresses.
 
     Returns the packed image's size, or None when the ELF cannot be packed; a
     caller must not write an artefact it cannot vouch for.
@@ -628,7 +645,12 @@ def pack_aarch64_flat_image(elf_path, image_path):
         return None
 
     base = min(paddr for paddr, _, _, _ in segments)
-    end = max(paddr + memsz for paddr, _, _, memsz in segments)
+    # The image ends at the last file-backed byte. A segment's `memsz` beyond
+    # its `filesz` is `.bss`/stack scratch: QEMU zeroes guest RAM at reset and
+    # `_start` clears `.bss`, so shipping those zeros on disk only bloats the
+    # image. The boot header's `image_size` still covers the full window, so
+    # QEMU keeps DTB/initrd out of the kernel's linked footprint.
+    end = max(paddr + filesz for paddr, _, filesz, _memsz in segments)
     image = bytearray(end - base)
     for paddr, offset, filesz, _memsz in sorted(segments):
         start = paddr - base
@@ -741,6 +763,8 @@ def cmd_build(args):
             if rc != 0:
                 return rc
         elif t == "aarch64":
+            if not _build_arch_userspace("aarch64"):
+                return 1
             log(f"Building InterOS Kernel [{AARCH64_TARGET_TRIPLE}]...")
             res = subprocess.run([
                 "cargo", "build", "--locked", "--manifest-path", "kernel-aarch64/Cargo.toml",
@@ -757,6 +781,8 @@ def cmd_build(args):
             if rc != 0:
                 return rc
         elif t == "riscv64":
+            if not _build_arch_userspace("riscv64"):
+                return 1
             log("Building InterOS Kernel [riscv64gc-unknown-none-elf]...")
             res = subprocess.run([
                 "cargo", "build", "--locked", "--manifest-path", "kernel-riscv64/Cargo.toml",

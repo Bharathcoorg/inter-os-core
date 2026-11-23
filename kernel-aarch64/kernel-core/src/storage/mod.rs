@@ -32,6 +32,7 @@
 pub mod block;
 pub mod boot_guard;
 pub mod persistent;
+pub mod virtio_blk;
 
 pub use block::{BlockDevice, BlockDeviceError, BlockDeviceInfo, BlockDeviceKind, SECTOR_SIZE};
 pub use boot_guard::{

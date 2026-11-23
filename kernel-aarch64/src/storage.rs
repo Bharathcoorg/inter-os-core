@@ -369,6 +369,12 @@ pub static AARCH64_IMAGE_EXTENT: Aarch64ImageExtent = Aarch64ImageExtent;
 /// write with a read.
 static mut SDHCI_JOURNAL_DEVICE: SdhciController = SdhciController::new(0);
 
+/// The virtio-blk transport bound to the journal, when one answered the probe.
+/// Filled at most once, by `bind_journal_device`, before secondary CPUs run.
+static mut VIRTIO_JOURNAL_DEVICE: Option<
+    interos_kernel_core::storage::virtio_blk::VirtioMmioBlockDevice,
+> = None;
+
 /// Binds this platform's block device to the shared journal and reports what the
 /// journal can now do. Called during boot.
 ///
@@ -382,11 +388,74 @@ static mut SDHCI_JOURNAL_DEVICE: SdhciController = SdhciController::new(0);
 /// keystore mints a storage root there. The two are distinguishable, which is why
 /// the boot log never claims a rollback floor was read.
 ///
-/// WHY a device with no region is bound at all rather than left unbound: the seam
-/// has to be exercised by something, and a bound-but-empty device proves the
-/// journal's failure path refuses to fabricate state. A real SDHCI/eMMC region, or
-/// a virtio-blk device, attaches to this same static before this call.
+/// WHY virtio is probed first: the QEMU `virt` board attaches no eMMC region,
+/// so without a real transport this static would only ever hold the
+/// bound-but-empty controller that proves the journal's refusal path. The
+/// shared core's virtio-mmio block driver turns `-drive if=none -device
+/// virtio-blk-device` into real sectors for exactly that case; the SDHCI
+/// controller below remains the binding for real hardware. Whichever probe
+/// answers first owns the journal.
 pub fn bind_journal_device() {
+    // Virtio transports first. On QEMU's ARM `virt` board the virtio-mmio
+    // transports sit at 0x0a000000 with a 0x200-byte stride (32 slots,
+    // 0x0a000000..0x0a004000) — NOT the 0x10001000/0x1000 layout the RISC-V
+    // virt board uses. `virtio-blk-device` plugs into the first free slot.
+    for i in 0..32usize {
+        let mmio = 0x0a00_0000 + i * 0x200;
+        // SAFETY: identity-mapped device MMIO, 4096 bytes per transport; the
+        // probe writes only virtio registers.
+        let device =
+            interos_kernel_core::storage::virtio_blk::VirtioMmioBlockDevice::probe(mmio);
+        if device.is_none() {
+            // Diagnose a transport that answers "virtio" but refuses the
+            // driver: without this, a failed negotiation looks identical to
+            // an empty slot and the journal silently binds the SDHCI stub.
+            let magic = unsafe { core::ptr::read_volatile(mmio as *const u32) };
+            if magic == 0x7472_6976 {
+                let version = unsafe { core::ptr::read_volatile((mmio + 4) as *const u32) };
+                let device_id = unsafe { core::ptr::read_volatile((mmio + 8) as *const u32) };
+                let status = unsafe { core::ptr::read_volatile((mmio + 0x70) as *const u32) };
+                let max_queue = unsafe { core::ptr::read_volatile((mmio + 0x34) as *const u32) };
+                crate::kprintln!(
+                    "[VIRTIO-MMIO] probe failed at {:#x}: version {} device_id {} status {:#x} queue_num_max {}.",
+                    mmio,
+                    version,
+                    device_id,
+                    status,
+                    max_queue
+                );
+            }
+            continue;
+        }
+        let device = device.expect("checked Some above");
+        // The device moves here: from probe's stack frame into the kernel
+        // static. Queue registers and DRIVER_OK are only programmed after the
+        // move, by `activate`, so the transport never sees a pre-move PFN.
+        let bound: &'static mut interos_kernel_core::storage::virtio_blk::VirtioMmioBlockDevice =
+            unsafe { (&mut *core::ptr::addr_of_mut!(VIRTIO_JOURNAL_DEVICE)).insert(device) };
+        if !bound.activate() {
+            // This transport answered "virtio" but refused the queue/features
+            // step. Give it back and keep scanning; the static is restored to
+            // None so the next slot starts clean.
+            unsafe { (&mut *core::ptr::addr_of_mut!(VIRTIO_JOURNAL_DEVICE)).take() };
+            crate::kprintln!(
+                "[VIRTIO-MMIO] transport at {:#x} refused activation; kept scanning.",
+                mmio
+            );
+            continue;
+        }
+        let sectors = bound.sector_count();
+        match interos_kernel_core::storage::persistent::bind_block_device(bound) {
+            Ok(()) => crate::kprintln!(
+                "[OK] kernel-core journal: virtio-blk bound at MMIO {:#x}, {} sectors.",
+                mmio,
+                sectors
+            ),
+            Err(reason) => crate::kprintln!("[WARN] kernel-core journal: {}", reason),
+        }
+        return;
+    }
+
     // SAFETY: this runs once, on the primordial CPU, before secondary cores are
     // brought up and before anything else can reach the journal, so there is
     // exactly one `&'static mut` to hand out and it is handed out once.
@@ -433,5 +502,74 @@ pub fn report_journal_rollback_floor() {
                 err
             );
         }
+    }
+}
+
+/// Commits one rollback-floor record through the journal and reads it back.
+///
+/// Mirrors the RISC-V kernel's selftest (`kernel-riscv64/src/storage.rs`):
+/// at boot it proves the whole vertical — virtio driver, queue, DMA scratch,
+/// journal slots, HMAC chain — against the device QEMU actually attached, and
+/// because the generation is read before the commit, a second boot on the same
+/// disk recovers the first boot's record and commits the next generation, which
+/// is the persistence proof a single boot cannot give. A failure is reported
+/// as it is, never swallowed: an unproven journal must look unproven.
+pub fn journal_selftest() -> Result<(), BlockDeviceError> {
+    const KIND: u8 = 9;
+    let mut generation = 1u64;
+    let mut existing = [0u8; 8];
+    if let Ok(Some((gen, _))) =
+        interos_kernel_core::storage::persistent::load_latest_kind(&mut existing, KIND)
+    {
+        generation = gen.saturating_add(1);
+    }
+    interos_kernel_core::storage::persistent::commit_kind(
+        &generation.to_le_bytes(),
+        KIND,
+    )
+    .map_err(|_| BlockDeviceError::WriteError)?;
+    let mut readback = [0u8; 8];
+    match interos_kernel_core::storage::persistent::load_latest_kind(&mut readback, KIND) {
+        Ok(Some((gen, len))) if gen == generation && len == 8 => {
+            crate::kprintln!(
+                "[OK] kernel-core journal selftest: commit generation {} written and read back.",
+                generation
+            );
+            Ok(())
+        }
+        Ok(Some((gen, len))) => {
+            crate::kprintln!(
+                "[WARN] kernel-core journal selftest: MISMATCH (generation {} len {} after committing {}).",
+                gen,
+                len,
+                generation
+            );
+            Err(BlockDeviceError::ReadError)
+        }
+        Ok(None) => {
+            crate::kprintln!("[WARN] kernel-core journal selftest: record vanished after commit.");
+            Err(BlockDeviceError::ReadError)
+        }
+        Err(err) => {
+            crate::kprintln!(
+                "[WARN] kernel-core journal selftest: read-back failed ({:?}).",
+                err
+            );
+            Err(BlockDeviceError::ReadError)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn journal_selftest_refuses_when_no_device_is_bound() {
+        // Host build: the journal's device binding is per-process state, and no
+        // device is bound here, so a commit must fail closed rather than
+        // fabricate a generation. Mirrors the RISC-V kernel's host test.
+        let result = journal_selftest();
+        assert!(result.is_err(), "an unbound journal must refuse, not succeed");
     }
 }
