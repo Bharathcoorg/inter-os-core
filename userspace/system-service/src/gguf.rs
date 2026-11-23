@@ -2380,7 +2380,7 @@ pub fn tensor_byte_size(
             .ok_or(GgufError::ArithmeticOverflow), // F16
         2 => {
             // Q4_0: 32 elements per 18 bytes
-            if total_elements % 32 != 0 {
+            if (dims[0] as usize) % 32 != 0 || total_elements % 32 != 0 {
                 return Err(GgufError::CorruptedTensor);
             }
             let blocks = total_elements / 32;
@@ -2388,7 +2388,7 @@ pub fn tensor_byte_size(
         }
         8 => {
             // Q8_0: 32 elements per 34 bytes
-            if total_elements % 32 != 0 {
+            if (dims[0] as usize) % 32 != 0 || total_elements % 32 != 0 {
                 return Err(GgufError::CorruptedTensor);
             }
             let blocks = total_elements / 32;
@@ -2396,7 +2396,7 @@ pub fn tensor_byte_size(
         }
         12 => {
             // Q4_K: 256 elements per 144 bytes
-            if total_elements % 256 != 0 {
+            if (dims[0] as usize) % 256 != 0 || total_elements % 256 != 0 {
                 return Err(GgufError::CorruptedTensor);
             }
             let blocks = total_elements / 256;

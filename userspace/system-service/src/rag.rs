@@ -1297,6 +1297,7 @@ pub fn format_rag_prompt(
     if matches.is_empty() {
         append!(b"[No matching local documents retrieved from storage]\n\n");
     } else {
+        append!(b"<retrieved_context>\n");
         append!(b"Retrieved verified local documents:\n");
         for (i, m) in matches.iter().enumerate() {
             append!(b"[");
@@ -1327,6 +1328,7 @@ pub fn format_rag_prompt(
             append!(&m.snippet[..m.snippet_len as usize]);
             append!(b"\"\n\n");
         }
+        append!(b"</retrieved_context>\n\n");
     }
 
     append!(b"--- USER QUERY ---\n");

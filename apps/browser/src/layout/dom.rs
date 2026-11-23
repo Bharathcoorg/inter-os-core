@@ -303,7 +303,6 @@ impl Dom {
         let mut depth = 1usize;
         let mut i = 0usize;
         let n = html.len();
-        let mut css_seen = false;
 
         while i < n {
             if html[i] != b'<' {
@@ -363,11 +362,8 @@ impl Dom {
                     continue;
                 }
                 i = find_close(html, i, b"style").unwrap_or(n);
-                if !css_seen {
-                    let end = find_close_start(html, start, b"style").unwrap_or(i);
-                    self.capture_css(&html[start..end]);
-                    css_seen = true;
-                }
+                let end = find_close_start(html, start, b"style").unwrap_or(i);
+                self.capture_css(&html[start..end]);
                 continue;
             }
             if tag.name_eq(b"title") {
@@ -669,11 +665,14 @@ impl Dom {
     }
 
     fn capture_css(&mut self, css: &[u8]) {
-        let n = css.len().min(MAX_CSS_BYTES);
-        self.stow_tokens_from(&css[..n]);
-        self.css[..n].copy_from_slice(&css[..n]);
-        self.css_len = n;
-        if css.len() > n {
+        let avail = MAX_CSS_BYTES.saturating_sub(self.css_len);
+        let n = css.len().min(avail);
+        if n > 0 {
+            self.stow_tokens_from(&css[..n]);
+            self.css[self.css_len..self.css_len + n].copy_from_slice(&css[..n]);
+            self.css_len += n;
+        }
+        if css.len() > avail {
             self.note(OVERFLOW_CSS);
         }
     }

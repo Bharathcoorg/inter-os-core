@@ -315,6 +315,7 @@ impl DalvikVmState {
         let mut pc: usize = 0;
         let mut steps = 0;
         const STEP_LIMIT: usize = 4096;
+        let reg_cap = self.registers.len();
 
         const TOTAL_INSTRUCTION_LIMIT: u64 = 1_000_000;
         while pc < insns.len() && steps < STEP_LIMIT {
@@ -336,7 +337,7 @@ impl DalvikVmState {
                     }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= 32 || v_src >= 32 {
+                    if v_dest >= reg_cap || v_src >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_dest] = self.registers[v_src];
@@ -348,7 +349,7 @@ impl DalvikVmState {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
                     let v_dest = insns[pc + 1] as usize;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_dest] = self.last_return_value;
@@ -360,7 +361,7 @@ impl DalvikVmState {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
                     let v_dest = insns[pc + 1] as usize;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_dest] = 0;
@@ -373,7 +374,7 @@ impl DalvikVmState {
                     }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let val = ((insns[pc + 1] as i8) >> 4) as u32;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_dest] = val;
@@ -386,7 +387,7 @@ impl DalvikVmState {
                     }
                     let v_dest = insns[pc + 1] as usize;
                     let val = i16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as i32 as u32;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_dest] = val;
@@ -399,7 +400,7 @@ impl DalvikVmState {
                     }
                     let v_dest = insns[pc + 1] as usize;
                     let val = i16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as i32 as u32;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_dest] = val;
@@ -412,7 +413,7 @@ impl DalvikVmState {
                     }
                     let v_dest = insns[pc + 1] as usize;
                     let str_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let text = dex.get_string_slice(str_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
@@ -431,7 +432,7 @@ impl DalvikVmState {
                         insns[pc + 4],
                         insns[pc + 5],
                     ]) as usize;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let text = dex.get_string_slice(str_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
@@ -445,7 +446,7 @@ impl DalvikVmState {
                     }
                     let v_dest = insns[pc + 1] as usize;
                     let type_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     if dex.get_type_slice(type_idx as u32).is_err() {
@@ -461,7 +462,7 @@ impl DalvikVmState {
                     }
                     let v_dest = insns[pc + 1] as usize;
                     let type_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let class_descriptor = dex.get_type_slice(type_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
@@ -498,7 +499,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     if self.registers[v_a] == self.registers[v_b] {
@@ -518,7 +519,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     if self.registers[v_a] != self.registers[v_b] {
@@ -537,7 +538,7 @@ impl DalvikVmState {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
                     let v_dest = insns[pc + 1] as usize;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     if self.registers[v_dest] == 0 {
@@ -556,7 +557,7 @@ impl DalvikVmState {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
                     let v_dest = insns[pc + 1] as usize;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     if self.registers[v_dest] != 0 {
@@ -637,7 +638,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_a] = self.registers[v_a].wrapping_add(self.registers[v_b]);
@@ -650,7 +651,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_a] = self.registers[v_a].wrapping_sub(self.registers[v_b]);
@@ -663,7 +664,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_a] = self.registers[v_a].wrapping_mul(self.registers[v_b]);
@@ -676,7 +677,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let divisor = self.registers[v_b] as i32;
@@ -694,7 +695,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let divisor = self.registers[v_b] as i32;
@@ -712,7 +713,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_a] &= self.registers[v_b];
@@ -725,7 +726,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_a] |= self.registers[v_b];
@@ -738,7 +739,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_a] ^= self.registers[v_b];
@@ -751,7 +752,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let shift = self.registers[v_b] & 0x1F;
@@ -765,7 +766,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let shift = self.registers[v_b] & 0x1F;
@@ -779,7 +780,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let shift = self.registers[v_b] & 0x1F;
@@ -795,7 +796,7 @@ impl DalvikVmState {
                     let v_dest = insns[pc + 1] as usize;
                     let v_b = insns[pc + 2] as usize;
                     let v_c = insns[pc + 3] as usize;
-                    if v_dest >= 32 || v_b >= 32 || v_c >= 32 {
+                    if v_dest >= reg_cap || v_b >= reg_cap || v_c >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let rb = self.registers[v_b];
@@ -832,7 +833,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let va = self.registers[v_a] as i32;
@@ -860,7 +861,7 @@ impl DalvikVmState {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
                     let v_dest = insns[pc + 1] as usize;
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let val = self.registers[v_dest] as i32;
@@ -888,7 +889,7 @@ impl DalvikVmState {
                     }
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let obj_id = self.registers[v_b];
@@ -905,7 +906,7 @@ impl DalvikVmState {
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
                     let type_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let elem_type = dex.get_type_slice(type_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
@@ -922,7 +923,7 @@ impl DalvikVmState {
                     let v_dest = insns[pc + 1] as usize;
                     let v_arr = insns[pc + 2] as usize;
                     let v_idx = insns[pc + 3] as usize;
-                    if v_dest >= 32 || v_arr >= 32 || v_idx >= 32 {
+                    if v_dest >= reg_cap || v_arr >= reg_cap || v_idx >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let arr_id = self.registers[v_arr];
@@ -943,7 +944,7 @@ impl DalvikVmState {
                     let v_val = insns[pc + 1] as usize;
                     let v_arr = insns[pc + 2] as usize;
                     let v_idx = insns[pc + 3] as usize;
-                    if v_val >= 32 || v_arr >= 32 || v_idx >= 32 {
+                    if v_val >= reg_cap || v_arr >= reg_cap || v_idx >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let arr_id = self.registers[v_arr];
@@ -964,7 +965,7 @@ impl DalvikVmState {
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
                     let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let obj_id = self.registers[v_b];
@@ -983,7 +984,7 @@ impl DalvikVmState {
                     let v_a = (insns[pc + 1] & 0x0F) as usize;
                     let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
                     let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
-                    if v_a >= 32 || v_b >= 32 {
+                    if v_a >= reg_cap || v_b >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let val = self.registers[v_a];
@@ -1001,7 +1002,7 @@ impl DalvikVmState {
                     }
                     let v_dest = insns[pc + 1] as usize;
                     let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
-                    if v_dest >= 32 {
+                    if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_dest] = self.get_static_field(field_idx);
@@ -1014,7 +1015,7 @@ impl DalvikVmState {
                     }
                     let v_src = insns[pc + 1] as usize;
                     let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
-                    if v_src >= 32 {
+                    if v_src >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let val = self.registers[v_src];
@@ -1027,7 +1028,7 @@ impl DalvikVmState {
                     }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= 32 || v_src >= 32 {
+                    if v_dest >= reg_cap || v_src >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let int_val = self.registers[v_src] as i32;
@@ -1042,7 +1043,7 @@ impl DalvikVmState {
                     }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= 32 || v_src >= 32 {
+                    if v_dest >= reg_cap || v_src >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let float_val = f32::from_bits(self.registers[v_src]);
@@ -1057,7 +1058,7 @@ impl DalvikVmState {
                     }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= 32 || v_src >= 32 {
+                    if v_dest >= reg_cap || v_src >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let byte_val = (self.registers[v_src] as i8) as i32;
@@ -1071,7 +1072,7 @@ impl DalvikVmState {
                     }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= 32 || v_src >= 32 {
+                    if v_dest >= reg_cap || v_src >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_dest] = (self.registers[v_src] as u16) as u32;
@@ -1084,7 +1085,7 @@ impl DalvikVmState {
                     }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= 32 || v_src >= 32 {
+                    if v_dest >= reg_cap || v_src >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let short_val = (self.registers[v_src] as i16) as i32;
@@ -1099,7 +1100,7 @@ impl DalvikVmState {
                     let v_dest = insns[pc + 1] as usize;
                     let v_b = insns[pc + 2] as usize;
                     let v_c = insns[pc + 3] as usize;
-                    if v_dest >= 32 || v_b >= 32 || v_c >= 32 {
+                    if v_dest >= reg_cap || v_b >= reg_cap || v_c >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let fb = f32::from_bits(self.registers[v_b]);
@@ -1127,7 +1128,7 @@ impl DalvikVmState {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
                     let v_src = insns[pc + 1] as usize;
-                    if v_src >= 32 {
+                    if v_src >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let ret_val = self.registers[v_src];
@@ -1144,7 +1145,7 @@ impl DalvikVmState {
                     if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = insns[pc + 1] as usize;
                     let v_src = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
-                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     self.registers[v_dest] = self.registers[v_src];
                     self.string_registers[v_dest] = self.string_registers[v_src].clone();
                     pc += 4;
@@ -1153,7 +1154,7 @@ impl DalvikVmState {
                     if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
                     let v_src = u16::from_le_bytes([insns[pc + 4], insns[pc + 5]]) as usize;
-                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     self.registers[v_dest] = self.registers[v_src];
                     self.string_registers[v_dest] = self.string_registers[v_src].clone();
                     pc += 6;
@@ -1162,7 +1163,7 @@ impl DalvikVmState {
                     if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest + 1 >= 32 || v_src + 1 >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_dest + 1 >= reg_cap || v_src + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     self.registers[v_dest] = self.registers[v_src];
                     self.registers[v_dest + 1] = self.registers[v_src + 1];
                     self.string_registers[v_dest] = None;
@@ -1173,7 +1174,7 @@ impl DalvikVmState {
                     if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     self.registers[v_dest] = self.registers[v_src];
                     self.string_registers[v_dest] = self.string_registers[v_src].clone();
                     pc += 2;
@@ -1181,7 +1182,7 @@ impl DalvikVmState {
                 OP_MOVE_RESULT_WIDE => {
                     if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = insns[pc + 1] as usize;
-                    if v_dest + 1 >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_dest + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     self.registers[v_dest] = self.last_return_value;
                     self.registers[v_dest + 1] = self.last_return_wide_hi;
                     self.string_registers[v_dest] = None;
@@ -1191,7 +1192,7 @@ impl DalvikVmState {
                 OP_MOVE_RESULT_OBJECT => {
                     if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = insns[pc + 1] as usize;
-                    if v_dest >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_dest >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     self.registers[v_dest] = self.last_return_value;
                     self.string_registers[v_dest] = self.last_return_string.clone();
                     pc += 2;
@@ -1199,20 +1200,20 @@ impl DalvikVmState {
                 OP_MONITOR_ENTER | OP_MONITOR_EXIT => {
                     if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_src = insns[pc + 1] as usize;
-                    if v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     pc += 2;
                 }
                 OP_CHECK_CAST => {
                     if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = insns[pc + 1] as usize;
-                    if v_dest >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_dest >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     pc += 4;
                 }
                 OP_INSTANCE_OF => {
                     if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let obj_id = self.registers[v_src];
                     self.registers[v_dest] = if obj_id > 0 { 1 } else { 0 };
                     self.string_registers[v_dest] = None;
@@ -1221,7 +1222,7 @@ impl DalvikVmState {
                 OP_FILL_ARRAY_DATA => {
                     if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_arr = insns[pc + 1] as usize;
-                    if v_arr >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_arr >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let offset = (i32::from_le_bytes([insns[pc + 2], insns[pc + 3], insns[pc + 4], insns[pc + 5]]) as isize) * 2;
                     let payload_pos = pc as isize + offset;
                     if payload_pos >= 0 && (payload_pos as usize + 8) <= insns.len() {
@@ -1251,7 +1252,7 @@ impl DalvikVmState {
                 OP_THROW => {
                     if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_ex = insns[pc + 1] as usize;
-                    if v_ex >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_ex >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let ex_id = self.registers[v_ex];
                     if ex_id == 0 { return Err(DalvikVmError::NullPointerDereference); }
                     return Err(DalvikVmError::UnhandledException(ex_id));
@@ -1259,7 +1260,7 @@ impl DalvikVmState {
                 OP_PACKED_SWITCH => {
                     if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_src = insns[pc + 1] as usize;
-                    if v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let test_val = self.registers[v_src] as i32;
                     let offset = (i32::from_le_bytes([insns[pc + 2], insns[pc + 3], insns[pc + 4], insns[pc + 5]]) as isize) * 2;
                     let payload_pos = pc as isize + offset;
@@ -1286,7 +1287,7 @@ impl DalvikVmState {
                 OP_SPARSE_SWITCH => {
                     if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_src = insns[pc + 1] as usize;
-                    if v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let test_val = self.registers[v_src] as i32;
                     let offset = (i32::from_le_bytes([insns[pc + 2], insns[pc + 3], insns[pc + 4], insns[pc + 5]]) as isize) * 2;
                     let payload_pos = pc as isize + offset;
@@ -1319,7 +1320,7 @@ impl DalvikVmState {
                     if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let val = self.registers[v_src];
                     self.registers[v_dest] = match opcode {
                         OP_NEG_INT => (-(val as i32)) as u32,
@@ -1339,7 +1340,7 @@ impl DalvikVmState {
                     let v_dest = insns[pc + 1] as usize;
                     let v_src = insns[pc + 2] as usize;
                     let lit8 = insns[pc + 3] as i8 as i32;
-                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let src_val = self.registers[v_src] as i32;
                     let res: u32 = match opcode {
                         OP_ADD_INT_LIT8 => src_val.wrapping_add(lit8) as u32,
@@ -1371,7 +1372,7 @@ impl DalvikVmState {
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
                     let lit16 = (i16::from_le_bytes([insns[pc + 2], insns[pc + 3]])) as i32;
-                    if v_dest >= 32 || v_src >= 32 { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let src_val = self.registers[v_src] as i32;
                     let res: u32 = match opcode {
                         OP_ADD_INT_LIT16 => src_val.wrapping_add(lit16) as u32,

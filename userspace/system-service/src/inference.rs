@@ -442,6 +442,11 @@ const TWO_PI: f32 = 6.28318530717958647692;
 
 /// Range-reduced software sine.
 pub fn f32_sin(mut x: f32) -> f32 {
+    if !x.is_finite() {
+        return f32::NAN;
+    }
+    let k = (x * (1.0 / TWO_PI)) as i64 as f32;
+    x -= k * TWO_PI;
     while x > PI {
         x -= TWO_PI;
     }
@@ -457,6 +462,11 @@ pub fn f32_sin(mut x: f32) -> f32 {
 
 /// Range-reduced software cosine.
 pub fn f32_cos(mut x: f32) -> f32 {
+    if !x.is_finite() {
+        return f32::NAN;
+    }
+    let k = (x * (1.0 / TWO_PI)) as i64 as f32;
+    x -= k * TWO_PI;
     while x > PI {
         x -= TWO_PI;
     }

@@ -33,13 +33,13 @@ impl EngineCapabilities {
     /// Capabilities of the native sovereign `#![no_std]` flow engine.
     pub const fn native_flow() -> Self {
         Self {
-            supports_css_flexbox: true,
-            supports_css_grid: true,
+            supports_css_flexbox: false,
+            supports_css_grid: false,
             supports_full_js: false, // Bounded AST interpreter
             supports_subframes: false,
             supports_cookies: true,
             supports_storage: false,
-            supports_streaming_render: true,
+            supports_streaming_render: false,
         }
     }
 

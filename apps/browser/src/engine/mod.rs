@@ -6,7 +6,6 @@
 //! Provides the `NativeFlowEngine` backend implementing `interos_std::engine::BrowserEngine`.
 
 pub use interos_std::engine::{BrowserEngine, EngineAction, EngineCapabilities, EngineStatus};
-use crate::css::Stylesheet;
 use crate::layout::dom::Dom;
 use crate::layout::flow::{self, TextLayout};
 
@@ -108,7 +107,8 @@ impl BrowserEngine for NativeFlowEngine {
         self.dom.parse(html.as_bytes());
 
         self.layout = TextLayout::new();
-        let sheet = Stylesheet::empty();
+        self.dom.collect_names();
+        let sheet = crate::css::parse_stylesheet(self.dom.css(), self.dom.token_store());
         let width = (self.viewport_w.saturating_sub(32) as usize).max(32);
         flow::build(&self.dom, &sheet, width, &mut self.layout);
         self.scroll_y = 0;
@@ -159,6 +159,17 @@ impl BrowserEngine for NativeFlowEngine {
                     } else {
                         0xFF1E293B // Dark slate typography
                     };
+                    let mut bg_color = 0xFFFFFFFFu32;
+                    for j in 0..self.layout.rect_count {
+                        let r = &self.layout.rects[j];
+                        let r_rx = r.x as usize;
+                        let r_ry = r.y as usize;
+                        let r_rw = r.w as usize;
+                        let r_rh = r.h as usize;
+                        if x >= r_rx && x < r_rx.saturating_add(r_rw) && doc_y_u >= r_ry && doc_y_u < r_ry.saturating_add(r_rh) {
+                            bg_color = r.color;
+                        }
+                    }
                     if let Some(px) = interos_std::font::test_glyph_aa(
                         x,
                         doc_y_u,
@@ -167,7 +178,7 @@ impl BrowserEngine for NativeFlowEngine {
                         run.scale as usize,
                         bytes,
                         text_color,
-                        0xFFFFFFFF,
+                        bg_color,
                         run.bold,
                     ) {
                         return px;
@@ -262,10 +273,11 @@ mod tests {
     fn native_flow_capabilities_match_contract() {
         let engine = NativeFlowEngine::new(720, 1234);
         let caps = engine.capabilities();
-        assert!(caps.supports_css_flexbox);
-        assert!(caps.supports_css_grid);
+        assert!(!caps.supports_css_flexbox);
+        assert!(!caps.supports_css_grid);
         assert!(!caps.supports_full_js);
         assert!(caps.supports_cookies);
+        assert!(!caps.supports_streaming_render);
     }
 
     #[test]
@@ -320,5 +332,14 @@ mod tests {
             }
         }
         assert!(found_ink, "render_pixel must sample font glyph ink");
+    }
+
+    #[test]
+    fn native_flow_parses_multiple_style_blocks_into_layout() {
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        let html = "<html><head><style>h1 { color: #FF0000; }</style><style>p { color: #00FF00; }</style></head><body><h1>Heading</h1><p>Paragraph</p></body></html>";
+        assert!(engine.load_html(html, None).is_ok());
+        assert!(!engine.dom().css().is_empty());
+        assert!(engine.layout().run_count >= 2);
     }
 }
