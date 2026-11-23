@@ -209,8 +209,9 @@ impl InputRouter {
         }
         match event.phase {
             PointerPhase::Down => {
-                let owner = self.classify_owner(event.position, screen_width, 1440, edge);
-                let edge_code = Self::classify_edge(event.position, screen_width, 1440, edge);
+                let screen_height = if screen_width == 1080 || event.position.y > 1440 { 2400 } else { 1440 };
+                let owner = self.classify_owner(event.position, screen_width, screen_height, edge);
+                let edge_code = Self::classify_edge(event.position, screen_width, screen_height, edge);
                 #[cfg(not(test))]
                 crate::serial_println!("[ROUTER] Down pos=({}, {}) owner={:?} edge={}", event.position.x, event.position.y, owner, edge_code);
                 self.pointers[index] = PointerState {
@@ -400,7 +401,8 @@ impl InputRouter {
 
         match event.phase {
             PointerPhase::Down => {
-                let owner = self.classify_owner(event.position, screen_width, 1440, edge);
+                let screen_height = if screen_width == 1080 || event.position.y > 1440 { 2400 } else { 1440 };
+                let owner = self.classify_owner(event.position, screen_width, screen_height, edge);
                 self.pointers[index] = PointerState {
                     active: true,
                     source: event.source,
@@ -408,7 +410,7 @@ impl InputRouter {
                     start: event.position,
                     current: event.position,
                     owner,
-                    edge: Self::classify_edge(event.position, screen_width, 1440, edge),
+                    edge: Self::classify_edge(event.position, screen_width, screen_height, edge),
                     down_tick: 0,
                 };
                 None

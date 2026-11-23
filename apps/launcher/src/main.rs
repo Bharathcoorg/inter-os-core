@@ -5584,7 +5584,8 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             // Edge swipe from right opens Quick Controls
-                            if is_drag(input.kind) && input.dx <= -60 && input.x >= 650 {
+                            let press_x = (input.x as i32).saturating_sub(input.dx);
+                            if is_drag(input.kind) && input.dx <= -60 && press_x >= 650 {
                                 state.current_view = ViewMode::QuickControls;
                                 render_view(surface, &state);
                                 std::log("[LAUNCHER] Quick Controls shade opened via edge swipe gesture.").ok();
@@ -5600,7 +5601,7 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             // Horizontal swipe left opens Live Widgets
-                            if is_drag(input.kind) && (input.dx <= -60 || input.dx >= 60) && input.x < 650 {
+                            if is_drag(input.kind) && (input.dx <= -60 || input.dx >= 60) && press_x < 650 {
                                 state.current_view = ViewMode::LiveWidgets;
                                 render_view(surface, &state);
                                 std::log("[LAUNCHER] Live Widgets opened via horizontal swipe gesture.",
@@ -5760,7 +5761,8 @@ pub extern "C" fn _start() -> ! {
                                 }
 
                                 // Apps dock tile tap (Slot 5: row 1, col 2): opens App Drawer
-                                if (1010..1225).contains(&y) && (475..695).contains(&x) {
+                                let apps_cell = screens::home::DOCK_TILES[5];
+                                if x >= apps_cell.x.saturating_sub(15) && x <= apps_cell.x + apps_cell.w + 15 && y >= apps_cell.y.saturating_sub(15) && y <= apps_cell.y + apps_cell.h + 15 {
                                     refresh_package_catalog(&mut state);
                                     refresh_runtime_recents(&mut state);
                                     screens::app_drawer::invalidate_app_drawer_frame();
