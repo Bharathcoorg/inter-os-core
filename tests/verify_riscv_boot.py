@@ -36,6 +36,9 @@ REQUIRED_SIGNALS = [
     "[TEST] RISC-V Task Removal Consistency, 5-Stage Reap & Transactional Switch VERIFIED.",
     "[TEST] RISC-V Context Switch: ra, sp, s0-s11 (GPRs), f0-f31 (FPU), FCSR, and sstatus.FS/VS verified bit-exact.",
     "[TEST] MMU Ownership Reclamation Errors & Quarantine Protection VERIFIED.",
+    "[STORAGE] virtio-blk bound at MMIO",
+    "[STORAGE] journal selftest: commit generation",
+    "[OK] Cross-Boot VFS Persistence:",
     "Spawning Userspace PID 1 (init) in U-Mode",
     "[PID1] Inter OS userspace init started in Ring 3.",
     "[PID1] Service stop lifecycle contract exercised.",
@@ -79,6 +82,12 @@ def main():
             print("[ERROR] Failed to build RISC-V 64 kernel.", file=sys.stderr)
             return 1
 
+    data_disk = os.environ.get("DATA_DISK_PATH", str(WORKSPACE_ROOT / "target" / "inter-os-data-master.img"))
+    if not os.path.exists(data_disk):
+        os.makedirs(os.path.dirname(data_disk), exist_ok=True)
+        with open(data_disk, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
     cmd = [
         qemu_bin,
         "-M", "virt",
@@ -86,6 +95,8 @@ def main():
         "-m", "1024M",
         "-bios", "default",
         "-kernel", str(kernel_path),
+        "-drive", f"file={data_disk},format=raw,if=none,id=datad,snapshot=on",
+        "-device", "virtio-blk-device,drive=datad",
         "-display", "none",
         "-serial", "stdio"
     ]

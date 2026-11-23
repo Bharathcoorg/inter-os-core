@@ -319,7 +319,12 @@ fn start_internal(id: u8) -> Result<u32, ()> {
             }
             let _ = caps.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
             let _ = caps.mint(crate::capability::CapabilityType::InputDevice, crate::capability::Rights::READ, None);
-            if id == 10 { // launcher
+            if id == 3 {
+                // storaged needs filesystem capabilities for storage management and auditing
+                let _ = caps.mint(crate::capability::CapabilityType::FileSystemWrite, crate::capability::Rights::WRITE, None);
+                let _ = caps.mint(crate::capability::CapabilityType::FileSystemRead, crate::capability::Rights::READ, None);
+            }
+            if id == 10 || id == 3 { // launcher and storaged
                 let _ = caps.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
             }
             let next_gen = svc.generation.load(Ordering::Acquire).wrapping_add(1).max(1);

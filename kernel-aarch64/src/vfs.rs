@@ -62,6 +62,9 @@ impl Vfs {
     pub fn ensure_initialized(&mut self) {
         if self.nodes.is_empty() {
             self.init_defaults();
+            if interos_kernel_core::storage::persistent::is_block_device_bound() {
+                self.restore_persistent_snapshot();
+            }
         }
     }
 
@@ -360,7 +363,112 @@ impl Vfs {
 
     pub fn close(&mut self, task_id: u32, fd: u32) -> Result<(), i64> {
         let task_fds = self.descriptors.get_mut(&task_id).ok_or(-9i64)?;
-        task_fds.remove(&fd).ok_or(-9i64)?;
+        let open_file = task_fds.remove(&fd).ok_or(-9i64)?;
+        if open_file.is_write {
+            let _ = self.sync();
+        }
+        Ok(())
+    }
+
+    pub fn is_persistent_path(path: &str) -> bool {
+        (path.starts_with("/data/") || path.starts_with("/user/") || path.starts_with("/storage/"))
+            && !path.starts_with("/data/.vfs.")
+    }
+
+    pub fn ensure_parents(&mut self, path: &str) {
+        let mut idx = 0;
+        let bytes = path.as_bytes();
+        while idx < bytes.len() {
+            if bytes[idx] == b'/' && idx > 0 {
+                let parent = &path[..idx];
+                if !self.nodes.contains_key(parent) {
+                    self.mkdir_internal(parent);
+                }
+            }
+            idx += 1;
+        }
+    }
+
+    pub fn create_file(&mut self, path: &str, content: &[u8], read_only: bool) -> Result<u64, i64> {
+        self.ensure_initialized();
+        self.ensure_parents(path);
+        let inode = self.next_inode;
+        self.next_inode += 1;
+        self.nodes.insert(
+            path.to_string(),
+            VfsNode {
+                inode,
+                path: path.to_string(),
+                data: content.to_vec(),
+                is_dir: false,
+                uid: 0,
+                gid: 0,
+                mode: if read_only { 0o444 } else { 0o644 },
+                mtime: 1700000000,
+                file_type: 1,
+                read_only,
+            },
+        );
+        if Self::is_persistent_path(path) {
+            let _ = self.sync();
+        }
+        Ok(inode)
+    }
+
+    pub fn mkdir(&mut self, path: &str, caps: &CapabilityTable) -> Result<u64, i64> {
+        self.ensure_initialized();
+        if caps
+            .check(CapabilityType::FileSystemWrite, Rights::WRITE)
+            .is_err()
+        {
+            return Err(-13); // -EACCES
+        }
+        if self.nodes.contains_key(path) {
+            return Err(-17); // -EEXIST
+        }
+        self.ensure_parents(path);
+        let inode = self.next_inode;
+        self.next_inode += 1;
+        self.nodes.insert(
+            path.to_string(),
+            VfsNode {
+                inode,
+                path: path.to_string(),
+                data: Vec::new(),
+                is_dir: true,
+                uid: 0,
+                gid: 0,
+                mode: 0o755,
+                mtime: 1700000000,
+                file_type: 3,
+                read_only: false,
+            },
+        );
+        if Self::is_persistent_path(path) {
+            let _ = self.sync();
+        }
+        Ok(inode)
+    }
+
+    pub fn unlink(&mut self, path: &str, caps: &CapabilityTable) -> Result<(), i64> {
+        self.ensure_initialized();
+        if caps
+            .check(CapabilityType::FileSystemWrite, Rights::WRITE)
+            .is_err()
+        {
+            return Err(-13); // -EACCES
+        }
+        let node = self.nodes.get(path).ok_or(-2i64)?;
+        if node.read_only {
+            return Err(-30); // -EROFS
+        }
+        if node.is_dir {
+            return Err(-21); // -EISDIR
+        }
+        self.nodes.remove(path);
+        if Self::is_persistent_path(path) {
+            let _ = self.sync();
+        }
         Ok(())
     }
 
@@ -440,7 +548,142 @@ impl Vfs {
     }
 
     pub fn sync(&self) -> Result<(), i64> {
-        Ok(())
+        if !interos_kernel_core::storage::persistent::is_block_device_bound() {
+            return Ok(());
+        }
+        let mut buf = alloc::vec![0u8; 64 * 1024];
+        buf[0..4].copy_from_slice(b"DTA1");
+        let mut pos = 6usize;
+        let mut count = 0u16;
+
+        for (path, node) in &self.nodes {
+            if node.read_only || !Self::is_persistent_path(path) {
+                continue;
+            }
+            let p_bytes = path.as_bytes();
+            if p_bytes.len() > 255 {
+                continue;
+            }
+            let is_dir = node.is_dir;
+            let d_len = if is_dir { 0 } else { node.data.len() };
+            let marked_len = (d_len as u32) | if is_dir { 0x2000_0000 } else { 0 };
+            if pos + 2 + p_bytes.len() + 4 + d_len > buf.len() {
+                break;
+            }
+            buf[pos..pos + 2].copy_from_slice(&(p_bytes.len() as u16).to_le_bytes());
+            pos += 2;
+            buf[pos..pos + p_bytes.len()].copy_from_slice(p_bytes);
+            pos += p_bytes.len();
+            buf[pos..pos + 4].copy_from_slice(&marked_len.to_le_bytes());
+            pos += 4;
+            if !is_dir && d_len > 0 {
+                buf[pos..pos + d_len].copy_from_slice(&node.data);
+                pos += d_len;
+            }
+            count = count.saturating_add(1);
+        }
+        buf[4..6].copy_from_slice(&count.to_le_bytes());
+        match interos_kernel_core::storage::persistent::commit_kind(&buf[..pos], 4) {
+            Ok(gen) => {
+                crate::kprintln!(
+                    "[VFS] Persisted {} nodes ({} bytes) to journal generation {}.",
+                    count,
+                    pos,
+                    gen
+                );
+                Ok(())
+            }
+            Err(_) => Err(-5), // -EIO
+        }
+    }
+
+    pub fn restore_persistent_snapshot(&mut self) {
+        self.ensure_initialized();
+        if !interos_kernel_core::storage::persistent::is_block_device_bound() {
+            return;
+        }
+        let mut buf = alloc::vec![0u8; 64 * 1024];
+        let (gen, len) =
+            match interos_kernel_core::storage::persistent::load_latest_kind(&mut buf, 4) {
+                Ok(Some(res)) => res,
+                Ok(None) => {
+                    crate::kprintln!("[VFS RESTORE] No persistent snapshot found in journal.");
+                    return;
+                }
+                Err(err) => {
+                    crate::kprintln!("[VFS RESTORE] Failed to load snapshot: {:?}", err);
+                    return;
+                }
+            };
+        if len < 6 || &buf[..4] != b"DTA1" {
+            crate::kprintln!(
+                "[VFS RESTORE] Invalid data snapshot header magic in journal generation {}.",
+                gen
+            );
+            return;
+        }
+        let count = u16::from_le_bytes([buf[4], buf[5]]) as usize;
+        let mut pos = 6usize;
+        let mut restored = 0usize;
+        for _ in 0..count {
+            if pos + 2 > len {
+                break;
+            }
+            let plen = u16::from_le_bytes([buf[pos], buf[pos + 1]]) as usize;
+            pos += 2;
+            if plen == 0 || plen > 255 || pos + plen + 4 > len {
+                break;
+            }
+            let path = match core::str::from_utf8(&buf[pos..pos + plen]).ok() {
+                Some(v) => v,
+                None => break,
+            };
+            pos += plen;
+            let raw = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
+            pos += 4;
+            let is_dir = (raw & 0x2000_0000) != 0 || path.ends_with('/');
+            let dlen = (raw & 0x1fff_ffff) as usize;
+            if !is_dir && (dlen > 64 * 1024 || pos + dlen > len) {
+                break;
+            }
+            if !Self::is_persistent_path(path) {
+                if !is_dir {
+                    pos += dlen;
+                }
+                continue;
+            }
+            if is_dir {
+                self.mkdir_internal(path);
+            } else {
+                let file_bytes = &buf[pos..pos + dlen];
+                self.ensure_parents(path);
+                let inode = self.next_inode;
+                self.next_inode += 1;
+                self.nodes.insert(
+                    path.to_string(),
+                    VfsNode {
+                        inode,
+                        path: path.to_string(),
+                        data: file_bytes.to_vec(),
+                        is_dir: false,
+                        uid: 0,
+                        gid: 0,
+                        mode: 0o644,
+                        mtime: 1700000000,
+                        file_type: 1,
+                        read_only: false,
+                    },
+                );
+                pos += dlen;
+            }
+            restored += 1;
+        }
+        crate::kprintln!(
+            "[VFS RESTORE] Restored {} persistent nodes from journal generation {} ({} bytes).",
+            restored,
+            gen,
+            len
+        );
     }
 
     pub fn get_file_content(&mut self, path: &str) -> Option<Vec<u8>> {

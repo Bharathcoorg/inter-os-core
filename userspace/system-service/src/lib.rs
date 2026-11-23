@@ -410,7 +410,10 @@ pub fn run_storage() -> ! {
             // next iteration, which kept the gate permanently open: storaged then ran
             // a full snapshot commit every pass and held ~98% of all scheduler ticks,
             // so an app task only saw the taps that landed in the gaps.
-            last_tick = timer_slot.and_then(|_| std::get_ticks().ok()).unwrap_or(now);
+            last_tick = timer_slot.and_then(|_| std::get_ticks().ok()).unwrap_or(now + 1);
+            if last_tick == 0 {
+                last_tick = 1;
+            }
         }
         if has_epoll {
             let _ = std::event_poll(std::EVENT_TIMER_TICK | std::EVENT_IPC_MSG, 20);

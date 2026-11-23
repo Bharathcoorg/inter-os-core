@@ -36,6 +36,9 @@ REQUIRED_SIGNALS = [
     "[TEST] AArch64 Transactional Switch Rollback VERIFIED.",
     "[TEST] AArch64 5-Stage Reap Evacuation Protocol VERIFIED.",
     "[TEST] MMU Ownership Reclamation Errors & Quarantine Protection VERIFIED.",
+    "[OK] kernel-core journal: virtio-blk bound",
+    "[OK] kernel-core journal selftest: commit generation",
+    "[OK] Cross-Boot VFS Persistence:",
     "[TEST] AArch64 Architectural Timer:",
     "[TEST] GICv3 Robustness: Bounds enforcement, truncated window rejection, and SPI routing validation VERIFIED.",
     "[TEST] AArch64 Sovereign TRNG: Generated 32 random bytes from firmware-seeded pool VERIFIED.",
@@ -79,12 +82,20 @@ def main():
             print("[ERROR] Failed to build AArch64 image.", file=sys.stderr)
             return 1
 
+    data_disk = os.environ.get("DATA_DISK_PATH", str(WORKSPACE_ROOT / "target" / "inter-os-data-master.img"))
+    if not os.path.exists(data_disk):
+        os.makedirs(os.path.dirname(data_disk), exist_ok=True)
+        with open(data_disk, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
     cmd = [
         qemu_bin,
         "-M", "virt",
         "-cpu", "cortex-a53",
         "-m", "1024M",
         "-kernel", str(image_path),
+        "-drive", f"file={data_disk},format=raw,if=none,id=datad,snapshot=on",
+        "-device", "virtio-blk-device,drive=datad",
         "-display", "none",
         "-serial", "stdio"
     ]

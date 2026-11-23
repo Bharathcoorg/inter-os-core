@@ -94,6 +94,8 @@ pub const SYS_APP_BACKGROUND: u64 = 116;
 pub const SYS_APP_FOREGROUND: u64 = 117;
 pub const SYS_APP_RESTART: u64 = 122;
 pub const SYS_FS_SYNC: u64 = 125;
+pub const SYS_FS_UNLINK: u64 = 133;
+pub const SYS_FS_MKDIR: u64 = 135;
 pub const SYS_FS_READ_AT: u64 = 164;
 /// Cross-architecture MMU memory lending/transfer syscall numbers.
 /// Hardware MMU page table lending is currently implemented for x86_64;
@@ -1396,6 +1398,52 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             Ok(()) => 0,
             Err(e) => e,
         },
+        SYS_FS_UNLINK => {
+            let (path_ptr, path_len) = if a0 < 0x1000 && a2 > 0 {
+                (a1, a2 as usize)
+            } else {
+                (a0, a1 as usize)
+            };
+            if path_len == 0 || path_len > 256 {
+                return -22;
+            }
+            let mut pbuf = [0u8; 256];
+            let path = match read_user_string(path_ptr, path_len, &mut pbuf) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            let (_caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            match crate::vfs::GLOBAL_VFS.lock().unlink(path, &caps) {
+                Ok(()) => 0,
+                Err(e) => e,
+            }
+        }
+        SYS_FS_MKDIR => {
+            let (path_ptr, path_len) = if a0 < 0x1000 && a2 > 0 {
+                (a1, a2 as usize)
+            } else {
+                (a0, a1 as usize)
+            };
+            if path_len == 0 || path_len > 256 {
+                return -22;
+            }
+            let mut pbuf = [0u8; 256];
+            let path = match read_user_string(path_ptr, path_len, &mut pbuf) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            let (_caller_pid, caps) = match get_caller_identity_and_caps() {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            match crate::vfs::GLOBAL_VFS.lock().mkdir(path, &caps) {
+                Ok(_) => 0,
+                Err(e) => e,
+            }
+        }
         SYS_BLOCK_READ => -13,
         SYS_VERIFY_PACKAGE => {
             let (path_ptr, path_len, out_ptr, out_len) = if a0 < 0x1000 && a2 > 0 {

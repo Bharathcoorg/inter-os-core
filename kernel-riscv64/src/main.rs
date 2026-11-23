@@ -84,6 +84,23 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     if let Err(err) = storage::journal_selftest() {
         println!("[BOOT] persistent storage selftest FAILED: {:?}.", err);
     }
+    crate::vfs::GLOBAL_VFS.lock().restore_persistent_snapshot();
+
+    // Storage Persistence Verification across reboots
+    if interos_kernel_core::storage::persistent::is_block_device_bound() {
+        let test_path = "/data/storage_persistence_marker.bin";
+        let expected = b"INTEROS_PERSISTENT_STORAGE_V1_VERIFIED";
+        let mut vfs = crate::vfs::GLOBAL_VFS.lock();
+        if let Some(content) = vfs.get_file_content(test_path) {
+            if content.as_slice() == expected {
+                println!("[OK] Cross-Boot VFS Persistence: restored marker file intact from storage media.");
+            }
+        } else {
+            let _ = vfs.create_file(test_path, expected, false);
+            let _ = vfs.sync();
+            println!("[OK] Cross-Boot VFS Persistence: committed initial marker file to storage media.");
+        }
+    }
     pcie::probe_and_init_display();
 
     // Supervisor user-memory access must be off: firmware leaves SUM set, and

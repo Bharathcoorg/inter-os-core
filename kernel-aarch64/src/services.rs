@@ -527,8 +527,21 @@ fn start_internal(id: u8) -> Result<u32, ()> {
                 crate::capability::Rights::READ,
                 None,
             );
-            if id == 10 {
-                // launcher
+            if id == 3 {
+                // storaged needs filesystem capabilities for storage management and auditing
+                caps.mint(
+                    crate::capability::CapabilityType::FileSystemWrite,
+                    crate::capability::Rights::WRITE,
+                    None,
+                );
+                caps.mint(
+                    crate::capability::CapabilityType::FileSystemRead,
+                    crate::capability::Rights::READ,
+                    None,
+                );
+            }
+            if id == 10 || id == 3 {
+                // launcher and storaged
                 caps.mint(
                     crate::capability::CapabilityType::TimerTickRead,
                     crate::capability::Rights::READ,
