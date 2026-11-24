@@ -378,9 +378,6 @@ impl Scheduler {
             if task.exit_code.is_none() {
                 task.exit_code = Some(code);
             }
-            if let Some(ref aspace) = task.address_space {
-                aspace.deactivate();
-            }
             true
         } else {
             false
@@ -410,8 +407,8 @@ impl Scheduler {
         if target_pid != 0 && target_pid == caller_pid {
             return Err(-16); // -EBUSY: caller cannot reap itself
         }
-        if target_pid != 0 && target_pid == curr_pid && self.tasks.get(self.current_task_idx).map(|t| t.state == TaskState::Running).unwrap_or(false) {
-            return Err(-16); // -EBUSY: cannot reap active running process
+        if target_pid != 0 && target_pid == curr_pid {
+            return Err(-16); // -EBUSY: cannot reap active process currently on stack
         }
 
         let pos = self.tasks.iter().position(|t| {
@@ -1524,6 +1521,12 @@ pub fn test_task_lifecycle() {
     sched3.tasks[1].address_space.as_ref().unwrap().try_activate().expect("activate evac_child");
     sched3.tasks[1].state = TaskState::Exited;
     sched3.current_task_idx = 1;
+
+    // Verify: when current_task_idx == 1 (c_evac), begin_reap on c_evac is rejected with -EBUSY even if state is Exited!
+    assert_eq!(sched3.begin_reap(p_idle, false, c_evac), Err(-16), "Active process stack cannot be reaped by itself even when Exited");
+
+    // Now switch current_task_idx to 0 (p_idle, the parent core context initiating reap)
+    sched3.current_task_idx = 0;
 
     // 8a/8b: begin_reap marks task Reaping and keeps address_space attached
     let h1 = sched3.begin_reap(p_idle, false, c_evac).expect("begin_reap on exited child");

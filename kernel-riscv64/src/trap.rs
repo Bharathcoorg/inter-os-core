@@ -247,9 +247,19 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                     }
                     let exited = crate::task::SCHEDULER.lock().exit_current();
                     println!("[INIT] Userspace exit recorded by scheduler: {}", exited);
-                    crate::task::yield_now();
+                    unsafe {
+                        crate::mmu::switch_to_kernel_satp();
+                    }
                     loop {
-                        unsafe { core::arch::asm!("wfi"); }
+                        crate::task::yield_now();
+                        unsafe {
+                            core::arch::asm!(
+                                "csrsi sstatus, 2",
+                                "wfi",
+                                "csrci sstatus, 2",
+                                options(nomem, nostack)
+                            );
+                        }
                     }
                 }
             }
@@ -273,6 +283,9 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 tf.regs[10] = (-14isize) as usize; // -EFAULT
                 let exited = crate::task::SCHEDULER.lock().exit_current_with_code(-11);
                 println!("[TRAP] Faulted userspace task marked exited: {}", exited);
+                unsafe {
+                    crate::mmu::switch_to_kernel_satp();
+                }
                 if unsafe { IN_LIFECYCLE_TEST } {
                     LAST_USER_FAULT_CODE.store(-11, core::sync::atomic::Ordering::Release);
                     unsafe {
@@ -305,6 +318,9 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 }
                 let exited = crate::task::SCHEDULER.lock().exit_current_with_code(-4);
                 println!("[TRAP] Illegal-instruction task marked exited: {}", exited);
+                unsafe {
+                    crate::mmu::switch_to_kernel_satp();
+                }
                 if unsafe { IN_LIFECYCLE_TEST } {
                     LAST_USER_FAULT_CODE.store(-4, core::sync::atomic::Ordering::Release);
                     unsafe {
@@ -337,6 +353,9 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 }
                 let exited = crate::task::SCHEDULER.lock().exit_current_with_code(-1);
                 println!("[TRAP] Unhandled exception task marked exited: {}", exited);
+                unsafe {
+                    crate::mmu::switch_to_kernel_satp();
+                }
                 if unsafe { IN_LIFECYCLE_TEST } {
                     LAST_USER_FAULT_CODE.store(-1, core::sync::atomic::Ordering::Release);
                     unsafe {
