@@ -61,6 +61,7 @@ import shutil
 import socket
 import socketserver
 import ssl
+import struct
 import subprocess
 import sys
 import threading
@@ -78,8 +79,10 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 try:
+    from emulator import server as emulator_server
     from emulator.server import qemu_x86_audio_args, StudioAPIHandler
 except ImportError:
+    emulator_server = None
     def qemu_x86_audio_args(_):
         return []
     StudioAPIHandler = None
@@ -191,6 +194,9 @@ class MonotonicSerialReader:
                             self.captured_logs.append(decoded)
                             if print_keywords and any(k in decoded for k in print_keywords):
                                 print(f"  [GUEST] {decoded}")
+                        if emulator_server is not None:
+                            with emulator_server.telemetry_lock:
+                                emulator_server.serial_lines.append(decoded)
                 with self._lock:
                     while self.cursor < len(self.captured_logs):
                         log = self.captured_logs[self.cursor]
@@ -208,8 +214,11 @@ class MonotonicSerialReader:
         return False
 
 
-def send_monitor_cmd(sock: socket.socket | None, cmd: str) -> str:
-    if not sock:
+def send_monitor_cmd(sock: socket.socket | bool | None, cmd: str) -> str:
+    if emulator_server is not None:
+        ok, resp = emulator_server.send_qemu_monitor_cmd(cmd)
+        return resp if ok else ""
+    if not sock or isinstance(sock, bool):
         return ""
     try:
         sock.sendall((cmd + "\n").encode("utf-8"))
@@ -329,17 +338,44 @@ def query_surfaces(reader: MonotonicSerialReader) -> list[dict]:
     with reader._lock:
         for line in reader.captured_logs[start_idx:]:
             if line.startswith("[SURFACES]"):
+                m_id = re.search(r"id=(\d+)", line)
                 m_owner = re.search(r"owner=(\d+)", line)
                 m_vis = re.search(r"visible=(true|false)", line)
                 m_z = re.search(r"\bz=(\d+)", line)
+                m_inp = re.search(r"input=(true|false)", line)
+                m_ready = re.search(r"ready=(true|false)", line)
+                m_frame = re.search(r"has_frame=(true|false)", line)
+                m_comp = re.search(r"complete=(true|false)", line)
                 if m_owner and m_vis:
                     surfaces.append({
+                        "id": int(m_id.group(1)) if m_id else 0,
                         "owner": int(m_owner.group(1)),
                         "visible": m_vis.group(1) == "true",
                         "z_order": int(m_z.group(1)) if m_z else 0,
+                        "input": m_inp.group(1) == "true" if m_inp else False,
+                        "ready": m_ready.group(1) == "true" if m_ready else False,
+                        "has_frame": m_frame.group(1) == "true" if m_frame else False,
+                        "complete": m_comp.group(1) == "true" if m_comp else False,
                         "line": line,
                     })
     return surfaces
+
+
+def query_proc_list(reader: MonotonicSerialReader) -> dict[int, str]:
+    """Query live tasks from PROC_LIST dump, returning {task_id: name}."""
+    with reader._lock:
+        start_idx = len(reader.captured_logs)
+    reader.send("PROC_LIST")
+    assert reader.wait_for("[PROC_LIST] END", timeout=10.0), "Timeout waiting for PROC_LIST sentinel"
+    procs = {}
+    with reader._lock:
+        for line in reader.captured_logs[start_idx:]:
+            if line.startswith("[PROC]"):
+                m_pid = re.search(r"pid=(\d+)", line)
+                m_name = re.search(r"name=(\S+)", line)
+                if m_pid and m_name:
+                    procs[int(m_pid.group(1))] = m_name.group(1)
+    return procs
 
 
 def build_tls_chain(directory: Path, cn: str = "10.0.2.2") -> tuple[Path, Path, Path]:
@@ -416,12 +452,14 @@ def make_page(path: str, size: int = PAGE_LEN) -> bytes:
         b"<!doctype html><html><head><meta charset=\"utf-8\"><title>InterOS TLS Test</title></head><body>"
         b"<h1><a href=\"/page2\">Link to Page 2</a></h1>"
         b"<p>marker:interos-tls-verified</p>"
+        b"<div style=\"background:#117733;height:32px\">PAGE1-CONTENT-RENDERED</div>"
     )
     if "/page2" in path:
         head = (
             b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Page 2</title></head><body>"
             b"<h1>Page 2 Arrived</h1>"
             b"<p>marker:interos-tls-page2-verified</p>"
+            b"<div style=\"background:#882211;height:32px\">PAGE2-CONTENT-RENDERED</div>"
         )
     tail = b"</body></html>"
     filler = b"<!-- padding-bytes-for-deterministic-12288-len -->"
@@ -553,6 +591,7 @@ def start_qemu_session(
     ser_port: int,
     mon_port: int,
     qemu_exe: str,
+    vnc_display: int = 1,
 ) -> tuple[subprocess.Popen, MonotonicSerialReader, socket.socket | None]:
     args = [
         qemu_exe,
@@ -566,7 +605,10 @@ def start_qemu_session(
         "-netdev", "user,id=net0",
         "-device", "e1000,netdev=net0,mac=52:54:00:12:34:56",
         "-m", "1024M",
+        "-vga", "none",
+        "-device", "VGA,edid=on,xres=720,yres=1440,vgamem_mb=32",
         "-display", "none",
+        "-vnc", f"127.0.0.1:{vnc_display}",
         "-chardev", f"socket,id=ser0,host=127.0.0.1,port={ser_port},server=on,wait=off",
         "-serial", "chardev:ser0",
         "-chardev", f"socket,id=mon0,host=127.0.0.1,port={mon_port},server=on,wait=off",
@@ -588,16 +630,28 @@ def start_qemu_session(
     assert serial_sock, "Failed to connect to QEMU serial socket"
     reader = MonotonicSerialReader(serial_sock)
 
-    mon_sock = None
-    for _ in range(50):
-        try:
-            m = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            m.connect(("127.0.0.1", mon_port))
-            m.settimeout(5.0)
-            mon_sock = m
-            break
-        except Exception:
-            time.sleep(0.2)
+    if emulator_server is not None:
+        emulator_server.MONITOR_PORT = mon_port
+        emulator_server.SUPPORTED_PROFILES["x86_64"]["monitor"]["port"] = mon_port
+        with emulator_server._persistent_monitor_lock:
+            if emulator_server._persistent_monitor_sock:
+                try:
+                    emulator_server._persistent_monitor_sock.close()
+                except Exception:
+                    pass
+                emulator_server._persistent_monitor_sock = None
+        mon_sock = True
+    else:
+        mon_sock = None
+        for _ in range(50):
+            try:
+                m = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                m.connect(("127.0.0.1", mon_port))
+                m.settimeout(5.0)
+                mon_sock = m
+                break
+            except Exception:
+                time.sleep(0.2)
 
     return proc, reader, mon_sock
 
@@ -616,11 +670,16 @@ def run_acceptance_suite() -> int:
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     # Use isolated test kernel image with debug-control-plane for TLS & fault testing
+    from tools.image_provenance import verify_boot_image_provenance
+
     dev_kernel_img = artifact_dir / "inter-os-bios-tls-dev.img"
-    prod_kernel_img = ROOT / "target" / "inter-os-bios.img"
-    kernel_img = dev_kernel_img if dev_kernel_img.exists() else prod_kernel_img
-    assert kernel_img.exists(), f"Missing kernel image at {kernel_img}"
-    print(f"  [BOOT IMAGE] Using: {kernel_img.name} (SHA-256: {hashlib.sha256(kernel_img.read_bytes()).hexdigest()[:16]}...)")
+    assert dev_kernel_img.exists(), (
+        f"Missing acceptance dev kernel image at {dev_kernel_img}. "
+        "Build via 'python tools/interos.py build acceptance-dev'."
+    )
+    verify_boot_image_provenance(dev_kernel_img, expected_debug_control_plane=True, allow_source_diff=True)
+    kernel_img = dev_kernel_img
+    print(f"  [BOOT IMAGE] Verified acceptance dev image: {kernel_img.name} (SHA-256: {hashlib.sha256(kernel_img.read_bytes()).hexdigest()[:16]}...)")
 
     data_disk = artifact_dir / "inter-os-data-acceptance.img"
     with data_disk.open("wb") as f:
@@ -661,6 +720,109 @@ def run_acceptance_suite() -> int:
             unlocked = reader1.wait_for(["Device unlocked", "Home surface rendered"], timeout=20.0)
         assert unlocked, "Failed to unlock device from lockscreen"
         print("  [OK] Device unlocked to Homescreen.")
+
+        # =====================================================================
+        # PART 1B: Live Device Studio Host Integration & Real-Time Stream
+        # =====================================================================
+        print("\n--- [PART 1B: Live Device Studio Host Integration & Real-Time Stream] ---")
+        studio_port = get_free_port()
+        socketserver.ThreadingTCPServer.daemon_threads = True
+        socketserver.ThreadingTCPServer.allow_reuse_address = True
+        studio_httpd = socketserver.ThreadingTCPServer(("127.0.0.1", studio_port), StudioAPIHandler)
+        studio_thread = threading.Thread(target=studio_httpd.serve_forever, daemon=True)
+        studio_thread.start()
+
+        base_url = f"http://127.0.0.1:{studio_port}"
+
+        def studio_req(method, path, body=None, headers=None):
+            h = {"Host": f"127.0.0.1:{studio_port}"}
+            if headers:
+                h.update(headers)
+            b = json.dumps(body).encode("utf-8") if isinstance(body, dict) else body
+            if body and "Content-Type" not in h:
+                h["Content-Type"] = "application/json"
+            req = urllib.request.Request(f"{base_url}{path}", data=b, headers=h, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    return r.status, r.read()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read()
+
+        if emulator_server is not None:
+            emulator_server.qemu_subproc = proc1
+            emulator_server.track_qemu_process(proc1, vnc_display=1, vnc_port=5901)
+            with emulator_server.serial_socket_lock:
+                emulator_server.serial_socket_conn = reader1.sock
+            emulator_server.launcher_has_booted = True
+            emulator_server.vnc_client.set_port(5901)
+            emulator_server.vnc_client.force_reconnect()
+
+            # 1. GET /api/qemu/status
+            st, body = studio_req("GET", "/api/qemu/status")
+            assert st == 200, f"Expected 200 for live /api/qemu/status, got {st}"
+            status_data = json.loads(body.decode("utf-8"))
+            dev_state = emulator_server.qemu_device_state()
+            assert status_data.get("qemu") is True or status_data.get("device_state") == "running" or dev_state.get("running") is True, (
+                f"Expected running guest in live status, got: {status_data} (dev_state={dev_state})"
+            )
+            print("  [OK] /api/qemu/status confirmed running guest.")
+
+            # 2. Wait for VNC scanout client connection
+            vnc_connected = False
+            for _ in range(30):
+                if emulator_server.vnc_client.connected and emulator_server.vnc_client.latest_raw_rgba is not None:
+                    vnc_connected = True
+                    break
+                time.sleep(0.5)
+            assert vnc_connected, "Device Studio VNC scanout client failed to connect to live QEMU display"
+            print("  [OK] Device Studio VNC scanout client connected and received scanout.")
+
+            # 3. GET /api/screen/frame (Single-shot PNG)
+            st, img_bytes = studio_req("GET", "/api/screen/frame?format=png")
+            assert st == 200, f"Expected 200 for live /api/screen/frame, got {st} (A 503 during live session fails the test)"
+            assert img_bytes.startswith(b"\x89PNG\r\n\x1a\n"), f"Invalid PNG magic from /api/screen/frame: {img_bytes[:8]}"
+            assert len(img_bytes) > 1000, f"Live PNG frame truncated ({len(img_bytes)} bytes)"
+            print(f"  [OK] /api/screen/frame served live PNG frame ({len(img_bytes)} bytes).")
+
+            # 4. GET /api/screen/binary_stream (Live scanout frame header check)
+            req_stream = urllib.request.Request(f"{base_url}/api/screen/binary_stream", headers={"Host": f"127.0.0.1:{studio_port}"})
+            resp_stream = urllib.request.urlopen(req_stream, timeout=5)
+            try:
+                chunk = resp_stream.read(16)
+                assert chunk.startswith(b"IOSF"), f"Expected IOSF stream header, got: {chunk[:8]}"
+                magic, ver, flags, seq, payload_len = struct.unpack(">4sHHII", chunk)
+                assert magic == b"IOSF" and payload_len > 0, f"Invalid IOSF stream message: {chunk}"
+                print(f"  [OK] /api/screen/binary_stream verified (IOSF header received: seq={seq}, payload_len={payload_len}).")
+            finally:
+                resp_stream.close()
+
+            # 5. Live Touch and Key Dispatch through Studio REST API
+            st, res = studio_req("POST", "/api/touch/event", {"action": "tap", "coords": "portrait", "x": 360, "y": 600})
+            assert st == 200, f"Expected 200 for live touch event, got {st} (503 during live session fails the test)"
+            touch_resp = json.loads(res.decode("utf-8"))
+            assert touch_resp.get("success") is True, f"Touch dispatch failed: {touch_resp}"
+            print("  [OK] Live touch event dispatched successfully through Studio REST API.")
+
+            st, res = studio_req("POST", "/api/input/key", {"key": "a"})
+            assert st == 200, f"Expected 200 for live input key, got {st}"
+            key_resp = json.loads(res.decode("utf-8"))
+            assert key_resp.get("success") is True, f"Input key dispatch failed: {key_resp}"
+            print("  [OK] Live input key dispatched successfully through Studio REST API.")
+
+            # 6. Reconnection Test: Force reconnect and verify stream continues
+            print("  [STUDIO RECONNECT] Testing client reconnection without guest restart...")
+            emulator_server.vnc_client.force_reconnect()
+            reconnected = False
+            for _ in range(30):
+                if emulator_server.vnc_client.connected and emulator_server.vnc_client.latest_raw_rgba is not None:
+                    reconnected = True
+                    break
+                time.sleep(0.2)
+            assert reconnected, "VNC client failed to reconnect after force_reconnect()"
+            st, img_bytes_recon = studio_req("GET", "/api/screen/frame?format=png")
+            assert st == 200, f"Expected 200 for /api/screen/frame after reconnect, got {st}"
+            assert img_bytes_recon.startswith(b"\x89PNG\r\n\x1a\n"), "Corrupt frame after reconnect"
+            print("  [OK] Device Studio reconnection verified without guest state loss.")
 
         # =====================================================================
         # PART 2: Notes Application & Exact Record Storage
@@ -816,9 +978,18 @@ def run_acceptance_suite() -> int:
 
         # Browser Back Button: (70, 1380)
         print("  [BROWSER] Tapping Back button (70, 1380) to return to /page1...")
+        before_records = len(tls_peer.records)
         reader1.send("TAP 70 1380")
+        assert reader1.wait_for("[BROWSER APP] Back: re-issuing navigation attempt.", timeout=15.0,
+                                print_keywords=["BROWSER"]), "Browser failed to re-issue navigation on Back"
+        assert reader1.wait_for("fetch_over_tcp bytes=", timeout=25.0,
+                                print_keywords=["BROWSER"]), "Back fetch did not complete"
+        assert reader1.wait_for(f"decode: doc_len={PAGE_LEN}", timeout=15.0), "Back decode failed"
         time.sleep(1.0)
-        print("  [OK] Back navigation action delivered.")
+        assert len(tls_peer.records) > before_records, "TLS listener received no re-issued /page1 request"
+        back_rec = tls_peer.records[-1]
+        assert back_rec.get("path") == "/page1", f"Expected /page1 on Back navigation, got: {back_rec}"
+        print(f"  [OK] Back navigation verified: browser re-requested and re-rendered /page1.")
 
         # =====================================================================
         # PART 4: Real App Switching & Recents Surface Proof
@@ -846,13 +1017,27 @@ def run_acceptance_suite() -> int:
 
         # Surface Proof: Query SURFACES to prove Notes surface is visible=true and top z_order
         surfaces = query_surfaces(reader1)
+        procs = query_proc_list(reader1)
         print(f"  [SURFACES] Active surfaces: {len(surfaces)}")
         for s in surfaces:
-            print(f"    owner={s['owner']} visible={s['visible']} z_order={s['z_order']}")
+            print(f"    id={s['id']} owner={s['owner']} visible={s['visible']} z_order={s['z_order']} input={s['input']}")
+        notes_pids = [pid for pid, name in procs.items() if "notes" in name]
+        assert notes_pids, f"Notes process not found in proc list: {procs}"
+        notes_pid = notes_pids[0]
         visible_surfaces = [s for s in surfaces if s["visible"]]
         assert visible_surfaces, "Zero visible surfaces found after switching to Notes"
         top_surface = max(visible_surfaces, key=lambda s: s["z_order"])
-        print(f"  [OK] Top visible surface owner={top_surface['owner']} z_order={top_surface['z_order']}")
+        assert top_surface["owner"] == notes_pid, (
+            f"Top surface owner {top_surface['owner']} does not match Notes PID {notes_pid}!"
+        )
+        assert top_surface["input"] is True, f"Top Notes surface lacks input focus: {top_surface}"
+        print(f"  [OK] Confirmed Notes (PID {notes_pid}) owns top visible interactive surface (id={top_surface['id']}, z={top_surface['z_order']}).")
+
+        # Prove Notes interactively handles Back in editor
+        reader1.send("TAP 48 80")
+        assert reader1.wait_for(["[NOTES] Note saved successfully.", "[NOTES]"], timeout=15.0,
+                                print_keywords=["NOTES"]), "Notes editor failed to handle Back tap"
+        print("  [OK] Notes editor responded to interactive tap while owning top surface.")
 
         dump3 = artifact_dir / "e2e_03_notes_from_recents.ppm"
         capture_screendump(mon1, dump3)
@@ -907,6 +1092,12 @@ def run_acceptance_suite() -> int:
         print("\n--- [PART 6: Storage Sync & Session 1 Shutdown] ---")
         reader1.send("SYNC")
         time.sleep(1.5)
+        if studio_httpd is not None:
+            try:
+                studio_httpd.shutdown()
+                studio_httpd.server_close()
+            except Exception:
+                pass
         send_monitor_cmd(mon1, "quit")
         proc1.wait(timeout=10)
         print("  [OK] Session 1 cleanly closed. Data committed to disk.")
@@ -920,6 +1111,12 @@ def run_acceptance_suite() -> int:
         raise
     finally:
         tls_peer.stop()
+        if studio_httpd is not None:
+            try:
+                studio_httpd.shutdown()
+                studio_httpd.server_close()
+            except Exception:
+                pass
         if proc1.poll() is None:
             proc1.kill()
 
@@ -928,6 +1125,11 @@ def run_acceptance_suite() -> int:
     # =========================================================================
     print("\n--- [PART 7: Reboot -> Unlock -> Bit-for-Bit VFS Verify -> Notes Reopen] ---")
     proc2, reader2, mon2 = start_qemu_session(kernel_img, data_disk, ser_port, mon_port, qemu_exe)
+    if emulator_server is not None:
+        emulator_server.qemu_subproc = proc2
+        emulator_server.track_qemu_process(proc2, vnc_display=1, vnc_port=5901)
+        with emulator_server.serial_socket_lock:
+            emulator_server.serial_socket_conn = reader2.sock
 
     try:
         assert reader2.wait_for("Step 5: Initial presentation complete", timeout=75.0,
@@ -999,65 +1201,78 @@ def run_acceptance_suite() -> int:
                 print(f"    {line}")
         raise
     finally:
+        if emulator_server is not None:
+            with emulator_server._persistent_monitor_lock:
+                if emulator_server._persistent_monitor_sock:
+                    try:
+                        emulator_server._persistent_monitor_sock.close()
+                    except Exception:
+                        pass
+                    emulator_server._persistent_monitor_sock = None
         if proc2.poll() is None:
             proc2.kill()
 
     # =========================================================================
-    # PART 8: Device Studio Web Control & Adversarial REST API Validation
+    # PART 8: Device Studio Truthful Offline & Adversarial REST API Validation
     # =========================================================================
-    print("\n--- [PART 8: Device Studio Web Control & Adversarial REST API] ---")
-    studio_port = get_free_port()
-    socketserver.TCPServer.allow_reuse_address = True
-    studio_httpd = socketserver.TCPServer(("127.0.0.1", studio_port), StudioAPIHandler)
-    studio_thread = threading.Thread(target=studio_httpd.serve_forever, daemon=True)
-    studio_thread.start()
+    print("\n--- [PART 8: Device Studio Truthful Offline & Adversarial REST API Validation] ---")
+    if emulator_server is not None:
+        emulator_server.clear_qemu_process()
+        with emulator_server.serial_socket_lock:
+            emulator_server.serial_socket_conn = None
+
+    studio_port2 = get_free_port()
+    socketserver.ThreadingTCPServer.daemon_threads = True
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    studio_httpd2 = socketserver.ThreadingTCPServer(("127.0.0.1", studio_port2), StudioAPIHandler)
+    studio_thread2 = threading.Thread(target=studio_httpd2.serve_forever, daemon=True)
+    studio_thread2.start()
 
     try:
-        base_url = f"http://127.0.0.1:{studio_port}"
+        base_url2 = f"http://127.0.0.1:{studio_port2}"
 
-        def studio_req(method, path, body=None, headers=None):
-            h = {"Host": f"127.0.0.1:{studio_port}"}
+        def studio_req_offline(method, path, body=None, headers=None):
+            h = {"Host": f"127.0.0.1:{studio_port2}"}
             if headers:
                 h.update(headers)
             b = json.dumps(body).encode("utf-8") if isinstance(body, dict) else body
             if body and "Content-Type" not in h:
                 h["Content-Type"] = "application/json"
-            req = urllib.request.Request(f"{base_url}{path}", data=b, headers=h, method=method)
+            req = urllib.request.Request(f"{base_url2}{path}", data=b, headers=h, method=method)
             try:
                 with urllib.request.urlopen(req, timeout=5) as r:
                     return r.status, r.read()
             except urllib.error.HTTPError as e:
                 return e.code, e.read()
 
-        # 1. POST /api/touch/event
-        st, _ = studio_req("POST", "/api/touch/event", {"action": "tap", "x": 360, "y": 600})
-        assert st in (200, 503), f"Expected 200 (online) or 503 (offline) for touch event, got {st}"
-        print(f"  [OK] /api/touch/event handled truthfully (status {st}).")
+        # 1. Truthful Offline: POST /api/touch/event -> MUST return 503
+        st, _ = studio_req_offline("POST", "/api/touch/event", {"action": "tap", "x": 360, "y": 600})
+        assert st == 503, f"Expected 503 for offline touch event, got {st}"
+        print("  [OK] /api/touch/event truthfully reported 503 when guest is offline.")
 
-        # 2. POST /api/input/key
-        st, _ = studio_req("POST", "/api/input/key", {"key": "a"})
-        assert st in (200, 503), f"Expected 200 (online) or 503 (offline) for input key, got {st}"
-        print(f"  [OK] /api/input/key handled truthfully (status {st}).")
+        # 2. Truthful Offline: POST /api/input/key -> MUST return 503
+        st, _ = studio_req_offline("POST", "/api/input/key", {"key": "a"})
+        assert st == 503, f"Expected 503 for offline input key, got {st}"
+        print("  [OK] /api/input/key truthfully reported 503 when guest is offline.")
 
-        # 3. GET /api/screen/binary_stream (Live scanout frame header check)
-        req_stream = urllib.request.Request(f"{base_url}/api/screen/binary_stream", headers={"Host": f"127.0.0.1:{studio_port}"})
-        try:
-            with urllib.request.urlopen(req_stream, timeout=3) as resp_stream:
-                chunk = resp_stream.read(16)
-                assert chunk.startswith(b"IOSF"), f"Expected IOSF stream header, got: {chunk[:8]}"
-                print("  [OK] /api/screen/binary_stream verified (IOSF header received).")
-        except Exception as e:
-            # If guest is offline during studio test, handler still responds or handles stream
-            print(f"  [STREAM TEST] Checked binary_stream endpoint: {e}")
+        # 3. Truthful Offline: GET /api/screen/frame -> MUST return 503
+        st, _ = studio_req_offline("GET", "/api/screen/frame")
+        assert st == 503, f"Expected 503 for offline screen frame, got {st}"
+        print("  [OK] /api/screen/frame truthfully reported 503 when guest is offline.")
 
-        # 4. Security: Cross-Origin -> 403 Forbidden
-        st, _ = studio_req("POST", "/api/touch/event", {"action": "tap", "x": 360, "y": 600},
-                           headers={"Origin": "http://evil.example.com"})
+        # 4. Truthful Offline: GET /api/screen/binary_stream -> MUST return 503
+        st, _ = studio_req_offline("GET", "/api/screen/binary_stream")
+        assert st == 503, f"Expected 503 for offline binary stream, got {st}"
+        print("  [OK] /api/screen/binary_stream truthfully reported 503 when guest is offline.")
+
+        # 5. Security: Cross-Origin -> 403 Forbidden
+        st, _ = studio_req_offline("POST", "/api/touch/event", {"action": "tap", "x": 360, "y": 600},
+                                   headers={"Origin": "http://evil.example.com"})
         assert st == 403, f"Expected 403 for cross-origin touch event, got {st}"
         print("  [OK] Cross-origin touch rejected with 403 Forbidden.")
 
-        # 5. Security: Missing Host Header -> 403 Forbidden
-        with socket.create_connection(("127.0.0.1", studio_port), timeout=3) as s_no_host:
+        # 6. Security: Missing Host Header -> 403 Forbidden
+        with socket.create_connection(("127.0.0.1", studio_port2), timeout=3) as s_no_host:
             raw_req = (
                 b"POST /api/touch/event HTTP/1.1\r\n"
                 b"Content-Type: application/json\r\n"
@@ -1070,15 +1285,15 @@ def run_acceptance_suite() -> int:
             assert "403" in status_line, f"Expected 403 for missing Host header, got: {status_line}"
         print("  [OK] Missing Host header rejected with 403 Forbidden.")
 
-        # 6. Security: Forbidden Monitor Command -> 403 Forbidden
-        st, _ = studio_req("POST", "/api/qemu/cmd", {"cmd": "quit"})
+        # 7. Security: Forbidden Monitor Command -> 403 Forbidden
+        st, _ = studio_req_offline("POST", "/api/qemu/cmd", {"cmd": "quit"})
         assert st == 403, f"Expected 403 for forbidden monitor command 'quit', got {st}"
         print("  [OK] Forbidden monitor command rejected with 403 Forbidden.")
 
     finally:
         try:
-            studio_httpd.shutdown()
-            studio_httpd.server_close()
+            studio_httpd2.shutdown()
+            studio_httpd2.server_close()
         except Exception:
             pass
 

@@ -60,7 +60,7 @@ $qemuProcess = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -PassThru -
 Write-Host "[QEMU] Started (PID: $($qemuProcess.Id))" -ForegroundColor Green
 
 # 3. Persist QEMU launch state so Device Studio immediately adopts the guest
-$pyRecord = "import sys, time; sys.path.insert(0, r'$emulatorDir'); import server; server.record_qemu_process({'pid': $($qemuProcess.Id), 'start_key': server._process_start_key($($qemuProcess.Id)), 'started_at': time.time(), 'arch': 'x86_64'})"
+$pyRecord = "import sys, time; sys.path.insert(0, r'$emulatorDir'); import server; server.record_qemu_process({'pid': $($qemuProcess.Id), 'start_key': server._process_start_key($($qemuProcess.Id)), 'started_at': time.time(), 'arch': 'x86_64', 'vnc_display': 1, 'vnc_port': $vncPort})"
 Start-Process -FilePath "python" -ArgumentList @("-c", $pyRecord) -Wait -NoNewWindow
 
 # 4. Wait a moment for QEMU VNC to be ready

@@ -486,12 +486,14 @@ fn hex_nibble(b: u8) -> Option<u8> {
 /// write at a time, and the chunks of a file arrive as separate
 /// commands with nothing tying them together but the path that named
 /// them.
+#[cfg(feature = "debug-control-plane")]
 struct GuestWrite {
     path: String,
     expected_len: usize,
     bytes: Vec<u8>,
 }
 
+#[cfg(feature = "debug-control-plane")]
 static GUEST_WRITE: Mutex<Option<GuestWrite>> = Mutex::new(None);
 
 /// Whether a path may be reached from the console.
@@ -504,6 +506,7 @@ static GUEST_WRITE: Mutex<Option<GuestWrite>> = Mutex::new(None);
 /// WHY reads share the write whitelist: this channel moves the user's own
 /// Storage write confinement: writes are strictly restricted to /data/ and user media.
 /// Reading allows /data/, user media, listing /storage, and reading specific user notes.
+#[cfg(feature = "debug-control-plane")]
 fn guest_path_is_safe(path: &str, writable: bool) -> bool {
     if path.is_empty() || path.len() > 192 {
         return false;
@@ -552,9 +555,11 @@ fn guest_path_is_safe(path: &str, writable: bool) -> bool {
 /// both directions. A model could never be put on the device, and a file
 /// the guest wrote could never be read from the host. The console is the
 /// only channel between the two, so the console carries the files.
+#[cfg(feature = "debug-control-plane")]
 fn handle_guest_fs_command(parts: &mut core::str::SplitAsciiWhitespace<'_>) -> bool {
     let Some(verb) = parts.next() else { return false };
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("STUDIO_FS_LIST") {
         let Some(path) = parts.next() else {
             serial_println!("[STUDIO_FS] ERROR missing path");
@@ -593,6 +598,7 @@ fn handle_guest_fs_command(parts: &mut core::str::SplitAsciiWhitespace<'_>) -> b
         return true;
     }
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("STUDIO_FS_READ") {
         let Some(path) = parts.next() else {
             serial_println!("[STUDIO_FS] ERROR missing path");
@@ -635,6 +641,7 @@ fn handle_guest_fs_command(parts: &mut core::str::SplitAsciiWhitespace<'_>) -> b
         return true;
     }
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("STUDIO_FS_BEGIN") {
         let Some(path) = parts.next() else {
             serial_println!("[STUDIO_FS] ERROR missing path");
@@ -658,6 +665,7 @@ fn handle_guest_fs_command(parts: &mut core::str::SplitAsciiWhitespace<'_>) -> b
         return true;
     }
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("STUDIO_FS_CHUNK") {
         let Some(offset) = parts.next().and_then(|v| v.parse::<usize>().ok()) else {
             serial_println!("[STUDIO_FS] ERROR missing offset");
@@ -702,6 +710,7 @@ fn handle_guest_fs_command(parts: &mut core::str::SplitAsciiWhitespace<'_>) -> b
         return true;
     }
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("STUDIO_FS_COMMIT") {
         let mut write = GUEST_WRITE.lock();
         let Some(state) = write.take() else {
@@ -734,6 +743,7 @@ fn handle_guest_fs_command(parts: &mut core::str::SplitAsciiWhitespace<'_>) -> b
         return true;
     }
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("STUDIO_FS_DELETE_FILE") {
         let Some(path) = parts.next() else {
             serial_println!("[STUDIO_FS] ERROR missing path");
@@ -754,6 +764,7 @@ fn handle_guest_fs_command(parts: &mut core::str::SplitAsciiWhitespace<'_>) -> b
         return true;
     }
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("STUDIO_FS_MKDIR") {
         let Some(path) = parts.next() else {
             serial_println!("[STUDIO_FS] ERROR missing path");
@@ -768,22 +779,6 @@ fn handle_guest_fs_command(parts: &mut core::str::SplitAsciiWhitespace<'_>) -> b
             vfs.mkdir(path);
         }
         serial_println!("MKDIR_OK path={}", path);
-        return true;
-    }
-
-    if verb.eq_ignore_ascii_case("RAPP_UNINSTALL") {
-        let Some(package_id) = parts.next() else {
-            serial_println!("[STUDIO_PKG] ERROR missing package id");
-            return true;
-        };
-        let removed = {
-            let mut vfs = crate::fs::VFS.lock();
-            vfs.remove_app_storage(package_id)
-        };
-        match removed {
-            Ok(()) => serial_println!("UNINSTALL_OK package={}", package_id),
-            Err(_) => serial_println!("[STUDIO_PKG] ERROR uninstall failed package={}", package_id),
-        }
         return true;
     }
 
@@ -1670,14 +1665,8 @@ fn handle_serial_command(cmd: &[u8]) {
     }
 
     // The guest's filesystem channel, and the console's other guest-facing
-    // commands. WHY it is asked for before the rest: the Studio sends
-    // these to read and write the guest's own files, and the rest of the
-    // console is the platform's own diagnostics.
-    //
-    // WHY the line is handed over whole: `handle_guest_fs_command` reads the
-    // verb itself, and the Studio's transport writes `STUDIO_FS_LIST <path>`
-    // as one line. Dropping the first token here made every one of those
-    // commands start at the path, match no verb, and fall through silently.
+    // commands. Confined to development control plane builds.
+    #[cfg(feature = "debug-control-plane")]
     {
         let mut guest_parts = s.split_ascii_whitespace();
         if handle_guest_fs_command(&mut guest_parts) {
@@ -1837,16 +1826,6 @@ fn handle_serial_command(cmd: &[u8]) {
         match crate::interrupts::process_table_dump_now() {
             Some(tasks) => crate::serial_println!("[PROC_LIST] END tasks={}", tasks),
             None => crate::serial_println!("[PROC_LIST] UNAVAILABLE scheduler_busy"),
-        }
-        return;
-    }
-
-    if verb.eq_ignore_ascii_case("APP_LAUNCH") {
-        if let Some(id) = parts.next() {
-            match crate::syscall::dev_launch_app(id) {
-                Ok(tid) => serial_println!("[RAPP_HOST] LAUNCHED id={} task={}", id, tid.0),
-                Err(err) => serial_println!("[RAPP_HOST] LAUNCH_FAILED id={} error={:?}", id, err),
-            }
         }
         return;
     }
@@ -2379,55 +2358,6 @@ fn handle_serial_command(cmd: &[u8]) {
                 }
             }
         }
-    } else if verb.eq_ignore_ascii_case("NAV") {
-        if let Some(target) = parts.next() {
-            if target.eq_ignore_ascii_case("BACK") {
-                crate::serial_println!("[COM1 INPUT] Hardware NAV BACK event received.");
-                crate::drivers::input::dispatch_to_focused_window(crate::drivers::input::InputEvent {
-                    kind: crate::drivers::input::InputEventKind::Back,
-                    x: 120,
-                    y: 1416,
-                    ..crate::drivers::input::InputEvent::EMPTY
-                });
-                crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
-            } else if target.eq_ignore_ascii_case("HOME") {
-                crate::serial_println!("[COM1 INPUT] Hardware NAV HOME event received.");
-                crate::drivers::input::dispatch_to_focused_window(crate::drivers::input::InputEvent {
-                    kind: crate::drivers::input::InputEventKind::Home,
-                    x: 360,
-                    y: 1416,
-                    ..crate::drivers::input::InputEvent::EMPTY
-                });
-                crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
-            } else if target.eq_ignore_ascii_case("RECENTS") {
-                crate::serial_println!("[COM1 INPUT] Hardware NAV RECENTS event received.");
-                crate::drivers::input::dispatch_to_focused_window(crate::drivers::input::InputEvent {
-                    kind: crate::drivers::input::InputEventKind::Recents,
-                    x: 600,
-                    y: 1416,
-                    ..crate::drivers::input::InputEvent::EMPTY
-                });
-                crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
-            }
-        }
-    } else if verb.eq_ignore_ascii_case("POWER_KEY") || verb.eq_ignore_ascii_case("LOCK_KEY") {
-        crate::serial_println!("[COM1 INPUT] Hardware POWER/LOCK key event received.");
-        let key_ev = crate::drivers::input::InputEvent {
-            kind: crate::drivers::input::InputEventKind::Key,
-            x: 0x1000F, // Power keycode
-            y: 1, // Pressed
-            ..crate::drivers::input::InputEvent::EMPTY
-        };
-        crate::drivers::input::dispatch_to_focused_window(key_ev);
-        crate::event::broadcast_event(crate::event::EVENT_TOUCH_INPUT);
-    } else if verb.eq_ignore_ascii_case("INPUT_KEY") {
-        if let Some(cp_s) = parts.next() {
-            if let Ok(cp) = cp_s.parse::<u32>() {
-                if let Some(c) = char::from_u32(cp) {
-                    crate::input::post_char_event(c);
-                }
-            }
-        }
     } else if s.len() == 1 {
         let c = s.chars().next().unwrap();
         crate::input::post_char_event(c);
@@ -2820,14 +2750,9 @@ mod tests {
         assert_eq!(crate::panic::get_panic_policy(), crate::panic::PanicPolicy::Halt);
     }
 
-    /// Finding C5 (arbitrary-path read leak via the Studio channel).
-    ///
-    /// `STUDIO_FS_READ` / `STUDIO_FS_LIST` used to accept any well-shaped path,
-    /// so an unauthenticated console line could dump `/user/.accounts` exactly
-    /// like the legacy `READ_FILE` verb. Reads now share the write root
-    /// whitelist: private platform state is refused, while a user document under
-    /// `/data` or media storage stays reachable. Runs in every build because the
-    /// confinement is not feature-gated.
+    /// In debug control plane builds, `STUDIO_FS_READ` / `STUDIO_FS_LIST` refuse
+    /// private paths outside the whitelist.
+    #[cfg(feature = "debug-control-plane")]
     #[test]
     fn studio_fs_channel_refuses_private_paths() {
         capture_clear();
@@ -2861,6 +2786,29 @@ mod tests {
         assert!(
             !lines.iter().any(|l| l.contains("ERROR unsafe path")),
             "STUDIO_FS_READ wrongly refused a legitimate /data document path: {:?}",
+            lines
+        );
+    }
+
+    /// In production builds without `debug-control-plane`, all STUDIO_FS commands
+    /// are completely disabled and cannot be executed over COM1.
+    #[cfg(not(feature = "debug-control-plane"))]
+    #[test]
+    fn production_build_refuses_studio_fs() {
+        capture_clear();
+        handle_serial_command(b"STUDIO_FS_READ /storage/note-untitled.note 0 192");
+        let lines = capture_lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("[STUDIO_FS_READ] hex=")),
+            "Production build must not execute STUDIO_FS_READ: {:?}",
+            lines
+        );
+        capture_clear();
+        handle_serial_command(b"STUDIO_FS_LIST /storage");
+        let lines = capture_lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("[STUDIO_FS_ENTRY]")),
+            "Production build must not execute STUDIO_FS_LIST: {:?}",
             lines
         );
     }

@@ -47,6 +47,8 @@ import zipfile
 from pathlib import Path
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
 APPS_DIR = WORKSPACE_ROOT / "apps"
 DIST_DIR = WORKSPACE_ROOT / "dist"
 PACKAGES_DIR = WORKSPACE_ROOT / "packages"
@@ -494,8 +496,10 @@ def _build_x86_kernel_and_image():
     # GET observers and the path-confined STUDIO_FS channel are unaffected and stay
     # available in every build.
     debug_control_plane = os.environ.get("INTEROS_DEBUG_CONTROL_PLANE", "").strip().lower()
+    features = []
     if debug_control_plane in ("1", "true", "yes", "on"):
         cargo_build += ["--features", "debug-control-plane"]
+        features.append("debug-control-plane")
         log_warn("=" * 72)
         log_warn("DEBUG CONTROL PLANE ENABLED (INTEROS_DEBUG_CONTROL_PLANE=1).")
         log_warn("This kernel build COMPILES IN unauthenticated serial verbs that")
@@ -511,7 +515,19 @@ def _build_x86_kernel_and_image():
     else:
         log("Kernel debug control plane: DISABLED (production default; set "
             "INTEROS_DEBUG_CONTROL_PLANE=1 to opt in for development only).")
-    target_base = Path(os.environ["CARGO_TARGET_DIR"]) if "CARGO_TARGET_DIR" in os.environ else (WORKSPACE_ROOT / "kernel" / "target")
+
+    is_debug_cp = "debug-control-plane" in features
+    cargo_env = dict(os.environ)
+    if is_debug_cp:
+        target_base = WORKSPACE_ROOT / "target" / "kernel-debug-cp"
+        cargo_env["CARGO_TARGET_DIR"] = str(target_base)
+        target_mirror = WORKSPACE_ROOT / "target" / "verify" / "e2e_acceptance" / "kernel-debug-cp"
+        img_path = WORKSPACE_ROOT / "target" / "verify" / "e2e_acceptance" / "inter-os-bios-tls-dev.img"
+    else:
+        target_base = Path(os.environ["CARGO_TARGET_DIR"]) if "CARGO_TARGET_DIR" in os.environ else (WORKSPACE_ROOT / "kernel" / "target")
+        target_mirror = WORKSPACE_ROOT / "target" / "x86_64-unknown-none" / kernel_profile / "kernel"
+        img_path = TARGET_DIR / "inter-os-bios.img"
+
     canonical_kernel = target_base / "x86_64-unknown-none" / kernel_profile / "kernel"
     if canonical_kernel.exists():
         try:
@@ -519,7 +535,7 @@ def _build_x86_kernel_and_image():
         except OSError:
             pass
 
-    res = subprocess.run(cargo_build, cwd=str(WORKSPACE_ROOT))
+    res = subprocess.run(cargo_build, cwd=str(WORKSPACE_ROOT), env=cargo_env)
     if res.returncode != 0:
         log_error("x86_64 kernel build failed")
         return res.returncode
@@ -528,26 +544,44 @@ def _build_x86_kernel_and_image():
         log_error(f"Kernel artifact missing after successful cargo build: {canonical_kernel}")
         return 1
 
-    target_mirror = WORKSPACE_ROOT / "target" / "x86_64-unknown-none" / kernel_profile / "kernel"
     target_mirror.parent.mkdir(parents=True, exist_ok=True)
     if canonical_kernel.resolve() != target_mirror.resolve():
         shutil.copy2(canonical_kernel, target_mirror)
     kernel_path = canonical_kernel
 
-    log("Packaging canonical QEMU Phone BIOS image...")
+    img_path.parent.mkdir(parents=True, exist_ok=True)
+    log(f"Packaging QEMU Phone BIOS image ({img_path.name})...")
     res = subprocess.run([
         "cargo", "run", "--locked",
         "--manifest-path", "boot/Cargo.toml",
-        "--", str(kernel_path), "target/inter-os-bios.img"
+        "--", str(kernel_path), str(img_path.relative_to(WORKSPACE_ROOT)).replace("\\", "/")
     ], cwd=str(WORKSPACE_ROOT))
     if res.returncode != 0:
         log_error("BIOS disk image packaging failed")
         return res.returncode
 
-    img_path = TARGET_DIR / "inter-os-bios.img"
     if not img_path.exists():
         log_error(f"Boot image missing after packaging: {img_path}")
         return 1
+
+    try:
+        from tools.image_provenance import create_provenance_manifest
+        embedded_json = target_base / "x86_64-unknown-none" / kernel_profile / "build"
+        out_json = None
+        for p in embedded_json.glob("kernel-*/out/embedded_image_digests.json"):
+            out_json = p
+            break
+        manifest_path = create_provenance_manifest(
+            img_path,
+            canonical_kernel,
+            profile=kernel_profile,
+            features=features,
+            embedded_digests_json=out_json,
+        )
+        log_success(f"Build provenance manifest generated: {manifest_path.name}")
+    except Exception as e:
+        log_warn(f"Notice: provenance manifest generation: {e}")
+
     log_success(f"x86_64 QEMU Phone image ready: {img_path.relative_to(WORKSPACE_ROOT)} ({img_path.stat().st_size} bytes)")
     return 0
 
@@ -739,6 +773,10 @@ def cmd_build(args):
         return 0
 
     if target_lower in ("demo", "qemu", "phone"):
+        return _build_x86_kernel_and_image()
+
+    if target_lower in ("acceptance_dev", "acceptance-dev", "e2e_dev", "e2e-dev", "acceptance"):
+        os.environ["INTEROS_DEBUG_CONTROL_PLANE"] = "1"
         return _build_x86_kernel_and_image()
 
     if target_lower in ("userspace", "apps", "services"):

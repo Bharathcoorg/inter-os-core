@@ -35,6 +35,8 @@ use kernel::storage::{MerkleVerifier, StorageError};
 use kernel::task::{SCHEDULER, TaskId};
 use kernel::wasm::{opcodes, Value, WasmError, WasmMemory, WasmModule, WasmVm};
 
+include!(concat!(env!("OUT_DIR"), "/build_provenance.rs"));
+
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(Mapping::Dynamic);
@@ -177,6 +179,21 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         Ok(count) => {
             serial_println!("[OK] Authenticated Boot: verified SHA-256 and ET_EXEC headers of {} embedded Ring-3 binaries.", count);
             serial_println!("[BOOT] Hardware Secure Boot: NOT IMPLEMENTED (unmeasured BIOS/QEMU boot path; software-authenticated image manifest only).");
+            let mut manifest_hex = [0u8; 64];
+            for (i, b) in EMBEDDED_MANIFEST_SHA256.iter().enumerate() {
+                manifest_hex[i * 2] = b"0123456789abcdef"[(b >> 4) as usize];
+                manifest_hex[i * 2 + 1] = b"0123456789abcdef"[(b & 0x0f) as usize];
+            }
+            let manifest_str = core::str::from_utf8(&manifest_hex).unwrap_or("");
+            serial_println!(
+                "[BUILD_PROVENANCE] git_sha={} git_dirty={} profile={} debug_control_plane={} embedded_count={} embedded_manifest_sha256={}",
+                BUILD_GIT_SHA,
+                BUILD_GIT_DIRTY,
+                BUILD_PROFILE,
+                BUILD_DEBUG_CONTROL_PLANE,
+                count,
+                manifest_str
+            );
         }
         Err(err) => {
             panic!("Authenticated Boot integrity verification failed: {}", err);

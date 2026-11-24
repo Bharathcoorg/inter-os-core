@@ -74,6 +74,9 @@ DEBUG_REPLY_MARKERS = (
     "[KILLSWITCH]",
     "[FILE_READ]",
     "[FILE_WRITE]",
+    "[STUDIO_FS_READ]",
+    "[STUDIO_FS]",
+    "[APK_HOST] FAULT_INJECTED",
 )
 
 # The release kernel ELF the build mirrors into the workspace target dir, plus the
@@ -99,6 +102,14 @@ RESIDUAL_GATED_VERBS = (
     "TLS_TRUST_CHUNK",
     "TLS_TRUST_COMMIT",
     "TLS_TRUST_REVOKE",
+    "APK_FAULT",
+    "STUDIO_FS_LIST",
+    "STUDIO_FS_READ",
+    "STUDIO_FS_BEGIN",
+    "STUDIO_FS_CHUNK",
+    "STUDIO_FS_COMMIT",
+    "STUDIO_FS_DELETE_FILE",
+    "STUDIO_FS_MKDIR",
 )
 
 CFG_NOT_GATE = '#[cfg(not(feature = "debug-control-plane"))]'

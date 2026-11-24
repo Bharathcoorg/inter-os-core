@@ -257,6 +257,11 @@ def _write_launch_state(record):
         pass
 
 
+def record_qemu_process(record):
+    """Compatibility alias for external launchers persisting QEMU state."""
+    _write_launch_state(record)
+
+
 def _remove_launch_state():
     try:
         os.remove(QEMU_LAUNCH_STATE_FILE)
@@ -1380,11 +1385,11 @@ SUPPORTED_PROFILES = {
         "cpu": "qemu64",
         "ram": 4096,
         "boot_type": "BIOS/MBR Bootloader",
-        "image": os.path.join(WORKSPACE_ROOT, "target", "inter-os-bios.img"),
+        "image": os.environ.get("INTEROS_KERNEL_IMAGE") or os.path.join(WORKSPACE_ROOT, "target", "inter-os-bios.img"),
         "status": "Primary QEMU Phone contract",
         "display": {"backend": "vnc", "host": "127.0.0.1", "port": VNC_PORT, "display_index": VNC_DISPLAY, "websocket_port": WS_PORT, "guest_width": 720, "guest_height": 1440, "density_dpi": 320, "scale_factor_permille": 1000, "authoring_space": {"width": 720, "height": 1440, "density_dpi": 320}},
-        "serial": {"host": "127.0.0.1", "port": 4301},
-        "monitor": {"host": "127.0.0.1", "port": 44445},
+        "serial": {"host": "127.0.0.1", "port": SERIAL_TCP_PORT},
+        "monitor": {"host": "127.0.0.1", "port": MONITOR_PORT},
     },
     "aarch64": {
         "name": "InterOS AArch64 Virt Mobile",

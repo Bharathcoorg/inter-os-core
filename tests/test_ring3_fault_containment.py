@@ -209,9 +209,14 @@ def run_fault_containment_test() -> int:
         print("SKIP: qemu-system-x86_64 binary not available or failed --version check.")
         return 2
 
-    dev_kernel_img = ROOT / "target" / "verify" / "e2e_acceptance" / "inter-os-bios-tls-dev.img"
-    kernel_img = dev_kernel_img if dev_kernel_img.exists() else (ROOT / "target" / "inter-os-bios.img")
-    assert kernel_img.exists(), f"Missing kernel image at {kernel_img}"
+    from tools.image_provenance import verify_boot_image_provenance
+
+    kernel_img = ROOT / "target" / "verify" / "e2e_acceptance" / "inter-os-bios-tls-dev.img"
+    assert kernel_img.exists(), (
+        f"Missing acceptance dev kernel image at {kernel_img}. "
+        "Build via 'python tools/interos.py build acceptance-dev'."
+    )
+    verify_boot_image_provenance(kernel_img, expected_debug_control_plane=True, allow_source_diff=True)
 
     artifact_dir = ROOT / "target" / "verify" / "fault_containment"
     artifact_dir.mkdir(parents=True, exist_ok=True)
