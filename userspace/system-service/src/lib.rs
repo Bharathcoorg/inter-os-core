@@ -896,9 +896,49 @@ pub fn run_acr_app_runtime() -> ! {
                                 let _ = std::log("[acr-app-runtime] STATE: Failed - unauthorized sender for CRSH");
                                 continue;
                             }
-                            let _ = std::log("[acr-app-runtime] FAULT INJECTION: triggering deliberate memory fault in child process");
-                            unsafe {
-                                core::ptr::write_volatile(0xDEAD_BEEF as *mut u8, 0x42);
+                            let sub_mode = if len >= 8 {
+                                &rx_buf[4..8]
+                            } else {
+                                b"PAGE"
+                            };
+
+                            if sub_mode == b"#UD " || sub_mode == b"UD2 " || sub_mode == b"UD  " {
+                                let _ = std::log("[acr-app-runtime] FAULT INJECTION: triggering deliberate Ring-3 #UD (Invalid Opcode) via ud2");
+                                #[cfg(target_arch = "x86_64")]
+                                unsafe {
+                                    core::arch::asm!("ud2", options(noreturn));
+                                }
+                                #[cfg(target_arch = "aarch64")]
+                                unsafe {
+                                    core::arch::asm!("udf #0", options(noreturn));
+                                }
+                                #[cfg(target_arch = "riscv64")]
+                                unsafe {
+                                    core::arch::asm!("unimp", options(noreturn));
+                                }
+                            } else if sub_mode == b"#DE " || sub_mode == b"DIV0" || sub_mode == b"DE  " {
+                                let _ = std::log("[acr-app-runtime] FAULT INJECTION: triggering deliberate Ring-3 #DE (Divide Error)");
+                                #[cfg(target_arch = "x86_64")]
+                                unsafe {
+                                    core::arch::asm!(
+                                        "mov eax, 1",
+                                        "xor ecx, ecx",
+                                        "div ecx",
+                                        options(noreturn)
+                                    );
+                                }
+                                #[cfg(not(target_arch = "x86_64"))]
+                                unsafe {
+                                    core::ptr::write_volatile(0xDEAD_BEEF as *mut u8, 0x42);
+                                }
+                            } else if sub_mode == b"PANI" || sub_mode == b"PANIC" {
+                                let _ = std::log("[acr-app-runtime] FAULT INJECTION: triggering deliberate userspace panic in Ring-3 child process");
+                                panic!("deliberate userspace panic for crash containment test");
+                            } else {
+                                let _ = std::log("[acr-app-runtime] FAULT INJECTION: triggering deliberate memory fault in child process");
+                                unsafe {
+                                    core::ptr::write_volatile(0xDEAD_BEEF as *mut u8, 0x42);
+                                }
                             }
                         }
                         _ => {}

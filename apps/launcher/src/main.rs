@@ -3498,7 +3498,7 @@ pub extern "C" fn _start() -> ! {
                         .ok();
                         render_view(surface, &state);
                     }
-                    Err(code) if code != -30 => {
+                    Err(code) if code != -30 && code != -1 => {
                         // Child exited or invalid PID: clear active_child
                         state.active_child = None;
                         refresh_runtime_recents(&mut state);
@@ -3573,10 +3573,10 @@ pub extern "C" fn _start() -> ! {
                         // not be paged or pulled.
                         if !matches!(state.current_view, ViewMode::LockScreen | ViewMode::PinEntry) {
                             if let Some(child_id) = state.active_child.take() {
-                                let _ = std::app_stop(child_id);
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
                                 std::log("[LAUNCHER] Home pressed; dismissed active child app.").ok();
+                                let _ = std::app_stop(child_id);
                                 let mut drain = std::InputEvent {
                                     kind: 0,
                                     x: 0,
@@ -3631,6 +3631,7 @@ pub extern "C" fn _start() -> ! {
                             _ => {
                                 state.current_view = ViewMode::HomeScreen;
                                 render_view(surface, &state);
+                                std::log("[LAUNCHER] Home pressed; returned to home screen.").ok();
                             }
                         }
                         continue;
@@ -3640,6 +3641,7 @@ pub extern "C" fn _start() -> ! {
                             refresh_runtime_recents(&mut state);
                             suspend_background_apps(&state);
                             screens::activity::refresh_previews(&mut state);
+                            state.active_child = None;
                             state.current_view = ViewMode::ActivitySpace;
                             render_view(surface, &state);
                         }
@@ -3653,10 +3655,10 @@ pub extern "C" fn _start() -> ! {
                             continue;
                         }
                         if let Some(child_id) = state.active_child.take() {
-                            let _ = std::app_stop(child_id);
                             state.current_view = ViewMode::HomeScreen;
                             render_view(surface, &state);
                             std::log("[LAUNCHER] Back/Home pressed; dismissed active child app.").ok();
+                            let _ = std::app_stop(child_id);
                             let mut drain = std::InputEvent { kind: 0, x: 0, y: 0, dx: 0, dy: 0, scale_milli: 1000 };
                             while std::input_event_poll(&mut drain).is_ok() {}
                             continue;
@@ -5490,6 +5492,7 @@ pub extern "C" fn _start() -> ! {
                                     refresh_runtime_recents(&mut state);
                                     suspend_background_apps(&state);
                                     screens::activity::refresh_previews(&mut state);
+                                    state.active_child = None;
                                     state.current_view = ViewMode::ActivitySpace;
                                     let mut win_buf = [0u8; 1024];
                                     let _ = std::window_list(&mut win_buf);
@@ -5854,6 +5857,7 @@ pub extern "C" fn _start() -> ! {
                                             refresh_runtime_recents(&mut state);
                                             suspend_background_apps(&state);
                                             screens::activity::refresh_previews(&mut state);
+                                            state.active_child = None;
                                             state.current_view = ViewMode::ActivitySpace;
                                             let mut win_buf = [0u8; 1024];
                                             let _ = std::window_list(&mut win_buf);
@@ -6219,6 +6223,7 @@ fn nav_panel_tap(
             refresh_runtime_recents(state);
             suspend_background_apps(state);
             screens::activity::refresh_previews(state);
+            state.active_child = None;
             state.current_view = ViewMode::ActivitySpace;
             let mut win_buf = [0u8; 1024];
             let _ = std::window_list(&mut win_buf);

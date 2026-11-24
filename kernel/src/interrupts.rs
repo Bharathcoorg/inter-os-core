@@ -858,6 +858,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
         let rip = stack_frame.instruction_pointer.as_u64();
         let _ = fault_report_bytes(b"[FAULT] Ring-3 Invalid Opcode (#UD)\n");
         let _ = fault_report_line(b"RIP=", rip);
+        let _ = fault_report_bytes(FAULT_TASK_TERMINATED_LINE);
         recover_and_terminate_current();
     }
     halt_after_fault_report_failure();
@@ -870,6 +871,7 @@ extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame)
         let rip = stack_frame.instruction_pointer.as_u64();
         let _ = fault_report_bytes(b"[FAULT] Ring-3 Divide Error (#DE)\n");
         let _ = fault_report_line(b"RIP=", rip);
+        let _ = fault_report_bytes(FAULT_TASK_TERMINATED_LINE);
         recover_and_terminate_current();
     }
     halt_after_fault_report_failure();
@@ -886,6 +888,7 @@ extern "x86-interrupt" fn stack_segment_fault_handler(
         let _ = fault_report_bytes(b"[FAULT] Ring-3 Stack Segment Fault (#SS)\n");
         let _ = fault_report_line(b"RIP=", rip);
         let _ = fault_report_line(b"ERR=", error_code);
+        let _ = fault_report_bytes(FAULT_TASK_TERMINATED_LINE);
         recover_and_terminate_current();
     }
     halt_after_fault_report_failure();

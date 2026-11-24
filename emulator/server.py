@@ -3766,6 +3766,10 @@ POST_ONLY_ROUTES = frozenset({
     '/api/hardware/orientation',
     '/api/orientation',
     '/api/hardware/sensor_inject',
+    '/api/sensors/inject',
+    '/api/battery/set',
+    '/api/biometrics/fingerprint',
+    '/api/killswitch/toggle',
     '/api/touch/event',
     '/api/pointer/hmp_event',
     '/api/input/key',
@@ -5411,7 +5415,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 else:
                     ok, resp = send_qemu_monitor_cmd('system_reset')
                     restart_method = 'monitor_system_reset'
-                    if not ok:
+                    if ok:
+                        vnc_client.force_reconnect()
+                    else:
                         stop_tracked_qemu()
                         ok, resp, info = launch_qemu_profile(active_profile_key)
                         restart_method = 'backend_relaunch'
@@ -5758,9 +5764,11 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 elif action in ('swipe', 'drag'):
                     steps = max(2, min(20, int(data.get('steps', 5))))
                     _deliver(f'SWIPE {gx} {gy} {gx2} {gy2} {steps}')
-                elif action in ('home', 'back', 'recents', 'settings', 'system'):
+                elif action in ('home', 'back', 'recents', 'settings', 'system', 'controls', 'quick_controls', 'quick'):
                     if action in ('settings', 'system'):
                         _deliver('RAPP_LAUNCH settings')
+                    elif action in ('controls', 'quick_controls', 'quick'):
+                        _deliver('TAP 360 25')
                     else:
                         _deliver(f'NAV {action.upper()}')
                 elif action in ('power', 'lock'):
@@ -5850,6 +5858,9 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 if key in ('Power', 'Lock'):
                     command = "LOCK_KEY"
                     response_key = {'key': key, 'action': 'lock' if key == 'Lock' else 'power_toggle'}
+                elif key in ('VolumeUp', 'VolumeDown'):
+                    command = f"VOLUME {'UP' if key == 'VolumeUp' else 'DOWN'}"
+                    response_key = {'key': key, 'action': 'volume_up' if key == 'VolumeUp' else 'volume_down'}
                 elif len(key) == 1:
                     command = f"INPUT_KEY {ord(key)}"
                     response_key = {'key': key, 'codepoint': ord(key)}

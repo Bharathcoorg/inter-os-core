@@ -88,12 +88,14 @@ static RAPP_TRANSFER: Mutex<Option<RappTransfer>> = Mutex::new(None);
 /// scrolled past. Rewriting the same bytes at the same position is harmless,
 /// while an offset that trusted line order would slide the anchor and store a
 /// certificate that is neither the original nor anything recognisable.
+#[cfg(feature = "debug-control-plane")]
 struct AnchorTransfer {
     expected_len: usize,
     der: [u8; crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES],
     received: [bool; crate::crypto::tls_trust::MAX_ANCHOR_DER_BYTES],
 }
 
+#[cfg(feature = "debug-control-plane")]
 static ANCHOR_TRANSFER: Mutex<Option<AnchorTransfer>> = Mutex::new(None);
 
 /// The most hex one `TLS_TRUST_CHUNK` line may carry.
@@ -102,6 +104,7 @@ static ANCHOR_TRANSFER: Mutex<Option<AnchorTransfer>> = Mutex::new(None);
 /// characters and one past that discards the whole line, so a chunk leaves room
 /// for the verb and a four-digit offset. It is also well under a sixth of the
 /// largest anchor, so even a full 2 KiB certificate arrives in eighteen lines.
+#[cfg(feature = "debug-control-plane")]
 const ANCHOR_CHUNK_HEX_CHARS: usize = 240;
 
 /// Initializes the primary COM1 serial port (I/O port 0x3F8).
@@ -499,13 +502,9 @@ static GUEST_WRITE: Mutex<Option<GuestWrite>> = Mutex::new(None);
 /// the same shape the host uses, before anything is read or written.
 ///
 /// WHY reads share the write whitelist: this channel moves the user's own
-/// documents -- a Studio screenshot, a host-delivered download, a file an app
-/// wrote into `/data` or media storage. It is not a window into the platform's
-/// private state. An unauthenticated console line must no more read
-/// `/user/.accounts` or the keystore than it may write there, so both
-/// directions are confined to one root whitelist. `_writable` is kept for
-/// call-site readability; the confinement no longer depends on it.
-fn guest_path_is_safe(path: &str, _writable: bool) -> bool {
+/// Storage write confinement: writes are strictly restricted to /data/ and user media.
+/// Reading allows /data/, user media, listing /storage, and reading specific user notes.
+fn guest_path_is_safe(path: &str, writable: bool) -> bool {
     if path.is_empty() || path.len() > 192 {
         return false;
     }
@@ -524,12 +523,24 @@ fn guest_path_is_safe(path: &str, _writable: bool) -> bool {
     // /system, the keystore -- is refused for reads and writes alike, so the
     // console can neither place a file among the platform's packages nor read
     // back the account secrets it guards.
-    if !path.starts_with("/data/")
-        && !path.starts_with("/storage/photos/")
-        && !path.starts_with("/storage/pictures/")
-        && !path.starts_with("/storage/videos/")
-    {
-        return false;
+    if writable {
+        if !path.starts_with("/data/")
+            && !path.starts_with("/storage/photos/")
+            && !path.starts_with("/storage/pictures/")
+            && !path.starts_with("/storage/videos/")
+        {
+            return false;
+        }
+    } else {
+        if !path.starts_with("/data/")
+            && path != "/storage"
+            && !path.starts_with("/storage/photos/")
+            && !path.starts_with("/storage/pictures/")
+            && !path.starts_with("/storage/videos/")
+            && !(path.starts_with("/storage/note-") && path.ends_with(".note"))
+        {
+            return false;
+        }
     }
     true
 }
@@ -988,8 +999,10 @@ fn handle_rapp_command(s: &str) -> bool {
         return true;
     }
 
+    #[cfg(feature = "debug-control-plane")]
     if verb.eq_ignore_ascii_case("APK_FAULT") {
         let Some(pkg) = parts.next() else { return true; };
+        let fault_type = parts.next().unwrap_or("pf");
         let target = {
             let sched = crate::task::SCHEDULER.lock();
             let cid = sched.find_live_task_named(pkg);
@@ -1003,10 +1016,17 @@ fn handle_rapp_command(s: &str) -> bool {
             serial_println!("[APK_HOST] REJECT package '{}' task not found", pkg);
             return true;
         };
-        let mut crsh_msg = [0u8; 4];
+        let mut crsh_msg = [0u8; 8];
         crsh_msg[0..4].copy_from_slice(b"CRSH");
+        let mode_bytes: &[u8; 4] = match fault_type.to_ascii_lowercase().as_str() {
+            "ud" | "#ud" | "ud2" => b"#UD ",
+            "de" | "#de" | "div0" => b"#DE ",
+            "panic" | "pan" => b"PANI",
+            _ => b"PAGE",
+        };
+        crsh_msg[4..8].copy_from_slice(mode_bytes);
         match crate::ipc::IPC_ROUTER.lock().send_direct(parent_id, child_id, 0x4853_5243, &crsh_msg) {
-            Ok(()) => serial_println!("[APK_HOST] FAULT_INJECTED pkg={} child={} parent={}", pkg, child_id.0, parent_id.0),
+            Ok(()) => serial_println!("[APK_HOST] FAULT_INJECTED pkg={} mode={} child={} parent={}", pkg, fault_type, child_id.0, parent_id.0),
             Err(_) => serial_println!("[APK_HOST] REJECT crsh ipc failed"),
         }
         return true;

@@ -312,6 +312,9 @@ impl AppState {
             // file manager and the launcher read has to be the note the
             // user just wrote.
             self.publish_notes();
+            std::log("[NOTES] Note saved successfully.").ok();
+        } else {
+            std::log("[NOTES] Note save failed.").ok();
         }
         ok
     }
@@ -2407,6 +2410,7 @@ fn handle_tap(state: &mut AppState, ux: usize, uy: usize) -> TapAction {
                             state.keyboard_visible = false;
                             state.swatch_picker_open = false;
                             state.view = ViewMode::Editor;
+                            std::log("[NOTES] Note opened in editor.").ok();
                             return TapAction::Redraw;
                         }
                     }
@@ -2769,6 +2773,7 @@ fn restore_live_store(store: &NotesStore) {
 /// bytes are still in the live path and the app says the store is corrupt.
 fn quarantine_failed_store(bytes: &[u8]) {
     let _ = write_sandbox_file(QUARANTINE_PATH, bytes);
+    std::log("[NOTES] Corrupt store quarantined to data/notes.corrupt").ok();
 }
 
 /// Writes the store to the device.
@@ -3082,6 +3087,13 @@ pub extern "C" fn _start() -> ! {
     // wrote. When the store cannot be read the list is simply empty, and the
     // UI already says "No Notes Saved Yet".
     let loaded = load_notes_from_storage(&mut state.store);
+    match loaded {
+        StorageState::Ready => std::log("[NOTES] Storage state: Ready").ok(),
+        StorageState::Recovered => std::log("[NOTES] Storage state: Recovered").ok(),
+        StorageState::Empty => std::log("[NOTES] Storage state: Empty").ok(),
+        StorageState::Corrupt => std::log("[NOTES] Storage state: Corrupt").ok(),
+        StorageState::Refused => std::log("[NOTES] Storage state: Refused").ok(),
+    };
     if matches!(
         loaded,
         StorageState::Refused | StorageState::Corrupt | StorageState::Empty

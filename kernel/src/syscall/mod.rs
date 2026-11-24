@@ -4733,11 +4733,25 @@ pub fn sys_app_focus(task_id: TaskId) -> SyscallResult {
     if task_id == TaskId(0) { return SyscallResult::InvalidArguments; }
     match crate::task::process::set_foreground(task_id) {
         Ok(()) => {
-            SCHEDULER.lock().unblock_task(task_id);
+            let caller_id = SCHEDULER.lock().current_task_id().unwrap_or(TaskId(0));
+            {
+                let mut sched = SCHEDULER.lock();
+                sched.unblock_task(task_id);
+                if let Some(task) = sched.get_task_mut(task_id) {
+                    if task.parent_id == TaskId(0) && caller_id != TaskId(0) {
+                        task.parent_id = caller_id;
+                    }
+                }
+            }
             // Focusing a task from the task switcher must also bring its
             // surfaces to the top; otherwise the launcher's home surface
             // stays in front and the switch looks like it did nothing.
-            crate::drivers::display_kms::DRM_KMS.lock().raise_surfaces_for_task(task_id.0);
+            {
+                let mut kms = crate::drivers::display_kms::DRM_KMS.lock();
+                kms.raise_surfaces_for_task(task_id.0);
+                let mut display = crate::drivers::KmsDisplayDriver::new(&mut kms);
+                let _ = display.composite_and_flip();
+            }
             SyscallResult::Success
         }
         Err(_) => SyscallResult::TargetNotFound,
@@ -4835,7 +4849,7 @@ const COOPERATIVE_STOP_GRACE_TICKS: u64 = 2;
 /// forever. The guest's deadline is the real bound; this cap only keeps a
 /// stuck-counter context from hanging a force-stop.
 #[cfg(not(test))]
-const COOPERATIVE_STOP_GRACE_SPINS: usize = 1_000_000;
+const COOPERATIVE_STOP_GRACE_SPINS: usize = 64;
 #[cfg(test)]
 const COOPERATIVE_STOP_GRACE_SPINS: usize = 256;
 
@@ -4877,23 +4891,25 @@ fn request_cooperative_stop(
 fn await_cooperative_stop(child_id: TaskId) {
     let deadline = crate::interrupts::get_system_ticks()
         .saturating_add(COOPERATIVE_STOP_GRACE_TICKS);
-    for _ in 0..COOPERATIVE_STOP_GRACE_SPINS {
-        let terminal = {
-            let sched = SCHEDULER.lock();
-            match sched.get_task(child_id) {
-                Some(task) => matches!(
-                    task.state,
-                    crate::task::TaskState::Zombie | crate::task::TaskState::Terminated
-                ),
-                // Already reaped: nothing left to wait for.
-                None => true,
+    for spin in 0..COOPERATIVE_STOP_GRACE_SPINS {
+        if spin % 16 == 0 {
+            let terminal = {
+                let sched = SCHEDULER.lock();
+                match sched.get_task(child_id) {
+                    Some(task) => matches!(
+                        task.state,
+                        crate::task::TaskState::Zombie | crate::task::TaskState::Terminated
+                    ),
+                    // Already reaped: nothing left to wait for.
+                    None => true,
+                }
+            };
+            if terminal {
+                return;
             }
-        };
-        if terminal {
-            return;
-        }
-        if crate::interrupts::get_system_ticks() >= deadline {
-            return;
+            if crate::interrupts::get_system_ticks() >= deadline {
+                return;
+            }
         }
         core::hint::spin_loop();
     }
@@ -4933,7 +4949,11 @@ pub fn sys_app_stop(child_id: TaskId) -> SyscallResult {
             // Force-stop is a synchronous lifecycle boundary: once the syscall
             // returns, the child's IPC, files, events, sockets, capabilities,
             // surfaces, process record, and kernel stack must be reclaimable.
-            match SCHEDULER.lock().reap_child(parent, child_id) {
+            let reaped = {
+                let mut sched = SCHEDULER.lock();
+                sched.reap_child(parent, child_id)
+            };
+            match reaped {
                 Ok(_) => {
                     if let Some(pkg) = child_package {
                         crate::notification::NOTIFICATION_MANAGER
