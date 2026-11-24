@@ -560,7 +560,7 @@ guest_framebuffer_size = (SCANOUT_W, SCANOUT_H)
 # desktop size is stale or transitional: publishing it would crop the phone
 # surface to the wrong geometry, so the session is resynchronised instead of
 # streaming stale pixels.
-CANONICAL_SCANOUT_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (SCANOUT_H, SCANOUT_W), (1280, 720)))
+CANONICAL_SCANOUT_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (SCANOUT_H, SCANOUT_W), (1280, 720), (1080, 2400)))
 MAX_SCANOUT_DIM = 4096
 
 
@@ -575,7 +575,7 @@ def is_canonical_scanout(w, h):
 # publishes the whole 1440x720 (or 1280x720) desktop. All are guest-derived crops,
 # never invented pixels; the browser scales the slice to the phone chassis
 # with smoothing, exactly like a hardware emulator viewport.
-PHONE_FRAME_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (SCANOUT_H, SCANOUT_W), (360, 720), (1280, 720)))
+PHONE_FRAME_SIZES = frozenset(((SCANOUT_W, SCANOUT_H), (SCANOUT_H, SCANOUT_W), (360, 720), (1280, 720), (1080, 2400)))
 
 # How long a monitor-confirmed non-native geometry keeps suppressing the resync.
 # WHY bounded: during boot the guest really does present 1280x720 until it engages

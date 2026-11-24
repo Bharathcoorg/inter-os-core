@@ -514,37 +514,54 @@ pub fn sys_waitpid(child_id: u64) -> SyscallResult {
         Some(id) => id,
         None => return SyscallResult::PermissionDenied,
     };
-    let child_tid = crate::task::TaskId(child_id);
-    let child = match sched.get_task_mut(child_tid) {
-        Some(task) => task,
-        None => return SyscallResult::InvalidArgument,
-    };
-    if child.parent_id != parent_id {
-        return SyscallResult::PermissionDenied;
-    }
-    let state = child.state;
-    let code = child.exit_code;
-
-    match state {
-        crate::task::TaskState::Zombie | crate::task::TaskState::Terminated => {
-            match sched.reap_child(parent_id, child_tid) {
-                Ok(reaped_code) => {
-                    drop(sched);
-                    serial_println!(
-                        "[WAITPID] Parent {} reaped child {} with exit code {}.",
-                        parent_id.0,
-                        child_id,
-                        reaped_code
-                    );
-                    show_shell_surfaces();
-                    SyscallResult::Success
-                }
-                Err(_) => SyscallResult::DeviceError,
+    if child_id == 0 {
+        match sched.reap_any_child(parent_id) {
+            Ok((reaped_id, reaped_code)) => {
+                drop(sched);
+                serial_println!(
+                    "[WAITPID] Parent {} reaped child {} with exit code {}.",
+                    parent_id.0,
+                    reaped_id.0,
+                    reaped_code
+                );
+                show_shell_surfaces();
+                SyscallResult::Success
             }
+            Err(_) => SyscallResult::NotReady,
         }
-        _ => {
-            let _ = code;
-            SyscallResult::NotReady
+    } else {
+        let child_tid = crate::task::TaskId(child_id);
+        let child = match sched.get_task_mut(child_tid) {
+            Some(task) => task,
+            None => return SyscallResult::InvalidArgument,
+        };
+        if child.parent_id != parent_id {
+            return SyscallResult::PermissionDenied;
+        }
+        let state = child.state;
+        let code = child.exit_code;
+
+        match state {
+            crate::task::TaskState::Zombie | crate::task::TaskState::Terminated => {
+                match sched.reap_child(parent_id, child_tid) {
+                    Ok(reaped_code) => {
+                        drop(sched);
+                        serial_println!(
+                            "[WAITPID] Parent {} reaped child {} with exit code {}.",
+                            parent_id.0,
+                            child_id,
+                            reaped_code
+                        );
+                        show_shell_surfaces();
+                        SyscallResult::Success
+                    }
+                    Err(_) => SyscallResult::DeviceError,
+                }
+            }
+            _ => {
+                let _ = code;
+                SyscallResult::NotReady
+            }
         }
     }
 }
@@ -4352,6 +4369,12 @@ pub fn sys_tcp_close(connection_id: u32) -> Result<(), SyscallResult> {
         let table = crate::net::TCP_TABLE.lock();
         let conn = table.get(connection_id).ok_or(SyscallResult::InvalidArguments)?;
         if conn.owner_task_id != owner { return Err(SyscallResult::PermissionDenied); }
+        if conn.state == crate::net::TcpState::SynSent || conn.state == crate::net::TcpState::Closed {
+            drop(table);
+            let mut table = crate::net::TCP_TABLE.lock();
+            let _ = table.close_owned(connection_id, owner);
+            return Ok(());
+        }
         if conn.state != crate::net::TcpState::Established && conn.state != crate::net::TcpState::CloseWait {
             return Err(SyscallResult::NotReady);
         }
@@ -5319,6 +5342,8 @@ pub fn sys_surface_create(cap_slot: usize, width: u32, height: u32, z_order: u32
         // next dispatched, and `revoke_all` has already made its capabilities dead.
         if let Err(why) = SCHEDULER.lock().terminate_task(TaskId(victim), crate::drivers::display_kms::DrmKmsController::EXIT_CODE_MEMORY_RETIRE) {
             crate::serial_println!("[LIFECYCLE] task {} could not be retired: {}", victim, why);
+        } else if let Some(task) = SCHEDULER.lock().get_task_mut(TaskId(victim)) {
+            task.parent_id = TaskId(0);
         }
         let reclaimed = crate::drivers::display_kms::DRM_KMS.lock().destroy_surfaces_owned_by(victim);
         if reclaimed > 0 {

@@ -2835,7 +2835,7 @@ pub fn transliterate(cp: u32) -> &'static [u8] {
     }
 }
 
-/// Renders an anti-aliased text pixel with horizontal budget clipping at `x0 + max_w`.
+/// Renders an anti-aliased text pixel with horizontal budget clipping at `x0..x0 + max_w`.
 #[inline(always)]
 pub fn test_text_aa_clipped(
     x: usize,
@@ -2849,7 +2849,7 @@ pub fn test_text_aa_clipped(
     bold: bool,
     max_w: usize,
 ) -> Option<u32> {
-    if x >= x0.saturating_add(max_w) {
+    if x < x0 || x >= x0.saturating_add(max_w) {
         return None;
     }
     test_text_aa(x, y, x0, y0, scale, text, color, bg, bold)

@@ -4670,23 +4670,6 @@ pub extern "C" fn _start() -> ! {
                                     break;
                                 }
 
-                                // Battery status bar tap opens PowerMenu
-                                if y <= 48 && x >= 480 {
-                                    state.current_view = ViewMode::PowerMenu;
-                                    render_view(surface, &state);
-                                    std::log("[LAUNCHER] Power menu opened via battery status bar tap.").ok();
-                                    let mut drain = std::InputEvent {
-                                        kind: 0,
-                                        x: 0,
-                                        y: 0,
-                                        dx: 0,
-                                        dy: 0,
-                                        scale_milli: 1000,
-                                    };
-                                    while std::input_event_poll(&mut drain).is_ok() {}
-                                    break;
-                                }
-
                                 // Tap on lock screen displays informational prompt without bypassing locked state.
                                 std::log("[LAUNCHER] Lock screen tapped; swipe up to unlock.").ok();
                                 let mut drain = std::InputEvent {

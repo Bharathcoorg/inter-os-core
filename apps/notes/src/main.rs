@@ -3154,7 +3154,7 @@ pub extern "C" fn _start() -> ! {
             while std::input_event_poll(&mut input).is_ok() {
                 if let Some(key) = input.key_event() {
                     if key.pressed {
-                        if key.code == 27 {
+                        if key.code == std::input_key_code::ESCAPE || key.code == 27 {
                             // Escape key exits app or editor
                             if state.keyboard_visible {
                                 state.keyboard_visible = false;
@@ -3169,9 +3169,17 @@ pub extern "C" fn _start() -> ! {
                                 let _ = std::surface_destroy(surface);
                                 std::exit_with_code(0);
                             }
-                        } else if state.view == ViewMode::Editor {
-                            inject_char(&mut state, key.code as u8);
-                            needs_redraw = true;
+                        } else {
+                            let code_byte = match key.code {
+                                std::input_key_code::ENTER | 10 | 13 => 10,
+                                std::input_key_code::BACKSPACE | 8 => 8,
+                                c if (32..=126).contains(&c) => c as u8,
+                                _ => 0,
+                            };
+                            if code_byte != 0 && (state.view == ViewMode::Editor || state.search_active) {
+                                inject_char(&mut state, code_byte);
+                                needs_redraw = true;
+                            }
                         }
                     }
                     continue;
@@ -3194,6 +3202,9 @@ pub extern "C" fn _start() -> ! {
                     let over_keyboard = state.keyboard_visible
                         && input.y >= KB_Y0 as u32
                         && (input.y as usize) < KB_Y1;
+                    let over_editor = state.view == ViewMode::Editor
+                        && input.y >= EDITOR_BODY_Y0 as u32
+                        && (input.y as usize) < (if state.keyboard_visible { KB_Y0 } else { 1400 });
                     if (input.kind == 4 || input.kind == 10) && over_list {
                         state.list_scroll.apply_drag(input.dy);
                         needs_redraw = true;
@@ -3201,6 +3212,11 @@ pub extern "C" fn _start() -> ! {
                     }
                     if (input.kind == 4 || input.kind == 10) && over_keyboard {
                         state.kb_scroll.apply_drag(input.dy);
+                        needs_redraw = true;
+                        continue;
+                    }
+                    if (input.kind == 4 || input.kind == 10) && over_editor {
+                        // Scrolling or gesture over editor content area does not exit
                         needs_redraw = true;
                         continue;
                     }
@@ -3277,5 +3293,6 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {}
+    std::log("[NOTES APP] Panic detected! Terminating task...").ok();
+    std::exit_with_code(1);
 }

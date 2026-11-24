@@ -1130,6 +1130,29 @@ impl Scheduler {
         Ok(exit_code)
     }
 
+    /// Reaps any terminated child of `parent_id`.
+    pub fn reap_any_child(&mut self, parent_id: TaskId) -> Result<(TaskId, i32), &'static str> {
+        let index = self.tasks.iter().position(|task| {
+            task.parent_id == parent_id
+                && matches!(task.state, TaskState::Zombie | TaskState::Terminated)
+        }).ok_or("no child ready")?;
+        let child_id = self.tasks[index].id;
+        let exit_code = self.tasks[index].exit_code;
+        match crate::task::process::reap(child_id) {
+            Ok(()) => {}
+            Err(ReapError::ThreadNotRegistered) | Err(ReapError::ProcessRecordMissing) => {}
+            Err(ReapError::TablesBusy) => return Err("child process record still held"),
+        }
+        self.tasks.remove(index);
+        if index < self.current_idx {
+            self.current_idx -= 1;
+        }
+        if self.current_idx >= self.tasks.len() && !self.tasks.is_empty() {
+            self.current_idx = self.tasks.len() - 1;
+        }
+        Ok((child_id, exit_code))
+    }
+
     /// Returns the total count of registered tasks.
     pub fn task_count(&self) -> usize {
         self.tasks.len()

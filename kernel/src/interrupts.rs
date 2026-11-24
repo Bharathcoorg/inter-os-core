@@ -297,6 +297,9 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     }
     idt.page_fault.set_handler_fn(page_fault_handler);
     idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
+    idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+    idt.divide_error.set_handler_fn(divide_error_handler);
+    idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
 
     // Hardware IRQs
     idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
@@ -846,6 +849,46 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         halt_after_fault_report_failure();
     }
     halt_after_fault_report_failure()
+}
+
+#[cfg(not(target_os = "windows"))]
+extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    let is_user = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    if is_user {
+        let rip = stack_frame.instruction_pointer.as_u64();
+        let _ = fault_report_bytes(b"[FAULT] Ring-3 Invalid Opcode (#UD)\n");
+        let _ = fault_report_line(b"RIP=", rip);
+        recover_and_terminate_current();
+    }
+    halt_after_fault_report_failure();
+}
+
+#[cfg(not(target_os = "windows"))]
+extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
+    let is_user = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    if is_user {
+        let rip = stack_frame.instruction_pointer.as_u64();
+        let _ = fault_report_bytes(b"[FAULT] Ring-3 Divide Error (#DE)\n");
+        let _ = fault_report_line(b"RIP=", rip);
+        recover_and_terminate_current();
+    }
+    halt_after_fault_report_failure();
+}
+
+#[cfg(not(target_os = "windows"))]
+extern "x86-interrupt" fn stack_segment_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    let is_user = stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3;
+    if is_user {
+        let rip = stack_frame.instruction_pointer.as_u64();
+        let _ = fault_report_bytes(b"[FAULT] Ring-3 Stack Segment Fault (#SS)\n");
+        let _ = fault_report_line(b"RIP=", rip);
+        let _ = fault_report_line(b"ERR=", error_code);
+        recover_and_terminate_current();
+    }
+    halt_after_fault_report_failure();
 }
 
 // -----------------------------------------------------------------------------

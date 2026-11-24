@@ -43,8 +43,11 @@ $qemuArgs = @(
     "-machine", "q35",
     "-cpu", "qemu64",
     "-m", "1024M",
-    "-drive", "format=raw,file=$img,index=0",
-    "-drive", "format=raw,file=$dataPath,index=1",
+    "-device", "piix3-ide,id=ide",
+    "-drive", "format=raw,file=$img,if=none,id=bootd",
+    "-device", "ide-hd,bus=ide.0,unit=0,drive=bootd,bootindex=1",
+    "-drive", "format=raw,file=$dataPath,if=none,id=datad",
+    "-device", "ide-hd,bus=ide.0,unit=1,drive=datad",
     "-vga", "none",
     "-device", "VGA,edid=on,xres=720,yres=1440,vgamem_mb=32",
     # Profile compatibility token: virtio-vga,edid=on,xres=720,yres=1440
@@ -55,6 +58,10 @@ $qemuArgs = @(
 )
 $qemuProcess = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -PassThru -NoNewWindow
 Write-Host "[QEMU] Started (PID: $($qemuProcess.Id))" -ForegroundColor Green
+
+# 3. Persist QEMU launch state so Device Studio immediately adopts the guest
+$pyRecord = "import sys, time; sys.path.insert(0, r'$emulatorDir'); import server; server.record_qemu_process({'pid': $($qemuProcess.Id), 'start_key': server._process_start_key($($qemuProcess.Id)), 'started_at': time.time(), 'arch': 'x86_64'})"
+Start-Process -FilePath "python" -ArgumentList @("-c", $pyRecord) -Wait -NoNewWindow
 
 # 4. Wait a moment for QEMU VNC to be ready
 Start-Sleep -Milliseconds 800

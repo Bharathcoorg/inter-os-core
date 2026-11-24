@@ -929,6 +929,9 @@ impl TcpConnectionTable {
         match slot {
             Some(entry) if entry.as_ref().map(|c| c.owner_task_id == owner_task_id).unwrap_or(false) => {
                 *entry = None;
+                if let Some(process) = crate::task::process::process_for_task(crate::task::TaskId(owner_task_id as u64)) {
+                    crate::task::process::release_network_socket(process);
+                }
                 Ok(())
             }
             _ => Err(NetError::CapabilityDenied),
