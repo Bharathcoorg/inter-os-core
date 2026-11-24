@@ -86,7 +86,7 @@ impl DalvikObject {
 }
 
 const MAX_DALVIK_OBJECTS: usize = 256;
-pub const MAX_REGISTERS_LIMIT: usize = 65536;
+pub const MAX_REGISTERS_LIMIT: usize = 2048;
 
 /// Execution state of the sovereign Dalvik Virtual Machine.
 pub struct DalvikVmState {
@@ -400,11 +400,13 @@ impl DalvikVmState {
                     }
                     let v_dest = insns[pc + 1] as usize;
                     let val = i16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as i32 as u32;
-                    if v_dest >= reg_cap {
+                    if v_dest >= reg_cap || v_dest + 1 >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     self.registers[v_dest] = val;
                     self.string_registers[v_dest] = None;
+                    self.registers[v_dest + 1] = if (val as i32) < 0 { 0xFFFFFFFF } else { 0 };
+                    self.string_registers[v_dest + 1] = None;
                     pc += 4;
                 }
                 OP_CONST_STRING => {
@@ -1133,7 +1135,10 @@ impl DalvikVmState {
                     }
                     let ret_val = self.registers[v_src];
                     self.last_return_value = ret_val;
-                    if opcode == OP_RETURN_WIDE && v_src + 1 < 32 {
+                    if opcode == OP_RETURN_WIDE {
+                        if v_src + 1 >= reg_cap {
+                            return Err(DalvikVmError::RegisterOutOfBounds);
+                        }
                         self.last_return_wide_hi = self.registers[v_src + 1];
                     } else {
                         self.last_return_wide_hi = 0;
@@ -1835,6 +1840,33 @@ mod tests {
         assert_eq!(vm.objects.len(), 2);
         assert_eq!(vm.gc_cycles, 1);
         assert_eq!(vm.gc_reclaimed_objects, 1);
+    }
+
+    #[test]
+    fn test_security_wide_opcode_at_reg_cap_minus_one_rejected() {
+        let mut vm = DalvikVmState::new();
+        let insns = [OP_RETURN_WIDE, 31];
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        assert_eq!(
+            vm.interpret_insns(&dex, 32, &insns),
+            Err(DalvikVmError::RegisterOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn test_security_oversized_register_count_fails_closed() {
+        let mut vm = DalvikVmState::new();
+        let mut dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let initial_dex = DexPackage::parse(&dex_bytes).unwrap();
+        let code_offset = initial_dex.methods[0].code_offset;
+        let oversized = (MAX_REGISTERS_LIMIT + 1) as u16;
+        dex_bytes[code_offset..code_offset + 2].copy_from_slice(&oversized.to_le_bytes());
+        let checksum = interos_android_format::dex::compute_adler32(&dex_bytes[12..]);
+        dex_bytes[8..12].copy_from_slice(&checksum.to_le_bytes());
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let res = vm.invoke_method(&dex, "Lorg/interos/Test;", "onCreate");
+        assert_eq!(res, Err(DalvikVmError::RegisterOutOfBounds));
     }
 }
 

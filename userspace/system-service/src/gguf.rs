@@ -3078,6 +3078,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_security_malformed_gguf_tensor_dimensions() {
+        // 1. Q4_0 (block size 32): dims[0] unaligned even though total_elements is aligned
+        // dims = [16, 2], total = 32 (32 % 32 == 0), but dims[0] = 16 (16 % 32 != 0)
+        assert_eq!(
+            tensor_byte_size(2, &[16, 2, 0, 0], 2),
+            Err(GgufError::CorruptedTensor),
+            "Q4_0 tensor with unaligned dims[0] must be rejected"
+        );
+
+        // 2. Q8_0 (block size 32): dims[0] = 30
+        assert_eq!(
+            tensor_byte_size(8, &[30, 1, 0, 0], 1),
+            Err(GgufError::CorruptedTensor),
+            "Q8_0 tensor with dims[0] = 30 must be rejected"
+        );
+
+        // 3. Q4_K (block size 256): dims[0] = 128, total = 256
+        assert_eq!(
+            tensor_byte_size(12, &[128, 2, 0, 0], 2),
+            Err(GgufError::CorruptedTensor),
+            "Q4_K tensor with dims[0] = 128 must be rejected"
+        );
+
+        // 4. Invalid dimension counts
+        assert_eq!(tensor_byte_size(0, &[768, 0, 0, 0], 0), Err(GgufError::InvalidMetadata));
+        assert_eq!(tensor_byte_size(0, &[768, 1, 1, 1], 5), Err(GgufError::InvalidMetadata));
+
+        // 5. Dimension multiplication arithmetic overflow
+        assert_eq!(
+            tensor_byte_size(0, &[usize::MAX as u64, 2, 1, 1], 2),
+            Err(GgufError::ArithmeticOverflow)
+        );
+    }
+
+    #[test]
     fn test_gguf_stream_bounded_parsing() {
         let mut buf = [0u8; 1024];
         let header = GgufHeader {

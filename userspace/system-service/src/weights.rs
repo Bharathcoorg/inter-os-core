@@ -218,7 +218,7 @@ fn descriptor_byte_len(dtype: u32, dims: &[u64; 4], n_dims: u32) -> Result<u64, 
     }
     let (per_block, bytes_per_block) =
         ggml_block_geometry(dtype).ok_or(LoadError::UnsupportedDtype("descriptor", dtype))?;
-    if elements % per_block != 0 {
+    if (dims[0] as usize) % (per_block as usize) != 0 || elements % per_block != 0 {
         return Err(LoadError::BadShape("block_elements", elements, per_block));
     }
     (elements / per_block)

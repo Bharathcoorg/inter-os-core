@@ -50,6 +50,23 @@ impl NativeFlowEngine {
     pub fn layout(&self) -> &TextLayout {
         &self.layout
     }
+
+    pub fn rect_color_at(&self, x: usize, doc_y: usize) -> Option<u32> {
+        for i in (0..self.layout.rect_count).rev() {
+            let r = &self.layout.rects[i];
+            let ry = r.y as usize;
+            let rh = r.h as usize;
+            if doc_y < ry || doc_y >= ry.saturating_add(rh) {
+                continue;
+            }
+            let rx = r.x as usize;
+            let rw = r.w as usize;
+            if x >= rx && x < rx.saturating_add(rw) {
+                return Some(r.color);
+            }
+        }
+        None
+    }
 }
 
 impl BrowserEngine for NativeFlowEngine {
@@ -143,13 +160,17 @@ impl BrowserEngine for NativeFlowEngine {
         let doc_y_u = doc_y as usize;
 
         // 1. Text runs (ink on top of page backgrounds)
+        let mut bg_color_cached: Option<u32> = None;
         for i in 0..self.layout.run_count {
             let run = &self.layout.runs[i];
-            let rx = run.x as usize;
             let ry = run.y as usize;
-            let rw = run.w as usize;
             let rh = (run.h as usize).max(interos_std::font::line_height(run.scale as usize));
-            if x >= rx && x < rx.saturating_add(rw) && doc_y_u >= ry && doc_y_u < ry.saturating_add(rh) {
+            if doc_y_u < ry || doc_y_u >= ry.saturating_add(rh) {
+                continue;
+            }
+            let rx = run.x as usize;
+            let rw = run.w as usize;
+            if x >= rx && x < rx.saturating_add(rw) {
                 let bytes = run.bytes(&self.dom);
                 if !bytes.is_empty() {
                     let text_color = if run.link != crate::layout::NO_LINK {
@@ -159,17 +180,9 @@ impl BrowserEngine for NativeFlowEngine {
                     } else {
                         0xFF1E293B // Dark slate typography
                     };
-                    let mut bg_color = 0xFFFFFFFFu32;
-                    for j in 0..self.layout.rect_count {
-                        let r = &self.layout.rects[j];
-                        let r_rx = r.x as usize;
-                        let r_ry = r.y as usize;
-                        let r_rw = r.w as usize;
-                        let r_rh = r.h as usize;
-                        if x >= r_rx && x < r_rx.saturating_add(r_rw) && doc_y_u >= r_ry && doc_y_u < r_ry.saturating_add(r_rh) {
-                            bg_color = r.color;
-                        }
-                    }
+                    let bg_color = *bg_color_cached.get_or_insert_with(|| {
+                        self.rect_color_at(x, doc_y_u).unwrap_or(0xFFFFFFFF)
+                    });
                     if let Some(px) = interos_std::font::test_glyph_aa(
                         x,
                         doc_y_u,
@@ -194,15 +207,8 @@ impl BrowserEngine for NativeFlowEngine {
         }
 
         // 2. Check rect items (backgrounds, borders)
-        for i in 0..self.layout.rect_count {
-            let r = &self.layout.rects[i];
-            let rx = r.x as usize;
-            let ry = r.y as usize;
-            let rw = r.w as usize;
-            let rh = r.h as usize;
-            if x >= rx && x < rx.saturating_add(rw) && doc_y_u >= ry && doc_y_u < ry.saturating_add(rh) {
-                return r.color;
-            }
+        if let Some(color) = self.rect_color_at(x, doc_y_u) {
+            return color;
         }
 
         0xFFFFFFFF // Default page background
@@ -341,5 +347,72 @@ mod tests {
         assert!(engine.load_html(html, None).is_ok());
         assert!(!engine.dom().css().is_empty());
         assert!(engine.layout().run_count >= 2);
+    }
+
+    #[test]
+    fn native_flow_multiple_styles_apply_colors_dimensions_and_pixel_values() {
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        let html = "<html><head><style>h1 { color: #D32F2F; }</style><style>p { color: #1565C0; }</style></head><body><h1>Header</h1><p>Paragraph text</p></body></html>";
+        assert!(engine.load_html(html, None).is_ok());
+        assert!(engine.layout().run_count >= 2);
+
+        // Find run with h1 color (#D32F2F) and run with p color (#1565C0)
+        let r0 = engine.layout().runs[..engine.layout().run_count]
+            .iter()
+            .find(|r| r.has_color && r.color == 0xFFD32F2F)
+            .expect("h1 run with #D32F2F");
+        let r1 = engine.layout().runs[..engine.layout().run_count]
+            .iter()
+            .find(|r| r.has_color && r.color == 0xFF1565C0)
+            .expect("p run with #1565C0");
+        assert!(r0.has_color);
+        assert!(r1.has_color);
+
+        // Pixel rasterization detects font glyph ink for h1
+        let mut found_h1_ink = false;
+        for y in (r0.y as usize)..(r0.y as usize + r0.h as usize) {
+            for x in (r0.x as usize)..(r0.x as usize + r0.w as usize) {
+                let px = engine.render_pixel(x, y);
+                if px != 0xFFFFFFFF {
+                    found_h1_ink = true;
+                    break;
+                }
+            }
+            if found_h1_ink {
+                break;
+            }
+        }
+        assert!(found_h1_ink, "h1 glyph ink must be rasterized");
+    }
+
+    #[test]
+    fn native_flow_contrast_rule_drops_low_contrast_colors() {
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        // Pure white #FFFFFF on white background fails 2:1 contrast ratio
+        let html = "<html><head><style>h1 { color: #FFFFFF; }</style></head><body><h1>Invisible</h1></body></html>";
+        assert!(engine.load_html(html, None).is_ok());
+        assert_eq!(engine.layout().run_count, 1);
+        let r0 = &engine.layout().runs[0];
+        // Low contrast color must be dropped to preserve readability
+        assert!(!r0.has_color, "Low contrast color on light background must be dropped");
+    }
+
+    #[test]
+    fn native_flow_nested_rects_follow_painters_order() {
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        // Outer rect (white), inner card (blue), topmost button (red)
+        engine.layout.rects[0] = crate::layout::RectItem { x: 10, y: 10, w: 200, h: 200, color: 0xFFFFFFFF, kind: crate::layout::RectKind::Fill };
+        engine.layout.rects[1] = crate::layout::RectItem { x: 20, y: 20, w: 100, h: 100, color: 0xFF0000FF, kind: crate::layout::RectKind::Fill };
+        engine.layout.rects[2] = crate::layout::RectItem { x: 30, y: 30, w: 40, h: 40, color: 0xFFFF0000, kind: crate::layout::RectKind::Fill };
+        engine.layout.rect_count = 3;
+
+        // Inside innermost button (35, 35) -> should get topmost color (red)
+        assert_eq!(engine.render_pixel(35, 35), 0xFFFF0000);
+        // Inside card but outside button (25, 25) -> should get middle color (blue)
+        assert_eq!(engine.render_pixel(25, 25), 0xFF0000FF);
+        // Inside outer rect only (15, 15) -> should get outer color (white)
+        assert_eq!(engine.render_pixel(15, 15), 0xFFFFFFFF);
+        // Outside all rects (5, 5) -> should get default background (white)
+        assert_eq!(engine.render_pixel(5, 5), 0xFFFFFFFF);
     }
 }

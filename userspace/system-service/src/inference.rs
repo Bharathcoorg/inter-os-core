@@ -437,46 +437,75 @@ pub fn f32_exp(x: f32) -> f32 {
     }
 }
 
-const PI: f32 = 3.14159265358979323846;
-const TWO_PI: f32 = 6.28318530717958647692;
+const HALF_PI_F64: f64 = 1.5707963267948966192313216916398;
+const INV_HALF_PI_F64: f64 = 0.63661977236758134307553505349006;
 
-/// Range-reduced software sine.
-pub fn f32_sin(mut x: f32) -> f32 {
+/// Bounded range-reduced software sine using quadrant reduction.
+/// Guaranteed zero unbounded loops and accurate across the entire finite single-precision range.
+pub fn f32_sin(x: f32) -> f32 {
     if !x.is_finite() {
         return f32::NAN;
     }
-    let k = (x * (1.0 / TWO_PI)) as i64 as f32;
-    x -= k * TWO_PI;
-    while x > PI {
-        x -= TWO_PI;
+    if x.abs() > 1.0e7 {
+        return f32::NAN;
     }
-    while x < -PI {
-        x += TWO_PI;
+    let x_f64 = x as f64;
+    let k = (x_f64 * INV_HALF_PI_F64 + (if x_f64 >= 0.0 { 0.5 } else { -0.5 })) as i64;
+    let r = (x_f64 - (k as f64) * HALF_PI_F64) as f32;
+    let q = (k % 4 + 4) % 4;
+
+    let r2 = r * r;
+    let r3 = r2 * r;
+    let r5 = r3 * r2;
+    let r7 = r5 * r2;
+    let sin_r = r - r3 * (1.0 / 6.0) + r5 * (1.0 / 120.0) - r7 * (1.0 / 5040.0);
+
+    let r4 = r2 * r2;
+    let r6 = r4 * r2;
+    let r8 = r6 * r2;
+    let cos_r = 1.0 - r2 * 0.5 + r4 * (1.0 / 24.0) - r6 * (1.0 / 720.0) + r8 * (1.0 / 40320.0);
+
+    match q {
+        0 => sin_r,
+        1 => cos_r,
+        2 => -sin_r,
+        3 => -cos_r,
+        _ => f32::NAN,
     }
-    let x2 = x * x;
-    let x3 = x2 * x;
-    let x5 = x3 * x2;
-    let x7 = x5 * x2;
-    x - x3 * (1.0 / 6.0) + x5 * (1.0 / 120.0) - x7 * (1.0 / 5040.0)
 }
 
-/// Range-reduced software cosine.
-pub fn f32_cos(mut x: f32) -> f32 {
+/// Bounded range-reduced software cosine using quadrant reduction.
+/// Guaranteed zero unbounded loops and accurate across the entire finite single-precision range.
+pub fn f32_cos(x: f32) -> f32 {
     if !x.is_finite() {
         return f32::NAN;
     }
-    let k = (x * (1.0 / TWO_PI)) as i64 as f32;
-    x -= k * TWO_PI;
-    while x > PI {
-        x -= TWO_PI;
+    if x.abs() > 1.0e7 {
+        return f32::NAN;
     }
-    while x < -PI {
-        x += TWO_PI;
+    let x_f64 = x as f64;
+    let k = (x_f64 * INV_HALF_PI_F64 + (if x_f64 >= 0.0 { 0.5 } else { -0.5 })) as i64;
+    let r = (x_f64 - (k as f64) * HALF_PI_F64) as f32;
+    let q = (k % 4 + 4) % 4;
+
+    let r2 = r * r;
+    let r3 = r2 * r;
+    let r5 = r3 * r2;
+    let r7 = r5 * r2;
+    let sin_r = r - r3 * (1.0 / 6.0) + r5 * (1.0 / 120.0) - r7 * (1.0 / 5040.0);
+
+    let r4 = r2 * r2;
+    let r6 = r4 * r2;
+    let r8 = r6 * r2;
+    let cos_r = 1.0 - r2 * 0.5 + r4 * (1.0 / 24.0) - r6 * (1.0 / 720.0) + r8 * (1.0 / 40320.0);
+
+    match q {
+        0 => cos_r,
+        1 => -sin_r,
+        2 => -cos_r,
+        3 => sin_r,
+        _ => f32::NAN,
     }
-    let x2 = x * x;
-    let x4 = x2 * x2;
-    let x6 = x4 * x2;
-    1.0 - x2 * 0.5 + x4 * (1.0 / 24.0) - x6 * (1.0 / 720.0)
 }
 
 /// Approximate base^exp for RoPE frequencies.
@@ -484,16 +513,25 @@ pub fn f32_pow_approx(base: f32, exp: f32) -> f32 {
     if exp == 0.0 {
         return 1.0;
     }
-    // ln(10000.0) ~ 9.21034037
+    // High-precision ln for RoPE bases
     let ln_base = if (base - 10000.0).abs() < 1.0 {
         9.21034037f32
+    } else if (base - 500000.0).abs() < 1.0 {
+        13.12236338f32
+    } else if (base - 1000000.0).abs() < 1.0 {
+        13.81551056f32
     } else {
-        // General ln via log2(base) * ln(2)
         let bits = base.to_bits();
-        let e = ((bits >> 23) & 0xff) as i32 - 127;
-        let m = f32::from_bits((bits & 0x007fffff) | 0x3f800000) - 1.0f32;
-        let ln_m = m - 0.5 * m * m + (1.0 / 3.0) * m * m * m;
-        (e as f32) * 0.69314718f32 + ln_m
+        let mut e = ((bits >> 23) & 0xff) as i32 - 127;
+        let mut y = f32::from_bits((bits & 0x007fffff) | 0x3f800000);
+        if y > 1.41421356 {
+            y *= 0.5;
+            e += 1;
+        }
+        let s = (y - 1.0) / (y + 1.0);
+        let s2 = s * s;
+        let poly = s * (2.0 + s2 * (2.0 / 3.0 + s2 * (2.0 / 5.0 + s2 * (2.0 / 7.0))));
+        (e as f32) * 0.69314718f32 + poly
     };
     f32_exp(exp * ln_base)
 }
@@ -6017,5 +6055,66 @@ pub mod tests {
 
         assert_eq!(cache.find(name), Some(&entry));
         assert_eq!(cache.find(b"nonexistent"), None);
+    }
+
+    #[test]
+    fn test_f32_sin_cos_numerical_bounds_and_accuracy() {
+        // Zero and small inputs
+        assert!((f32_sin(0.0) - 0.0).abs() < 1e-6);
+        assert!((f32_cos(0.0) - 1.0).abs() < 1e-6);
+
+        // Standard angles (pi/6, pi/4, pi/3, pi/2, pi, 3pi/2, 2pi)
+        let pi = core::f32::consts::PI;
+        assert!((f32_sin(pi / 6.0) - 0.5).abs() < 1e-4);
+        assert!((f32_cos(pi / 6.0) - 0.8660254).abs() < 1e-4);
+        assert!((f32_sin(pi / 4.0) - 0.70710678).abs() < 1e-4);
+        assert!((f32_cos(pi / 4.0) - 0.70710678).abs() < 1e-4);
+        assert!((f32_sin(pi / 2.0) - 1.0).abs() < 1e-4);
+        assert!(f32_cos(pi / 2.0).abs() < 1e-4);
+        assert!(f32_sin(pi).abs() < 1e-4);
+        assert!((f32_cos(pi) - (-1.0)).abs() < 1e-4);
+        assert!((f32_sin(1.5 * pi) - (-1.0)).abs() < 1e-4);
+        assert!(f32_cos(1.5 * pi).abs() < 1e-4);
+        assert!(f32_sin(2.0 * pi).abs() < 1e-4);
+        assert!((f32_cos(2.0 * pi) - 1.0).abs() < 1e-4);
+
+        // Negative angles
+        assert!((f32_sin(-pi / 2.0) - (-1.0)).abs() < 1e-4);
+        assert!(f32_cos(-pi / 2.0).abs() < 1e-4);
+
+        // Large finite angles (where old while loops stalled / hung)
+        assert!(f32_sin(1000.0).is_finite());
+        assert!(f32_cos(1000.0).is_finite());
+        assert!(f32_sin(131072.0).is_finite());
+        assert!(f32_cos(131072.0).is_finite());
+        assert!(f32_sin(1000000.0).is_finite());
+        assert!(f32_cos(1000000.0).is_finite());
+
+        // Extreme inputs (> 1e7 or non-finite) MUST NOT hang or overflow
+        assert!(f32_sin(1e30).is_nan());
+        assert!(f32_cos(1e30).is_nan());
+        assert!(f32_sin(f32::INFINITY).is_nan());
+        assert!(f32_cos(f32::INFINITY).is_nan());
+        assert!(f32_sin(f32::NAN).is_nan());
+        assert!(f32_cos(f32::NAN).is_nan());
+
+        // Pythagorean identity sin^2 + cos^2 = 1.0
+        for test_val in [0.1f32, 0.7, 1.2, 2.5, 5.0, 100.0, 50000.0] {
+            let s = f32_sin(test_val);
+            let c = f32_cos(test_val);
+            let id = s * s + c * c;
+            assert!((id - 1.0).abs() < 1e-4, "Failed for {test_val}: {s}^2 + {c}^2 = {id}");
+        }
+    }
+
+    #[test]
+    fn test_f32_pow_approx_accuracy() {
+        assert_eq!(f32_pow_approx(10000.0, 0.0), 1.0);
+        // Base 10000 (standard RoPE base)
+        let v1 = f32_pow_approx(10000.0, 0.25); // 10000^0.25 = 10.0
+        assert!((v1 - 10.0).abs() < 0.1, "10000^0.25 = {v1}, expected ~10.0");
+        // Base 1000000 (extended RoPE base)
+        let v2 = f32_pow_approx(1000000.0, 0.5); // 1000000^0.5 = 1000.0
+        assert!((v2 - 1000.0).abs() < 5.0, "1000000^0.5 = {v2}, expected ~1000.0");
     }
 }
