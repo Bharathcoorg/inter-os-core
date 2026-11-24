@@ -476,8 +476,8 @@ pub fn run_ipc_adversarial_tests() {
     crate::serial_println!("[TEST] Initializing Zero-Trust Microkernel IPC Invariant Suite...");
 
     let mut router = IpcRouter::new();
-    let sender_id = TaskId(101);
-    let target_id = TaskId(202);
+    let sender_id = TaskId::new();
+    let target_id = TaskId::new();
 
     router.register_task(target_id);
 
