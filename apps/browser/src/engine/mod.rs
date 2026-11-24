@@ -54,6 +54,10 @@ impl NativeFlowEngine {
     pub fn rect_color_at(&self, x: usize, doc_y: usize) -> Option<u32> {
         for i in (0..self.layout.rect_count).rev() {
             let r = &self.layout.rects[i];
+            // Skip transparent rects (alpha == 0)
+            if (r.color >> 24) == 0 {
+                continue;
+            }
             let ry = r.y as usize;
             let rh = r.h as usize;
             if doc_y < ry || doc_y >= ry.saturating_add(rh) {
@@ -61,9 +65,19 @@ impl NativeFlowEngine {
             }
             let rx = r.x as usize;
             let rw = r.w as usize;
-            if x >= rx && x < rx.saturating_add(rw) {
-                return Some(r.color);
+            if x < rx || x >= rx.saturating_add(rw) {
+                continue;
             }
+            if r.kind == crate::layout::flow::RectKind::Outline {
+                let is_perimeter = x == rx
+                    || x == rx.saturating_add(rw).saturating_sub(1)
+                    || doc_y == ry
+                    || doc_y == ry.saturating_add(rh).saturating_sub(1);
+                if !is_perimeter {
+                    continue;
+                }
+            }
+            return Some(r.color);
         }
         None
     }
@@ -207,7 +221,7 @@ impl BrowserEngine for NativeFlowEngine {
         }
 
         // 2. Check rect items (backgrounds, borders)
-        if let Some(color) = self.rect_color_at(x, doc_y_u) {
+        if let Some(color) = bg_color_cached.or_else(|| self.rect_color_at(x, doc_y_u)) {
             return color;
         }
 
@@ -414,5 +428,64 @@ mod tests {
         assert_eq!(engine.render_pixel(15, 15), 0xFFFFFFFF);
         // Outside all rects (5, 5) -> should get default background (white)
         assert_eq!(engine.render_pixel(5, 5), 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn native_flow_outline_rect_does_not_occlude_interior_fill() {
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        // Card background fill (gray 0xFFE2E8F0) followed by card outline (blue 0xFF2563EB)
+        engine.layout.rects[0] = crate::layout::RectItem {
+            x: 10,
+            y: 10,
+            w: 100,
+            h: 100,
+            color: 0xFFE2E8F0,
+            kind: crate::layout::RectKind::Fill,
+        };
+        engine.layout.rects[1] = crate::layout::RectItem {
+            x: 10,
+            y: 10,
+            w: 100,
+            h: 100,
+            color: 0xFF2563EB,
+            kind: crate::layout::RectKind::Outline,
+        };
+        engine.layout.rect_count = 2;
+
+        // Perimeter pixels must show outline color
+        assert_eq!(engine.render_pixel(10, 10), 0xFF2563EB);
+        assert_eq!(engine.render_pixel(109, 10), 0xFF2563EB);
+        assert_eq!(engine.render_pixel(10, 109), 0xFF2563EB);
+        assert_eq!(engine.render_pixel(109, 109), 0xFF2563EB);
+
+        // Interior pixels must show fill color, NOT be occluded by outline
+        assert_eq!(engine.render_pixel(11, 11), 0xFFE2E8F0);
+        assert_eq!(engine.render_pixel(50, 50), 0xFFE2E8F0);
+        assert_eq!(engine.render_pixel(108, 108), 0xFFE2E8F0);
+    }
+
+    #[test]
+    fn native_flow_transparent_rect_passes_through_to_underlying_layer() {
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        // Base fill (red 0xFFFF0000) covered by transparent rect (alpha = 0)
+        engine.layout.rects[0] = crate::layout::RectItem {
+            x: 10,
+            y: 10,
+            w: 50,
+            h: 50,
+            color: 0xFFFF0000,
+            kind: crate::layout::RectKind::Fill,
+        };
+        engine.layout.rects[1] = crate::layout::RectItem {
+            x: 10,
+            y: 10,
+            w: 50,
+            h: 50,
+            color: 0x00FFFFFF, // Transparent
+            kind: crate::layout::RectKind::Fill,
+        };
+        engine.layout.rect_count = 2;
+
+        assert_eq!(engine.render_pixel(25, 25), 0xFFFF0000);
     }
 }
