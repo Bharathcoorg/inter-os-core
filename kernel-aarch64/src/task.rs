@@ -248,6 +248,14 @@ pub struct ReapHandle {
     pub exit_code: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskCopyToken {
+    pub pid: u32,
+    pub generation: u32,
+}
+
+pub const MAX_USER_COPY_PINS: u32 = 0x3FFF_FFFF;
+
 #[repr(C, align(64))]
 pub struct PerCpuData {
     pub logical_id: usize,
@@ -729,9 +737,9 @@ impl Scheduler {
     }
 
     /// Registers the beginning of an in-flight user memory copy for the active task.
-    /// Returns the PID whose address space is protected against concurrent reaping,
+    /// Returns a validated `TaskCopyToken` protecting against concurrent reaping and generation reuse,
     /// or None if the current context has no attached user address space.
-    pub fn begin_current_user_copy(&mut self) -> Result<Option<u32>, i64> {
+    pub fn begin_current_user_copy(&mut self) -> Result<Option<TaskCopyToken>, i64> {
         let pos = match self.current_task_pos() {
             Some(p) => p,
             None => return Ok(None),
@@ -744,14 +752,38 @@ impl Scheduler {
             if aspace.is_closing() || aspace.is_destroyed() {
                 return Err(-14);
             }
+            let prev = aspace.in_user_copy.load(core::sync::atomic::Ordering::Acquire);
+            if prev >= MAX_USER_COPY_PINS {
+                return Err(-14);
+            }
             aspace.in_user_copy.fetch_add(1, core::sync::atomic::Ordering::Release);
-            Ok(Some(tcb.id))
+            Ok(Some(TaskCopyToken {
+                pid: tcb.id,
+                generation: tcb.generation,
+            }))
         } else {
             Ok(None)
         }
     }
 
-    /// Unregisters an in-flight user memory copy for the specified PID.
+    /// Unregisters an in-flight user memory copy for the specified token.
+    pub fn end_user_copy(&mut self, token: TaskCopyToken) {
+        if let Some(pos) = self
+            .tasks
+            .iter()
+            .position(|t| t.id == token.pid && t.generation == token.generation)
+        {
+            if let Some(ref aspace) = self.tasks[pos].address_space {
+                let _ = aspace.in_user_copy.fetch_update(
+                    core::sync::atomic::Ordering::Release,
+                    core::sync::atomic::Ordering::Acquire,
+                    |val| if val > 0 { Some(val - 1) } else { Some(0) },
+                );
+            }
+        }
+    }
+
+    /// Unregisters an in-flight user memory copy for the specified PID (legacy helper).
     pub fn end_user_copy_for_pid(&mut self, pid: u32) {
         if let Some(pos) = self.tasks.iter().position(|t| t.id == pid) {
             if let Some(ref aspace) = self.tasks[pos].address_space {
@@ -778,15 +810,8 @@ impl Scheduler {
         if target_pid != 0 && target_pid == caller_pid {
             return Err(-16); // -EBUSY: caller cannot reap itself
         }
-        if target_pid != 0
-            && target_pid == curr_pid
-            && self
-                .tasks
-                .get(self.current_task_idx)
-                .map(|t| t.state == TaskState::Running)
-                .unwrap_or(false)
-        {
-            return Err(-16); // -EBUSY: cannot reap active running process
+        if target_pid != 0 && target_pid == curr_pid {
+            return Err(-16); // -EBUSY: cannot reap active process currently on stack
         }
 
         let pos = self
@@ -2435,25 +2460,59 @@ pub fn test_user_copy_concurrency_guards() {
     let mut sched = Scheduler::new();
     sched.next_pid = 7000;
     let caps = CapabilityTable::new();
+    let parent_pid = sched.spawn_user_process(0, "reaper_parent", 0, 0, None, caps.clone());
     let aspace2 = crate::mmu::UserAddressSpace::new().expect("Address space alloc");
-    let pid = sched.spawn_user_process(0, "copy_reap_task", 0, 0, Some(aspace2), caps);
-    sched.tasks[0].state = TaskState::Terminated;
-    sched.tasks[0].address_space.as_ref().unwrap().in_user_copy.store(1, core::sync::atomic::Ordering::Release);
+    let pid = sched.spawn_user_process(parent_pid, "copy_reap_task", 0, 0, Some(aspace2), caps.clone());
+    let target_idx = sched.tasks.iter().position(|t| t.id == pid).unwrap();
+    sched.current_task_idx = 0; // Current running CPU is executing parent_pid
+    sched.tasks[target_idx].state = TaskState::Terminated;
+    sched.tasks[target_idx].address_space.as_ref().unwrap().in_user_copy.store(1, core::sync::atomic::Ordering::Release);
 
-    let res = sched.begin_reap(0, true, pid);
+    let res = sched.begin_reap(parent_pid, true, pid);
     assert_eq!(res, Err(-16), "begin_reap must reject task with in_user_copy > 0");
     assert_eq!(
-        sched.tasks[0].state,
+        sched.tasks[target_idx].state,
         TaskState::Terminated,
         "Task must remain Terminated, not falsely transitioned to Reaping"
     );
 
-    sched.tasks[0].address_space.as_ref().unwrap().in_user_copy.store(0, core::sync::atomic::Ordering::Release);
-    let handle = sched.begin_reap(0, true, pid).expect("begin_reap succeeds when in_user_copy == 0");
-    assert_eq!(sched.tasks[0].state, TaskState::Reaping);
+    sched.tasks[target_idx].address_space.as_ref().unwrap().in_user_copy.store(0, core::sync::atomic::Ordering::Release);
+    let handle = sched.begin_reap(parent_pid, true, pid).expect("begin_reap succeeds when in_user_copy == 0");
+    assert_eq!(sched.tasks[target_idx].state, TaskState::Reaping);
     let detached = sched.detach_reaping_aspace(handle).expect("detach succeeds").unwrap();
     drop(detached);
     assert_eq!(sched.finish_reap(handle), Ok(0));
+
+    // 3. Token-based user copy lifecycle & pin capping
+    let mut sched2 = Scheduler::new();
+    sched2.next_pid = 8000;
+    let aspace3 = crate::mmu::UserAddressSpace::new().expect("Address space alloc");
+    let u_pid = sched2.spawn_user_process(0, "user_copy_proc", 0, 0, Some(aspace3), caps.clone());
+    sched2.current_task_idx = 0;
+    sched2.tasks[0].state = TaskState::Running;
+
+    let token = sched2.begin_current_user_copy().expect("begin copy").expect("token present");
+    assert_eq!(token.pid, u_pid);
+    assert_eq!(sched2.tasks[0].address_space.as_ref().unwrap().in_user_copy.load(core::sync::atomic::Ordering::Acquire), 1);
+
+    sched2.end_user_copy(token);
+    assert_eq!(sched2.tasks[0].address_space.as_ref().unwrap().in_user_copy.load(core::sync::atomic::Ordering::Acquire), 0);
+
+    // Stale generation token cannot decrement after reap/generation change
+    let stale_token = TaskCopyToken { pid: u_pid, generation: 999 };
+    sched2.tasks[0].address_space.as_ref().unwrap().in_user_copy.store(1, core::sync::atomic::Ordering::Release);
+    sched2.end_user_copy(stale_token);
+    assert_eq!(sched2.tasks[0].address_space.as_ref().unwrap().in_user_copy.load(core::sync::atomic::Ordering::Acquire), 1, "Stale token must not decrement counter");
+    sched2.tasks[0].address_space.as_ref().unwrap().in_user_copy.store(0, core::sync::atomic::Ordering::Release);
+
+    // Pin limit cap rejects overflow
+    sched2.tasks[0].address_space.as_ref().unwrap().in_user_copy.store(MAX_USER_COPY_PINS, core::sync::atomic::Ordering::Release);
+    assert_eq!(sched2.begin_current_user_copy(), Err(-14), "Overflow beyond MAX_USER_COPY_PINS must be rejected");
+
+    // Self-reaping active context is rejected even if Exited
+    sched2.tasks[0].state = TaskState::Exited;
+    sched2.current_task_idx = 0;
+    assert_eq!(sched2.begin_reap(0, true, u_pid), Err(-16), "Active process stack cannot be reaped by itself even when Exited");
     crate::kprintln!("[TEST] AArch64 UserCopy Concurrency Guards VERIFIED.");
 }
 

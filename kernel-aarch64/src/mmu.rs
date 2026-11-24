@@ -2032,6 +2032,9 @@ impl UserAddressSpace {
     }
 
     pub fn destroy_fallible(&mut self) -> Result<(), TeardownError> {
+        if self.in_user_copy.load(core::sync::atomic::Ordering::Acquire) != 0 {
+            return Err(TeardownError::ActiveOnRemoteCpu(0));
+        }
         loop {
             let cur = self.lifecycle.load(core::sync::atomic::Ordering::Acquire);
             if (cur & LIFECYCLE_DESTROYED_BIT) != 0 {
