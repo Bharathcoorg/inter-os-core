@@ -441,7 +441,7 @@ const HALF_PI_F64: f64 = 1.5707963267948966192313216916398;
 const INV_HALF_PI_F64: f64 = 0.63661977236758134307553505349006;
 
 /// Bounded range-reduced software sine using quadrant reduction.
-/// Guaranteed zero unbounded loops and accurate across the entire finite single-precision range.
+/// Valid for |x| <= 1.0e7; returns NaN beyond this domain or for non-finite inputs.
 pub fn f32_sin(x: f32) -> f32 {
     if !x.is_finite() {
         return f32::NAN;
@@ -455,27 +455,23 @@ pub fn f32_sin(x: f32) -> f32 {
     let q = (k % 4 + 4) % 4;
 
     let r2 = r * r;
-    let r3 = r2 * r;
-    let r5 = r3 * r2;
-    let r7 = r5 * r2;
-    let sin_r = r - r3 * (1.0 / 6.0) + r5 * (1.0 / 120.0) - r7 * (1.0 / 5040.0);
-
-    let r4 = r2 * r2;
-    let r6 = r4 * r2;
-    let r8 = r6 * r2;
-    let cos_r = 1.0 - r2 * 0.5 + r4 * (1.0 / 24.0) - r6 * (1.0 / 720.0) + r8 * (1.0 / 40320.0);
-
-    match q {
-        0 => sin_r,
-        1 => cos_r,
-        2 => -sin_r,
-        3 => -cos_r,
-        _ => f32::NAN,
+    if q == 0 || q == 2 {
+        let r3 = r2 * r;
+        let r5 = r3 * r2;
+        let r7 = r5 * r2;
+        let sin_r = r - r3 * (1.0 / 6.0) + r5 * (1.0 / 120.0) - r7 * (1.0 / 5040.0);
+        if q == 0 { sin_r } else { -sin_r }
+    } else {
+        let r4 = r2 * r2;
+        let r6 = r4 * r2;
+        let r8 = r6 * r2;
+        let cos_r = 1.0 - r2 * 0.5 + r4 * (1.0 / 24.0) - r6 * (1.0 / 720.0) + r8 * (1.0 / 40320.0);
+        if q == 1 { cos_r } else { -cos_r }
     }
 }
 
 /// Bounded range-reduced software cosine using quadrant reduction.
-/// Guaranteed zero unbounded loops and accurate across the entire finite single-precision range.
+/// Valid for |x| <= 1.0e7; returns NaN beyond this domain or for non-finite inputs.
 pub fn f32_cos(x: f32) -> f32 {
     if !x.is_finite() {
         return f32::NAN;
@@ -489,32 +485,34 @@ pub fn f32_cos(x: f32) -> f32 {
     let q = (k % 4 + 4) % 4;
 
     let r2 = r * r;
-    let r3 = r2 * r;
-    let r5 = r3 * r2;
-    let r7 = r5 * r2;
-    let sin_r = r - r3 * (1.0 / 6.0) + r5 * (1.0 / 120.0) - r7 * (1.0 / 5040.0);
-
-    let r4 = r2 * r2;
-    let r6 = r4 * r2;
-    let r8 = r6 * r2;
-    let cos_r = 1.0 - r2 * 0.5 + r4 * (1.0 / 24.0) - r6 * (1.0 / 720.0) + r8 * (1.0 / 40320.0);
-
-    match q {
-        0 => cos_r,
-        1 => -sin_r,
-        2 => -cos_r,
-        3 => sin_r,
-        _ => f32::NAN,
+    if q == 0 || q == 2 {
+        let r4 = r2 * r2;
+        let r6 = r4 * r2;
+        let r8 = r6 * r2;
+        let cos_r = 1.0 - r2 * 0.5 + r4 * (1.0 / 24.0) - r6 * (1.0 / 720.0) + r8 * (1.0 / 40320.0);
+        if q == 0 { cos_r } else { -cos_r }
+    } else {
+        let r3 = r2 * r;
+        let r5 = r3 * r2;
+        let r7 = r5 * r2;
+        let sin_r = r - r3 * (1.0 / 6.0) + r5 * (1.0 / 120.0) - r7 * (1.0 / 5040.0);
+        if q == 1 { -sin_r } else { sin_r }
     }
 }
 
 /// Approximate base^exp for RoPE frequencies.
+/// Returns NaN for non-finite inputs, base <= 0.0, or negative bases.
 pub fn f32_pow_approx(base: f32, exp: f32) -> f32 {
+    if !base.is_finite() || !exp.is_finite() || base <= 0.0 {
+        return f32::NAN;
+    }
     if exp == 0.0 {
         return 1.0;
     }
     // High-precision ln for RoPE bases
-    let ln_base = if (base - 10000.0).abs() < 1.0 {
+    let ln_base = if (base - 8000.0).abs() < 1.0 {
+        8.98719682f32
+    } else if (base - 10000.0).abs() < 1.0 {
         9.21034037f32
     } else if (base - 500000.0).abs() < 1.0 {
         13.12236338f32
@@ -1068,6 +1066,9 @@ pub fn rms_norm(x: &mut [f32], w: &[f32], eps: f32) {
 
 /// Applies Rotary Positional Embeddings (RoPE) in-place to query or key components.
 pub fn apply_rope(vec: &mut [f32], pos: usize, head_dim: usize, base: f32) {
+    if head_dim == 0 || !base.is_finite() || base <= 0.0 {
+        return;
+    }
     let half_dim = head_dim / 2;
     for j in 0..half_dim {
         let exponent = (2 * j) as f32 / (head_dim as f32);
@@ -6110,11 +6111,29 @@ pub mod tests {
     #[test]
     fn test_f32_pow_approx_accuracy() {
         assert_eq!(f32_pow_approx(10000.0, 0.0), 1.0);
+        // Base 8000 (common LiteRT base: 8000^(1/3) = 20.0)
+        let v0 = f32_pow_approx(8000.0, 1.0 / 3.0);
+        assert!((v0 - 20.0).abs() < 0.2, "8000^(1/3) = {v0}, expected ~20.0");
         // Base 10000 (standard RoPE base)
         let v1 = f32_pow_approx(10000.0, 0.25); // 10000^0.25 = 10.0
         assert!((v1 - 10.0).abs() < 0.1, "10000^0.25 = {v1}, expected ~10.0");
         // Base 1000000 (extended RoPE base)
         let v2 = f32_pow_approx(1000000.0, 0.5); // 1000000^0.5 = 1000.0
         assert!((v2 - 1000.0).abs() < 5.0, "1000000^0.5 = {v2}, expected ~1000.0");
+
+        // Negative, zero, NaN, or non-finite bases must produce NaN
+        assert!(f32_pow_approx(f32::NAN, 1.0).is_nan());
+        assert!(f32_pow_approx(10000.0, f32::NAN).is_nan());
+        assert!(f32_pow_approx(-10000.0, 1.0).is_nan());
+        assert!(f32_pow_approx(0.0, 1.0).is_nan());
+        assert!(f32_pow_approx(f32::INFINITY, 1.0).is_nan());
+        assert!(f32_pow_approx(10000.0, f32::INFINITY).is_nan());
+
+        // apply_rope resilience to non-finite or invalid base
+        let mut vec = [1.0f32, 2.0, 3.0, 4.0];
+        apply_rope(&mut vec, 1, 4, -10000.0);
+        assert_eq!(vec, [1.0, 2.0, 3.0, 4.0], "Negative base must leave vector unmodified");
+        apply_rope(&mut vec, 1, 0, 10000.0);
+        assert_eq!(vec, [1.0, 2.0, 3.0, 4.0], "Zero head_dim must leave vector unmodified");
     }
 }

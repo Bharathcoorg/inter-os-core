@@ -1063,7 +1063,7 @@ pub fn kernel_rope_split_half(
     pos: usize,
     base: f32,
 ) -> Result<(), Error> {
-    if head_dim == 0 || head_dim % 2 != 0 || vec.len() < head_dim || base <= 0.0 {
+    if head_dim == 0 || head_dim % 2 != 0 || vec.len() < head_dim || base <= 0.0 || !base.is_finite() {
         return Err(Error::InvalidFlatBuffer);
     }
     let half_dim = head_dim / 2;
