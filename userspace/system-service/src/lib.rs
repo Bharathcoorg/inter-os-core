@@ -1536,6 +1536,7 @@ fn handle_agent_ipc(
                     let locked = payload.get(1).copied().unwrap_or(0) != 0;
                     state.set_locked(locked);
                     if locked {
+                        state.generation = state.generation.saturating_add(1);
                         tool_registry.expire_session_grants();
                         tool_registry.clear_invocation_grants();
                         if let Some(ref mut plan) = state.active_plan {
@@ -1594,6 +1595,10 @@ fn handle_agent_ipc(
                     emit_agent_ack(sender_task_id, msg_type, 0, &resp, tx_buf);
                 }
                 6 => {
+                    if state.is_locked {
+                        emit_agent_ack(sender_task_id, msg_type, 4, b"DEVICE_LOCKED", tx_buf);
+                        return;
+                    }
                     if payload.len() >= 37 {
                         let tool_id = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
                         let mut digest = [0u8; 32];
@@ -1643,7 +1648,7 @@ fn handle_agent_ipc(
             match payload[0] {
                 1 => {
                     let plan_id = std::get_ticks().unwrap_or(1);
-                    let mut plan = std::companion::ExecutionPlan::new(plan_id);
+                    let mut plan = std::companion::ExecutionPlan::new_with_gen(plan_id, state.generation);
                     if payload.len() >= 5 {
                         let tool_id_raw = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
                         let (tool_id, args) = if tool_id_raw == 0 && payload.len() > 5 {
@@ -1676,41 +1681,114 @@ fn handle_agent_ipc(
                     state.active_plan = Some(plan);
 
                     let status_byte = plan.status as u8;
-                    emit_agent_ack(sender_task_id, msg_type, 0, &[status_byte], tx_buf);
+                    let mut resp = [0u8; 17];
+                    resp[0] = status_byte;
+                    resp[1..9].copy_from_slice(&plan_id.to_le_bytes());
+                    resp[9..17].copy_from_slice(&state.generation.to_le_bytes());
+                    emit_agent_ack(sender_task_id, msg_type, 0, &resp, tx_buf);
                 }
                 2 => {
-                    if let Some(mut plan) = state.active_plan.take() {
-                        if payload.len() >= 9 {
-                            let req_plan_id = u64::from_le_bytes([
-                                payload[1], payload[2], payload[3], payload[4],
-                                payload[5], payload[6], payload[7], payload[8],
-                            ]);
-                            if req_plan_id != plan.id {
-                                state.active_plan = Some(plan);
-                                emit_agent_ack(sender_task_id, msg_type, 2, b"PLAN_ID_MISMATCH", tx_buf);
-                                return;
-                            }
-                        }
-                        plan.user_consent_granted = true;
-                        plan.status = std::companion::PlanStatus::Running;
-                        let cur_ticks = std::get_ticks().unwrap_or(0);
-                        let expiry = cur_ticks + 60_000;
+                    // Check 1: Reject approval while device is locked
+                    if state.is_locked {
+                        emit_agent_ack(sender_task_id, msg_type, 4, b"DEVICE_LOCKED", tx_buf);
+                        return;
+                    }
 
-                        for i in 0..plan.step_count {
-                            let step = &plan.steps[i];
-                            let desc_gen = tool_registry.find_by_id(step.tool_id).map(|d| d.generation).unwrap_or(0);
-                            let grant = std::appmcp::InvocationGrant {
-                                tool_id: step.tool_id,
-                                user_id: state.user_id,
-                                plan_id: plan.id,
-                                plan_gen: state.generation,
-                                tool_gen: desc_gen,
-                                args_digest: step.args_digest(),
-                                expiry_ticks: expiry,
-                                valid: true,
-                            };
-                            tool_registry.grant_exact_invocation(grant);
+                    // Check 2: The model/agent runtime itself cannot approve its own plans
+                    if sender_task_id == std::ai::SERVICE_AGENT_TASK_ID || std::service_peer_matches(14, sender_task_id) {
+                        emit_agent_ack(sender_task_id, msg_type, 3, b"MODEL_CANNOT_SELF_APPROVE", tx_buf);
+                        return;
+                    }
+
+                    // Check 3: Require complete expected payload (Opcode 2 + 8-byte plan_id + 8-byte plan_gen = 17 bytes)
+                    if payload.len() < 9 {
+                        emit_agent_ack(sender_task_id, msg_type, 5, b"MISSING_PLAN_ID", tx_buf);
+                        return;
+                    }
+                    if payload.len() < 17 {
+                        emit_agent_ack(sender_task_id, msg_type, 5, b"INCOMPLETE_APPROVAL_PAYLOAD", tx_buf);
+                        return;
+                    }
+
+                    // Check 4: Validate active plan presence
+                    let active_plan = match state.active_plan.as_ref() {
+                        Some(p) => p,
+                        None => {
+                            emit_agent_ack(sender_task_id, msg_type, 1, b"NO_PLAN", tx_buf);
+                            return;
                         }
+                    };
+
+                    // Check 5: Verify plan state before approval (reject cancelled, completed, or already executing plans)
+                    if active_plan.status == std::companion::PlanStatus::Cancelled {
+                        emit_agent_ack(sender_task_id, msg_type, 6, b"PLAN_ALREADY_CANCELLED", tx_buf);
+                        return;
+                    }
+                    if active_plan.status == std::companion::PlanStatus::Completed {
+                        emit_agent_ack(sender_task_id, msg_type, 6, b"PLAN_ALREADY_COMPLETED", tx_buf);
+                        return;
+                    }
+                    if active_plan.status != std::companion::PlanStatus::AwaitingConsent && active_plan.status != std::companion::PlanStatus::Running {
+                        emit_agent_ack(sender_task_id, msg_type, 6, b"INVALID_PLAN_STATE", tx_buf);
+                        return;
+                    }
+
+                    // Check 6: Verify exact plan ID
+                    let req_plan_id = u64::from_le_bytes([
+                        payload[1], payload[2], payload[3], payload[4],
+                        payload[5], payload[6], payload[7], payload[8],
+                    ]);
+                    if req_plan_id == 0 || req_plan_id != active_plan.id {
+                        emit_agent_ack(sender_task_id, msg_type, 2, b"PLAN_ID_MISMATCH", tx_buf);
+                        return;
+                    }
+
+                    // Check 7: Verify plan generation against active state generation
+                    let req_plan_gen = u64::from_le_bytes([
+                        payload[9], payload[10], payload[11], payload[12],
+                        payload[13], payload[14], payload[15], payload[16],
+                    ]);
+                    if req_plan_gen != state.generation || req_plan_gen != active_plan.generation {
+                        emit_agent_ack(sender_task_id, msg_type, 7, b"STALE_PLAN_GENERATION", tx_buf);
+                        return;
+                    }
+
+                    // Take plan for execution (single-use consumption)
+                    let mut plan = state.active_plan.take().unwrap();
+                    plan.user_consent_granted = true;
+                    plan.status = std::companion::PlanStatus::Running;
+                    let cur_ticks = std::get_ticks().unwrap_or(0);
+                    let expiry = cur_ticks + 60_000;
+
+                    // Grant exact invocations for each step in the consented plan
+                    let mut grants_ok = true;
+                    for i in 0..plan.step_count {
+                        let step = &plan.steps[i];
+                        let desc_gen = tool_registry.find_by_id(step.tool_id).map(|d| d.generation).unwrap_or(0);
+                        let grant = std::appmcp::InvocationGrant {
+                            tool_id: step.tool_id,
+                            user_id: state.user_id,
+                            plan_id: plan.id,
+                            plan_gen: state.generation,
+                            tool_gen: desc_gen,
+                            args_digest: step.args_digest(),
+                            expiry_ticks: expiry,
+                            valid: true,
+                        };
+                        if !tool_registry.grant_exact_invocation(grant) {
+                            grants_ok = false;
+                            break;
+                        }
+                    }
+
+                    if !grants_ok {
+                        tool_registry.clear_invocation_grants();
+                        plan.status = std::companion::PlanStatus::Failed;
+                        state.generation = state.generation.saturating_add(1);
+                        state.active_plan = Some(plan);
+                        emit_agent_ack(sender_task_id, msg_type, 8, b"GRANT_REGISTRATION_FAILED", tx_buf);
+                        return;
+                    }
 
                         let mut all_succeeded = true;
                         while plan.current_step < plan.step_count {
@@ -1826,21 +1904,35 @@ fn handle_agent_ipc(
 
                         if all_succeeded && plan.current_step >= plan.step_count {
                             plan.status = std::companion::PlanStatus::Completed;
+                        } else if plan.status != std::companion::PlanStatus::Cancelled {
+                            plan.status = std::companion::PlanStatus::Failed;
                         }
+                        // Invalidate plan generation so any late/queued message for this plan cannot be re-executed
+                        state.generation = state.generation.saturating_add(1);
+                        tool_registry.clear_invocation_grants();
                         let status_byte = plan.status as u8;
                         state.active_plan = Some(plan);
                         emit_agent_ack(sender_task_id, msg_type, 0, &[status_byte], tx_buf);
-                    } else {
-                        emit_agent_ack(sender_task_id, msg_type, 1, b"NO_PLAN", tx_buf);
-                    }
                 }
                 3 => {
+                    if payload.len() >= 9 {
+                        let req_plan_id = u64::from_le_bytes([
+                            payload[1], payload[2], payload[3], payload[4],
+                            payload[5], payload[6], payload[7], payload[8],
+                        ]);
+                        if let Some(ref plan) = state.active_plan {
+                            if req_plan_id != plan.id {
+                                emit_agent_ack(sender_task_id, msg_type, 2, b"PLAN_ID_MISMATCH", tx_buf);
+                                return;
+                            }
+                        }
+                    }
+                    state.generation = state.generation.saturating_add(1);
+                    tool_registry.clear_invocation_grants();
                     if let Some(ref mut plan) = state.active_plan {
                         plan.cancel();
-                        tool_registry.clear_invocation_grants();
                         emit_agent_ack(sender_task_id, msg_type, 0, &[plan.status as u8], tx_buf);
                     } else {
-                        tool_registry.clear_invocation_grants();
                         emit_agent_ack(sender_task_id, msg_type, 1, b"NO_PLAN", tx_buf);
                     }
                 }
@@ -1859,6 +1951,10 @@ fn handle_agent_ipc(
         std::ai::MSG_TYPE_TOOL_EXEC => {
             if !is_authorized_agent_admin(sender_task_id) {
                 emit_agent_ack(sender_task_id, msg_type, 3, b"UNAUTHORIZED_CALLER", tx_buf);
+                return;
+            }
+            if state.is_locked {
+                emit_agent_ack(sender_task_id, msg_type, 4, b"DEVICE_LOCKED", tx_buf);
                 return;
             }
             if payload.len() < 4 {

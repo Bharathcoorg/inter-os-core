@@ -843,6 +843,7 @@ pub struct ExecutionPlan {
     pub step_count: usize,
     pub current_step: usize,
     pub user_consent_granted: bool,
+    pub generation: u64,
 }
 
 impl Default for ExecutionPlan {
@@ -854,6 +855,7 @@ impl Default for ExecutionPlan {
             step_count: 0,
             current_step: 0,
             user_consent_granted: false,
+            generation: 0,
         }
     }
 }
@@ -867,6 +869,19 @@ impl ExecutionPlan {
             step_count: 0,
             current_step: 0,
             user_consent_granted: false,
+            generation: 0,
+        }
+    }
+
+    pub fn new_with_gen(id: u64, generation: u64) -> Self {
+        Self {
+            id,
+            status: PlanStatus::Proposed,
+            steps: [PlanStep::default(); MAX_PLAN_STEPS],
+            step_count: 0,
+            current_step: 0,
+            user_consent_granted: false,
+            generation,
         }
     }
 

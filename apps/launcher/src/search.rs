@@ -792,6 +792,9 @@ pub fn query_service_generate(prompt: &[u8], out_buf: &mut [u8]) -> Result<usize
     Err((interos_std::ai::STATUS_UNAVAILABLE, "On-device generative stream unavailable: no local model weights loaded."))
 }
 
+static mut CURRENT_PROPOSED_PLAN_ID: u64 = 0;
+static mut CURRENT_PROPOSED_PLAN_GEN: u64 = 0;
+
 /// Queries the agent daemon (agentd) with Opcode 1 to propose an execution plan.
 pub fn query_agent_propose_plan(tool_id: u32, args: &[u8]) -> Result<u32, ()> {
     let mut req = [0u8; 64];
@@ -816,6 +819,20 @@ pub fn query_agent_propose_plan(tool_id: u32, args: &[u8]) -> Result<u32, ()> {
             return Err(());
         }
         if msg_type == interos_std::ai::MSG_TYPE_AGENT_PLAN && len >= 1 {
+            if len >= 9 {
+                let pid = u64::from_le_bytes([
+                    rx_buf[1], rx_buf[2], rx_buf[3], rx_buf[4],
+                    rx_buf[5], rx_buf[6], rx_buf[7], rx_buf[8],
+                ]);
+                unsafe { CURRENT_PROPOSED_PLAN_ID = pid; }
+            }
+            if len >= 17 {
+                let pgen = u64::from_le_bytes([
+                    rx_buf[9], rx_buf[10], rx_buf[11], rx_buf[12],
+                    rx_buf[13], rx_buf[14], rx_buf[15], rx_buf[16],
+                ]);
+                unsafe { CURRENT_PROPOSED_PLAN_GEN = pgen; }
+            }
             return Ok(rx_buf[0] as u32);
         }
     }
@@ -825,7 +842,15 @@ pub fn query_agent_propose_plan(tool_id: u32, args: &[u8]) -> Result<u32, ()> {
 
 /// Dispatches Opcode 2 (APPROVE) to agentd to execute the consented tool action.
 pub fn query_agent_approve_plan() -> Result<u32, ()> {
-    let req = [2u8]; // Opcode 2: APPROVE
+    let pid = unsafe { CURRENT_PROPOSED_PLAN_ID };
+    let pgen = unsafe { CURRENT_PROPOSED_PLAN_GEN };
+    if pid == 0 {
+        return Err(());
+    }
+    let mut req = [0u8; 17];
+    req[0] = 2; // Opcode 2: APPROVE
+    req[1..9].copy_from_slice(&pid.to_le_bytes());
+    req[9..17].copy_from_slice(&pgen.to_le_bytes());
     if interos_std::ipc_send(
         interos_std::ai::SERVICE_AGENT_TASK_ID,
         interos_std::ai::MSG_TYPE_AGENT_PLAN,
@@ -840,6 +865,10 @@ pub fn query_agent_approve_plan() -> Result<u32, ()> {
             && msg_type == interos_std::ai::MSG_TYPE_AGENT_PLAN
             && len >= 1
         {
+            unsafe {
+                CURRENT_PROPOSED_PLAN_ID = 0;
+                CURRENT_PROPOSED_PLAN_GEN = 0;
+            }
             return Ok(rx_buf[0] as u32);
         }
     }
@@ -849,7 +878,16 @@ pub fn query_agent_approve_plan() -> Result<u32, ()> {
 
 /// Dispatches Opcode 3 (CANCEL) to agentd to abort the proposed plan.
 pub fn query_agent_cancel_plan() -> Result<(), ()> {
-    let req = [3u8]; // Opcode 3: CANCEL
+    let pid = unsafe { CURRENT_PROPOSED_PLAN_ID };
+    let pgen = unsafe { CURRENT_PROPOSED_PLAN_GEN };
+    let mut req = [0u8; 17];
+    req[0] = 3; // Opcode 3: CANCEL
+    req[1..9].copy_from_slice(&pid.to_le_bytes());
+    req[9..17].copy_from_slice(&pgen.to_le_bytes());
+    unsafe {
+        CURRENT_PROPOSED_PLAN_ID = 0;
+        CURRENT_PROPOSED_PLAN_GEN = 0;
+    }
     let _ = interos_std::ipc_send(
         interos_std::ai::SERVICE_AGENT_TASK_ID,
         interos_std::ai::MSG_TYPE_AGENT_PLAN,
