@@ -1010,6 +1010,10 @@ impl DynamicToolRegistry {
 
     /// Grants an exact cryptographic invocation grant.
     pub fn grant_exact_invocation(&mut self, mut grant: InvocationGrant) -> bool {
+        // Enforce strict security invariants: no wildcard user, no indefinite expiry, no empty digest
+        if grant.user_id == 0 || grant.expiry_ticks == 0 || grant.args_digest == [0u8; 32] {
+            return false;
+        }
         grant.valid = true;
         for g in &mut self.invocation_grants {
             if g.valid
@@ -1035,8 +1039,8 @@ impl DynamicToolRegistry {
     }
 
     /// Consumes an exact cryptographic invocation grant.
-    /// Must match: `tool_id`, `user_id` (or if grant.user_id == 0 wildcard), `plan_id`, `plan_gen`,
-    /// `tool_gen`, `args_digest`, and `current_ticks <= grant.expiry_ticks` (or grant.expiry_ticks == 0 for indefinite).
+    /// Must match: `tool_id`, `user_id`, `plan_id`, `plan_gen`,
+    /// `tool_gen`, `args_digest`, and unexpired `current_ticks <= grant.expiry_ticks`.
     /// Upon match, sets `grant.valid = false`, decrements `grant_count`, and returns `true`.
     pub fn consume_exact_invocation(
         &mut self,
@@ -1048,15 +1052,19 @@ impl DynamicToolRegistry {
         args_digest: &[u8; 32],
         current_ticks: u64,
     ) -> bool {
+        if user_id == 0 || args_digest == &[0u8; 32] {
+            return false;
+        }
         for g in &mut self.invocation_grants {
             if g.valid
                 && g.tool_id == tool_id
-                && (g.user_id == 0 || g.user_id == user_id)
+                && g.user_id == user_id
                 && g.plan_id == plan_id
                 && g.plan_gen == plan_gen
                 && g.tool_gen == tool_gen
                 && &g.args_digest == args_digest
-                && (g.expiry_ticks == 0 || current_ticks <= g.expiry_ticks)
+                && g.expiry_ticks > 0
+                && current_ticks <= g.expiry_ticks
             {
                 g.valid = false;
                 self.grant_count = self.grant_count.saturating_sub(1);
@@ -1077,15 +1085,19 @@ impl DynamicToolRegistry {
         args_digest: &[u8; 32],
         current_ticks: u64,
     ) -> bool {
+        if user_id == 0 || args_digest == &[0u8; 32] {
+            return false;
+        }
         for g in &self.invocation_grants {
             if g.valid
                 && g.tool_id == tool_id
-                && (g.user_id == 0 || g.user_id == user_id)
+                && g.user_id == user_id
                 && g.plan_id == plan_id
                 && g.plan_gen == plan_gen
                 && g.tool_gen == tool_gen
                 && &g.args_digest == args_digest
-                && (g.expiry_ticks == 0 || current_ticks <= g.expiry_ticks)
+                && g.expiry_ticks > 0
+                && current_ticks <= g.expiry_ticks
             {
                 return true;
             }
@@ -1093,37 +1105,19 @@ impl DynamicToolRegistry {
         false
     }
 
-    /// Grants user consent for a specific tool invocation bound to an arguments CRC.
-    /// Backward-compatible wrapper delegating to exact cryptographic grants.
-    pub fn grant_invocation_consent(&mut self, tool_id: u32, args_crc: u32) -> bool {
-        let mut digest = [0u8; 32];
-        digest[..4].copy_from_slice(&args_crc.to_le_bytes());
-        let grant = InvocationGrant {
-            tool_id,
-            user_id: 0,
-            plan_id: 0,
-            plan_gen: 0,
-            tool_gen: 0,
-            args_digest: digest,
-            expiry_ticks: 0,
-            valid: true,
-        };
-        self.grant_exact_invocation(grant)
+    /// Deprecated legacy consent helper. Fails closed to mandate SHA-256 bound exact grants.
+    pub fn grant_invocation_consent(&mut self, _tool_id: u32, _args_crc: u32) -> bool {
+        false
     }
 
-    /// Verifies and consumes user consent for a specific tool invocation bound to an arguments CRC.
-    /// Backward-compatible wrapper delegating to exact cryptographic grants.
-    pub fn consume_invocation_consent(&mut self, tool_id: u32, args_crc: u32) -> bool {
-        let mut digest = [0u8; 32];
-        digest[..4].copy_from_slice(&args_crc.to_le_bytes());
-        self.consume_exact_invocation(tool_id, 0, 0, 0, 0, &digest, 0)
+    /// Deprecated legacy consent helper. Fails closed to mandate SHA-256 bound exact grants.
+    pub fn consume_invocation_consent(&mut self, _tool_id: u32, _args_crc: u32) -> bool {
+        false
     }
 
-    /// Checks whether user consent exists for a specific tool invocation bound to an arguments CRC.
-    pub fn has_invocation_consent(&self, tool_id: u32, args_crc: u32) -> bool {
-        let mut digest = [0u8; 32];
-        digest[..4].copy_from_slice(&args_crc.to_le_bytes());
-        self.has_exact_invocation(tool_id, 0, 0, 0, 0, &digest, 0)
+    /// Deprecated legacy consent helper. Fails closed to mandate SHA-256 bound exact grants.
+    pub fn has_invocation_consent(&self, _tool_id: u32, _args_crc: u32) -> bool {
+        false
     }
 
     /// Clears all active invocation consent grants.
@@ -1490,29 +1484,12 @@ mod tests {
         let mut reg = DynamicToolRegistry::new();
         let tool_id = 0x8888_0001;
         let args_crc_a = 0x1234_5678;
-        let args_crc_b = 0x8765_4321;
 
+        // Legacy CRC32 consent methods must strictly fail closed
         assert!(!reg.has_invocation_consent(tool_id, args_crc_a));
-
-        // Grant consent for args_crc_a
-        reg.grant_invocation_consent(tool_id, args_crc_a);
-        assert!(reg.has_invocation_consent(tool_id, args_crc_a));
-        assert!(!reg.has_invocation_consent(tool_id, args_crc_b));
-
-        // Consume for wrong args fails
-        assert!(!reg.consume_invocation_consent(tool_id, args_crc_b));
-        assert!(reg.has_invocation_consent(tool_id, args_crc_a));
-
-        // Consume for correct args succeeds and removes grant
-        assert!(reg.consume_invocation_consent(tool_id, args_crc_a));
+        assert!(!reg.grant_invocation_consent(tool_id, args_crc_a));
         assert!(!reg.has_invocation_consent(tool_id, args_crc_a));
         assert!(!reg.consume_invocation_consent(tool_id, args_crc_a));
-
-        // Clear invocation grants
-        reg.grant_invocation_consent(tool_id, args_crc_b);
-        assert!(reg.has_invocation_consent(tool_id, args_crc_b));
-        reg.clear_invocation_grants();
-        assert!(!reg.has_invocation_consent(tool_id, args_crc_b));
     }
 
     #[test]
@@ -1658,7 +1635,7 @@ mod tests {
         // Cannot consume twice
         assert!(!reg.consume_exact_invocation(tool_id, user_id, plan_id, plan_gen, tool_gen, &args_digest, 19_999));
 
-        // Test wildcard user_id (user_id = 0 matches any caller user_id)
+        // Rejection: wildcard user_id (user_id = 0 is rejected)
         let wildcard_grant = InvocationGrant {
             tool_id: 0x1111,
             user_id: 0,
@@ -1666,11 +1643,36 @@ mod tests {
             plan_gen: 1,
             tool_gen: 1,
             args_digest: [0xAA; 32],
-            expiry_ticks: 0, // indefinite
+            expiry_ticks: 100_000,
             valid: true,
         };
-        assert!(reg.grant_exact_invocation(wildcard_grant));
-        assert!(reg.consume_exact_invocation(0x1111, 4242, 10, 1, 1, &[0xAA; 32], 999_999));
+        assert!(!reg.grant_exact_invocation(wildcard_grant));
+
+        // Rejection: indefinite expiry (expiry_ticks = 0 is rejected)
+        let indefinite_grant = InvocationGrant {
+            tool_id: 0x1111,
+            user_id: 1001,
+            plan_id: 10,
+            plan_gen: 1,
+            tool_gen: 1,
+            args_digest: [0xAA; 32],
+            expiry_ticks: 0,
+            valid: true,
+        };
+        assert!(!reg.grant_exact_invocation(indefinite_grant));
+
+        // Rejection: empty digest ([0u8; 32] is rejected)
+        let empty_digest_grant = InvocationGrant {
+            tool_id: 0x1111,
+            user_id: 1001,
+            plan_id: 10,
+            plan_gen: 1,
+            tool_gen: 1,
+            args_digest: [0u8; 32],
+            expiry_ticks: 100_000,
+            valid: true,
+        };
+        assert!(!reg.grant_exact_invocation(empty_digest_grant));
     }
 
     #[test]
@@ -1718,7 +1720,7 @@ mod tests {
             plan_gen: 1,
             tool_gen: h_send.generation,
             args_digest: [1u8; 32],
-            expiry_ticks: 0,
+            expiry_ticks: 10_000,
             valid: true,
         };
         let grant2 = InvocationGrant {
@@ -1728,7 +1730,7 @@ mod tests {
             plan_gen: 1,
             tool_gen: h_balance.generation,
             args_digest: [2u8; 32],
-            expiry_ticks: 0,
+            expiry_ticks: 10_000,
             valid: true,
         };
 

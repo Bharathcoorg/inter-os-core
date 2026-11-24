@@ -26,6 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 APK_SIG_BLOCK_MAGIC = b"APK Sig Block 42"
 APK_SIGNATURE_SCHEME_V2_BLOCK_ID = 0x7109871a
 APK_SIGNATURE_SCHEME_V3_BLOCK_ID = 0xf05368c0
+# AOSP fs-verity padding block ID (used to pad signing block to 4096-byte alignment).
+# Note: 0x42726577 is AOSP's VERITY_PADDING_BLOCK_ID. Retained for signing block pair recognition;
+# genuine APK Signature Scheme v4 is verified via companion .idsig file (crates/interos-android-format).
 VERITY_PADDING_BLOCK_ID = 0x42726577
 APK_SIGNATURE_SCHEME_V4_BLOCK_ID = VERITY_PADDING_BLOCK_ID
 CONTENT_DIGEST_CHUNK_SIZE = 1024 * 1024

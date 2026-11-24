@@ -1527,7 +1527,7 @@ fn handle_agent_ipc(
             if payload.is_empty() {
                 return;
             }
-            if matches!(payload[0], 1 | 2 | 3 | 4 | 6 | 7) && !is_authorized_agent_admin(sender_task_id) {
+            if matches!(payload[0], 1 | 2 | 3 | 4 | 6 | 7 | 8) && !is_authorized_agent_admin(sender_task_id) {
                 emit_agent_ack(sender_task_id, msg_type, 3, b"UNAUTHORIZED_CALLER", tx_buf);
                 return;
             }
@@ -1537,6 +1537,10 @@ fn handle_agent_ipc(
                     state.set_locked(locked);
                     if locked {
                         tool_registry.expire_session_grants();
+                        tool_registry.clear_invocation_grants();
+                        if let Some(ref mut plan) = state.active_plan {
+                            plan.cancel();
+                        }
                     }
                     emit_agent_ack(sender_task_id, msg_type, 0, b"LOCK_ACK", tx_buf);
                 }
@@ -1590,13 +1594,12 @@ fn handle_agent_ipc(
                     emit_agent_ack(sender_task_id, msg_type, 0, &resp, tx_buf);
                 }
                 6 => {
-                    if payload.len() >= 9 {
+                    if payload.len() >= 37 {
                         let tool_id = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
-                        let args_crc = u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]]);
+                        let mut digest = [0u8; 32];
+                        digest.copy_from_slice(&payload[5..37]);
                         let desc_gen = tool_registry.find_by_id(tool_id).map(|d| d.generation).unwrap_or(0);
                         let ticks = std::get_ticks().unwrap_or(0);
-                        let mut digest = [0u8; 32];
-                        digest[..4].copy_from_slice(&args_crc.to_le_bytes());
                         let grant = std::appmcp::InvocationGrant {
                             tool_id,
                             user_id: state.user_id,
@@ -1607,9 +1610,11 @@ fn handle_agent_ipc(
                             expiry_ticks: ticks + 60_000,
                             valid: true,
                         };
-                        tool_registry.grant_exact_invocation(grant);
-                        tool_registry.grant_invocation_consent(tool_id, args_crc);
-                        emit_agent_ack(sender_task_id, msg_type, 0, b"GRANT_ACK", tx_buf);
+                        if tool_registry.grant_exact_invocation(grant) {
+                            emit_agent_ack(sender_task_id, msg_type, 0, b"GRANT_ACK", tx_buf);
+                        } else {
+                            emit_agent_ack(sender_task_id, msg_type, 2, b"GRANT_REJECTED", tx_buf);
+                        }
                     } else {
                         emit_agent_ack(sender_task_id, msg_type, 1, b"INVALID_GRANT_PAYLOAD", tx_buf);
                     }
@@ -1629,6 +1634,10 @@ fn handle_agent_ipc(
         }
         std::ai::MSG_TYPE_AGENT_PLAN => {
             if payload.is_empty() {
+                return;
+            }
+            if !is_authorized_agent_admin(sender_task_id) {
+                emit_agent_ack(sender_task_id, msg_type, 3, b"UNAUTHORIZED_CALLER", tx_buf);
                 return;
             }
             match payload[0] {
@@ -1671,6 +1680,17 @@ fn handle_agent_ipc(
                 }
                 2 => {
                     if let Some(mut plan) = state.active_plan.take() {
+                        if payload.len() >= 9 {
+                            let req_plan_id = u64::from_le_bytes([
+                                payload[1], payload[2], payload[3], payload[4],
+                                payload[5], payload[6], payload[7], payload[8],
+                            ]);
+                            if req_plan_id != plan.id {
+                                state.active_plan = Some(plan);
+                                emit_agent_ack(sender_task_id, msg_type, 2, b"PLAN_ID_MISMATCH", tx_buf);
+                                return;
+                            }
+                        }
                         plan.user_consent_granted = true;
                         plan.status = std::companion::PlanStatus::Running;
                         let cur_ticks = std::get_ticks().unwrap_or(0);
@@ -1690,7 +1710,6 @@ fn handle_agent_ipc(
                                 valid: true,
                             };
                             tool_registry.grant_exact_invocation(grant);
-                            tool_registry.grant_invocation_consent(step.tool_id, step.args_crc());
                         }
 
                         let mut all_succeeded = true;
@@ -1701,7 +1720,6 @@ fn handle_agent_ipc(
                             }
                             let step_idx = plan.current_step;
                             let tool_id = plan.steps[step_idx].tool_id;
-                            let args_crc = plan.steps[step_idx].args_crc();
                             let args_str = plan.steps[step_idx].args_str();
                             let args_digest = plan.steps[step_idx].args_digest();
 
@@ -1732,7 +1750,7 @@ fn handle_agent_ipc(
                                     desc.generation,
                                     &args_digest,
                                     ticks,
-                                ) && !tool_registry.consume_invocation_consent(tool_id, args_crc) {
+                                ) {
                                     plan.steps[step_idx].status = std::companion::StepStatus::Failed;
                                     plan.status = std::companion::PlanStatus::Failed;
                                     all_succeeded = false;
@@ -1819,8 +1837,10 @@ fn handle_agent_ipc(
                 3 => {
                     if let Some(ref mut plan) = state.active_plan {
                         plan.cancel();
+                        tool_registry.clear_invocation_grants();
                         emit_agent_ack(sender_task_id, msg_type, 0, &[plan.status as u8], tx_buf);
                     } else {
+                        tool_registry.clear_invocation_grants();
                         emit_agent_ack(sender_task_id, msg_type, 1, b"NO_PLAN", tx_buf);
                     }
                 }
@@ -1837,6 +1857,10 @@ fn handle_agent_ipc(
             }
         }
         std::ai::MSG_TYPE_TOOL_EXEC => {
+            if !is_authorized_agent_admin(sender_task_id) {
+                emit_agent_ack(sender_task_id, msg_type, 3, b"UNAUTHORIZED_CALLER", tx_buf);
+                return;
+            }
             if payload.len() < 4 {
                 emit_agent_ack(sender_task_id, msg_type, 1, b"INVALID_TOOL_PAYLOAD", tx_buf);
                 return;

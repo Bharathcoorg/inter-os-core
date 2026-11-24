@@ -69,6 +69,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_acr_per_apk_isolation.py": 5,
     "tests/test_adversarial_security.py": 10,
     "tests/test_agent_manager_truth_contract.py": 39,
+    "tests/test_agent_plan_security.py": 6,
     "tests/test_android_apk_container_contract.py": 4,
     "tests/test_android_app_verification_contract.py": 6,
     "tests/test_android_compat_contract.py": 3,
