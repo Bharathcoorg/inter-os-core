@@ -77,13 +77,19 @@ fn main() {
         .copied()
         .collect();
     if !missing.is_empty() {
-        // Only a warning: the `include_bytes!` below still fails loudly at compile
-        // time, and this message names exactly which build step was skipped.
-        println!(
-            "cargo:warning=user images missing from {}: {} (run tools/build_userspace.ps1)",
+        panic!(
+            "unreadable or absent build input: embedded user images missing from {}: {} (run tools/build_userspace.ps1)",
             user_target.display(),
             missing.join(", ")
         );
+    }
+
+    // Verify manifest has no duplicate names
+    let mut seen_names = std::collections::HashSet::new();
+    for name in EMBEDDED_USER_IMAGES {
+        if !seen_names.insert(*name) {
+            panic!("duplicate embedded image name in manifest: {}", name);
+        }
     }
 
     let out_dir = match std::env::var("OUT_DIR") {
@@ -96,18 +102,16 @@ fn main() {
     digests_code.push_str("pub static EXPECTED_IMAGE_DIGESTS: &[(&str, [u8; 32])] = &[\n");
     for image in EMBEDDED_USER_IMAGES {
         let path = user_target.join(image);
-        let digest: [u8; 32] = if path.exists() {
-            if let Ok(bytes) = std::fs::read(&path) {
-                Sha256::digest(&bytes).into()
-            } else {
-                [0u8; 32]
-            }
-        } else {
-            [0u8; 32]
-        };
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!("unreadable build input at {}: {}", path.display(), e);
+        });
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        if digest == [0u8; 32] {
+            panic!("computed all-zero digest for embedded image {}", image);
+        }
         digests_code.push_str(&format!("    (\"{}\", {:?}),\n", image, digest));
     }
     digests_code.push_str("];\n");
     let digests_path = out_dir.join("embedded_image_digests.rs");
-    let _ = std::fs::write(digests_path, digests_code);
+    std::fs::write(&digests_path, digests_code).expect("failed to write embedded_image_digests.rs");
 }
