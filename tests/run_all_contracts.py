@@ -23,6 +23,7 @@ RUNTIME_DEPENDENT_SKIPPED_FILES = frozenset({
     "tests/qemu/test_vault_persistence.py",
     "tests/test_crash_watchdog.py",
     "tests/test_cross_arch_persistence.py",
+    "tests/test_end_to_end_smartphone_acceptance.py",
     "tests/test_interactive_lifecycle.py",
     "tests/test_qemu_audio.py",
     "tests/test_build_workflow.py",
