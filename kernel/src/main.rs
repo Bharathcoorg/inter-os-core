@@ -171,10 +171,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial_println!("[BOOT] Verified boot: NOT IMPLEMENTED. No dm-verity measurement of the real system partition exists; no fixed Merkle root is provisioned and no partition block is attested at boot.");
 
     // Authenticated embedded userspace image manifest verification:
-    // Guarantees all embedded Ring-3 binaries have valid ELF headers, ET_EXEC executable format, and uncorrupted bytes.
+    // Guarantees all embedded Ring-3 binaries have valid ELF headers, ET_EXEC executable format,
+    // and match their build-time cryptographic SHA-256 digests.
     match kernel::task::images::verify_embedded_images() {
         Ok(count) => {
             serial_println!("[OK] Authenticated Boot: verified SHA-256 and ET_EXEC headers of {} embedded Ring-3 binaries.", count);
+            serial_println!("[BOOT] Hardware Secure Boot: NOT IMPLEMENTED (unmeasured BIOS/QEMU boot path; software-authenticated image manifest only).");
         }
         Err(err) => {
             panic!("Authenticated Boot integrity verification failed: {}", err);

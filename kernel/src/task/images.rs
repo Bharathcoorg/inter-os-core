@@ -107,24 +107,119 @@ pub static ALL_USER_IMAGES: &[UserImage] = &[
     UserImage { name: "acr-app-runtime", elf: ACR_APP_RUNTIME_ELF },
 ];
 
+include!(concat!(env!("OUT_DIR"), "/embedded_image_digests.rs"));
+
+/// Validates ELF header invariants and verifies cryptographic SHA-256 digest
+/// against the authenticated expected digest manifest.
+pub fn verify_single_image(
+    name: &str,
+    elf: &[u8],
+    expected_digest: Option<&[u8; 32]>,
+) -> Result<(), &'static str> {
+    use sha2::{Digest, Sha256};
+    if elf.len() < 64 {
+        return Err("image too small to be valid ELF (< 64 bytes)");
+    }
+    if &elf[0..4] != b"\x7fELF" {
+        return Err("invalid ELF magic (expected \\x7fELF)");
+    }
+    // ET_EXEC check (e_type == 2 at offset 16 in little endian)
+    let e_type = u16::from_le_bytes([elf[16], elf[17]]);
+    if e_type != 2 {
+        return Err("embedded user image is not ET_EXEC");
+    }
+
+    // Verify SHA-256 digest against expected digest if provided
+    let actual_hash: [u8; 32] = Sha256::digest(elf).into();
+    if let Some(expected) = expected_digest {
+        if *expected != [0u8; 32] && actual_hash != *expected {
+            return Err("embedded user image SHA-256 digest mismatch (corrupted or tampered binary)");
+        }
+    } else if let Some(&(_, expected)) = EXPECTED_IMAGE_DIGESTS.iter().find(|(n, _)| *n == name) {
+        if expected != [0u8; 32] && actual_hash != expected {
+            return Err("embedded user image SHA-256 digest mismatch (corrupted or tampered binary)");
+        }
+    }
+
+    Ok(())
+}
+
 pub fn verify_embedded_images() -> Result<usize, &'static str> {
-    use sha2::{Sha256, Digest};
     let mut verified_count = 0;
     for img in ALL_USER_IMAGES {
-        if img.elf.len() < 64 {
-            return Err("image too small to be valid ELF");
-        }
-        if &img.elf[0..4] != b"\x7fELF" {
-            return Err("invalid ELF magic");
-        }
-        // ET_EXEC check (e_type == 2 at offset 16 in little endian)
-        let e_type = u16::from_le_bytes([img.elf[16], img.elf[17]]);
-        if e_type != 2 {
-            return Err("embedded user image is not ET_EXEC");
-        }
-        // Compute SHA-256 hash to prove whole-image digest integrity
-        let _hash = Sha256::digest(img.elf);
+        verify_single_image(img.name, img.elf, None)?;
         verified_count += 1;
     }
     Ok(verified_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn make_test_elf(payload_byte: u8) -> [u8; 64] {
+        let mut buf = [0u8; 64];
+        buf[0..4].copy_from_slice(b"\x7fELF");
+        buf[4] = 2; // 64-bit
+        buf[5] = 1; // Little-endian
+        buf[6] = 1; // Current ELF version
+        buf[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC = 2
+        buf[18..20].copy_from_slice(&0x3Eu16.to_le_bytes()); // x86_64
+        buf[32] = payload_byte;
+        buf
+    }
+
+    #[test]
+    fn test_valid_image_verification_passes() {
+        let elf = make_test_elf(0x42);
+        let digest: [u8; 32] = Sha256::digest(&elf).into();
+        assert!(verify_single_image("test", &elf, Some(&digest)).is_ok());
+    }
+
+    #[test]
+    fn test_tampered_payload_byte_causes_rejection() {
+        let elf = make_test_elf(0x42);
+        let digest: [u8; 32] = Sha256::digest(&elf).into();
+
+        let mut tampered = elf;
+        tampered[32] ^= 0xFF; // Modify single byte in payload
+
+        let res = verify_single_image("test", &tampered, Some(&digest));
+        assert_eq!(
+            res,
+            Err("embedded user image SHA-256 digest mismatch (corrupted or tampered binary)")
+        );
+    }
+
+    #[test]
+    fn test_tampered_magic_causes_rejection() {
+        let mut elf = make_test_elf(0x42);
+        elf[0] = 0;
+        let digest: [u8; 32] = Sha256::digest(&elf).into();
+        assert_eq!(
+            verify_single_image("test", &elf, Some(&digest)),
+            Err("invalid ELF magic (expected \\x7fELF)")
+        );
+    }
+
+    #[test]
+    fn test_tampered_executable_type_causes_rejection() {
+        let mut elf = make_test_elf(0x42);
+        elf[16..18].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN instead of ET_EXEC
+        let digest: [u8; 32] = Sha256::digest(&elf).into();
+        assert_eq!(
+            verify_single_image("test", &elf, Some(&digest)),
+            Err("embedded user image is not ET_EXEC")
+        );
+    }
+
+    #[test]
+    fn test_truncated_image_causes_rejection() {
+        let elf = [0x7fu8, b'E', b'L', b'F'];
+        assert_eq!(
+            verify_single_image("test", &elf, None),
+            Err("image too small to be valid ELF (< 64 bytes)")
+        );
+    }
 }

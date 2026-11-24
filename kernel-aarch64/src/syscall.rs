@@ -133,23 +133,42 @@ const USER_COPY_CHUNK: usize = 32 * 1024;
 
 /// RAII guard preventing premature address-space evacuation and frame recycling
 /// while an in-flight user memory copy is executing across chunk boundaries.
-struct UserCopyGuard(Option<u32>);
+pub(crate) struct UserCopyGuard {
+    counter: Option<*const core::sync::atomic::AtomicU32>,
+}
 
 impl UserCopyGuard {
-    fn new() -> Result<Self, i64> {
-        let opt_pid = {
-            let mut sched = SCHEDULER.lock();
-            sched.begin_current_user_copy()?
+    pub(crate) fn new() -> Result<Self, i64> {
+        let counter_ptr = {
+            let sched = SCHEDULER.lock();
+            let pos = sched.current_task_pos().ok_or(-14i64)?;
+            let tcb = &sched.tasks[pos];
+            if tcb.state != TaskState::Running {
+                return Err(-14);
+            }
+            if let Some(ref aspace) = tcb.address_space {
+                if aspace.is_closing() || aspace.is_destroyed() {
+                    return Err(-14);
+                }
+                aspace.in_user_copy.fetch_add(1, core::sync::atomic::Ordering::Release);
+                Some(&aspace.in_user_copy as *const core::sync::atomic::AtomicU32)
+            } else {
+                None
+            }
         };
-        Ok(Self(opt_pid))
+        Ok(Self { counter: counter_ptr })
     }
 }
 
 impl Drop for UserCopyGuard {
     fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            let mut sched = SCHEDULER.lock();
-            sched.end_user_copy_for_pid(pid);
+        if let Some(ptr) = self.counter {
+            let counter = unsafe { &*ptr };
+            let _ = counter.fetch_update(
+                core::sync::atomic::Ordering::Release,
+                core::sync::atomic::Ordering::Acquire,
+                |val| if val > 0 { Some(val - 1) } else { Some(0) },
+            );
         }
     }
 }
@@ -1845,6 +1864,9 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
             let mut sched = SCHEDULER.lock();
             if let Some(b_task) = sched.tasks.iter_mut().find(|t| t.id == rec.borrower_task) {
                 if let Some(ref mut b_aspace) = b_task.address_space {
+                    if b_aspace.in_user_copy.load(core::sync::atomic::Ordering::Acquire) != 0 {
+                        return -16; // -EBUSY: borrower has in-flight user copy; lender must retry
+                    }
                     for i in 0..rec.page_count {
                         let vaddr = rec.borrower_vaddr + (i as u64 * 4096);
                         let _ = b_aspace.unmap_user_page(vaddr, false);
@@ -1955,6 +1977,9 @@ pub fn sys_dispatch(syscall_nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64
                     Some(a) => a,
                     None => return -13,
                 };
+                if sender_aspace.in_user_copy.load(core::sync::atomic::Ordering::Acquire) != 0 {
+                    return -16; // -EBUSY: sender has in-flight user copy
+                }
                 for i in 0..page_count {
                     let vaddr = sender_vaddr + (i as u64 * 4096);
                     let (phys, is_write) = match sender_aspace.translate(vaddr) {

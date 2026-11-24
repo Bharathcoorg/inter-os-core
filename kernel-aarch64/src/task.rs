@@ -755,7 +755,11 @@ impl Scheduler {
     pub fn end_user_copy_for_pid(&mut self, pid: u32) {
         if let Some(pos) = self.tasks.iter().position(|t| t.id == pid) {
             if let Some(ref aspace) = self.tasks[pos].address_space {
-                aspace.in_user_copy.fetch_sub(1, core::sync::atomic::Ordering::Release);
+                let _ = aspace.in_user_copy.fetch_update(
+                    core::sync::atomic::Ordering::Release,
+                    core::sync::atomic::Ordering::Acquire,
+                    |val| if val > 0 { Some(val - 1) } else { Some(0) },
+                );
             }
         }
     }
@@ -802,6 +806,12 @@ impl Scheduler {
         let task = &mut self.tasks[pos];
         if !is_supervisor && task.parent_id != caller_pid {
             return Err(-13); // -EACCES: caller does not own this child and lacks supervisor capability
+        }
+
+        if let Some(ref aspace) = task.address_space {
+            if aspace.in_user_copy.load(core::sync::atomic::Ordering::Acquire) != 0 {
+                return Err(-16); // -EBUSY: in-flight user copy active; keep task in current state so it can finish
+            }
         }
 
         task.state = TaskState::Reaping;
@@ -2397,7 +2407,54 @@ pub fn test_reap_evacuation_protocol() {
     }
 
     crate::mmu::ArmMmu::switch_to_kernel();
+    test_user_copy_concurrency_guards();
     crate::kprintln!("[TEST] AArch64 5-Stage Reap Evacuation Protocol VERIFIED.");
+}
+
+pub fn test_user_copy_concurrency_guards() {
+    crate::kprintln!("--- [Testing AArch64 UserCopy Concurrency Guards] ---");
+    // 1. Underflow prevention
+    let aspace = crate::mmu::UserAddressSpace::new().expect("Address space alloc");
+    assert_eq!(aspace.in_user_copy.load(core::sync::atomic::Ordering::Acquire), 0);
+    let _ = aspace.in_user_copy.fetch_update(
+        core::sync::atomic::Ordering::Release,
+        core::sync::atomic::Ordering::Acquire,
+        |val| if val > 0 { Some(val - 1) } else { Some(0) },
+    );
+    assert_eq!(
+        aspace.in_user_copy.load(core::sync::atomic::Ordering::Acquire),
+        0,
+        "Counter must not underflow below 0"
+    );
+    assert!(
+        Scheduler::is_aspace_evacuated(&aspace),
+        "Address space must remain evacuated after underflow prevention"
+    );
+
+    // 2. begin_reap rejects active user copy with -EBUSY (-16)
+    let mut sched = Scheduler::new();
+    sched.next_pid = 7000;
+    let caps = CapabilityTable::new();
+    let aspace2 = crate::mmu::UserAddressSpace::new().expect("Address space alloc");
+    let pid = sched.spawn_user_process(0, "copy_reap_task", 0, 0, Some(aspace2), caps);
+    sched.tasks[0].state = TaskState::Terminated;
+    sched.tasks[0].address_space.as_ref().unwrap().in_user_copy.store(1, core::sync::atomic::Ordering::Release);
+
+    let res = sched.begin_reap(0, true, pid);
+    assert_eq!(res, Err(-16), "begin_reap must reject task with in_user_copy > 0");
+    assert_eq!(
+        sched.tasks[0].state,
+        TaskState::Terminated,
+        "Task must remain Terminated, not falsely transitioned to Reaping"
+    );
+
+    sched.tasks[0].address_space.as_ref().unwrap().in_user_copy.store(0, core::sync::atomic::Ordering::Release);
+    let handle = sched.begin_reap(0, true, pid).expect("begin_reap succeeds when in_user_copy == 0");
+    assert_eq!(sched.tasks[0].state, TaskState::Reaping);
+    let detached = sched.detach_reaping_aspace(handle).expect("detach succeeds").unwrap();
+    drop(detached);
+    assert_eq!(sched.finish_reap(handle), Ok(0));
+    crate::kprintln!("[TEST] AArch64 UserCopy Concurrency Guards VERIFIED.");
 }
 
 pub fn test_transactional_switch() {

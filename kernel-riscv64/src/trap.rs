@@ -279,10 +279,16 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                         return_to_kernel_mode();
                     }
                 }
-                unsafe { core::arch::asm!("csrsi sstatus, 2", options(nomem, nostack)); }
                 loop {
                     crate::task::yield_now();
-                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+                    unsafe {
+                        core::arch::asm!(
+                            "csrsi sstatus, 2",
+                            "wfi",
+                            "csrci sstatus, 2",
+                            options(nomem, nostack)
+                        );
+                    }
                 }
             }
             // Illegal instruction
@@ -305,10 +311,16 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                         return_to_kernel_mode();
                     }
                 }
-                unsafe { core::arch::asm!("csrsi sstatus, 2", options(nomem, nostack)); }
                 loop {
                     crate::task::yield_now();
-                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+                    unsafe {
+                        core::arch::asm!(
+                            "csrsi sstatus, 2",
+                            "wfi",
+                            "csrci sstatus, 2",
+                            options(nomem, nostack)
+                        );
+                    }
                 }
             }
             _ => {
@@ -331,10 +343,16 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                         return_to_kernel_mode();
                     }
                 }
-                unsafe { core::arch::asm!("csrsi sstatus, 2", options(nomem, nostack)); }
                 loop {
                     crate::task::yield_now();
-                    unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+                    unsafe {
+                        core::arch::asm!(
+                            "csrsi sstatus, 2",
+                            "wfi",
+                            "csrci sstatus, 2",
+                            options(nomem, nostack)
+                        );
+                    }
                 }
             }
         }

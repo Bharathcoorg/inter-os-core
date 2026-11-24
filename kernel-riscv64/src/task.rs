@@ -378,6 +378,9 @@ impl Scheduler {
             if task.exit_code.is_none() {
                 task.exit_code = Some(code);
             }
+            if let Some(ref aspace) = task.address_space {
+                aspace.deactivate();
+            }
             true
         } else {
             false
