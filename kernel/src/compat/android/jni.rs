@@ -81,6 +81,7 @@ pub struct JniEnv {
     objects: BTreeMap<u32, JniObject>,
     local_frames: Vec<LocalFrame>,
     global_refs: BTreeSet<u32>,
+    weak_global_refs: BTreeSet<u32>,
     next_class_id: u32,
     next_method_id: u32,
     next_field_id: u32,
@@ -102,6 +103,7 @@ impl JniEnv {
                 refs: Vec::new(),
             }],
             global_refs: BTreeSet::new(),
+            weak_global_refs: BTreeSet::new(),
             next_class_id: 1,
             next_method_id: 1,
             next_field_id: 1,
@@ -206,12 +208,87 @@ impl JniEnv {
         id
     }
 
-    /// JNI `FindClass(const char* name)`
+    /// Checks if a class name corresponds to a standard core Java or Android framework class.
+    pub fn is_known_framework_class(name: &str) -> bool {
+        matches!(
+            name,
+            "java/lang/Object"
+                | "java/lang/Class"
+                | "java/lang/String"
+                | "java/lang/StringBuilder"
+                | "java/lang/StringBuffer"
+                | "java/lang/Integer"
+                | "java/lang/Long"
+                | "java/lang/Boolean"
+                | "java/lang/Byte"
+                | "java/lang/Short"
+                | "java/lang/Float"
+                | "java/lang/Double"
+                | "java/lang/Character"
+                | "java/lang/Void"
+                | "java/lang/Throwable"
+                | "java/lang/Exception"
+                | "java/lang/RuntimeException"
+                | "java/lang/NullPointerException"
+                | "java/lang/ArrayIndexOutOfBoundsException"
+                | "java/lang/IndexOutOfBoundsException"
+                | "java/lang/ClassCastException"
+                | "java/lang/IllegalStateException"
+                | "java/lang/IllegalArgumentException"
+                | "java/lang/IllegalMonitorStateException"
+                | "java/lang/NoSuchMethodError"
+                | "java/lang/NoSuchFieldError"
+                | "java/lang/NoClassDefFoundError"
+                | "java/lang/ClassNotFoundException"
+                | "java/lang/System"
+                | "java/lang/Math"
+                | "java/lang/Thread"
+                | "java/lang/Runnable"
+                | "java/util/ArrayList"
+                | "java/util/HashMap"
+                | "java/util/List"
+                | "java/util/Map"
+                | "java/util/Iterator"
+                | "java/io/File"
+                | "java/io/InputStream"
+                | "java/io/OutputStream"
+                | "java/io/Serializable"
+                | "java/lang/Cloneable"
+                | "android/os/Bundle"
+                | "android/os/Parcel"
+                | "android/os/Parcelable"
+                | "android/os/IBinder"
+                | "android/os/Binder"
+                | "android/os/Looper"
+                | "android/os/Handler"
+                | "android/content/Intent"
+                | "android/content/Context"
+                | "android/content/SharedPreferences"
+                | "android/content/SharedPreferences$Editor"
+                | "android/app/Activity"
+                | "android/app/Application"
+                | "android/view/View"
+                | "android/view/ViewGroup"
+                | "android/view/MotionEvent"
+                | "android/graphics/Bitmap"
+                | "android/graphics/Canvas"
+                | "android/graphics/Paint"
+                | "android/graphics/Path"
+                | "android/graphics/Rect"
+        )
+    }
+
+    /// JNI `FindClass(const char* name)`.
+    /// Fails closed with NoClassDefFoundError if the class is not registered and not a recognized framework class.
     pub fn find_class(&mut self, name: &str) -> Option<u32> {
-        self.class_name_map.get(name).copied().or_else(|| {
-            // Auto-register requested framework class
-            Some(self.register_class(name))
-        })
+        if let Some(&id) = self.class_name_map.get(name) {
+            return Some(id);
+        }
+        if Self::is_known_framework_class(name) {
+            return Some(self.register_class(name));
+        }
+        self.throw_new("java/lang/NoClassDefFoundError", &format!("Class {} not found in classpath", name));
+        None
     }
 
     /// JNI `GetMethodID(jclass clazz, const char* name, const char* sig)`.
@@ -283,16 +360,11 @@ impl JniEnv {
     }
 
     /// JNI `PopLocalFrame(jobject result)`
-    /// Pops the active frame and releases references created within it, returning result promoted to the parent frame.
+    /// Pops the active frame and releases local references created within it, returning result promoted to parent frame.
+    /// Does not immediately destroy heap objects; reachability determines lifecycle.
     pub fn pop_local_frame(&mut self, result: u32) -> u32 {
         if self.local_frames.len() > 1 {
-            if let Some(frame) = self.local_frames.pop() {
-                for id in frame.refs {
-                    if id != result && !self.global_refs.contains(&id) {
-                        self.objects.remove(&id);
-                    }
-                }
-            }
+            self.local_frames.pop();
         }
         if result > 0 {
             self.track_local_ref(result);
@@ -301,16 +373,11 @@ impl JniEnv {
     }
 
     /// JNI `DeleteLocalRef(jobject obj)`
+    /// Releases the local reference handle from the active local frame.
     pub fn delete_local_ref(&mut self, obj_id: u32) {
         if let Some(frame) = self.local_frames.last_mut() {
             if let Some(pos) = frame.refs.iter().position(|&x| x == obj_id) {
                 frame.refs.remove(pos);
-            }
-        }
-        if !self.global_refs.contains(&obj_id) {
-            let is_in_any_frame = self.local_frames.iter().any(|f| f.refs.contains(&obj_id));
-            if !is_in_any_frame {
-                self.objects.remove(&obj_id);
             }
         }
     }
@@ -327,14 +394,35 @@ impl JniEnv {
     /// JNI `DeleteGlobalRef(jobject gref)`
     pub fn delete_global_ref(&mut self, obj_id: u32) {
         self.global_refs.remove(&obj_id);
-        let is_in_any_frame = self.local_frames.iter().any(|f| f.refs.contains(&obj_id));
-        if !is_in_any_frame {
-            self.objects.remove(&obj_id);
+    }
+
+    /// JNI `NewWeakGlobalRef(jobject obj)`
+    pub fn new_weak_global_ref(&mut self, obj_id: u32) -> u32 {
+        if obj_id == 0 || !self.objects.contains_key(&obj_id) {
+            return 0;
         }
+        self.weak_global_refs.insert(obj_id);
+        obj_id
+    }
+
+    /// JNI `DeleteWeakGlobalRef(jweak wref)`
+    pub fn delete_weak_global_ref(&mut self, obj_id: u32) {
+        self.weak_global_refs.remove(&obj_id);
     }
 
     /// JNI `IsSameObject(jobject ref1, jobject ref2)`
     pub fn is_same_object(&self, ref1: u32, ref2: u32) -> bool {
+        let r1_valid = ref1 == 0 || self.objects.contains_key(&ref1);
+        let r2_valid = ref2 == 0 || self.objects.contains_key(&ref2);
+        if !r1_valid && !r2_valid {
+            return true;
+        }
+        if !r1_valid {
+            return ref2 == 0;
+        }
+        if !r2_valid {
+            return ref1 == 0;
+        }
         ref1 == ref2
     }
 
@@ -346,10 +434,97 @@ impl JniEnv {
         if self.global_refs.contains(&obj_id) {
             return JniRefType::GlobalRefType;
         }
+        if self.weak_global_refs.contains(&obj_id) {
+            return JniRefType::WeakGlobalRefType;
+        }
         if self.local_frames.iter().any(|f| f.refs.contains(&obj_id)) {
             return JniRefType::LocalRefType;
         }
         JniRefType::InvalidRefType
+    }
+
+    /// Determines if an object is reachable from the JNI GC root set (local frames, global refs,
+    /// or transitively via object fields and array elements).
+    pub fn is_reachable(&self, target_id: u32) -> bool {
+        if target_id == 0 || !self.objects.contains_key(&target_id) {
+            return false;
+        }
+        let mut visited = BTreeSet::new();
+        let mut queue = Vec::new();
+
+        for &g in &self.global_refs {
+            if g != 0 && visited.insert(g) {
+                queue.push(g);
+            }
+        }
+        for frame in &self.local_frames {
+            for &l in &frame.refs {
+                if l != 0 && visited.insert(l) {
+                    queue.push(l);
+                }
+            }
+        }
+
+        while let Some(curr) = queue.pop() {
+            if curr == target_id {
+                return true;
+            }
+            if let Some(obj) = self.objects.get(&curr) {
+                for &child in obj.object_fields.values() {
+                    if child != 0 && visited.insert(child) {
+                        queue.push(child);
+                    }
+                }
+                if let Some(ref elems) = obj.array_elements {
+                    for &elem in elems {
+                        if elem != 0 && visited.insert(elem) {
+                            queue.push(elem);
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Reclaims managed objects that are no longer reachable from any JNI GC root.
+    pub fn collect_garbage(&mut self) -> usize {
+        let mut reachable = BTreeSet::new();
+        let mut queue = Vec::new();
+
+        for &g in &self.global_refs {
+            if g != 0 && self.objects.contains_key(&g) && reachable.insert(g) {
+                queue.push(g);
+            }
+        }
+        for frame in &self.local_frames {
+            for &l in &frame.refs {
+                if l != 0 && self.objects.contains_key(&l) && reachable.insert(l) {
+                    queue.push(l);
+                }
+            }
+        }
+
+        while let Some(curr) = queue.pop() {
+            if let Some(obj) = self.objects.get(&curr) {
+                for &child in obj.object_fields.values() {
+                    if child != 0 && self.objects.contains_key(&child) && reachable.insert(child) {
+                        queue.push(child);
+                    }
+                }
+                if let Some(ref elems) = obj.array_elements {
+                    for &elem in elems {
+                        if elem != 0 && self.objects.contains_key(&elem) && reachable.insert(elem) {
+                            queue.push(elem);
+                        }
+                    }
+                }
+            }
+        }
+
+        let before_count = self.objects.len();
+        self.objects.retain(|id, _| reachable.contains(id));
+        before_count.saturating_sub(self.objects.len())
     }
 
     /// JNI `NewStringUTF(const char* bytes)`
@@ -680,5 +855,106 @@ mod tests {
         env.delete_global_ref(global_obj);
         // Now global_obj is no longer in any local frame, so it should be Invalid
         assert_eq!(env.get_object_ref_type(global_obj), JniRefType::InvalidRefType);
+    }
+
+    #[test]
+    fn test_jni_object_survives_local_frame_pop_when_referenced_in_field() {
+        let mut env = JniEnv::new();
+        let obj_cls = env.find_class("java/lang/Object").unwrap();
+        let parent_obj = env.new_object(obj_cls);
+
+        // Push local frame
+        assert_eq!(env.push_local_frame(16), JNI_OK);
+        let child_obj = env.new_string_utf("child_payload");
+
+        // Store child_obj in parent's object field #1
+        env.set_object_field(parent_obj, 1, child_obj);
+
+        // Pop frame without promoting child_obj (returning 0)
+        env.pop_local_frame(0);
+
+        // child_obj is no longer a local reference in current frame
+        assert_eq!(env.get_object_ref_type(child_obj), JniRefType::InvalidRefType);
+
+        // But child_obj is STILL REACHABLE from parent_obj root!
+        assert!(env.is_reachable(child_obj));
+
+        // GC sweep must NOT collect child_obj because it is reachable from parent_obj
+        let swept = env.collect_garbage();
+        assert_eq!(swept, 0);
+        assert_eq!(env.get_string_utf_chars(child_obj), Some("child_payload"));
+    }
+
+    #[test]
+    fn test_jni_find_class_fail_closed_on_unknown() {
+        let mut env = JniEnv::new();
+
+        // Standard framework class succeeds
+        assert!(env.find_class("android/os/Bundle").is_some());
+
+        // Unknown class must fail closed and throw NoClassDefFoundError
+        assert!(!env.exception_check());
+        let unknown = env.find_class("com/malicious/UnknownExploit");
+        assert_eq!(unknown, None);
+        assert!(env.exception_check());
+
+        let ex_id = env.exception_occurred().unwrap();
+        let ex_obj = env.objects.get(&ex_id).unwrap();
+        let ex_cls = env.classes.get(&ex_obj.class_id).unwrap();
+        assert_eq!(ex_cls.name, "java/lang/NoClassDefFoundError");
+    }
+
+    #[test]
+    fn test_jni_garbage_collection_and_cyclic_graphs() {
+        let mut env = JniEnv::new();
+        let obj_cls = env.find_class("java/lang/Object").unwrap();
+
+        let a = env.new_object(obj_cls);
+        let b = env.new_object(obj_cls);
+
+        // Create cycle: a.field[1] = b, b.field[1] = a
+        env.set_object_field(a, 1, b);
+        env.set_object_field(b, 1, a);
+
+        // While a is in root local frame, both a and b are reachable
+        assert!(env.is_reachable(a));
+        assert!(env.is_reachable(b));
+        assert_eq!(env.collect_garbage(), 0);
+
+        // Allocate disconnected garbage object c
+        let c = env.new_string_utf("temporary_garbage");
+        // Delete c from local frame
+        env.delete_local_ref(c);
+        assert!(!env.is_reachable(c));
+
+        // GC sweeps c, preserving cyclic a <-> b
+        let swept = env.collect_garbage();
+        assert_eq!(swept, 1);
+        assert!(env.is_reachable(a));
+        assert!(env.is_reachable(b));
+    }
+
+    #[test]
+    fn test_jni_weak_global_ref_lifecycle() {
+        let mut env = JniEnv::new();
+        let str_obj = env.new_string_utf("weak_target");
+
+        let weak_ref = env.new_weak_global_ref(str_obj);
+        assert_eq!(env.get_object_ref_type(weak_ref), JniRefType::WeakGlobalRefType);
+        assert!(env.is_same_object(weak_ref, str_obj));
+
+        // Delete local reference to str_obj so it has only weak reference
+        env.delete_local_ref(str_obj);
+        assert!(!env.is_reachable(str_obj));
+
+        // Sweep garbage
+        let swept = env.collect_garbage();
+        assert_eq!(swept, 1);
+
+        // Once collected, weak ref compares equal to 0 (NULL)
+        assert!(env.is_same_object(weak_ref, 0));
+        assert_eq!(env.get_object_ref_type(weak_ref), JniRefType::InvalidRefType);
+
+        env.delete_weak_global_ref(weak_ref);
     }
 }

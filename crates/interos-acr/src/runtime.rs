@@ -29,6 +29,7 @@ pub enum DalvikVmError {
     ArrayIndexOutOfBounds,
     NullPointerDereference,
     UnhandledException(u32),
+    MonitorBlocked(u32),
 }
 
 const MAX_TRIES_COUNT: usize = 256;
@@ -351,6 +352,11 @@ pub struct DalvikVmState {
     pub pending_exception: Option<u32>,
     /// Task/thread identity executing in this VM instance.
     pub current_task_id: u64,
+    pub current_thread_id: u64,
+    /// Thread execution contexts managed by this VM.
+    pub threads: BTreeMap<u64, JavaThreadState>,
+    /// Caller context providing security credentials for VFS operations.
+    pub caller_context: Option<super::vfs::AndroidCaller>,
     /// Monitor lock table tracking object identities, thread ownership, and recursion depth.
     pub monitors: BTreeMap<u32, MonitorRecord>,
     objects: Vec<DalvikObject>,
@@ -361,11 +367,33 @@ pub struct DalvikVmState {
     pub gc_total_pause_ticks: u64,
 }
 
-/// State of a synchronized Java monitor lock.
+/// Execution state of a managed Java thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaThreadStatus {
+    Runnable,
+    BlockedOnMonitor(u32),
+    WaitingOnCondition(u32),
+    TimedWaiting(u32, u64),
+    Terminated,
+}
+
+/// A managed Java thread state within the Dalvik VM.
+#[derive(Debug, Clone)]
+pub struct JavaThreadState {
+    pub thread_id: u64,
+    pub name: String,
+    pub status: JavaThreadStatus,
+    pub interrupted: bool,
+    pub owned_monitors: Vec<u32>,
+}
+
+/// State of a synchronized Java monitor lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitorRecord {
-    pub owner_task_id: u64,
+    pub owner_thread: u64,
     pub recursion_count: u32,
+    pub wait_queue: Vec<u64>,
+    pub cond_waiters: Vec<u64>,
 }
 
 /// Returns true if a source class descriptor is assignable to target class descriptor.
@@ -584,8 +612,17 @@ pub fn class_implements_framework_interface(class_desc: &str, iface_desc: &str) 
 }
 
 impl DalvikVmState {
-    /// Creates a fresh Dalvik Virtual Machine state with cleared registers.
+    /// Creates a fresh Dalvik Virtual Machine state with cleared registers and initial main thread.
     pub fn new() -> Self {
+        let mut threads = BTreeMap::new();
+        threads.insert(1, JavaThreadState {
+            thread_id: 1,
+            name: String::from("main"),
+            status: JavaThreadStatus::Runnable,
+            interrupted: false,
+            owned_monitors: Vec::new(),
+        });
+
         Self {
             registers: alloc::vec![0u32; 32],
             string_registers: alloc::vec![None; 32],
@@ -597,6 +634,9 @@ impl DalvikVmState {
             call_depth: 0,
             pending_exception: None,
             current_task_id: 1,
+            current_thread_id: 1,
+            threads,
+            caller_context: None,
             monitors: BTreeMap::new(),
             objects: Vec::new(),
             next_object_id: 1,
@@ -605,6 +645,141 @@ impl DalvikVmState {
             gc_reclaimed_objects: 0,
             gc_total_pause_ticks: 0,
         }
+    }
+
+    /// Sets the currently active thread identity for this VM.
+    pub fn set_current_thread(&mut self, thread_id: u64) {
+        self.current_thread_id = thread_id;
+        self.current_task_id = thread_id;
+        self.threads.entry(thread_id).or_insert(JavaThreadState {
+            thread_id,
+            name: alloc::format!("Thread-{}", thread_id),
+            status: JavaThreadStatus::Runnable,
+            interrupted: false,
+            owned_monitors: Vec::new(),
+        });
+    }
+
+    /// Spawns a new managed thread in the VM.
+    pub fn spawn_thread(&mut self, thread_id: u64, name: &str) {
+        self.threads.insert(thread_id, JavaThreadState {
+            thread_id,
+            name: String::from(name),
+            status: JavaThreadStatus::Runnable,
+            interrupted: false,
+            owned_monitors: Vec::new(),
+        });
+    }
+
+    /// Releases all monitors held by a terminating thread, waking up contending waiters.
+    pub fn thread_exit(&mut self, thread_id: u64) {
+        let owned = if let Some(t) = self.threads.get_mut(&thread_id) {
+            t.status = JavaThreadStatus::Terminated;
+            core::mem::take(&mut t.owned_monitors)
+        } else {
+            Vec::new()
+        };
+
+        for obj_id in owned {
+            if let Some(rec) = self.monitors.get_mut(&obj_id) {
+                if rec.owner_thread == thread_id {
+                    rec.recursion_count = 0;
+                    if !rec.wait_queue.is_empty() {
+                        let next_owner = rec.wait_queue.remove(0);
+                        rec.owner_thread = next_owner;
+                        rec.recursion_count = 1;
+                        if let Some(t) = self.threads.get_mut(&next_owner) {
+                            t.status = JavaThreadStatus::Runnable;
+                            if !t.owned_monitors.contains(&obj_id) {
+                                t.owned_monitors.push(obj_id);
+                            }
+                        }
+                    } else if rec.cond_waiters.is_empty() {
+                        self.monitors.remove(&obj_id);
+                    } else {
+                        rec.owner_thread = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Implements Object.wait(): verifies caller owns monitor, releases lock, and enqueues thread on condition.
+    pub fn monitor_wait(&mut self, obj_id: u32, timeout_millis: u64) -> Result<u32, DalvikVmError> {
+        let tid = self.current_thread_id;
+        let Some(rec) = self.monitors.get_mut(&obj_id) else {
+            return Err(self.throw_illegal_monitor_state(Some("Object not locked")));
+        };
+        if rec.owner_thread != tid || rec.recursion_count == 0 {
+            return Err(self.throw_illegal_monitor_state(Some("Current thread does not own monitor")));
+        }
+
+        // Release lock
+        rec.recursion_count = 0;
+        rec.cond_waiters.push(tid);
+
+        if let Some(t) = self.threads.get_mut(&tid) {
+            t.status = if timeout_millis > 0 {
+                JavaThreadStatus::TimedWaiting(obj_id, timeout_millis)
+            } else {
+                JavaThreadStatus::WaitingOnCondition(obj_id)
+            };
+            t.owned_monitors.retain(|&m| m != obj_id);
+        }
+
+        // Wake next contending waiter if any
+        if !rec.wait_queue.is_empty() {
+            let next_owner = rec.wait_queue.remove(0);
+            rec.owner_thread = next_owner;
+            rec.recursion_count = 1;
+            if let Some(t) = self.threads.get_mut(&next_owner) {
+                t.status = JavaThreadStatus::Runnable;
+                if !t.owned_monitors.contains(&obj_id) {
+                    t.owned_monitors.push(obj_id);
+                }
+            }
+        } else {
+            rec.owner_thread = 0;
+        }
+
+        self.last_return_value = 0;
+        self.last_return_string = None;
+        Ok(0)
+    }
+
+    /// Implements Object.notify() / Object.notifyAll(): moves condition waiters to monitor acquisition wait queue.
+    pub fn monitor_notify(&mut self, obj_id: u32, notify_all: bool) -> Result<u32, DalvikVmError> {
+        let tid = self.current_thread_id;
+        let Some(rec) = self.monitors.get_mut(&obj_id) else {
+            return Err(self.throw_illegal_monitor_state(Some("Object not locked")));
+        };
+        if rec.owner_thread != tid || rec.recursion_count == 0 {
+            return Err(self.throw_illegal_monitor_state(Some("Current thread does not own monitor")));
+        }
+
+        if notify_all {
+            while !rec.cond_waiters.is_empty() {
+                let waiter_tid = rec.cond_waiters.remove(0);
+                if !rec.wait_queue.contains(&waiter_tid) {
+                    rec.wait_queue.push(waiter_tid);
+                }
+                if let Some(t) = self.threads.get_mut(&waiter_tid) {
+                    t.status = JavaThreadStatus::BlockedOnMonitor(obj_id);
+                }
+            }
+        } else if !rec.cond_waiters.is_empty() {
+            let waiter_tid = rec.cond_waiters.remove(0);
+            if !rec.wait_queue.contains(&waiter_tid) {
+                rec.wait_queue.push(waiter_tid);
+            }
+            if let Some(t) = self.threads.get_mut(&waiter_tid) {
+                t.status = JavaThreadStatus::BlockedOnMonitor(obj_id);
+            }
+        }
+
+        self.last_return_value = 0;
+        self.last_return_string = None;
+        Ok(0)
     }
 
     /// Mark-and-sweep garbage collection over the managed Dalvik object heap.
@@ -890,6 +1065,101 @@ impl DalvikVmState {
     ) -> Result<u32, DalvikVmError> {
         let class = class_name.strip_prefix('L').and_then(|s| s.strip_suffix(';')).unwrap_or(class_name);
         match class {
+            "java/lang/Object" => {
+                match method_name {
+                    "<init>" => {
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "wait" => {
+                        let receiver_id = arg_values.get(0).copied().unwrap_or(0);
+                        if receiver_id == 0 {
+                            return Err(self.throw_npe(Some("Null receiver in Object.wait")));
+                        }
+                        self.monitor_wait(receiver_id, 0)
+                    }
+                    "notify" => {
+                        let receiver_id = arg_values.get(0).copied().unwrap_or(0);
+                        if receiver_id == 0 {
+                            return Err(self.throw_npe(Some("Null receiver in Object.notify")));
+                        }
+                        self.monitor_notify(receiver_id, false)
+                    }
+                    "notifyAll" => {
+                        let receiver_id = arg_values.get(0).copied().unwrap_or(0);
+                        if receiver_id == 0 {
+                            return Err(self.throw_npe(Some("Null receiver in Object.notifyAll")));
+                        }
+                        self.monitor_notify(receiver_id, true)
+                    }
+                    "equals" => {
+                        let a = arg_values.get(0).copied().unwrap_or(0);
+                        let b = arg_values.get(1).copied().unwrap_or(0);
+                        let eq = if a == b { 1 } else { 0 };
+                        self.last_return_value = eq;
+                        self.last_return_string = None;
+                        Ok(eq)
+                    }
+                    "hashCode" => {
+                        let a = arg_values.get(0).copied().unwrap_or(0);
+                        self.last_return_value = a;
+                        self.last_return_string = None;
+                        Ok(a)
+                    }
+                    _ => {
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                }
+            }
+            "java/lang/Thread" => {
+                match method_name {
+                    "<init>" => {
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "currentThread" => {
+                        self.last_return_value = self.current_thread_id as u32;
+                        self.last_return_string = None;
+                        Ok(self.current_thread_id as u32)
+                    }
+                    "getId" => {
+                        self.last_return_value = self.current_thread_id as u32;
+                        self.last_return_string = None;
+                        Ok(self.current_thread_id as u32)
+                    }
+                    "isInterrupted" => {
+                        let interrupted = self.threads.get(&self.current_thread_id).map(|t| t.interrupted).unwrap_or(false);
+                        let res = if interrupted { 1 } else { 0 };
+                        self.last_return_value = res;
+                        self.last_return_string = None;
+                        Ok(res)
+                    }
+                    "interrupt" => {
+                        let target_tid = arg_values.get(0).copied().unwrap_or(0) as u64;
+                        let tid = if target_tid == 0 { self.current_thread_id } else { target_tid };
+                        if let Some(t) = self.threads.get_mut(&tid) {
+                            t.interrupted = true;
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "yield" | "sleep" => {
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    _ => {
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                }
+            }
             "java/lang/String" => {
                 match method_name {
                     "<init>" => {
@@ -2393,7 +2663,8 @@ impl DalvikVmState {
                                 _ => String::new(),
                             }
                         } else { String::new() };
-                        let exists = if super::vfs::ANDROID_SANDBOX_FS.lock().exists(&path) { 1 } else { 0 };
+                        let caller = self.caller_context.clone().unwrap_or_else(super::vfs::AndroidCaller::system);
+                        let exists = if super::vfs::ANDROID_SANDBOX_FS.lock().exists_as(&caller, &path) { 1 } else { 0 };
                         self.last_return_value = exists;
                         self.last_return_string = None;
                         Ok(exists)
@@ -2406,7 +2677,8 @@ impl DalvikVmState {
                                 _ => String::new(),
                             }
                         } else { String::new() };
-                        let is_dir = if super::vfs::ANDROID_SANDBOX_FS.lock().is_directory(&path) { 1 } else { 0 };
+                        let caller = self.caller_context.clone().unwrap_or_else(super::vfs::AndroidCaller::system);
+                        let is_dir = if super::vfs::ANDROID_SANDBOX_FS.lock().is_directory_as(&caller, &path) { 1 } else { 0 };
                         self.last_return_value = is_dir;
                         self.last_return_string = None;
                         Ok(is_dir)
@@ -2419,8 +2691,9 @@ impl DalvikVmState {
                                 _ => String::new(),
                             }
                         } else { String::new() };
-                        let fs = super::vfs::ANDROID_SANDBOX_FS.lock();
-                        let is_file = if fs.exists(&path) && !fs.is_directory(&path) { 1 } else { 0 };
+                        let caller = self.caller_context.clone().unwrap_or_else(super::vfs::AndroidCaller::system);
+                        let mut fs = super::vfs::ANDROID_SANDBOX_FS.lock();
+                        let is_file = if fs.exists_as(&caller, &path) && !fs.is_directory_as(&caller, &path) { 1 } else { 0 };
                         self.last_return_value = is_file;
                         self.last_return_string = None;
                         Ok(is_file)
@@ -2433,7 +2706,8 @@ impl DalvikVmState {
                                 _ => String::new(),
                             }
                         } else { String::new() };
-                        let len = super::vfs::ANDROID_SANDBOX_FS.lock().open_read(&path).map(|d| d.len() as u64).unwrap_or(0);
+                        let caller = self.caller_context.clone().unwrap_or_else(super::vfs::AndroidCaller::system);
+                        let len = super::vfs::ANDROID_SANDBOX_FS.lock().open_read_as(&caller, &path).map(|d| d.len() as u64).unwrap_or(0);
                         self.last_return_value = (len & 0xFFFFFFFF) as u32;
                         self.last_return_wide_hi = ((len >> 32) & 0xFFFFFFFF) as u32;
                         self.last_return_string = None;
@@ -2447,7 +2721,8 @@ impl DalvikVmState {
                                 _ => String::new(),
                             }
                         } else { String::new() };
-                        let ok = match super::vfs::ANDROID_SANDBOX_FS.lock().delete_file(&path) {
+                        let caller = self.caller_context.clone().unwrap_or_else(super::vfs::AndroidCaller::system);
+                        let ok = match super::vfs::ANDROID_SANDBOX_FS.lock().delete_file_as(&caller, &path) {
                             Ok(deleted) => if deleted { 1 } else { 0 },
                             Err(_) => 0,
                         };
@@ -2463,7 +2738,8 @@ impl DalvikVmState {
                                 _ => String::new(),
                             }
                         } else { String::new() };
-                        let entries = super::vfs::ANDROID_SANDBOX_FS.lock().list_directory(&path).unwrap_or_default();
+                        let caller = self.caller_context.clone().unwrap_or_else(super::vfs::AndroidCaller::system);
+                        let entries = super::vfs::ANDROID_SANDBOX_FS.lock().list_directory_as(&caller, &path).unwrap_or_default();
                         let arr_id = self.allocate_array("[Ljava/lang/String;", entries.len())?;
                         for (i, entry) in entries.into_iter().enumerate() {
                             let s_id = self.allocate_string(&entry)?;
@@ -4448,15 +4724,45 @@ impl DalvikVmState {
                     if obj_id == 0 {
                         return Err(self.throw_npe(Some("Null object reference in monitor-enter")));
                     }
-                    let rec = self.monitors.entry(obj_id).or_insert(MonitorRecord {
-                        owner_task_id: self.current_task_id,
-                        recursion_count: 0,
-                    });
-                    if rec.owner_task_id != self.current_task_id && rec.recursion_count > 0 {
-                        return Err(self.throw_illegal_monitor_state(Some("Lock held by another task")));
+                    let tid = self.current_thread_id;
+                    let mut is_blocked = false;
+
+                    if let Some(rec) = self.monitors.get_mut(&obj_id) {
+                        if rec.recursion_count == 0 {
+                            rec.owner_thread = tid;
+                            rec.recursion_count = 1;
+                        } else if rec.owner_thread == tid {
+                            rec.recursion_count = rec.recursion_count.saturating_add(1);
+                        } else {
+                            // Contention: monitor held by another thread!
+                            // Enqueue current thread on wait_queue and mark Blocked
+                            if !rec.wait_queue.contains(&tid) {
+                                rec.wait_queue.push(tid);
+                            }
+                            if let Some(t) = self.threads.get_mut(&tid) {
+                                t.status = JavaThreadStatus::BlockedOnMonitor(obj_id);
+                            }
+                            is_blocked = true;
+                        }
+                    } else {
+                        self.monitors.insert(obj_id, MonitorRecord {
+                            owner_thread: tid,
+                            recursion_count: 1,
+                            wait_queue: Vec::new(),
+                            cond_waiters: Vec::new(),
+                        });
                     }
-                    rec.owner_task_id = self.current_task_id;
-                    rec.recursion_count = rec.recursion_count.saturating_add(1);
+
+                    if is_blocked {
+                        // Do not advance pc; thread will retry acquisition once unblocked
+                        return Err(DalvikVmError::MonitorBlocked(obj_id));
+                    }
+
+                    if let Some(t) = self.threads.get_mut(&tid) {
+                        if !t.owned_monitors.contains(&obj_id) {
+                            t.owned_monitors.push(obj_id);
+                        }
+                    }
                     pc += 2;
                 }
                 OP_MONITOR_EXIT => {
@@ -4467,20 +4773,46 @@ impl DalvikVmState {
                     if obj_id == 0 {
                         return Err(self.throw_npe(Some("Null object reference in monitor-exit")));
                     }
+                    let tid = self.current_thread_id;
                     let mut should_remove = false;
+                    let mut woken_thread = None;
+
                     if let Some(rec) = self.monitors.get_mut(&obj_id) {
-                        if rec.owner_task_id != self.current_task_id || rec.recursion_count == 0 {
+                        if rec.owner_thread != tid || rec.recursion_count == 0 {
                             return Err(self.throw_illegal_monitor_state(Some("Current thread does not own monitor")));
                         }
                         rec.recursion_count -= 1;
                         if rec.recursion_count == 0 {
-                            should_remove = true;
+                            if !rec.wait_queue.is_empty() {
+                                let next_owner = rec.wait_queue.remove(0);
+                                rec.owner_thread = next_owner;
+                                rec.recursion_count = 1;
+                                woken_thread = Some(next_owner);
+                            } else if rec.cond_waiters.is_empty() {
+                                should_remove = true;
+                            } else {
+                                rec.owner_thread = 0;
+                            }
                         }
                     } else {
                         return Err(self.throw_illegal_monitor_state(Some("Monitor not locked")));
                     }
+
                     if should_remove {
                         self.monitors.remove(&obj_id);
+                    }
+                    if let Some(w_tid) = woken_thread {
+                        if let Some(t) = self.threads.get_mut(&w_tid) {
+                            t.status = JavaThreadStatus::Runnable;
+                            if !t.owned_monitors.contains(&obj_id) {
+                                t.owned_monitors.push(obj_id);
+                            }
+                        }
+                    }
+                    if should_remove || woken_thread.is_some() {
+                        if let Some(curr_t) = self.threads.get_mut(&tid) {
+                            curr_t.owned_monitors.retain(|&m| m != obj_id);
+                        }
                     }
                     pc += 2;
                 }
@@ -5999,6 +6331,132 @@ mod tests {
         let resolved = vm.resolve_virtual_method(&dex, "Landroid/widget/Button;", "getId", "I");
         assert!(resolved.is_some(), "Multi-level virtual dispatch must find View::getId from Button receiver");
         assert_eq!(resolved.unwrap().class_name, "Landroid/view/View;");
+    }
+
+    #[test]
+    fn test_dalvik_monitor_reentrant_and_contention() {
+        let dex_bytes = create_test_dex("Lcom/example/SyncTest;", "run", "()V");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        let obj_id = vm.allocate_string("monitor_target").unwrap();
+        vm.registers[0] = obj_id;
+
+        // Thread 1 acquires monitor
+        vm.set_current_thread(1);
+        let insns_enter = [OP_MONITOR_ENTER, 0x00, OP_RETURN_VOID, 0x00];
+        assert!(vm.interpret_insns(&dex, 2, &insns_enter).is_ok());
+
+        let mon = vm.monitors.get(&obj_id).unwrap();
+        assert_eq!(mon.owner_thread, 1);
+        assert_eq!(mon.recursion_count, 1);
+
+        // Reentrant enter: count becomes 2
+        assert!(vm.interpret_insns(&dex, 2, &insns_enter).is_ok());
+        let mon = vm.monitors.get(&obj_id).unwrap();
+        assert_eq!(mon.recursion_count, 2);
+
+        // Reentrant exit: count becomes 1, still owned by Thread 1
+        let insns_exit = [OP_MONITOR_EXIT, 0x00, OP_RETURN_VOID, 0x00];
+        assert!(vm.interpret_insns(&dex, 2, &insns_exit).is_ok());
+        let mon = vm.monitors.get(&obj_id).unwrap();
+        assert_eq!(mon.owner_thread, 1);
+        assert_eq!(mon.recursion_count, 1);
+
+        // Thread 2 attempts to acquire: contention -> MonitorBlocked(obj_id)
+        vm.spawn_thread(2, "Worker-1");
+        vm.set_current_thread(2);
+        let err = vm.interpret_insns(&dex, 2, &insns_enter).unwrap_err();
+        assert_eq!(err, DalvikVmError::MonitorBlocked(obj_id));
+
+        // Thread 2 status must be BlockedOnMonitor(obj_id)
+        let t2 = vm.threads.get(&2).unwrap();
+        assert_eq!(t2.status, JavaThreadStatus::BlockedOnMonitor(obj_id));
+
+        // Thread 1 exits: ownership transfers to Thread 2!
+        vm.set_current_thread(1);
+        assert!(vm.interpret_insns(&dex, 2, &insns_exit).is_ok());
+
+        let mon = vm.monitors.get(&obj_id).unwrap();
+        assert_eq!(mon.owner_thread, 2);
+        assert_eq!(mon.recursion_count, 1);
+
+        let t2 = vm.threads.get(&2).unwrap();
+        assert_eq!(t2.status, JavaThreadStatus::Runnable);
+    }
+
+    #[test]
+    fn test_dalvik_object_wait_and_notify() {
+        let mut vm = DalvikVmState::new();
+        let obj_id = vm.allocate_string("cond_var").unwrap();
+
+        vm.spawn_thread(10, "Producer");
+        vm.spawn_thread(20, "Consumer");
+
+        // Consumer enters monitor
+        vm.set_current_thread(20);
+        vm.registers[0] = obj_id;
+        let dex_bytes = create_test_dex("Lcom/example/CondTest;", "run", "()V");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let insns_enter = [OP_MONITOR_ENTER, 0x00, OP_RETURN_VOID, 0x00];
+        assert!(vm.interpret_insns(&dex, 2, &insns_enter).is_ok());
+
+        // Consumer calls monitor_wait: releases lock and joins cond_waiters
+        assert!(vm.monitor_wait(obj_id, 0).is_ok());
+        let consumer = vm.threads.get(&20).unwrap();
+        assert_eq!(consumer.status, JavaThreadStatus::WaitingOnCondition(obj_id));
+
+        let mon = vm.monitors.get(&obj_id).unwrap();
+        assert_eq!(mon.owner_thread, 0); // Lock is free
+        assert_eq!(mon.cond_waiters, alloc::vec![20]);
+
+        // Producer enters monitor
+        vm.set_current_thread(10);
+        assert!(vm.interpret_insns(&dex, 2, &insns_enter).is_ok());
+
+        // Producer notifies: Consumer moves from cond_waiters to wait_queue
+        assert_eq!(vm.monitor_notify(obj_id, false), Ok(0));
+        let mon = vm.monitors.get(&obj_id).unwrap();
+        assert!(mon.cond_waiters.is_empty());
+        assert_eq!(mon.wait_queue, alloc::vec![20]);
+
+        // Producer exits: Consumer acquires lock and becomes Runnable
+        let insns_exit = [OP_MONITOR_EXIT, 0x00, OP_RETURN_VOID, 0x00];
+        assert!(vm.interpret_insns(&dex, 2, &insns_exit).is_ok());
+
+        let mon = vm.monitors.get(&obj_id).unwrap();
+        assert_eq!(mon.owner_thread, 20);
+        let consumer = vm.threads.get(&20).unwrap();
+        assert_eq!(consumer.status, JavaThreadStatus::Runnable);
+    }
+
+    #[test]
+    fn test_dalvik_thread_exit_cleanup_releases_monitors() {
+        let mut vm = DalvikVmState::new();
+        let obj_id = vm.allocate_string("shared_resource").unwrap();
+
+        vm.spawn_thread(100, "Worker");
+        vm.spawn_thread(200, "Waiter");
+
+        vm.set_current_thread(100);
+        vm.registers[0] = obj_id;
+        let dex_bytes = create_test_dex("Lcom/example/ExitTest;", "run", "()V");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let insns_enter = [OP_MONITOR_ENTER, 0x00, OP_RETURN_VOID, 0x00];
+        assert!(vm.interpret_insns(&dex, 2, &insns_enter).is_ok());
+
+        // Waiter attempts acquisition and gets blocked
+        vm.set_current_thread(200);
+        assert_eq!(vm.interpret_insns(&dex, 2, &insns_enter), Err(DalvikVmError::MonitorBlocked(obj_id)));
+
+        // Worker terminates unexpectedly
+        vm.thread_exit(100);
+
+        // Lock must have transferred to Waiter
+        let mon = vm.monitors.get(&obj_id).unwrap();
+        assert_eq!(mon.owner_thread, 200);
+        let waiter = vm.threads.get(&200).unwrap();
+        assert_eq!(waiter.status, JavaThreadStatus::Runnable);
     }
 }
 

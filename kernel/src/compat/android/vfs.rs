@@ -22,6 +22,19 @@ use spin::Mutex;
 
 const SNAPSHOT_MAGIC: &[u8; 16] = b"ANDR_VFS_SNAP_V1";
 const MAX_SYMLINK_HOPS: usize = 8;
+const MAX_SNAPSHOT_INODES: usize = 10_000;
+const MAX_SNAPSHOT_DATA_SIZE: usize = 32 * 1024 * 1024;
+const MAX_PATH_LENGTH: usize = 1024;
+
+fn compute_adler32(data: &[u8]) -> u32 {
+    let mut s1 = 1u32;
+    let mut s2 = 0u32;
+    for &b in data {
+        s1 = (s1 + b as u32) % 65521;
+        s2 = (s2 + s1) % 65521;
+    }
+    (s2 << 16) | s1
+}
 
 /// Errors returned by the Android virtualized filesystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +92,35 @@ pub struct AndroidCaller {
     pub package_name: String,
     pub app_id: u32,
     pub caps: AndroidStorageCaps,
+}
+
+impl AndroidCaller {
+    /// Constructs a validated application caller identity.
+    pub fn new(package_name: &str, app_id: u32, caps: AndroidStorageCaps) -> Result<Self, AndroidFsError> {
+        if package_name.is_empty()
+            || package_name.len() > 128
+            || package_name.contains('/')
+            || package_name.contains('\\')
+            || package_name.contains('\0')
+            || package_name.contains("..")
+        {
+            return Err(AndroidFsError::SecurityViolation);
+        }
+        Ok(Self {
+            package_name: String::from(package_name),
+            app_id,
+            caps,
+        })
+    }
+
+    /// Privileged system caller identity (UID 1000).
+    pub fn system() -> Self {
+        Self {
+            package_name: String::from("android.system"),
+            app_id: 1000,
+            caps: AndroidStorageCaps::all_files_access(),
+        }
+    }
 }
 
 /// An isolated virtual filesystem inode within the Android container sandbox.
@@ -193,33 +235,61 @@ impl AndroidSandboxFs {
         Ok(canonical)
     }
 
-    /// Resolves symlinks iteratively up to MAX_SYMLINK_HOPS, detecting cycles and escapes.
+    /// Resolves intermediate and terminal symlinks iteratively up to MAX_SYMLINK_HOPS,
+    /// preventing symlink directory escapes and infinite cycles.
     fn resolve_symlinks(&mut self, start_path: &str) -> Result<String, AndroidFsError> {
-        let mut current = self.canonicalize_path(start_path)?;
+        let normalized = self.canonicalize_path(start_path)?;
+        let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+        let mut current_resolved = String::new();
         let mut hops = 0;
 
-        while hops < MAX_SYMLINK_HOPS {
-            let target_opt = self.inodes.get(&current).and_then(|inode| inode.symlink_target.clone());
-            if let Some(target) = target_opt {
-                current = self.canonicalize_path(&target)?;
-                hops += 1;
-                continue;
-            }
-            return Ok(current);
-        }
+        for seg in segments {
+            current_resolved.push('/');
+            current_resolved.push_str(seg);
 
-        // Exceeded symlink hop limit (cycle or excessive chaining)
-        self.security_violations += 1;
-        Err(AndroidFsError::SecurityViolation)
+            // Follow symlinks on the current resolved path prefix
+            while let Some(target) = self.inodes.get(&current_resolved).and_then(|i| i.symlink_target.clone()) {
+                hops += 1;
+                if hops > MAX_SYMLINK_HOPS {
+                    self.security_violations += 1;
+                    return Err(AndroidFsError::SecurityViolation);
+                }
+                current_resolved = self.canonicalize_path(&target)?;
+            }
+        }
+        if current_resolved.is_empty() {
+            current_resolved.push('/');
+        }
+        Ok(current_resolved)
     }
 
     /// Checks if a caller is authorized to access the canonical target path.
+    /// Default-deny: Any unrecognized, foreign, or unauthorized path is rejected.
     fn check_caller_access(
         &mut self,
         caller: &AndroidCaller,
         canonical_path: &str,
         is_write: bool,
     ) -> Result<(), AndroidFsError> {
+        // Sensitive host microkernel and system paths are unconditionally blocked for ALL callers
+        if canonical_path.starts_with("/system/etc")
+            || canonical_path.starts_with("/packages")
+            || canonical_path.starts_with("/system/recovery")
+            || canonical_path == "/data/audit.log"
+            || canonical_path.starts_with("/data/system")
+        {
+            self.security_violations += 1;
+            return Err(AndroidFsError::SecurityViolation);
+        }
+
+        // System caller (UID 1000) authorization
+        if caller.package_name == "android.system" && caller.app_id == 1000 {
+            if is_write && canonical_path.starts_with("/system") {
+                return Err(AndroidFsError::PermissionDenied); // system partition is strictly read-only
+            }
+            return Ok(());
+        }
+
         // 1. Private data access: /data/data/<pkg>/**
         if let Some(rest) = canonical_path.strip_prefix("/data/data/") {
             let pkg_owner = rest.split('/').next().unwrap_or("");
@@ -269,7 +339,17 @@ impl AndroidSandboxFs {
             return Ok(());
         }
 
-        Ok(())
+        // 5. Installed app APK directory: /data/app/** (read-only for apps)
+        if canonical_path.starts_with("/data/app") {
+            if is_write {
+                return Err(AndroidFsError::PermissionDenied);
+            }
+            return Ok(());
+        }
+
+        // 6. DEFAULT DENY: Unknown, foreign, or unauthorized path
+        self.security_violations += 1;
+        Err(AndroidFsError::PermissionDenied)
     }
 
     /// Reads a file with caller capability gating and symlink resolution.
@@ -377,30 +457,57 @@ impl AndroidSandboxFs {
         );
     }
 
-    /// Reads a file from the Android sandbox (backwards-compatible privileged helper).
+    /// Reads a file from the Android sandbox (routes through system caller with security boundary enforcement).
     pub fn open_read(&mut self, target_path: &str) -> Result<&[u8], AndroidFsError> {
-        let canonical = self.canonicalize_path(target_path)?;
-        if let Some(inode) = self.inodes.get(&canonical) {
-            if inode.is_directory {
-                return Err(AndroidFsError::PermissionDenied);
-            }
-            Ok(&inode.data)
-        } else {
-            Err(AndroidFsError::NotFound)
-        }
+        let system_caller = AndroidCaller::system();
+        self.open_read_as(&system_caller, target_path)
     }
 
-    /// Writes a file into the Android sandbox (backwards-compatible privileged helper).
+    /// Writes a file into the Android sandbox (routes through system caller with security boundary enforcement).
     pub fn open_write(&mut self, target_path: &str, data: &[u8]) -> Result<(), AndroidFsError> {
-        let canonical = self.canonicalize_path(target_path)?;
-        self.create_file(&canonical, data);
-        Ok(())
+        let system_caller = AndroidCaller::system();
+        self.open_write_as(&system_caller, target_path, data)
     }
 
-    /// Deletes a file or directory from the sandbox (backwards-compatible privileged helper).
+    /// Deletes a file or directory from the sandbox (routes through system caller with security boundary enforcement).
     pub fn delete_file(&mut self, target_path: &str) -> Result<bool, AndroidFsError> {
-        let canonical = self.canonicalize_path(target_path)?;
-        Ok(self.inodes.remove(&canonical).is_some())
+        let system_caller = AndroidCaller::system();
+        self.delete_file_as(&system_caller, target_path)
+    }
+
+    /// Checks if a path exists with caller capability gating and symlink resolution.
+    pub fn exists_as(&mut self, caller: &AndroidCaller, target_path: &str) -> bool {
+        let canonical = match self.resolve_symlinks(target_path) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        if self.check_caller_access(caller, &canonical, false).is_err() {
+            return false;
+        }
+        self.inodes.contains_key(&canonical)
+    }
+
+    /// Checks if a path is a directory with caller capability gating and symlink resolution.
+    pub fn is_directory_as(&mut self, caller: &AndroidCaller, target_path: &str) -> bool {
+        let canonical = match self.resolve_symlinks(target_path) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        if self.check_caller_access(caller, &canonical, false).is_err() {
+            return false;
+        }
+        self.inodes.get(&canonical).map(|i| i.is_directory).unwrap_or(false)
+    }
+
+    /// Lists directory entries directly under target_path with caller capability gating.
+    pub fn list_directory_as(
+        &mut self,
+        caller: &AndroidCaller,
+        target_path: &str,
+    ) -> Result<Vec<String>, AndroidFsError> {
+        let canonical = self.resolve_symlinks(target_path)?;
+        self.check_caller_access(caller, &canonical, false)?;
+        self.list_directory(&canonical)
     }
 
     /// Checks if a path exists in the sandbox.
@@ -444,7 +551,7 @@ impl AndroidSandboxFs {
         self.security_violations
     }
 
-    /// Serializes the entire virtual filesystem state for persistent storage.
+    /// Serializes the entire virtual filesystem state for persistent storage with checksum protection.
     pub fn export_snapshot(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(SNAPSHOT_MAGIC);
@@ -471,12 +578,26 @@ impl AndroidSandboxFs {
             buf.extend_from_slice(&inode.data);
         }
 
+        let checksum = compute_adler32(&buf);
+        buf.extend_from_slice(&checksum.to_le_bytes());
+
         buf
     }
 
-    /// Restores filesystem state from a serialized snapshot.
+    /// Restores filesystem state from a serialized snapshot with checksum and bounds enforcement.
     pub fn restore_snapshot(&mut self, bytes: &[u8]) -> Result<(), AndroidFsError> {
-        if bytes.len() < 20 || &bytes[..16] != SNAPSHOT_MAGIC {
+        if bytes.len() < 24 || &bytes[..16] != SNAPSHOT_MAGIC {
+            return Err(AndroidFsError::CorruptSnapshot);
+        }
+
+        let payload_len = bytes.len() - 4;
+        let expected_checksum = u32::from_le_bytes([
+            bytes[payload_len],
+            bytes[payload_len + 1],
+            bytes[payload_len + 2],
+            bytes[payload_len + 3],
+        ]);
+        if compute_adler32(&bytes[..payload_len]) != expected_checksum {
             return Err(AndroidFsError::CorruptSnapshot);
         }
 
@@ -484,35 +605,40 @@ impl AndroidSandboxFs {
         let count = u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize;
         offset += 4;
 
+        if count > MAX_SNAPSHOT_INODES {
+            return Err(AndroidFsError::CorruptSnapshot);
+        }
+
+        let mut total_data_bytes = 0usize;
         let mut restored_inodes = BTreeMap::new();
 
         for _ in 0..count {
-            if offset + 4 > bytes.len() {
+            if offset + 4 > payload_len {
                 return Err(AndroidFsError::CorruptSnapshot);
             }
             let path_len = u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize;
             offset += 4;
-            if offset + path_len > bytes.len() {
+            if path_len == 0 || path_len > MAX_PATH_LENGTH || offset + path_len > payload_len {
                 return Err(AndroidFsError::CorruptSnapshot);
             }
             let path_str = core::str::from_utf8(&bytes[offset..offset + path_len])
                 .map_err(|_| AndroidFsError::CorruptSnapshot)?;
             offset += path_len;
 
-            if offset >= bytes.len() {
+            if offset >= payload_len {
                 return Err(AndroidFsError::CorruptSnapshot);
             }
             let is_directory = bytes[offset] == 1;
             offset += 1;
 
-            if offset + 4 > bytes.len() {
+            if offset + 4 > payload_len {
                 return Err(AndroidFsError::CorruptSnapshot);
             }
             let symlink_len = u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize;
             offset += 4;
 
             let symlink_target = if symlink_len > 0 {
-                if offset + symlink_len > bytes.len() {
+                if symlink_len > MAX_PATH_LENGTH || offset + symlink_len > payload_len {
                     return Err(AndroidFsError::CorruptSnapshot);
                 }
                 let target_str = core::str::from_utf8(&bytes[offset..offset + symlink_len])
@@ -523,13 +649,13 @@ impl AndroidSandboxFs {
                 None
             };
 
-            if offset + 4 > bytes.len() {
+            if offset + 4 > payload_len {
                 return Err(AndroidFsError::CorruptSnapshot);
             }
             let data_len = u32::from_le_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]) as usize;
             offset += 4;
-
-            if offset + data_len > bytes.len() {
+            total_data_bytes = total_data_bytes.saturating_add(data_len);
+            if total_data_bytes > MAX_SNAPSHOT_DATA_SIZE || offset + data_len > payload_len {
                 return Err(AndroidFsError::CorruptSnapshot);
             }
             let data = bytes[offset..offset + data_len].to_vec();
@@ -697,5 +823,108 @@ mod tests {
 
         let content = restored_fs.open_read("/data/data/org.fossify.filemanager/files/config.xml").expect("read restored file");
         assert_eq!(content, b"<config>val</config>");
+    }
+
+    #[test]
+    fn test_vfs_intermediate_symlink_directory_escape() {
+        let mut fs = AndroidSandboxFs::empty();
+        fs.populate_defaults();
+
+        let victim = AndroidCaller::new("com.victim.app", 10005, AndroidStorageCaps::isolated()).unwrap();
+        let attacker = AndroidCaller::new("com.attacker.app", 10006, AndroidStorageCaps::all_files_access()).unwrap();
+        fs.provision_app_sandbox("com.victim.app");
+        fs.provision_app_sandbox("com.attacker.app");
+
+        fs.open_write_as(&victim, "/data/data/com.victim.app/files/secret.txt", b"VICTIM_DATA").unwrap();
+
+        // Intermediate directory symlink created in attacker's directory pointing to victim's sandbox:
+        // /data/data/com.attacker.app/files/escape_dir -> /data/data/com.victim.app/files
+        fs.create_symlink_as(&attacker, "/data/data/com.attacker.app/files/escape_dir", "/data/data/com.victim.app/files").unwrap();
+
+        // Accessing file through intermediate directory symlink must fail closed with SecurityViolation
+        let breach = fs.open_read_as(&attacker, "/data/data/com.attacker.app/files/escape_dir/secret.txt");
+        assert_eq!(breach, Err(AndroidFsError::SecurityViolation));
+    }
+
+    #[test]
+    fn test_vfs_default_deny_unknown_paths() {
+        let mut fs = AndroidSandboxFs::empty();
+        fs.populate_defaults();
+
+        let app = AndroidCaller::new("com.normal.app", 10007, AndroidStorageCaps::all_files_access()).unwrap();
+        fs.provision_app_sandbox("com.normal.app");
+
+        // Arbitrary unmounted paths must return PermissionDenied (Default Deny)
+        assert_eq!(fs.open_read_as(&app, "/random/unknown/path"), Err(AndroidFsError::PermissionDenied));
+        assert_eq!(fs.open_write_as(&app, "/var/run/secret", b"data"), Err(AndroidFsError::PermissionDenied));
+    }
+
+    #[test]
+    fn test_vfs_corrupted_snapshot_fails_closed() {
+        let mut fs = AndroidSandboxFs::empty();
+        fs.populate_defaults();
+
+        // 1. Corrupted magic header
+        let mut bad_magic = fs.export_snapshot();
+        bad_magic[0] = b'X';
+        let mut test_fs1 = AndroidSandboxFs::empty();
+        assert_eq!(test_fs1.restore_snapshot(&bad_magic), Err(AndroidFsError::CorruptSnapshot));
+
+        // 2. Corrupted checksum
+        let mut bad_checksum = fs.export_snapshot();
+        let last_idx = bad_checksum.len() - 1;
+        bad_checksum[last_idx] ^= 0xFF;
+        let mut test_fs2 = AndroidSandboxFs::empty();
+        assert_eq!(test_fs2.restore_snapshot(&bad_checksum), Err(AndroidFsError::CorruptSnapshot));
+
+        // 3. Truncated snapshot
+        let truncated = &fs.export_snapshot()[..18];
+        let mut test_fs3 = AndroidSandboxFs::empty();
+        assert_eq!(test_fs3.restore_snapshot(truncated), Err(AndroidFsError::CorruptSnapshot));
+    }
+
+    #[test]
+    fn test_vfs_atomic_cross_app_rename_rejection() {
+        let mut fs = AndroidSandboxFs::empty();
+        fs.populate_defaults();
+
+        let app_a = AndroidCaller::new("com.victim.app", 10008, AndroidStorageCaps::isolated()).unwrap();
+        let app_b = AndroidCaller::new("com.attacker.app", 10009, AndroidStorageCaps::isolated()).unwrap();
+
+        fs.provision_app_sandbox("com.victim.app");
+        fs.provision_app_sandbox("com.attacker.app");
+
+        fs.open_write_as(&app_a, "/data/data/com.victim.app/files/vault.db", b"SECRET_VAULT").unwrap();
+
+        // Attacker attempts to rename victim's file into attacker's sandbox
+        let breach = fs.rename_file_as(
+            &app_b,
+            "/data/data/com.victim.app/files/vault.db",
+            "/data/data/com.attacker.app/files/stolen.db",
+        );
+        assert_eq!(breach, Err(AndroidFsError::SecurityViolation));
+
+        // Victim file remains intact
+        let victim_data = fs.open_read_as(&app_a, "/data/data/com.victim.app/files/vault.db").unwrap();
+        assert_eq!(victim_data, b"SECRET_VAULT");
+    }
+
+    #[test]
+    fn test_vfs_caller_identity_validation() {
+        assert!(AndroidCaller::new("com.valid.app", 10010, AndroidStorageCaps::isolated()).is_ok());
+
+        // Forged or traversing package names rejected
+        assert_eq!(
+            AndroidCaller::new("com/invalid/app", 10011, AndroidStorageCaps::isolated()).unwrap_err(),
+            AndroidFsError::SecurityViolation
+        );
+        assert_eq!(
+            AndroidCaller::new("../escape", 10012, AndroidStorageCaps::isolated()).unwrap_err(),
+            AndroidFsError::SecurityViolation
+        );
+        assert_eq!(
+            AndroidCaller::new("", 10013, AndroidStorageCaps::isolated()).unwrap_err(),
+            AndroidFsError::SecurityViolation
+        );
     }
 }
