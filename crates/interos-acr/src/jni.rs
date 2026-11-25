@@ -88,6 +88,8 @@ pub struct JniEnv {
     next_object_id: u32,
     pub native_calls_executed: u64,
     pub pending_exception: Option<u32>,
+    vm_registers: Vec<u32>,
+    static_fields: Vec<(u16, u32)>,
 }
 
 impl JniEnv {
@@ -110,6 +112,8 @@ impl JniEnv {
             next_object_id: 1,
             native_calls_executed: 0,
             pending_exception: None,
+            vm_registers: Vec::new(),
+            static_fields: Vec::new(),
         };
 
         // Pre-register standard core classes and their members
@@ -350,6 +354,29 @@ impl JniEnv {
         }
     }
 
+    /// JNI `EnsureLocalCapacity(jint capacity)`
+    pub fn ensure_local_capacity(&mut self, capacity: usize) -> i32 {
+        if capacity > 4096 {
+            return JNI_ERR;
+        }
+        if let Some(frame) = self.local_frames.last_mut() {
+            if frame.capacity < capacity {
+                frame.capacity = capacity;
+            }
+        }
+        JNI_OK
+    }
+
+    /// Sets active VM virtual registers as external GC roots.
+    pub fn set_vm_registers(&mut self, regs: &[u32]) {
+        self.vm_registers = regs.to_vec();
+    }
+
+    /// Sets active VM static fields as external GC roots.
+    pub fn set_static_fields(&mut self, fields: &[(u16, u32)]) {
+        self.static_fields = fields.to_vec();
+    }
+
     /// JNI `PushLocalFrame(jint capacity)`
     pub fn push_local_frame(&mut self, capacity: usize) -> i32 {
         self.local_frames.push(LocalFrame {
@@ -410,6 +437,17 @@ impl JniEnv {
         self.weak_global_refs.remove(&obj_id);
     }
 
+    /// Resolves a weak global reference; returns 0 if the object was collected.
+    pub fn resolve_weak_global_ref(&self, weak_ref: u32) -> u32 {
+        if weak_ref == 0 || !self.weak_global_refs.contains(&weak_ref) {
+            0
+        } else if self.objects.contains_key(&weak_ref) {
+            weak_ref
+        } else {
+            0
+        }
+    }
+
     /// JNI `IsSameObject(jobject ref1, jobject ref2)`
     pub fn is_same_object(&self, ref1: u32, ref2: u32) -> bool {
         let r1_valid = ref1 == 0 || self.objects.contains_key(&ref1);
@@ -444,7 +482,7 @@ impl JniEnv {
     }
 
     /// Determines if an object is reachable from the JNI GC root set (local frames, global refs,
-    /// or transitively via object fields and array elements).
+    /// VM registers, static fields, or transitively via object fields and array elements).
     pub fn is_reachable(&self, target_id: u32) -> bool {
         if target_id == 0 || !self.objects.contains_key(&target_id) {
             return false;
@@ -462,6 +500,16 @@ impl JniEnv {
                 if l != 0 && visited.insert(l) {
                     queue.push(l);
                 }
+            }
+        }
+        for &r in &self.vm_registers {
+            if r != 0 && visited.insert(r) {
+                queue.push(r);
+            }
+        }
+        for &(_, val) in &self.static_fields {
+            if val != 0 && visited.insert(val) {
+                queue.push(val);
             }
         }
 
@@ -502,6 +550,16 @@ impl JniEnv {
                 if l != 0 && self.objects.contains_key(&l) && reachable.insert(l) {
                     queue.push(l);
                 }
+            }
+        }
+        for &r in &self.vm_registers {
+            if r != 0 && self.objects.contains_key(&r) && reachable.insert(r) {
+                queue.push(r);
+            }
+        }
+        for &(_, val) in &self.static_fields {
+            if val != 0 && self.objects.contains_key(&val) && reachable.insert(val) {
+                queue.push(val);
             }
         }
 
@@ -954,7 +1012,36 @@ mod tests {
         // Once collected, weak ref compares equal to 0 (NULL)
         assert!(env.is_same_object(weak_ref, 0));
         assert_eq!(env.get_object_ref_type(weak_ref), JniRefType::InvalidRefType);
+        assert_eq!(env.resolve_weak_global_ref(weak_ref), 0);
 
         env.delete_weak_global_ref(weak_ref);
+    }
+
+    #[test]
+    fn test_jni_local_capacity_and_external_vm_roots() {
+        let mut env = JniEnv::new();
+
+        // 1. ensure_local_capacity
+        assert_eq!(env.ensure_local_capacity(1024), JNI_OK);
+        assert_eq!(env.local_frames.last().unwrap().capacity, 1024);
+        assert_eq!(env.ensure_local_capacity(8192), JNI_ERR);
+
+        // 2. Objects kept alive via external VM registers
+        let obj_str = env.new_string_utf("held_by_vm_register");
+        env.delete_local_ref(obj_str);
+        assert!(!env.is_reachable(obj_str));
+
+        env.set_vm_registers(&[obj_str, 0, 42]);
+        assert!(env.is_reachable(obj_str));
+
+        let swept = env.collect_garbage();
+        assert_eq!(swept, 0);
+        assert_eq!(env.get_string_utf_chars(obj_str), Some("held_by_vm_register"));
+
+        // Clear VM registers -> object swept
+        env.set_vm_registers(&[]);
+        assert!(!env.is_reachable(obj_str));
+        let swept2 = env.collect_garbage();
+        assert_eq!(swept2, 1);
     }
 }

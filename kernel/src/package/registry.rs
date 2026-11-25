@@ -609,6 +609,18 @@ impl PackageRegistry {
         code_digest: [u8; 32],
         signer_identity: [u8; 32],
     ) -> Result<u32, ()> {
+        // Zero-valued signer identities are strictly rejected (Zero Ambient Authority)
+        if signer_identity == [0u8; 32] {
+            crate::serial_println!("[PACKAGE] registration rejected: zero-valued signer identity for '{}'", package_id);
+            return Err(());
+        }
+
+        // Prevent Android APK from impersonating first-party system packages
+        if crate::package::first_party_package(package_id).is_some() {
+            crate::serial_println!("[PACKAGE] registration rejected: cannot overwrite first-party system package '{}'", package_id);
+            return Err(());
+        }
+
         let old_entries = self.entries.clone();
         let old_gen = self.generation;
         let old_uid = self.next_android_uid;
@@ -617,14 +629,24 @@ impl PackageRegistry {
         let existing = self.entries.iter().position(|e| e.package_id == package_id);
         let (app_uid, principal_id) = if let Some(idx) = existing {
             let prev = &self.entries[idx];
+            // Cannot overwrite a non-Android package with an Android APK
+            if prev.kind != PackageKind::AndroidApk {
+                crate::serial_println!("[PACKAGE] update rejected: package kind mismatch for '{}'", package_id);
+                return Err(());
+            }
             // Signer continuity check: unrelated signers cannot overwrite existing packages
-            if prev.signer_identity != [0u8; 32] && signer_identity != [0u8; 32] && prev.signer_identity != signer_identity {
+            if prev.signer_identity != signer_identity {
                 crate::serial_println!("[PACKAGE] update rejected: signer identity mismatch for '{}'", package_id);
                 return Err(());
             }
             // Anti-rollback check: monotonic version progression
             if version_code < prev.version_code {
                 crate::serial_println!("[PACKAGE] update rejected: version downgrade ({} < {}) for '{}'", version_code, prev.version_code, package_id);
+                return Err(());
+            }
+            // Anti-tamper check: cannot overwrite exact same version code with differing code digest
+            if version_code == prev.version_code && code_digest != prev.code_digest {
+                crate::serial_println!("[PACKAGE] update rejected: conflicting code digest for version {} in '{}'", version_code, package_id);
                 return Err(());
             }
             (prev.app_uid, prev.principal_id)

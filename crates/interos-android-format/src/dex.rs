@@ -37,136 +37,168 @@ pub const MAX_STRING_BYTES_FACTOR: usize = 32;
 
 // Dalvik Opcodes
 pub const OP_NOP: u8 = 0x00;
-pub const OP_MOVE: u8 = 0x01;
-pub const OP_MOVE_RESULT: u8 = 0x0A;
-pub const OP_MOVE_EXCEPTION: u8 = 0x0D;
-pub const OP_RETURN_VOID: u8 = 0x0E;
-pub const OP_RETURN: u8 = 0x0F;
-pub const OP_RETURN_WIDE: u8 = 0x10;
-pub const OP_CONST_4: u8 = 0x12;
-pub const OP_CONST_16: u8 = 0x13;
-pub const OP_CONST_HIGH16: u8 = 0x15;
-pub const OP_CONST_WIDE: u8 = 0x16;
-pub const OP_CONST_WIDE_16: u8 = 0x16;
-pub const OP_CONST_WIDE_32: u8 = 0x17;
-pub const OP_CONST_WIDE_FULL: u8 = 0x18;
-pub const OP_CONST_WIDE_HIGH16: u8 = 0x19;
-pub const OP_CONST_STRING: u8 = 0x1A;
-pub const OP_CONST_STRING_JUMBO: u8 = 0x1B;
-pub const OP_CONST_CLASS: u8 = 0x1C;
-pub const OP_NEW_INSTANCE: u8 = 0x22;
-pub const OP_GOTO: u8 = 0x28;
-pub const OP_GOTO_16: u8 = 0x29;
-pub const OP_IF_EQ: u8 = 0x32;
-pub const OP_IF_NE: u8 = 0x33;
-pub const OP_IF_EQZ: u8 = 0x38;
-pub const OP_IF_NEZ: u8 = 0x39;
-pub const OP_INVOKE_VIRTUAL: u8 = 0x6E;
-pub const OP_INVOKE_SUPER: u8 = 0x6F;
-pub const OP_INVOKE_DIRECT: u8 = 0x70;
-pub const OP_INVOKE_STATIC: u8 = 0x71;
-pub const OP_INVOKE_INTERFACE: u8 = 0x72;
-pub const OP_INVOKE_VIRTUAL_RANGE: u8 = 0x74;
-pub const OP_INVOKE_SUPER_RANGE: u8 = 0x75;
-pub const OP_INVOKE_DIRECT_RANGE: u8 = 0x76;
-pub const OP_INVOKE_STATIC_RANGE: u8 = 0x77;
-pub const OP_INVOKE_INTERFACE_RANGE: u8 = 0x78;
-pub const OP_ADD_INT_2ADDR: u8 = 0xB0;
-pub const OP_SUB_INT_2ADDR: u8 = 0xB1;
-pub const OP_MUL_INT_2ADDR: u8 = 0xB2;
-pub const OP_DIV_INT_2ADDR: u8 = 0xB3;
-pub const OP_REM_INT_2ADDR: u8 = 0xB4;
-pub const OP_AND_INT_2ADDR: u8 = 0xB5;
-pub const OP_OR_INT_2ADDR: u8 = 0xB6;
-pub const OP_XOR_INT_2ADDR: u8 = 0xB7;
-pub const OP_SHL_INT_2ADDR: u8 = 0xB8;
-pub const OP_SHR_INT_2ADDR: u8 = 0xB9;
-pub const OP_USHR_INT_2ADDR: u8 = 0xBA;
+pub const OP_MOVE: u8 = 0x01;                     // format 12x: move vA, vB
+pub const OP_MOVE_FROM16: u8 = 0x02;              // format 22x: move/from16 vAA, vBBBB
+pub const OP_MOVE_16: u8 = 0x03;                  // format 32x: move/16 vAAAA, vBBBB
+pub const OP_MOVE_WIDE: u8 = 0x04;                // format 12x: move-wide vA, vB
+pub const OP_MOVE_WIDE_FROM16: u8 = 0x05;         // format 22x: move-wide/from16 vAA, vBBBB
+pub const OP_MOVE_WIDE_16: u8 = 0x06;             // format 32x: move-wide/16 vAAAA, vBBBB
+pub const OP_MOVE_OBJECT: u8 = 0x07;              // format 12x: move-object vA, vB
+pub const OP_MOVE_OBJECT_FROM16: u8 = 0x08;        // format 22x: move-object/from16 vAA, vBBBB
+pub const OP_MOVE_OBJECT_16: u8 = 0x09;            // format 32x: move-object/16 vAAAA, vBBBB
+pub const OP_MOVE_RESULT: u8 = 0x0A;              // format 11x: move-result vAA
+pub const OP_MOVE_RESULT_WIDE: u8 = 0x0B;         // format 11x: move-result-wide vAA
+pub const OP_MOVE_RESULT_OBJECT: u8 = 0x0C;       // format 11x: move-result-object vAA
+pub const OP_MOVE_EXCEPTION: u8 = 0x0D;           // format 11x: move-exception vAA
 
-pub const OP_ARRAY_LENGTH: u8 = 0x21;
-pub const OP_NEW_ARRAY: u8 = 0x23;
-pub const OP_FILLED_NEW_ARRAY: u8 = 0x24;
-pub const OP_FILLED_NEW_ARRAY_RANGE: u8 = 0x25;
+pub const OP_RETURN_VOID: u8 = 0x0E;              // format 10x: return-void
+pub const OP_RETURN: u8 = 0x0F;                   // format 11x: return vAA
+pub const OP_RETURN_WIDE: u8 = 0x10;              // format 11x: return-wide vAA
+pub const OP_RETURN_OBJECT: u8 = 0x11;            // format 11x: return-object vAA
 
-pub const OP_IF_LT: u8 = 0x34;
-pub const OP_IF_GE: u8 = 0x35;
-pub const OP_IF_GT: u8 = 0x36;
-pub const OP_IF_LE: u8 = 0x37;
-pub const OP_IF_LTZ: u8 = 0x3A;
-pub const OP_IF_GEZ: u8 = 0x3B;
-pub const OP_IF_GTZ: u8 = 0x3C;
-pub const OP_IF_LEZ: u8 = 0x3D;
+pub const OP_CONST_4: u8 = 0x12;                  // format 11n: const/4 vA, #+B
+pub const OP_CONST_16: u8 = 0x13;                 // format 21s: const/16 vAA, #+BBBB
+pub const OP_CONST: u8 = 0x14;                    // format 31i: const vAA, #+BBBBBBBB
+pub const OP_CONST_HIGH16: u8 = 0x15;             // format 21h: const/high16 vAA, #+BBBB0000
+pub const OP_CONST_WIDE_16: u8 = 0x16;            // format 21s: const-wide/16 vAA, #+BBBB
+pub const OP_CONST_WIDE: u8 = 0x16;               // Alias for OP_CONST_WIDE_16
+pub const OP_CONST_WIDE_32: u8 = 0x17;            // format 31i: const-wide/32 vAA, #+BBBBBBBB
+pub const OP_CONST_WIDE_FULL: u8 = 0x18;          // format 51l: const-wide vAA, #+BBBBBBBBBBBBBBBB
+pub const OP_CONST_WIDE_HIGH16: u8 = 0x19;        // format 21h: const-wide/high16 vAA, #+BBBB000000000000
+pub const OP_CONST_STRING: u8 = 0x1A;             // format 21c: const-string vAA, string@BBBB
+pub const OP_CONST_STRING_JUMBO: u8 = 0x1B;       // format 31c: const-string/jumbo vAA, string@BBBBBBBB
+pub const OP_CONST_CLASS: u8 = 0x1C;              // format 21c: const-class vAA, type@BBBB
 
-pub const OP_CMPL_DOUBLE: u8 = 0x2F;
-pub const OP_CMPG_DOUBLE: u8 = 0x30;
-pub const OP_CMP_LONG: u8 = 0x31;
+pub const OP_MONITOR_ENTER: u8 = 0x1D;            // format 11x: monitor-enter vAA
+pub const OP_MONITOR_EXIT: u8 = 0x1E;             // format 11x: monitor-exit vAA
+pub const OP_CHECK_CAST: u8 = 0x1F;               // format 21c: check-cast vAA, type@BBBB
+pub const OP_INSTANCE_OF: u8 = 0x20;              // format 22c: instance-of vA, vB, type@CCCC
+pub const OP_ARRAY_LENGTH: u8 = 0x21;             // format 12x: array-length vA, vB
+pub const OP_NEW_INSTANCE: u8 = 0x22;             // format 21c: new-instance vAA, type@BBBB
+pub const OP_NEW_ARRAY: u8 = 0x23;                // format 22c: new-array vA, vB, type@CCCC
+pub const OP_FILLED_NEW_ARRAY: u8 = 0x24;         // format 35c: filled-new-array {vC..vG}, type@BBBB
+pub const OP_FILLED_NEW_ARRAY_RANGE: u8 = 0x25;   // format 3rc: filled-new-array/range {vCCCC..vNNNN}, type@BBBB
+pub const OP_FILL_ARRAY_DATA: u8 = 0x26;          // format 31t: fill-array-data vAA, +BBBBBBBB
+pub const OP_THROW: u8 = 0x27;                    // format 11x: throw vAA
 
-pub const OP_AGET: u8 = 0x44;
-pub const OP_AGET_WIDE: u8 = 0x45;
-pub const OP_AGET_OBJECT: u8 = 0x46;
-pub const OP_AGET_BOOLEAN: u8 = 0x47;
-pub const OP_AGET_BYTE: u8 = 0x48;
-pub const OP_AGET_CHAR: u8 = 0x49;
-pub const OP_AGET_SHORT: u8 = 0x4A;
+pub const OP_GOTO: u8 = 0x28;                     // format 10t: goto +AA
+pub const OP_GOTO_16: u8 = 0x29;                  // format 20t: goto/16 +AAAA
+pub const OP_GOTO_32: u8 = 0x2A;                  // format 30t: goto/32 +AAAAAAAA
 
-pub const OP_APUT: u8 = 0x4B;
-pub const OP_APUT_WIDE: u8 = 0x4C;
-pub const OP_APUT_OBJECT: u8 = 0x4D;
-pub const OP_APUT_BOOLEAN: u8 = 0x4E;
-pub const OP_APUT_BYTE: u8 = 0x4F;
-pub const OP_APUT_CHAR: u8 = 0x50;
-pub const OP_APUT_SHORT: u8 = 0x51;
+pub const OP_PACKED_SWITCH: u8 = 0x2B;            // format 31t: packed-switch vAA, +BBBBBBBB
+pub const OP_SPARSE_SWITCH: u8 = 0x2C;            // format 31t: sparse-switch vAA, +BBBBBBBB
+pub const OP_CMPL_FLOAT: u8 = 0x2D;               // format 23x: cmpl-float vAA, vBB, vCC
+pub const OP_CMPG_FLOAT: u8 = 0x2E;               // format 23x: cmpg-float vAA, vBB, vCC
+pub const OP_CMPL_DOUBLE: u8 = 0x2F;              // format 23x: cmpl-double vAA, vBB, vCC
+pub const OP_CMPG_DOUBLE: u8 = 0x30;              // format 23x: cmpg-double vAA, vBB, vCC
+pub const OP_CMP_LONG: u8 = 0x31;                 // format 23x: cmp-long vAA, vBB, vCC
 
-pub const OP_IGET: u8 = 0x52;
-pub const OP_IGET_WIDE: u8 = 0x53;
-pub const OP_IGET_OBJECT: u8 = 0x54;
-pub const OP_IGET_BOOLEAN: u8 = 0x55;
-pub const OP_IGET_BYTE: u8 = 0x56;
-pub const OP_IGET_CHAR: u8 = 0x57;
-pub const OP_IGET_SHORT: u8 = 0x58;
+pub const OP_IF_EQ: u8 = 0x32;                    // format 22t: if-eq vA, vB, +CCCC
+pub const OP_IF_NE: u8 = 0x33;                    // format 22t: if-ne vA, vB, +CCCC
+pub const OP_IF_LT: u8 = 0x34;                    // format 22t: if-lt vA, vB, +CCCC
+pub const OP_IF_GE: u8 = 0x35;                    // format 22t: if-ge vA, vB, +CCCC
+pub const OP_IF_GT: u8 = 0x36;                    // format 22t: if-gt vA, vB, +CCCC
+pub const OP_IF_LE: u8 = 0x37;                    // format 22t: if-le vA, vB, +CCCC
+pub const OP_IF_EQZ: u8 = 0x38;                   // format 21t: if-eqz vAA, +BBBB
+pub const OP_IF_NEZ: u8 = 0x39;                   // format 21t: if-nez vAA, +BBBB
+pub const OP_IF_LTZ: u8 = 0x3A;                   // format 21t: if-ltz vAA, +BBBB
+pub const OP_IF_GEZ: u8 = 0x3B;                   // format 21t: if-gez vAA, +BBBB
+pub const OP_IF_GTZ: u8 = 0x3C;                   // format 21t: if-gtz vAA, +BBBB
+pub const OP_IF_LEZ: u8 = 0x3D;                   // format 21t: if-lez vAA, +BBBB
 
-pub const OP_IPUT: u8 = 0x59;
-pub const OP_IPUT_WIDE: u8 = 0x5A;
-pub const OP_IPUT_OBJECT: u8 = 0x5B;
-pub const OP_IPUT_BOOLEAN: u8 = 0x5C;
-pub const OP_IPUT_BYTE: u8 = 0x5D;
-pub const OP_IPUT_CHAR: u8 = 0x5E;
-pub const OP_IPUT_SHORT: u8 = 0x5F;
+pub const OP_AGET: u8 = 0x44;                     // format 23x: aget vAA, vBB, vCC
+pub const OP_AGET_WIDE: u8 = 0x45;                // format 23x: aget-wide vAA, vBB, vCC
+pub const OP_AGET_OBJECT: u8 = 0x46;              // format 23x: aget-object vAA, vBB, vCC
+pub const OP_AGET_BOOLEAN: u8 = 0x47;             // format 23x: aget-boolean vAA, vBB, vCC
+pub const OP_AGET_BYTE: u8 = 0x48;                // format 23x: aget-byte vAA, vBB, vCC
+pub const OP_AGET_CHAR: u8 = 0x49;                // format 23x: aget-char vAA, vBB, vCC
+pub const OP_AGET_SHORT: u8 = 0x4A;               // format 23x: aget-short vAA, vBB, vCC
 
-pub const OP_CMPL_FLOAT: u8 = 0x2D;
-pub const OP_CMPG_FLOAT: u8 = 0x2E;
+pub const OP_APUT: u8 = 0x4B;                     // format 23x: aput vAA, vBB, vCC
+pub const OP_APUT_WIDE: u8 = 0x4C;                // format 23x: aput-wide vAA, vBB, vCC
+pub const OP_APUT_OBJECT: u8 = 0x4D;              // format 23x: aput-object vAA, vBB, vCC
+pub const OP_APUT_BOOLEAN: u8 = 0x4E;             // format 23x: aput-boolean vAA, vBB, vCC
+pub const OP_APUT_BYTE: u8 = 0x4F;                // format 23x: aput-byte vAA, vBB, vCC
+pub const OP_APUT_CHAR: u8 = 0x50;                // format 23x: aput-char vAA, vBB, vCC
+pub const OP_APUT_SHORT: u8 = 0x51;               // format 23x: aput-short vAA, vBB, vCC
 
-pub const OP_SGET: u8 = 0x60;
-pub const OP_SGET_WIDE: u8 = 0x61;
-pub const OP_SGET_OBJECT: u8 = 0x62;
-pub const OP_SGET_BOOLEAN: u8 = 0x63;
-pub const OP_SGET_BYTE: u8 = 0x64;
-pub const OP_SGET_CHAR: u8 = 0x65;
-pub const OP_SGET_SHORT: u8 = 0x66;
+pub const OP_IGET: u8 = 0x52;                     // format 22c: iget vA, vB, field@CCCC
+pub const OP_IGET_WIDE: u8 = 0x53;                // format 22c: iget-wide vA, vB, field@CCCC
+pub const OP_IGET_OBJECT: u8 = 0x54;              // format 22c: iget-object vA, vB, field@CCCC
+pub const OP_IGET_BOOLEAN: u8 = 0x55;             // format 22c: iget-boolean vA, vB, field@CCCC
+pub const OP_IGET_BYTE: u8 = 0x56;                // format 22c: iget-byte vA, vB, field@CCCC
+pub const OP_IGET_CHAR: u8 = 0x57;                // format 22c: iget-char vA, vB, field@CCCC
+pub const OP_IGET_SHORT: u8 = 0x58;               // format 22c: iget-short vA, vB, field@CCCC
 
-pub const OP_SPUT: u8 = 0x67;
-pub const OP_SPUT_WIDE: u8 = 0x68;
-pub const OP_SPUT_OBJECT: u8 = 0x69;
-pub const OP_SPUT_BOOLEAN: u8 = 0x6A;
-pub const OP_SPUT_BYTE: u8 = 0x6B;
-pub const OP_SPUT_CHAR: u8 = 0x6C;
-pub const OP_SPUT_SHORT: u8 = 0x6D;
+pub const OP_IPUT: u8 = 0x59;                     // format 22c: iput vA, vB, field@CCCC
+pub const OP_IPUT_WIDE: u8 = 0x5A;                // format 22c: iput-wide vA, vB, field@CCCC
+pub const OP_IPUT_OBJECT: u8 = 0x5B;              // format 22c: iput-object vA, vB, field@CCCC
+pub const OP_IPUT_BOOLEAN: u8 = 0x5C;             // format 22c: iput-boolean vA, vB, field@CCCC
+pub const OP_IPUT_BYTE: u8 = 0x5D;                // format 22c: iput-byte vA, vB, field@CCCC
+pub const OP_IPUT_CHAR: u8 = 0x5E;                // format 22c: iput-char vA, vB, field@CCCC
+pub const OP_IPUT_SHORT: u8 = 0x5F;               // format 22c: iput-short vA, vB, field@CCCC
 
-pub const OP_INT_TO_LONG: u8 = 0x81;
-pub const OP_LONG_TO_INT: u8 = 0x82;
-pub const OP_INT_TO_DOUBLE: u8 = 0x83;
-pub const OP_INT_TO_FLOAT: u8 = 0x84;
-pub const OP_LONG_TO_FLOAT: u8 = 0x85;
-pub const OP_LONG_TO_DOUBLE: u8 = 0x86;
-pub const OP_FLOAT_TO_INT: u8 = 0x87;
-pub const OP_FLOAT_TO_LONG: u8 = 0x88;
-pub const OP_FLOAT_TO_DOUBLE: u8 = 0x89;
-pub const OP_DOUBLE_TO_INT: u8 = 0x8A;
-pub const OP_DOUBLE_TO_LONG: u8 = 0x8B;
-pub const OP_DOUBLE_TO_FLOAT: u8 = 0x8C;
-pub const OP_INT_TO_BYTE: u8 = 0x8D;
-pub const OP_INT_TO_CHAR: u8 = 0x8E;
-pub const OP_INT_TO_SHORT: u8 = 0x8F;
+pub const OP_SGET: u8 = 0x60;                     // format 21c: sget vAA, field@BBBB
+pub const OP_SGET_WIDE: u8 = 0x61;                // format 21c: sget-wide vAA, field@BBBB
+pub const OP_SGET_OBJECT: u8 = 0x62;              // format 21c: sget-object vAA, field@BBBB
+pub const OP_SGET_BOOLEAN: u8 = 0x63;             // format 21c: sget-boolean vAA, field@BBBB
+pub const OP_SGET_BYTE: u8 = 0x64;                // format 21c: sget-byte vAA, field@BBBB
+pub const OP_SGET_CHAR: u8 = 0x65;                // format 21c: sget-char vAA, field@BBBB
+pub const OP_SGET_SHORT: u8 = 0x66;               // format 21c: sget-short vAA, field@BBBB
+
+pub const OP_SPUT: u8 = 0x67;                     // format 21c: sput vAA, field@BBBB
+pub const OP_SPUT_WIDE: u8 = 0x68;                // format 21c: sput-wide vAA, field@BBBB
+pub const OP_SPUT_OBJECT: u8 = 0x69;              // format 21c: sput-object vAA, field@BBBB
+pub const OP_SPUT_BOOLEAN: u8 = 0x6A;             // format 21c: sput-boolean vAA, field@BBBB
+pub const OP_SPUT_BYTE: u8 = 0x6B;                // format 21c: sput-byte vAA, field@BBBB
+pub const OP_SPUT_CHAR: u8 = 0x6C;                // format 21c: sput-char vAA, field@BBBB
+pub const OP_SPUT_SHORT: u8 = 0x6D;               // format 21c: sput-short vAA, field@BBBB
+
+pub const OP_INVOKE_VIRTUAL: u8 = 0x6E;           // format 35c: invoke-virtual {vC..vG}, meth@BBBB
+pub const OP_INVOKE_SUPER: u8 = 0x6F;             // format 35c: invoke-super {vC..vG}, meth@BBBB
+pub const OP_INVOKE_DIRECT: u8 = 0x70;            // format 35c: invoke-direct {vC..vG}, meth@BBBB
+pub const OP_INVOKE_STATIC: u8 = 0x71;            // format 35c: invoke-static {vC..vG}, meth@BBBB
+pub const OP_INVOKE_INTERFACE: u8 = 0x72;         // format 35c: invoke-interface {vC..vG}, meth@BBBB
+pub const OP_INVOKE_VIRTUAL_RANGE: u8 = 0x74;     // format 3rc: invoke-virtual/range {vCCCC..vNNNN}, meth@BBBB
+pub const OP_INVOKE_SUPER_RANGE: u8 = 0x75;       // format 3rc: invoke-super/range {vCCCC..vNNNN}, meth@BBBB
+pub const OP_INVOKE_DIRECT_RANGE: u8 = 0x76;      // format 3rc: invoke-direct/range {vCCCC..vNNNN}, meth@BBBB
+pub const OP_INVOKE_STATIC_RANGE: u8 = 0x77;      // format 3rc: invoke-static/range {vCCCC..vNNNN}, meth@BBBB
+pub const OP_INVOKE_INTERFACE_RANGE: u8 = 0x78;   // format 3rc: invoke-interface/range {vCCCC..vNNNN}, meth@BBBB
+
+pub const OP_NEG_INT: u8 = 0x7B;                  // format 12x: neg-int vA, vB
+pub const OP_NOT_INT: u8 = 0x7C;                  // format 12x: not-int vA, vB
+pub const OP_NEG_LONG: u8 = 0x7D;                 // format 12x: neg-long vA, vB
+pub const OP_NOT_LONG: u8 = 0x7E;                 // format 12x: not-long vA, vB
+pub const OP_NEG_FLOAT: u8 = 0x7F;                // format 12x: neg-float vA, vB
+pub const OP_NEG_DOUBLE: u8 = 0x80;               // format 12x: neg-double vA, vB
+
+pub const OP_INT_TO_LONG: u8 = 0x81;              // format 12x: int-to-long vA, vB
+pub const OP_INT_TO_FLOAT: u8 = 0x82;             // format 12x: int-to-float vA, vB
+pub const OP_INT_TO_DOUBLE: u8 = 0x83;            // format 12x: int-to-double vA, vB
+pub const OP_LONG_TO_INT: u8 = 0x84;              // format 12x: long-to-int vA, vB
+pub const OP_LONG_TO_FLOAT: u8 = 0x85;            // format 12x: long-to-float vA, vB
+pub const OP_LONG_TO_DOUBLE: u8 = 0x86;           // format 12x: long-to-double vA, vB
+pub const OP_FLOAT_TO_INT: u8 = 0x87;             // format 12x: float-to-int vA, vB
+pub const OP_FLOAT_TO_LONG: u8 = 0x88;            // format 12x: float-to-long vA, vB
+pub const OP_FLOAT_TO_DOUBLE: u8 = 0x89;          // format 12x: float-to-double vA, vB
+pub const OP_DOUBLE_TO_INT: u8 = 0x8A;            // format 12x: double-to-int vA, vB
+pub const OP_DOUBLE_TO_LONG: u8 = 0x8B;           // format 12x: double-to-long vA, vB
+pub const OP_DOUBLE_TO_FLOAT: u8 = 0x8C;          // format 12x: double-to-float vA, vB
+pub const OP_INT_TO_BYTE: u8 = 0x8D;              // format 12x: int-to-byte vA, vB
+pub const OP_INT_TO_CHAR: u8 = 0x8E;              // format 12x: int-to-char vA, vB
+pub const OP_INT_TO_SHORT: u8 = 0x8F;             // format 12x: int-to-short vA, vB
+
+pub const OP_ADD_INT: u8 = 0x90;
+pub const OP_SUB_INT: u8 = 0x91;
+pub const OP_MUL_INT: u8 = 0x92;
+pub const OP_DIV_INT: u8 = 0x93;
+pub const OP_REM_INT: u8 = 0x94;
+pub const OP_AND_INT: u8 = 0x95;
+pub const OP_OR_INT: u8 = 0x96;
+pub const OP_XOR_INT: u8 = 0x97;
+pub const OP_SHL_INT: u8 = 0x98;
+pub const OP_SHR_INT: u8 = 0x99;
+pub const OP_USHR_INT: u8 = 0x9A;
 
 pub const OP_ADD_LONG: u8 = 0x9B;
 pub const OP_SUB_LONG: u8 = 0x9C;
@@ -192,6 +224,18 @@ pub const OP_MUL_DOUBLE: u8 = 0xAD;
 pub const OP_DIV_DOUBLE: u8 = 0xAE;
 pub const OP_REM_DOUBLE: u8 = 0xAF;
 
+pub const OP_ADD_INT_2ADDR: u8 = 0xB0;
+pub const OP_SUB_INT_2ADDR: u8 = 0xB1;
+pub const OP_MUL_INT_2ADDR: u8 = 0xB2;
+pub const OP_DIV_INT_2ADDR: u8 = 0xB3;
+pub const OP_REM_INT_2ADDR: u8 = 0xB4;
+pub const OP_AND_INT_2ADDR: u8 = 0xB5;
+pub const OP_OR_INT_2ADDR: u8 = 0xB6;
+pub const OP_XOR_INT_2ADDR: u8 = 0xB7;
+pub const OP_SHL_INT_2ADDR: u8 = 0xB8;
+pub const OP_SHR_INT_2ADDR: u8 = 0xB9;
+pub const OP_USHR_INT_2ADDR: u8 = 0xBA;
+
 pub const OP_ADD_LONG_2ADDR: u8 = 0xBB;
 pub const OP_SUB_LONG_2ADDR: u8 = 0xBC;
 pub const OP_MUL_LONG_2ADDR: u8 = 0xBD;
@@ -216,59 +260,26 @@ pub const OP_MUL_DOUBLE_2ADDR: u8 = 0xCD;
 pub const OP_DIV_DOUBLE_2ADDR: u8 = 0xCE;
 pub const OP_REM_DOUBLE_2ADDR: u8 = 0xCF;
 
-pub const OP_ADD_INT: u8 = 0x90;
-pub const OP_SUB_INT: u8 = 0x91;
-pub const OP_MUL_INT: u8 = 0x92;
-pub const OP_DIV_INT: u8 = 0x93;
-pub const OP_REM_INT: u8 = 0x94;
-pub const OP_AND_INT: u8 = 0x95;
-pub const OP_OR_INT: u8 = 0x96;
-pub const OP_XOR_INT: u8 = 0x97;
-pub const OP_SHL_INT: u8 = 0x98;
-pub const OP_SHR_INT: u8 = 0x99;
-pub const OP_USHR_INT: u8 = 0x9A;
+pub const OP_ADD_INT_LIT16: u8 = 0xD0;            // format 22s: add-int/lit16
+pub const OP_RSUB_INT: u8 = 0xD1;                 // format 22s: rsub-int
+pub const OP_MUL_INT_LIT16: u8 = 0xD2;            // format 22s: mul-int/lit16
+pub const OP_DIV_INT_LIT16: u8 = 0xD3;            // format 22s: div-int/lit16
+pub const OP_REM_INT_LIT16: u8 = 0xD4;            // format 22s: rem-int/lit16
+pub const OP_AND_INT_LIT16: u8 = 0xD5;            // format 22s: and-int/lit16
+pub const OP_OR_INT_LIT16: u8 = 0xD6;             // format 22s: or-int/lit16
+pub const OP_XOR_INT_LIT16: u8 = 0xD7;            // format 22s: xor-int/lit16
 
-pub const OP_MOVE_FROM16: u8 = 0x02;
-pub const OP_MOVE_16: u8 = 0x03;
-pub const OP_MOVE_WIDE: u8 = 0x04;
-pub const OP_MOVE_OBJECT: u8 = 0x07;
-pub const OP_MOVE_RESULT_WIDE: u8 = 0x0B;
-pub const OP_MOVE_RESULT_OBJECT: u8 = 0x0C;
-
-pub const OP_MONITOR_ENTER: u8 = 0x1D;
-pub const OP_MONITOR_EXIT: u8 = 0x1E;
-pub const OP_CHECK_CAST: u8 = 0x1F;
-pub const OP_INSTANCE_OF: u8 = 0x20;
-pub const OP_FILL_ARRAY_DATA: u8 = 0x26;
-pub const OP_THROW: u8 = 0x27;
-
-pub const OP_PACKED_SWITCH: u8 = 0x2B;
-pub const OP_SPARSE_SWITCH: u8 = 0x2C;
-
-pub const OP_NEG_INT: u8 = 0x7B;
-pub const OP_NOT_INT: u8 = 0x7C;
-pub const OP_NEG_FLOAT: u8 = 0x7D;
-
-pub const OP_ADD_INT_LIT16: u8 = 0xD0;
-pub const OP_RSUB_INT: u8 = 0xD1;
-pub const OP_MUL_INT_LIT16: u8 = 0xD2;
-pub const OP_DIV_INT_LIT16: u8 = 0xD3;
-pub const OP_REM_INT_LIT16: u8 = 0xD4;
-pub const OP_AND_INT_LIT16: u8 = 0xD5;
-pub const OP_OR_INT_LIT16: u8 = 0xD6;
-pub const OP_XOR_INT_LIT16: u8 = 0xD7;
-
-pub const OP_ADD_INT_LIT8: u8 = 0xD8;
-pub const OP_RSUB_INT_LIT8: u8 = 0xD9;
-pub const OP_MUL_INT_LIT8: u8 = 0xDA;
-pub const OP_DIV_INT_LIT8: u8 = 0xDB;
-pub const OP_REM_INT_LIT8: u8 = 0xDC;
-pub const OP_AND_INT_LIT8: u8 = 0xDD;
-pub const OP_OR_INT_LIT8: u8 = 0xDE;
-pub const OP_XOR_INT_LIT8: u8 = 0xDF;
-pub const OP_SHL_INT_LIT8: u8 = 0xE0;
-pub const OP_SHR_INT_LIT8: u8 = 0xE1;
-pub const OP_USHR_INT_LIT8: u8 = 0xE2;
+pub const OP_ADD_INT_LIT8: u8 = 0xD8;             // format 22b: add-int/lit8
+pub const OP_RSUB_INT_LIT8: u8 = 0xD9;            // format 22b: rsub-int/lit8
+pub const OP_MUL_INT_LIT8: u8 = 0xDA;             // format 22b: mul-int/lit8
+pub const OP_DIV_INT_LIT8: u8 = 0xDB;             // format 22b: div-int/lit8
+pub const OP_REM_INT_LIT8: u8 = 0xDC;             // format 22b: rem-int/lit8
+pub const OP_AND_INT_LIT8: u8 = 0xDD;             // format 22b: and-int/lit8
+pub const OP_OR_INT_LIT8: u8 = 0xDE;              // format 22b: or-int/lit8
+pub const OP_XOR_INT_LIT8: u8 = 0xDF;             // format 22b: xor-int/lit8
+pub const OP_SHL_INT_LIT8: u8 = 0xE0;             // format 22b: shl-int/lit8
+pub const OP_SHR_INT_LIT8: u8 = 0xE1;             // format 22b: shr-int/lit8
+pub const OP_USHR_INT_LIT8: u8 = 0xE2;            // format 22b: ushr-int/lit8
 
 /// Raw DEX File Header (112 bytes).
 #[derive(Clone, Copy, Debug)]
@@ -710,6 +721,17 @@ impl<'a> DexPackage<'a> {
                                 return Err(DexError::BranchOutOfBounds);
                             }
                             pc += 4;
+                        }
+                        OP_GOTO_32 => {
+                            if pc + 6 > insns.len() {
+                                return Err(DexError::BranchOutOfBounds);
+                            }
+                            let offset = i32::from_le_bytes([insns[pc + 2], insns[pc + 3], insns[pc + 4], insns[pc + 5]]) as isize * 2;
+                            let target = pc as isize + offset;
+                            if target < 0 || target >= insns.len() as isize {
+                                return Err(DexError::BranchOutOfBounds);
+                            }
+                            pc += 6;
                         }
                         0x24 | 0x25 => { // OP_FILLED_NEW_ARRAY, OP_FILLED_NEW_ARRAY_RANGE
                             if pc + 6 > insns.len() {

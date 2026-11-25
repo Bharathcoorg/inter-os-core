@@ -193,6 +193,16 @@ pub enum BundleValue {
     Bundle(BTreeMap<String, BundleValue>),
 }
 
+impl BundleValue {
+    pub fn estimated_size_bytes(&self) -> usize {
+        core::mem::size_of::<Self>() + match self {
+            BundleValue::String(s) => s.len(),
+            BundleValue::Bundle(m) => m.iter().map(|(k, v)| k.len() + v.estimated_size_bytes() + 32).sum(),
+            _ => 0,
+        }
+    }
+}
+
 /// Software square root using Newton-Raphson method for no_std targets.
 pub fn soft_sqrt(val: f64) -> f64 {
     if val < 0.0 || val.is_nan() {
@@ -325,9 +335,49 @@ impl DalvikObject {
             self.fields.push((field_idx, val));
         }
     }
+
+    pub fn estimated_size_bytes(&self) -> usize {
+        let mut size = core::mem::size_of::<Self>() + self.class_descriptor.len();
+        size += self.fields.len() * (core::mem::size_of::<(u16, u32)>() + 8);
+        if let Some(ref arr) = self.array_elements {
+            size += arr.len() * core::mem::size_of::<u32>();
+        }
+        size += match &self.payload {
+            ObjectPayload::None => 0,
+            ObjectPayload::String(s) | ObjectPayload::StringBuilder(s) => s.len(),
+            ObjectPayload::Class { descriptor } => descriptor.len(),
+            ObjectPayload::ArrayList(list) => list.len() * core::mem::size_of::<u32>(),
+            ObjectPayload::HashMap(map) => map.iter().map(|(k, _)| k.len() + 24).sum(),
+            ObjectPayload::SharedPreferences { name, values } => {
+                name.len() + values.iter().map(|(k, v)| k.len() + v.estimated_size_bytes() + 24).sum::<usize>()
+            }
+            ObjectPayload::SharedPreferencesEditor { pref_name, staged, .. } => {
+                pref_name.len()
+                    + staged
+                        .iter()
+                        .map(|(k, opt_v)| {
+                            k.len() + opt_v.as_ref().map(|v| v.estimated_size_bytes()).unwrap_or(0) + 24
+                        })
+                        .sum::<usize>()
+            }
+            ObjectPayload::File { path } => path.len(),
+            ObjectPayload::Parcel(p) => p.data_size(),
+            ObjectPayload::Bundle(b) => b.iter().map(|(k, v)| k.len() + v.estimated_size_bytes() + 24).sum(),
+            ObjectPayload::Intent { action, categories, data_uri, extras } => {
+                action.as_ref().map(|s| s.len()).unwrap_or(0)
+                    + categories.iter().map(|s| s.len()).sum::<usize>()
+                    + data_uri.as_ref().map(|s| s.len()).unwrap_or(0)
+                    + extras.iter().map(|(k, v)| k.len() + v.estimated_size_bytes() + 24).sum::<usize>()
+            }
+            ObjectPayload::Throwable { message, .. } => message.as_ref().map(|s| s.len()).unwrap_or(0),
+            _ => 0,
+        };
+        size
+    }
 }
 
-const MAX_DALVIK_OBJECTS: usize = 256;
+pub const DEFAULT_HEAP_MAX_BYTES: usize = 16 * 1024 * 1024; // 16 MB default quota
+pub const MAX_HEAP_CEILING_BYTES: usize = 64 * 1024 * 1024; // 64 MB maximum ceiling
 pub const MAX_REGISTERS_LIMIT: usize = 2048;
 
 /// Execution state of the sovereign Dalvik Virtual Machine.
@@ -366,6 +416,9 @@ pub struct DalvikVmState {
     objects: Vec<DalvikObject>,
     next_object_id: u32,
     static_fields: Vec<(u16, u32)>,
+    pub heap_max_bytes: usize,
+    pub heap_used_bytes: usize,
+    pub gc_trigger_threshold_bytes: usize,
     pub gc_cycles: u64,
     pub gc_reclaimed_objects: usize,
     pub gc_total_pause_ticks: u64,
@@ -381,7 +434,19 @@ pub enum JavaThreadStatus {
     Terminated,
 }
 
-/// A managed Java thread state within the Dalvik VM.
+/// Saved stack frame for inter-method Dalvik calls within a Java thread context.
+#[derive(Debug, Clone)]
+pub struct DalvikCallFrame {
+    pub current_class: String,
+    pub current_method: String,
+    pub return_pc: usize,
+    pub saved_registers: Vec<u32>,
+    pub saved_string_registers: Vec<Option<String>>,
+    pub code_offset: usize,
+    pub registers_size: u16,
+}
+
+/// A managed Java thread state within the Dalvik VM holding complete execution context.
 #[derive(Debug, Clone)]
 pub struct JavaThreadState {
     pub thread_id: u64,
@@ -389,6 +454,17 @@ pub struct JavaThreadState {
     pub status: JavaThreadStatus,
     pub interrupted: bool,
     pub owned_monitors: Vec<u32>,
+    pub registers: Vec<u32>,
+    pub string_registers: Vec<Option<String>>,
+    pub call_depth: u8,
+    pub pending_exception: Option<u32>,
+    pub pc: usize,
+    pub current_class: String,
+    pub current_method: String,
+    pub code_offset: usize,
+    pub registers_size: u16,
+    pub target_object: Option<u32>,
+    pub call_stack: Vec<DalvikCallFrame>,
 }
 
 /// State of a synchronized Java monitor lock.
@@ -615,17 +691,34 @@ pub fn class_implements_framework_interface(class_desc: &str, iface_desc: &str) 
     }
 }
 
+impl JavaThreadState {
+    pub fn new(thread_id: u64, name: &str) -> Self {
+        Self {
+            thread_id,
+            name: String::from(name),
+            status: JavaThreadStatus::Runnable,
+            interrupted: false,
+            owned_monitors: Vec::new(),
+            registers: alloc::vec![0u32; 32],
+            string_registers: alloc::vec![None; 32],
+            call_depth: 0,
+            pending_exception: None,
+            pc: 0,
+            current_class: String::new(),
+            current_method: String::new(),
+            code_offset: 0,
+            registers_size: 0,
+            target_object: None,
+            call_stack: Vec::new(),
+        }
+    }
+}
+
 impl DalvikVmState {
     /// Creates a fresh Dalvik Virtual Machine state with cleared registers and initial main thread.
     pub fn new() -> Self {
         let mut threads = BTreeMap::new();
-        threads.insert(1, JavaThreadState {
-            thread_id: 1,
-            name: String::from("main"),
-            status: JavaThreadStatus::Runnable,
-            interrupted: false,
-            owned_monitors: Vec::new(),
-        });
+        threads.insert(1, JavaThreadState::new(1, "main"));
         let mut run_queue = VecDeque::new();
         run_queue.push_back(1);
 
@@ -649,9 +742,34 @@ impl DalvikVmState {
             objects: Vec::new(),
             next_object_id: 1,
             static_fields: Vec::new(),
+            heap_max_bytes: DEFAULT_HEAP_MAX_BYTES,
+            heap_used_bytes: 0,
+            gc_trigger_threshold_bytes: DEFAULT_HEAP_MAX_BYTES * 3 / 4,
             gc_cycles: 0,
             gc_reclaimed_objects: 0,
             gc_total_pause_ticks: 0,
+        }
+    }
+
+    /// Saves the active VM execution context into the current thread state.
+    pub fn save_current_thread_context(&mut self) {
+        if let Some(t) = self.threads.get_mut(&self.current_thread_id) {
+            t.registers = self.registers.clone();
+            t.string_registers = self.string_registers.clone();
+            t.call_depth = self.call_depth;
+            t.pending_exception = self.pending_exception;
+        }
+    }
+
+    /// Loads the active VM execution context from the specified thread state.
+    pub fn load_current_thread_context(&mut self, thread_id: u64) {
+        if let Some(t) = self.threads.get(&thread_id) {
+            self.current_thread_id = thread_id;
+            self.current_task_id = thread_id;
+            self.registers = t.registers.clone();
+            self.string_registers = t.string_registers.clone();
+            self.call_depth = t.call_depth;
+            self.pending_exception = t.pending_exception;
         }
     }
 
@@ -700,6 +818,7 @@ impl DalvikVmState {
                     rec.recursion_count = 1;
                     if let Some(t) = self.threads.get_mut(&tid) {
                         t.status = JavaThreadStatus::Runnable;
+                        t.pc = t.pc.saturating_add(2);
                         if !t.owned_monitors.contains(&obj_id) {
                             t.owned_monitors.push(obj_id);
                         }
@@ -726,9 +845,69 @@ impl DalvikVmState {
         let mut steps = 0;
         while steps < max_quanta {
             if let Some(next_tid) = self.pop_next_runnable() {
-                self.current_thread_id = next_tid;
-                self.current_task_id = next_tid;
+                self.save_current_thread_context();
+                self.load_current_thread_context(next_tid);
                 steps = steps.saturating_add(1);
+
+                // If thread remains runnable, re-enqueue for round-robin fairness
+                if let Some(t) = self.threads.get(&next_tid) {
+                    if t.status == JavaThreadStatus::Runnable {
+                        self.run_queue.push_back(next_tid);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        steps
+    }
+
+    /// Advances thread execution by slicing bytecode execution across runnable threads using DEX.
+    pub fn step_scheduler_slice_with_dex(
+        &mut self,
+        dex: &DexPackage,
+        max_quanta: usize,
+        current_ticks: u64,
+    ) -> usize {
+        self.wake_timed_waiters(current_ticks);
+
+        let mut steps = 0;
+        while steps < max_quanta {
+            if let Some(next_tid) = self.pop_next_runnable() {
+                self.save_current_thread_context();
+                self.load_current_thread_context(next_tid);
+                steps = steps.saturating_add(1);
+
+                let code_off = self.threads.get(&next_tid).map(|t| t.code_offset).unwrap_or(0);
+                let reg_sz = self.threads.get(&next_tid).map(|t| t.registers_size).unwrap_or(0);
+                if code_off > 0 && code_off + 16 <= dex.raw.len() {
+                    let insns_size = u32::from_le_bytes([
+                        dex.raw[code_off + 12],
+                        dex.raw[code_off + 13],
+                        dex.raw[code_off + 14],
+                        dex.raw[code_off + 15],
+                    ]) as usize;
+                    let insns_bytes = insns_size.saturating_mul(2);
+                    let insns_start = code_off + 16;
+                    if insns_start + insns_bytes <= dex.raw.len() {
+                        let insns = &dex.raw[insns_start..insns_start + insns_bytes];
+                        let res = self.interpret_insns_with_code_offset(dex, reg_sz, code_off, insns);
+                        match res {
+                            Ok(_) => {
+                                self.thread_exit(next_tid);
+                            }
+                            Err(DalvikVmError::MonitorBlocked(_)) => {
+                                // Thread is blocked on monitor, do not re-enqueue
+                            }
+                            Err(_) => {
+                                if let Some(t) = self.threads.get_mut(&next_tid) {
+                                    t.status = JavaThreadStatus::Terminated;
+                                }
+                                self.thread_exit(next_tid);
+                            }
+                        }
+                    }
+                }
 
                 // If thread remains runnable, re-enqueue for round-robin fairness
                 if let Some(t) = self.threads.get(&next_tid) {
@@ -745,27 +924,18 @@ impl DalvikVmState {
 
     /// Sets the currently active thread identity for this VM.
     pub fn set_current_thread(&mut self, thread_id: u64) {
-        self.current_thread_id = thread_id;
-        self.current_task_id = thread_id;
-        self.threads.entry(thread_id).or_insert(JavaThreadState {
-            thread_id,
-            name: alloc::format!("Thread-{}", thread_id),
-            status: JavaThreadStatus::Runnable,
-            interrupted: false,
-            owned_monitors: Vec::new(),
-        });
+        self.save_current_thread_context();
+        if !self.threads.contains_key(&thread_id) {
+            let name = alloc::format!("Thread-{}", thread_id);
+            self.threads.insert(thread_id, JavaThreadState::new(thread_id, &name));
+        }
+        self.load_current_thread_context(thread_id);
         self.enqueue_runnable(thread_id);
     }
 
     /// Spawns a new managed thread in the VM.
     pub fn spawn_thread(&mut self, thread_id: u64, name: &str) {
-        self.threads.insert(thread_id, JavaThreadState {
-            thread_id,
-            name: String::from(name),
-            status: JavaThreadStatus::Runnable,
-            interrupted: false,
-            owned_monitors: Vec::new(),
-        });
+        self.threads.insert(thread_id, JavaThreadState::new(thread_id, name));
         self.enqueue_runnable(thread_id);
     }
 
@@ -789,6 +959,7 @@ impl DalvikVmState {
                         rec.recursion_count = 1;
                         if let Some(t) = self.threads.get_mut(&next_owner) {
                             t.status = JavaThreadStatus::Runnable;
+                            t.pc = t.pc.saturating_add(2);
                             if !t.owned_monitors.contains(&obj_id) {
                                 t.owned_monitors.push(obj_id);
                             }
@@ -834,10 +1005,12 @@ impl DalvikVmState {
             rec.recursion_count = 1;
             if let Some(t) = self.threads.get_mut(&next_owner) {
                 t.status = JavaThreadStatus::Runnable;
+                t.pc = t.pc.saturating_add(2);
                 if !t.owned_monitors.contains(&obj_id) {
                     t.owned_monitors.push(obj_id);
                 }
             }
+            self.enqueue_runnable(next_owner);
         } else {
             rec.owner_thread = 0;
         }
@@ -883,21 +1056,45 @@ impl DalvikVmState {
     }
 
     /// Mark-and-sweep garbage collection over the managed Dalvik object heap.
-    /// Traces roots from active registers (v0..v31) and static fields.
+    /// Traces roots from active registers across all threads, call stacks, and static fields.
     pub fn gc_mark_and_sweep(&mut self) -> (usize, u64) {
         let mut marked = alloc::collections::BTreeSet::new();
-        // Roots from registers
+
+        // Roots from currently active registers
         for reg in &self.registers {
             if *reg > 0 && *reg < self.next_object_id {
                 marked.insert(*reg);
             }
         }
+
+        // Roots from all thread contexts (registers, call stack frames, target objects)
+        for thread in self.threads.values() {
+            for reg in &thread.registers {
+                if *reg > 0 && *reg < self.next_object_id {
+                    marked.insert(*reg);
+                }
+            }
+            if let Some(target) = thread.target_object {
+                if target > 0 && target < self.next_object_id {
+                    marked.insert(target);
+                }
+            }
+            for frame in &thread.call_stack {
+                for reg in &frame.saved_registers {
+                    if *reg > 0 && *reg < self.next_object_id {
+                        marked.insert(*reg);
+                    }
+                }
+            }
+        }
+
         // Roots from static fields
         for (_, val) in &self.static_fields {
             if *val > 0 && *val < self.next_object_id {
                 marked.insert(*val);
             }
         }
+
         // Traverse fields and stateful payloads of marked objects
         let mut queue: Vec<u32> = marked.iter().copied().collect();
         while let Some(obj_id) = queue.pop() {
@@ -942,6 +1139,7 @@ impl DalvikVmState {
         let initial_count = self.objects.len();
         self.objects.retain(|o| marked.contains(&o.id));
         let reclaimed = initial_count.saturating_sub(self.objects.len());
+        self.heap_used_bytes = self.objects.iter().map(|o| o.estimated_size_bytes()).sum();
         self.gc_cycles += 1;
         self.gc_reclaimed_objects += reclaimed;
         let pause_ticks = (reclaimed as u64) * 5 + 10;
@@ -969,33 +1167,53 @@ impl DalvikVmState {
 
     /// Allocates an actual VM-local object identity; IDs are never reused during this VM's life.
     fn allocate_object(&mut self, class_descriptor: &str) -> Result<u32, DalvikVmError> {
-        if self.objects.len() >= MAX_DALVIK_OBJECTS {
-            return Err(DalvikVmError::ObjectHeapLimitExceeded);
+        let est_size = 64 + class_descriptor.len();
+        if self.heap_used_bytes.saturating_add(est_size) > self.gc_trigger_threshold_bytes {
+            self.gc_mark_and_sweep();
+        }
+        if self.heap_used_bytes.saturating_add(est_size) > self.heap_max_bytes {
+            self.gc_mark_and_sweep();
+            if self.heap_used_bytes.saturating_add(est_size) > self.heap_max_bytes {
+                return Err(DalvikVmError::ObjectHeapLimitExceeded);
+            }
         }
         if (!class_descriptor.starts_with('L') || !class_descriptor.ends_with(';')) && !class_descriptor.starts_with('[') {
             return Err(DalvikVmError::InvalidBytecode);
         }
         let id = self.next_object_id;
         self.next_object_id = id.checked_add(1).ok_or(DalvikVmError::ObjectHeapLimitExceeded)?;
-        self.objects.push(DalvikObject::new(id, class_descriptor));
+        let obj = DalvikObject::new(id, class_descriptor);
+        let actual_size = obj.estimated_size_bytes();
+        self.heap_used_bytes = self.heap_used_bytes.saturating_add(actual_size);
+        self.objects.push(obj);
         Ok(id)
     }
 
     fn allocate_array(&mut self, element_type: &str, length: usize) -> Result<u32, DalvikVmError> {
-        if self.objects.len() >= MAX_DALVIK_OBJECTS {
+        if length > 65536 {
             return Err(DalvikVmError::ObjectHeapLimitExceeded);
         }
-        if length > 1024 {
-            return Err(DalvikVmError::ObjectHeapLimitExceeded);
-        }
-        let id = self.next_object_id;
-        self.next_object_id = id.checked_add(1).ok_or(DalvikVmError::ObjectHeapLimitExceeded)?;
         let slots = if element_type.starts_with("[J") || element_type.starts_with("[D") {
             length.saturating_mul(2)
         } else {
             length
         };
-        self.objects.push(DalvikObject::new_array(id, element_type, slots));
+        let est_size = 64 + element_type.len() + slots.saturating_mul(4);
+        if self.heap_used_bytes.saturating_add(est_size) > self.gc_trigger_threshold_bytes {
+            self.gc_mark_and_sweep();
+        }
+        if self.heap_used_bytes.saturating_add(est_size) > self.heap_max_bytes {
+            self.gc_mark_and_sweep();
+            if self.heap_used_bytes.saturating_add(est_size) > self.heap_max_bytes {
+                return Err(DalvikVmError::ObjectHeapLimitExceeded);
+            }
+        }
+        let id = self.next_object_id;
+        self.next_object_id = id.checked_add(1).ok_or(DalvikVmError::ObjectHeapLimitExceeded)?;
+        let arr = DalvikObject::new_array(id, element_type, slots);
+        let actual_size = arr.estimated_size_bytes();
+        self.heap_used_bytes = self.heap_used_bytes.saturating_add(actual_size);
+        self.objects.push(arr);
         Ok(id)
     }
 
@@ -1252,6 +1470,33 @@ impl DalvikVmState {
                         let new_tid = self.threads.keys().max().copied().unwrap_or(1) + 1;
                         let name = alloc::format!("Thread-{}", new_tid);
                         self.spawn_thread(new_tid, &name);
+                        let target_obj = arg_values.first().copied().unwrap_or(0);
+                        let target_desc = if target_obj > 0 {
+                            self.get_object(target_obj).ok().map(|o| o.class_descriptor.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(t) = self.threads.get_mut(&new_tid) {
+                            if let Some(desc) = target_desc {
+                                t.target_object = Some(target_obj);
+                                t.current_class = desc.clone();
+                                t.current_method = String::from("run");
+                                if let Some(meth) = dex.methods.iter().find(|m| m.class_name == desc && m.method_name == "run") {
+                                    t.code_offset = meth.code_offset;
+                                    t.registers_size = meth.registers_size;
+                                    if (meth.registers_size as usize) > t.registers.len() {
+                                        t.registers.resize(meth.registers_size as usize, 0);
+                                        t.string_registers.resize(meth.registers_size as usize, None);
+                                    }
+                                    if meth.registers_size > 0 && meth.ins_size > 0 {
+                                        let this_reg = (meth.registers_size.saturating_sub(meth.ins_size)) as usize;
+                                        if this_reg < t.registers.len() {
+                                            t.registers[this_reg] = target_obj;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         self.last_return_value = new_tid as u32;
                         self.last_return_string = None;
                         Ok(new_tid as u32)
@@ -3489,6 +3734,19 @@ impl DalvikVmState {
                     self.string_registers[v_dest] = None;
                     pc += 4;
                 }
+                OP_CONST => {
+                    if pc + 6 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let val = u32::from_le_bytes([insns[pc + 2], insns[pc + 3], insns[pc + 4], insns[pc + 5]]);
+                    if v_dest >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    self.registers[v_dest] = val;
+                    self.string_registers[v_dest] = None;
+                    pc += 6;
+                }
                 OP_CONST_HIGH16 => {
                     if pc + 4 > insns.len() {
                         return Err(DalvikVmError::InvalidBytecode);
@@ -3633,6 +3891,17 @@ impl DalvikVmState {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
                     let offset = (i16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as isize) * 2;
+                    let next_pc = pc as isize + offset;
+                    if next_pc < 0 || next_pc as usize > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    pc = next_pc as usize;
+                }
+                OP_GOTO_32 => {
+                    if pc + 6 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let offset = (i32::from_le_bytes([insns[pc + 2], insns[pc + 3], insns[pc + 4], insns[pc + 5]]) as isize) * 2;
                     let next_pc = pc as isize + offset;
                     if next_pc < 0 || next_pc as usize > insns.len() {
                         return Err(DalvikVmError::InvalidBytecode);
@@ -4766,7 +5035,7 @@ impl DalvikVmState {
                     self.last_return_string = None;
                     return Ok(0);
                 }
-                OP_RETURN | OP_RETURN_WIDE => {
+                OP_RETURN | OP_RETURN_WIDE | OP_RETURN_OBJECT => {
                     if pc + 2 > insns.len() {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
@@ -4781,10 +5050,24 @@ impl DalvikVmState {
                             return Err(DalvikVmError::RegisterOutOfBounds);
                         }
                         self.last_return_wide_hi = self.registers[v_src + 1];
+                        self.last_return_string = None;
+                    } else if opcode == OP_RETURN_OBJECT {
+                        self.last_return_wide_hi = 0;
+                        if let Some(ref s) = self.string_registers[v_src] {
+                            self.last_return_string = Some(s.clone());
+                        } else if let Ok(obj) = self.get_object(ret_val) {
+                            if let ObjectPayload::String(ref s) = obj.payload {
+                                self.last_return_string = Some(s.clone());
+                            } else {
+                                self.last_return_string = None;
+                            }
+                        } else {
+                            self.last_return_string = None;
+                        }
                     } else {
                         self.last_return_wide_hi = 0;
+                        self.last_return_string = self.string_registers[v_src].clone();
                     }
-                    self.last_return_string = self.string_registers[v_src].clone();
                     return Ok(ret_val);
                 }
                 OP_MOVE_FROM16 => {
@@ -4816,6 +5099,28 @@ impl DalvikVmState {
                     self.string_registers[v_dest + 1] = None;
                     pc += 2;
                 }
+                OP_MOVE_WIDE_FROM16 => {
+                    if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_src = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
+                    if v_dest + 1 >= reg_cap || v_src + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    self.registers[v_dest] = self.registers[v_src];
+                    self.registers[v_dest + 1] = self.registers[v_src + 1];
+                    self.string_registers[v_dest] = None;
+                    self.string_registers[v_dest + 1] = None;
+                    pc += 4;
+                }
+                OP_MOVE_WIDE_16 => {
+                    if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
+                    let v_src = u16::from_le_bytes([insns[pc + 4], insns[pc + 5]]) as usize;
+                    if v_dest + 1 >= reg_cap || v_src + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    self.registers[v_dest] = self.registers[v_src];
+                    self.registers[v_dest + 1] = self.registers[v_src + 1];
+                    self.string_registers[v_dest] = None;
+                    self.string_registers[v_dest + 1] = None;
+                    pc += 6;
+                }
                 OP_MOVE_OBJECT => {
                     if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
@@ -4824,6 +5129,24 @@ impl DalvikVmState {
                     self.registers[v_dest] = self.registers[v_src];
                     self.string_registers[v_dest] = self.string_registers[v_src].clone();
                     pc += 2;
+                }
+                OP_MOVE_OBJECT_FROM16 => {
+                    if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_src = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    self.registers[v_dest] = self.registers[v_src];
+                    self.string_registers[v_dest] = self.string_registers[v_src].clone();
+                    pc += 4;
+                }
+                OP_MOVE_OBJECT_16 => {
+                    if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
+                    let v_src = u16::from_le_bytes([insns[pc + 4], insns[pc + 5]]) as usize;
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    self.registers[v_dest] = self.registers[v_src];
+                    self.string_registers[v_dest] = self.string_registers[v_src].clone();
+                    pc += 6;
                 }
                 OP_MOVE_RESULT_WIDE => {
                     if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
@@ -4881,7 +5204,10 @@ impl DalvikVmState {
                     }
 
                     if is_blocked {
-                        // Do not advance pc; thread will retry acquisition once unblocked
+                        // Save pc on thread state for acquisition retry
+                        if let Some(t) = self.threads.get_mut(&tid) {
+                            t.pc = pc;
+                        }
                         return Err(DalvikVmError::MonitorBlocked(obj_id));
                     }
 
@@ -4931,10 +5257,12 @@ impl DalvikVmState {
                     if let Some(w_tid) = woken_thread {
                         if let Some(t) = self.threads.get_mut(&w_tid) {
                             t.status = JavaThreadStatus::Runnable;
+                            t.pc = t.pc.saturating_add(2);
                             if !t.owned_monitors.contains(&obj_id) {
                                 t.owned_monitors.push(obj_id);
                             }
                         }
+                        self.enqueue_runnable(w_tid);
                     }
                     if should_remove || woken_thread.is_some() {
                         if let Some(curr_t) = self.threads.get_mut(&tid) {
@@ -5103,6 +5431,24 @@ impl DalvikVmState {
                         _ => 0,
                     };
                     self.string_registers[v_dest] = None;
+                    pc += 2;
+                }
+                OP_NEG_LONG | OP_NOT_LONG | OP_NEG_DOUBLE => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest + 1 >= reg_cap || v_src + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let val = self.get_wide_reg(v_src);
+                    let res = match opcode {
+                        OP_NEG_LONG => (-(val as i64)) as u64,
+                        OP_NOT_LONG => !val,
+                        OP_NEG_DOUBLE => {
+                            let d = f64::from_bits(val);
+                            (-d).to_bits()
+                        }
+                        _ => 0,
+                    };
+                    self.set_wide_reg(v_dest, res)?;
                     pc += 2;
                 }
                 OP_ADD_INT_LIT8 | OP_RSUB_INT_LIT8 | OP_MUL_INT_LIT8 | OP_DIV_INT_LIT8 | OP_REM_INT_LIT8
@@ -5367,10 +5713,9 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(vm.objects[0].id, first);
         assert_eq!(vm.objects[0].class_descriptor, "Lorg/interos/First;");
-        for _ in 2..MAX_DALVIK_OBJECTS {
-            vm.allocate_object("Lorg/interos/Bounded;").unwrap();
-        }
-        assert_eq!(vm.objects.len(), MAX_DALVIK_OBJECTS);
+        vm.registers[0] = first;
+        vm.registers[1] = second;
+        vm.heap_max_bytes = vm.heap_used_bytes;
         assert_eq!(vm.allocate_object("Lorg/interos/Overflow;"), Err(DalvikVmError::ObjectHeapLimitExceeded));
     }
 
@@ -6493,6 +6838,7 @@ mod tests {
         // Thread 2 attempts to acquire: contention -> MonitorBlocked(obj_id)
         vm.spawn_thread(2, "Worker-1");
         vm.set_current_thread(2);
+        vm.registers[0] = obj_id;
         let err = vm.interpret_insns(&dex, 2, &insns_enter).unwrap_err();
         assert_eq!(err, DalvikVmError::MonitorBlocked(obj_id));
 
@@ -6539,6 +6885,7 @@ mod tests {
 
         // Producer enters monitor
         vm.set_current_thread(10);
+        vm.registers[0] = obj_id;
         assert!(vm.interpret_insns(&dex, 2, &insns_enter).is_ok());
 
         // Producer notifies: Consumer moves from cond_waiters to wait_queue
@@ -6574,6 +6921,7 @@ mod tests {
 
         // Waiter attempts acquisition and gets blocked
         vm.set_current_thread(200);
+        vm.registers[0] = obj_id;
         assert_eq!(vm.interpret_insns(&dex, 2, &insns_enter), Err(DalvikVmError::MonitorBlocked(obj_id)));
 
         // Worker terminates unexpectedly
@@ -6652,6 +7000,151 @@ mod tests {
         vm.threads.get_mut(&1).unwrap().status = JavaThreadStatus::Runnable;
         let yield_res = vm.dispatch_framework_method(&dex, "java/lang/Thread", "yield", &[], &[]);
         assert_eq!(yield_res, Ok(0));
+    }
+
+    #[test]
+    fn test_dalvik_extended_opcodes() {
+        let dex_bytes = create_test_dex("Lorg/interos/ExtendedOps;", "test", "()I");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // 1. OP_CONST (0x14) loads full 32-bit integer: v0 = 0x12345678
+        let insns_const = [
+            OP_CONST, 0x00, 0x78, 0x56, 0x34, 0x12,
+            OP_RETURN, 0x00,
+        ];
+        let res = vm.interpret_insns(&dex, 2, &insns_const).unwrap();
+        assert_eq!(res, 0x1234_5678);
+
+        // 2. OP_GOTO_32 (0x2A): jumps 4 code units (+8 bytes) ahead past an unreachable trap
+        let insns_goto32 = [
+            OP_CONST_4, 0x10, // v0 = 1 (2 bytes, pc: 0..2)
+            OP_GOTO_32, 0x00, 0x04, 0x00, 0x00, 0x00, // jump +4 code units (+8 bytes) from pc=2 to pc=10
+            OP_CONST_4, 0x90, // v0 = -7 (skipped, 2 bytes, pc: 8..10)
+            OP_RETURN, 0x00,  // pc: 10..12
+        ];
+        let res = vm.interpret_insns(&dex, 2, &insns_goto32).unwrap();
+        assert_eq!(res, 1);
+
+        // 3. OP_RETURN_OBJECT (0x11): returns object ID and shadow string
+        let obj_id = vm.allocate_string("test").unwrap();
+        vm.registers[0] = obj_id;
+        let insns_ret_obj = [
+            OP_RETURN_OBJECT, 0x00,
+        ];
+        let ret_obj = vm.interpret_insns(&dex, 2, &insns_ret_obj).unwrap();
+        assert_eq!(ret_obj, obj_id);
+        assert_eq!(vm.last_return_string.as_deref(), Some("test"));
+
+        // 4. OP_MOVE_WIDE_FROM16 (0x05) and OP_MOVE_WIDE_16 (0x06)
+        let insns_wide_moves = [
+            OP_CONST_WIDE_32, 0x02, 0xEF, 0xBE, 0xAD, 0xDE, // v2:v3 = 0xDEADBEEF
+            OP_MOVE_WIDE_FROM16, 0x00, 0x02, 0x00,          // v0:v1 = v2:v3
+            OP_MOVE_WIDE_16, 0x00, 0x04, 0x00, 0x00, 0x00,  // v4:v5 = v0:v1
+            OP_RETURN_WIDE, 0x04,
+        ];
+        let ret_wide = vm.interpret_insns(&dex, 6, &insns_wide_moves).unwrap();
+        assert_eq!(ret_wide, 0xDEAD_BEEF);
+
+        // 5. OP_MOVE_OBJECT_FROM16 (0x08) and OP_MOVE_OBJECT_16 (0x09)
+        vm.registers[2] = obj_id;
+        let insns_obj_moves = [
+            OP_MOVE_OBJECT_FROM16, 0x00, 0x02, 0x00,       // v0 = v2
+            OP_MOVE_OBJECT_16, 0x00, 0x04, 0x00, 0x00, 0x00, // v4 = v0
+            OP_RETURN_OBJECT, 0x04,
+        ];
+        let ret_obj2 = vm.interpret_insns(&dex, 6, &insns_obj_moves).unwrap();
+        assert_eq!(ret_obj2, obj_id);
+        assert_eq!(vm.last_return_string.as_deref(), Some("test"));
+
+        // 6. Wide unary ops: OP_NEG_LONG (0x7D), OP_NOT_LONG (0x7E), OP_NEG_DOUBLE (0x80)
+        let insns_neg_long = [
+            OP_CONST_WIDE_32, 0x00, 0x2A, 0x00, 0x00, 0x00, // v0:v1 = 42
+            OP_NEG_LONG, 0x02,                              // v2:v3 = -42
+            OP_RETURN_WIDE, 0x02,
+        ];
+        vm.interpret_insns(&dex, 4, &insns_neg_long).unwrap();
+        assert_eq!(vm.get_wide_reg(2) as i64, -42);
+
+        let insns_not_long = [
+            OP_CONST_WIDE_32, 0x00, 0x00, 0x00, 0x00, 0x00, // v0:v1 = 0
+            OP_NOT_LONG, 0x02,                              // v2:v3 = !0 = ~0
+            OP_RETURN_WIDE, 0x02,
+        ];
+        vm.interpret_insns(&dex, 4, &insns_not_long).unwrap();
+        assert_eq!(vm.get_wide_reg(2), !0u64);
+    }
+
+    #[test]
+    fn test_heap_quota_and_gc_scaling() {
+        let mut vm = DalvikVmState::new();
+
+        // Under the old 256 limit, allocating 500 objects would fail.
+        // With the 16MB quota, allocating 500 objects succeeds cleanly!
+        let mut live_ids = Vec::new();
+        for _ in 0..500 {
+            let id = vm.allocate_object("Ljava/lang/String;").unwrap();
+            live_ids.push(id);
+        }
+        assert_eq!(vm.objects.len(), 500);
+        assert!(vm.heap_used_bytes > 0 && vm.heap_used_bytes < vm.heap_max_bytes);
+
+        // Keep 10 roots in static fields, rest become garbage
+        for i in 0..10 {
+            vm.set_static_field(i as u16, live_ids[i]).unwrap();
+        }
+        // Force GC
+        let (reclaimed, pause) = vm.gc_mark_and_sweep();
+        assert_eq!(reclaimed, 490);
+        assert_eq!(vm.objects.len(), 10);
+        assert!(pause > 0);
+        assert!(vm.heap_used_bytes < 5000);
+
+        // Verify ceiling enforcement
+        vm.heap_max_bytes = 100; // Artificially constrain quota
+        let err = vm.allocate_object("Ljava/lang/String;").unwrap_err();
+        assert_eq!(err, DalvikVmError::ObjectHeapLimitExceeded);
+    }
+
+    #[test]
+    fn test_dalvik_two_thread_producer_consumer_wait_notify_and_isolation() {
+        let dex_bytes = create_test_dex("Lorg/interos/SyncTest;", "run", "()V");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        let lock_obj = vm.allocate_object("Ljava/lang/Object;").unwrap();
+
+        // Main thread (tid=1) acquires lock
+        vm.set_current_thread(1);
+        let insns_enter = [OP_MONITOR_ENTER, 0x00, OP_RETURN_VOID, 0x00];
+        vm.registers[0] = lock_obj;
+        assert!(vm.interpret_insns(&dex, 2, &insns_enter).is_ok());
+
+        // Spawn consumer thread (tid=2)
+        vm.spawn_thread(2, "Consumer");
+        vm.set_current_thread(2);
+        vm.registers[0] = lock_obj;
+
+        // Thread 2 attempts to enter held monitor -> must fail with MonitorBlocked and save PC
+        let err = vm.interpret_insns(&dex, 2, &insns_enter).unwrap_err();
+        assert_eq!(err, DalvikVmError::MonitorBlocked(lock_obj));
+        assert!(matches!(vm.threads.get(&2).unwrap().status, JavaThreadStatus::BlockedOnMonitor(id) if id == lock_obj));
+
+        // Switch back to thread 1 and exit monitor
+        vm.set_current_thread(1);
+        let insns_exit = [OP_MONITOR_EXIT, 0x00, OP_RETURN_VOID, 0x00];
+        vm.registers[0] = lock_obj;
+        assert!(vm.interpret_insns(&dex, 2, &insns_exit).is_ok());
+
+        // Lock ownership has transferred to thread 2, and thread 2 is now Runnable with advanced PC
+        let mon = vm.monitors.get(&lock_obj).unwrap();
+        assert_eq!(mon.owner_thread, 2);
+        assert_eq!(vm.threads.get(&2).unwrap().status, JavaThreadStatus::Runnable);
+        assert_eq!(vm.threads.get(&2).unwrap().pc, 2);
+
+        // Step scheduler: thread 2 executes its slice in complete isolation
+        vm.step_scheduler_slice(2, 50);
+        assert_eq!(vm.current_thread_id, 2);
     }
 }
 

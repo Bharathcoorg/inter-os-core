@@ -124,7 +124,13 @@ def verify_real_world_apk_acceptance():
 
 def ensure_test_apk_generator():
     bin_path = ROOT / "target" / "debug" / ("gen-test-apk.exe" if os.name == "nt" else "gen-test-apk")
-    if not bin_path.exists():
+    format_src = ROOT / "crates" / "interos-android-format" / "src"
+    rebuild = not bin_path.exists()
+    if bin_path.exists():
+        bin_mtime = bin_path.stat().st_mtime
+        if any(p.stat().st_mtime > bin_mtime for p in format_src.rglob("*.rs")):
+            rebuild = True
+    if rebuild:
         subprocess.run(
             ["cargo", "build", "-p", "interos-android-format", "--bin", "gen-test-apk"],
             cwd=ROOT,
@@ -189,10 +195,12 @@ def verify_acr_qemu():
     dev_kernel_img = ROOT / "target" / "verify" / "e2e_acceptance" / "inter-os-bios-tls-dev.img"
     kernel_src = ROOT / "kernel" / "src"
     acr_src = ROOT / "crates" / "interos-acr" / "src"
+    format_src = ROOT / "crates" / "interos-android-format" / "src"
+    userspace_src = ROOT / "userspace"
     rebuild = not dev_kernel_img.exists()
     if dev_kernel_img.exists():
         img_mtime = dev_kernel_img.stat().st_mtime
-        for src_dir in (kernel_src, acr_src):
+        for src_dir in (kernel_src, acr_src, format_src, userspace_src):
             if any(p.stat().st_mtime > img_mtime for p in src_dir.rglob("*.rs")):
                 rebuild = True
                 break

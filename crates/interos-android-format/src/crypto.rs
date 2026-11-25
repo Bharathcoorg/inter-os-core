@@ -797,6 +797,155 @@ pub fn parse_spki(spki_bytes: &[u8]) -> Option<ParsedPublicKey> {
     None
 }
 
+/// Helper to parse one ASN.1 DER TLV element from a byte slice.
+/// Returns (tag, value_slice, total_element_len).
+pub fn parse_der_element(slice: &[u8]) -> Option<(u8, &[u8], usize)> {
+    if slice.len() < 2 {
+        return None;
+    }
+    let tag = slice[0];
+    let (len, len_bytes) = parse_der_len(&slice[1..])?;
+    let header_len = 1 + len_bytes;
+    let total_len = header_len.checked_add(len)?;
+    if total_len > slice.len() {
+        return None;
+    }
+    Some((tag, &slice[header_len..total_len], total_len))
+}
+
+/// Extracts the raw SubjectPublicKeyInfo (SPKI) DER slice from an X.509 DER certificate.
+/// In RFC 5280, a Certificate is a SEQUENCE of TBSCertificate, signatureAlgorithm, signatureValue.
+/// Inside TBSCertificate, field 6 (or 5 if version [0] is absent) is SubjectPublicKeyInfo.
+pub fn extract_spki_from_certificate(cert_der: &[u8]) -> Option<&[u8]> {
+    let (tag, cert_body, _) = parse_der_element(cert_der)?;
+    if tag != 0x30 {
+        return None;
+    }
+
+    let (tbs_tag, tbs_body, _) = parse_der_element(cert_body)?;
+    if tbs_tag != 0x30 {
+        return None;
+    }
+
+    let mut cursor = 0;
+    if cursor >= tbs_body.len() {
+        return None;
+    }
+
+    // Version [0] is optional; if present it has tag 0xA0
+    if tbs_body[cursor] == 0xA0 {
+        let (_, _, elem_len) = parse_der_element(&tbs_body[cursor..])?;
+        cursor += elem_len;
+    }
+
+    // serialNumber (INTEGER 0x02)
+    let (tag, _, elem_len) = parse_der_element(&tbs_body[cursor..])?;
+    if tag != 0x02 {
+        return None;
+    }
+    cursor += elem_len;
+
+    // signature (AlgorithmIdentifier SEQUENCE 0x30)
+    let (tag, _, elem_len) = parse_der_element(&tbs_body[cursor..])?;
+    if tag != 0x30 {
+        return None;
+    }
+    cursor += elem_len;
+
+    // issuer (Name SEQUENCE 0x30)
+    let (tag, _, elem_len) = parse_der_element(&tbs_body[cursor..])?;
+    if tag != 0x30 {
+        return None;
+    }
+    cursor += elem_len;
+
+    // validity (Validity SEQUENCE 0x30)
+    let (tag, _, elem_len) = parse_der_element(&tbs_body[cursor..])?;
+    if tag != 0x30 {
+        return None;
+    }
+    cursor += elem_len;
+
+    // subject (Name SEQUENCE 0x30)
+    let (tag, _, elem_len) = parse_der_element(&tbs_body[cursor..])?;
+    if tag != 0x30 {
+        return None;
+    }
+    cursor += elem_len;
+
+    // subjectPublicKeyInfo (SubjectPublicKeyInfo SEQUENCE 0x30)
+    let spki_slice = &tbs_body[cursor..];
+    let (tag, _, spki_len) = parse_der_element(spki_slice)?;
+    if tag != 0x30 {
+        return None;
+    }
+
+    Some(&spki_slice[..spki_len])
+}
+
+/// Constructs a valid minimal self-signed X.509 DER certificate enclosing the given SPKI.
+/// Used for deterministic APK signing block creation in test fixtures.
+pub fn build_test_certificate_der(spki: &[u8]) -> Vec<u8> {
+    let serial = [0x02, 0x01, 0x01];
+    let sig_algo = [0x30, 0x0A, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02];
+    let name = [0x30, 0x0F, 0x31, 0x0D, 0x30, 0x0B, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0C, 0x04, b'T', b'e', b's', b't'];
+    let validity = [
+        0x30, 0x1E,
+        0x17, 0x0D, b'2', b'4', b'0', b'1', b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'Z',
+        0x17, 0x0D, b'3', b'4', b'0', b'1', b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'Z',
+    ];
+
+    let mut tbs_body = Vec::new();
+    tbs_body.extend_from_slice(&serial);
+    tbs_body.extend_from_slice(&sig_algo);
+    tbs_body.extend_from_slice(&name);
+    tbs_body.extend_from_slice(&validity);
+    tbs_body.extend_from_slice(&name);
+    tbs_body.extend_from_slice(spki);
+
+    let mut tbs = Vec::new();
+    tbs.push(0x30);
+    append_der_len(&mut tbs, tbs_body.len());
+    tbs.extend_from_slice(&tbs_body);
+
+    let mut sig_val = Vec::new();
+    sig_val.push(0x03);
+    sig_val.push(65);
+    sig_val.push(0x00);
+    sig_val.resize(sig_val.len() + 64, 0xAA);
+
+    let mut cert_body = Vec::new();
+    cert_body.extend_from_slice(&tbs);
+    cert_body.extend_from_slice(&sig_algo);
+    cert_body.extend_from_slice(&sig_val);
+
+    let mut cert = Vec::new();
+    cert.push(0x30);
+    append_der_len(&mut cert, cert_body.len());
+    cert.extend_from_slice(&cert_body);
+    cert
+}
+
+fn append_der_len(buf: &mut Vec<u8>, len: usize) {
+    if len < 0x80 {
+        buf.push(len as u8);
+    } else if len <= 0xFF {
+        buf.push(0x81);
+        buf.push(len as u8);
+    } else if len <= 0xFFFF {
+        buf.push(0x82);
+        buf.push((len >> 8) as u8);
+        buf.push(len as u8);
+    } else {
+        buf.push(0x84);
+        buf.push((len >> 24) as u8);
+        buf.push((len >> 16) as u8);
+        buf.push((len >> 8) as u8);
+        buf.push(len as u8);
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -876,5 +1025,20 @@ mod tests {
         let mut tampered_digest = digest;
         tampered_digest[0] ^= 0x01;
         assert!(!verify_ecdsa_p256(&qx, &qy, &r_bytes, &s_bytes, &tampered_digest));
+    }
+
+    #[test]
+    fn test_extract_spki_from_certificate_roundtrip() {
+        let mut mock_spki = Vec::new();
+        mock_spki.push(0x30);
+        mock_spki.push(10);
+        mock_spki.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+        let cert = build_test_certificate_der(&mock_spki);
+        let extracted = extract_spki_from_certificate(&cert).expect("SPKI extraction must succeed");
+        assert_eq!(extracted, mock_spki.as_slice());
+
+        assert!(extract_spki_from_certificate(&cert[..20]).is_none());
+        assert!(extract_spki_from_certificate(&[0x02, 0x01, 0x01]).is_none());
     }
 }

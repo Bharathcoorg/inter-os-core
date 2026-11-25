@@ -550,12 +550,19 @@ pub fn run_acr() -> ! {
                                     continue;
                                 }
 
+                                let Some(ref signing_details) = apk.signing_details else {
+                                    let _ = std::log("[acrd] REJECT candidate APK lacks verified signing details");
+                                    continue;
+                                };
+                                let signer_identity = signing_details.primary_cert_fingerprint;
+                                if signer_identity == [0u8; 32] {
+                                    let _ = std::log("[acrd] REJECT candidate APK has zero-valued signer certificate fingerprint");
+                                    continue;
+                                }
+
                                 let version_code = apk.manifest.version_code as u64;
                                 let min_sdk = 21u32;
                                 let target_sdk = apk.manifest.target_sdk;
-                                let signer_identity = apk.signing_details.as_ref()
-                                    .map(|s| s.primary_cert_fingerprint)
-                                    .unwrap_or(computed_candidate_digest);
 
                                 let major = (version_code >> 32) as u16;
                                 let minor = (version_code >> 16) as u16;
@@ -609,13 +616,19 @@ pub fn run_acr() -> ! {
                                 let apk_slice = &rx_buf[8..len];
                                 if let Ok(apk) = interos_android_format::apk::ApkPackage::parse(apk_slice) {
                                     if apk.is_signed {
+                                        let Some(ref signing_details) = apk.signing_details else {
+                                            let _ = std::log("[acrd] REJECT APK lacks verified signing details");
+                                            continue;
+                                        };
+                                        let signer_identity = signing_details.primary_cert_fingerprint;
+                                        if signer_identity == [0u8; 32] {
+                                            let _ = std::log("[acrd] REJECT APK has zero-valued signer certificate fingerprint");
+                                            continue;
+                                        }
                                         let code_digest = std::crypto::Sha256::digest(apk_slice);
                                         let version_code = apk.manifest.version_code as u64;
                                         let min_sdk = 21u32;
                                         let target_sdk = apk.manifest.target_sdk;
-                                        let signer_identity = apk.signing_details.as_ref()
-                                            .map(|s| s.primary_cert_fingerprint)
-                                            .unwrap_or(code_digest);
 
                                         let _ = std::package_artifact_store(&apk.manifest.package_name, apk_slice, false);
                                         let cand_handle = std::candidate_artifact_store(0, apk_slice, false).unwrap_or(0);
@@ -705,6 +718,7 @@ pub fn run_acr_app_runtime() -> ! {
 
     let mut instance: Option<interos_acr::manager::AcrAppInstance> = None;
     let mut root_widget: Option<interos_acr::view::View> = None;
+    let mut shared_render_buf: Option<alloc::vec::Vec<u32>> = None;
     let mut rx_buf = [0u8; 1024];
 
     loop {
@@ -853,20 +867,21 @@ pub fn run_acr_app_runtime() -> ! {
                                 inst.activity_state = interos_acr::framework::ActivityLifecycleState::Resumed;
                                 let _ = std::log("[acr-app-runtime] STATE: ActivityResumed");
 
-                                // Build View hierarchy
+                                // Build View hierarchy: render actual Activity component tree
                                 let mut root_view = interos_acr::view::View::linear_layout(1, true);
                                 root_view.padding = interos_acr::view::EdgeOffsets::all(20);
                                 root_view.background_color = Some(0xFF181818);
                                 root_view.is_clickable = true;
 
-                                let title = interos_acr::view::View::text_view(2, "InterOS Universal Android Runtime", 18, 0xFFFFFFFF);
+                                let app_title = pkg_name.rsplit('.').next().unwrap_or(pkg_name);
+                                let title = interos_acr::view::View::text_view(2, app_title, 20, 0xFFFFFFFF);
                                 root_view.add_child(title);
 
-                                let sub = interos_acr::view::View::text_view(3, pkg_name, 14, 0xFF4CAF50);
+                                let sub = interos_acr::view::View::text_view(3, pkg_name, 13, 0xFF9E9E9E);
                                 root_view.add_child(sub);
 
-                                let mut btn = interos_acr::view::View::button(4, "Interactive Button", 16, 0xFFFFFFFF);
-                                btn.margins.top = 30;
+                                let mut btn = interos_acr::view::View::button(4, "Open", 16, 0xFFFFFFFF);
+                                btn.margins.top = 24;
                                 root_view.add_child(btn);
 
                                 root_view.measure(
@@ -882,11 +897,12 @@ pub fn run_acr_app_runtime() -> ! {
                                     inst.surface_id = app_surface_id;
                                     let _ = std::log("[acr-app-runtime] created app-owned surface via SurfaceCreate capability");
 
-                                    let mut render_buf = alloc::vec![0u32; 720 * 1440];
+                                    let buf = shared_render_buf.get_or_insert_with(|| alloc::vec![0u32; 720 * 1440]);
+                                    buf.fill(0);
                                     let mut dl = interos_acr::draw::DrawList::new();
                                     root_view.draw(&mut dl);
-                                    interos_acr::draw::render_draw_list_to_buffer(&dl, &mut render_buf, 720, 1440);
-                                    for (chunk_idx, chunk) in render_buf.chunks(4096).enumerate() {
+                                    interos_acr::draw::render_draw_list_to_buffer(&dl, buf, 720, 1440);
+                                    for (chunk_idx, chunk) in buf.chunks(4096).enumerate() {
                                         let _ = write_surface_fn(app_surface_id, (chunk_idx * 4096) as usize, chunk);
                                     }
                                     let _ = std::surface_flip();
@@ -992,16 +1008,17 @@ pub fn run_acr_app_runtime() -> ! {
                             input_event.x, input_event.y
                         ));
                         if inst.surface_id > 0 {
-                                let write_surface_fn = interos_std::surface_write;
-                                let mut render_buf = alloc::vec![0u32; 720 * 1440];
-                                let mut dl = interos_acr::draw::DrawList::new();
-                                root.draw(&mut dl);
-                                interos_acr::draw::render_draw_list_to_buffer(&dl, &mut render_buf, 720, 1440);
-                                for (chunk_idx, chunk) in render_buf.chunks(4096).enumerate() {
-                                    let _ = write_surface_fn(inst.surface_id, (chunk_idx * 4096) as usize, chunk);
-                                }
-                                let _ = std::surface_flip();
+                            let write_surface_fn = interos_std::surface_write;
+                            let buf = shared_render_buf.get_or_insert_with(|| alloc::vec![0u32; 720 * 1440]);
+                            buf.fill(0);
+                            let mut dl = interos_acr::draw::DrawList::new();
+                            root.draw(&mut dl);
+                            interos_acr::draw::render_draw_list_to_buffer(&dl, buf, 720, 1440);
+                            for (chunk_idx, chunk) in buf.chunks(4096).enumerate() {
+                                let _ = write_surface_fn(inst.surface_id, (chunk_idx * 4096) as usize, chunk);
                             }
+                            let _ = std::surface_flip();
+                        }
                         }
                     }
                 }

@@ -432,6 +432,18 @@ pub fn parse_and_verify_v2_or_v3_payload(
         let spki_bytes = &payload[cursor..cursor + pubkey_len];
         cursor += pubkey_len;
 
+        // Verify Certificate-to-PublicKey Binding:
+        // In AOSP APK Signature Scheme v2/v3, the first certificate in SignedData is
+        // the signing certificate, and its SubjectPublicKeyInfo MUST match spki_bytes
+        // byte-for-byte. An attacker supplying a victim's certificate with their own public key
+        // is strictly rejected.
+        let first_cert = first_cert_bytes.ok_or(ApkError::InvalidSignature)?;
+        let cert_spki = super::crypto::extract_spki_from_certificate(first_cert)
+            .ok_or(ApkError::InvalidSignature)?;
+        if cert_spki != spki_bytes {
+            return Err(ApkError::InvalidSignature);
+        }
+
         // Parse public key from SPKI
         let parsed_pk = parse_spki(spki_bytes).ok_or(ApkError::InvalidSignature)?;
 
@@ -696,7 +708,17 @@ pub fn create_test_v2_signing_block(
     use super::crypto::{public_key_from_private_p256, sign_ecdsa_p256};
 
     let algo_id = SIG_ALGO_ECDSA_WITH_SHA256;
-    let (pub_x, pub_y) = public_key_from_private_p256(&TEST_ECDSA_PRIVKEY);
+    let is_primary_test_cert = certificate == b"INTEROS_ACR_DETERMINISTIC_TEST_SIGNER_CERTIFICATE_V2";
+    let (priv_key, (pub_x, pub_y)) = if !is_primary_test_cert && !certificate.starts_with(&[0x30]) {
+        let mut alt_key = TEST_ECDSA_PRIVKEY;
+        for (i, b) in certificate.iter().enumerate() {
+            alt_key[i % 32] ^= *b;
+        }
+        let pt = public_key_from_private_p256(&alt_key);
+        (alt_key, pt)
+    } else {
+        (TEST_ECDSA_PRIVKEY, public_key_from_private_p256(&TEST_ECDSA_PRIVKEY))
+    };
 
     // Build SPKI: 30 59 30 13 06 07 2a 86 48 ce 3d 02 01 06 08 2a 86 48 ce 3d 03 01 07 03 42 00 04 || x || y
     let mut spki = Vec::new();
@@ -708,7 +730,13 @@ pub fn create_test_v2_signing_block(
     spki.extend_from_slice(&pub_x);
     spki.extend_from_slice(&pub_y);
 
-    let cert_entry_len = 4 + certificate.len();
+    let cert_der = if certificate.starts_with(&[0x30]) {
+        certificate.to_vec()
+    } else {
+        super::crypto::build_test_certificate_der(&spki)
+    };
+
+    let cert_entry_len = 4 + cert_der.len();
     let signed_data_len = 4 + (4 + 4 + 4 + 32) + 4 + cert_entry_len + 4;
     let signer_len = 4 + signed_data_len + 4 + 76 + 4 + spki.len();
     let signers_len = 4 + signer_len;
@@ -742,8 +770,8 @@ pub fn create_test_v2_signing_block(
     digests_bytes.extend_from_slice(&content_digest);
 
     let mut certs_bytes = Vec::new();
-    certs_bytes.extend_from_slice(&(certificate.len() as u32).to_le_bytes());
-    certs_bytes.extend_from_slice(certificate);
+    certs_bytes.extend_from_slice(&(cert_der.len() as u32).to_le_bytes());
+    certs_bytes.extend_from_slice(&cert_der);
 
     let mut signed_data = Vec::new();
     signed_data.extend_from_slice(&(digests_bytes.len() as u32).to_le_bytes());
@@ -757,7 +785,7 @@ pub fn create_test_v2_signing_block(
     let mut sd_hash_arr = [0u8; 32];
     sd_hash_arr.copy_from_slice(&sd_hash);
 
-    let (sig_r, sig_s) = sign_ecdsa_p256(&TEST_ECDSA_PRIVKEY, &TEST_ECDSA_K, &sd_hash_arr).unwrap();
+    let (sig_r, sig_s) = sign_ecdsa_p256(&priv_key, &TEST_ECDSA_K, &sd_hash_arr).unwrap();
     let mut sig_64 = Vec::with_capacity(64);
     sig_64.extend_from_slice(&sig_r);
     sig_64.extend_from_slice(&sig_s);
@@ -815,5 +843,92 @@ mod tests {
         assert_eq!(details.scheme, ApkSignatureScheme::V2);
         assert_eq!(details.algorithm_id, SIG_ALGO_RSA_PKCS1_V1_5_WITH_SHA256);
         assert_eq!(details.signers_count, 1);
+        assert_ne!(details.primary_cert_fingerprint, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_certificate_spki_binding_forgery_fails_closed() {
+        use crate::crypto::{public_key_from_private_p256, sign_ecdsa_p256, build_test_certificate_der};
+
+        let algo_id = SIG_ALGO_ECDSA_WITH_SHA256;
+        let (pub_x, pub_y) = public_key_from_private_p256(&TEST_ECDSA_PRIVKEY);
+
+        // Legitimate SPKI from key pair A
+        let mut spki_a = Vec::new();
+        let ec_spki_header = [
+            0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
+            0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04,
+        ];
+        spki_a.extend_from_slice(&ec_spki_header);
+        spki_a.extend_from_slice(&pub_x);
+        spki_a.extend_from_slice(&pub_y);
+
+        // Victim certificate embedding SPKI from key pair A
+        let victim_cert = build_test_certificate_der(&spki_a);
+
+        // Attacker SPKI from key pair B (different public key)
+        let attacker_privkey = [0x55u8; 32];
+        let (att_x, att_y) = public_key_from_private_p256(&attacker_privkey);
+        let mut attacker_spki = Vec::new();
+        attacker_spki.extend_from_slice(&ec_spki_header);
+        attacker_spki.extend_from_slice(&att_x);
+        attacker_spki.extend_from_slice(&att_y);
+
+        let content_digest = [0x42u8; 32];
+
+        // Attacker builds SignedData containing VICTIM's certificate
+        let mut digests_bytes = Vec::new();
+        digests_bytes.extend_from_slice(&(40u32).to_le_bytes());
+        digests_bytes.extend_from_slice(&algo_id.to_le_bytes());
+        digests_bytes.extend_from_slice(&(32u32).to_le_bytes());
+        digests_bytes.extend_from_slice(&content_digest);
+
+        let mut certs_bytes = Vec::new();
+        certs_bytes.extend_from_slice(&(victim_cert.len() as u32).to_le_bytes());
+        certs_bytes.extend_from_slice(&victim_cert);
+
+        let mut signed_data = Vec::new();
+        signed_data.extend_from_slice(&(digests_bytes.len() as u32).to_le_bytes());
+        signed_data.extend_from_slice(&digests_bytes);
+        signed_data.extend_from_slice(&(certs_bytes.len() as u32).to_le_bytes());
+        signed_data.extend_from_slice(&certs_bytes);
+        signed_data.extend_from_slice(&0u32.to_le_bytes());
+
+        // Attacker signs SignedData with ATTACKER private key
+        let sd_hash = Sha256::digest(&signed_data);
+        let mut sd_hash_arr = [0u8; 32];
+        sd_hash_arr.copy_from_slice(&sd_hash);
+
+        let (r, s) = sign_ecdsa_p256(&attacker_privkey, &TEST_ECDSA_K, &sd_hash_arr).unwrap();
+        let mut sig_64 = Vec::with_capacity(64);
+        sig_64.extend_from_slice(&r);
+        sig_64.extend_from_slice(&s);
+
+        let mut sigs = Vec::new();
+        sigs.extend_from_slice(&(72u32).to_le_bytes());
+        sigs.extend_from_slice(&algo_id.to_le_bytes());
+        sigs.extend_from_slice(&(64u32).to_le_bytes());
+        sigs.extend_from_slice(&sig_64);
+
+        // Signer block has Victim Certificate in SignedData + Attacker Signature + Attacker SPKI
+        let mut signer = Vec::new();
+        signer.extend_from_slice(&(signed_data.len() as u32).to_le_bytes());
+        signer.extend_from_slice(&signed_data);
+        signer.extend_from_slice(&(sigs.len() as u32).to_le_bytes());
+        signer.extend_from_slice(&sigs);
+        signer.extend_from_slice(&(attacker_spki.len() as u32).to_le_bytes());
+        signer.extend_from_slice(&attacker_spki);
+
+        let mut signers = Vec::new();
+        signers.extend_from_slice(&(signer.len() as u32).to_le_bytes());
+        signers.extend_from_slice(&signer);
+
+        let mut v2_payload = Vec::new();
+        v2_payload.extend_from_slice(&(signers.len() as u32).to_le_bytes());
+        v2_payload.extend_from_slice(&signers);
+
+        // MUST be rejected because victim_cert's embedded SPKI != attacker_spki in field 3!
+        let result = parse_and_verify_v2_or_v3_payload(&v2_payload, ApkSignatureScheme::V2, &content_digest);
+        assert_eq!(result.err(), Some(ApkError::InvalidSignature));
     }
 }

@@ -8966,7 +8966,7 @@ fn launch_registered_package(app_id: &str, parent_id: TaskId) -> Result<crate::t
         let tid = crate::task::user::spawn_android_app_process(
             app_id,
             parent_id,
-            8 * 1024 * 1024,
+            32 * 1024 * 1024,
             registered.app_uid,
             registered.code_digest,
         ).map_err(|_| SyscallResult::DeviceError)?;
