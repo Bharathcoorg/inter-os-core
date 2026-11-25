@@ -1489,9 +1489,9 @@ mod tests {
                 vm.last_return_value = v;
                 vm.last_return_string = None;
             }
-            _ => panic!("Expected Return(0)"),
+            _ => panic!("Expected Return(1)"),
         }
-        assert_eq!(vm.last_return_value, 0);
+        assert_eq!(vm.last_return_value, 1);
         assert_eq!(vm.last_return_string, None);
 
         // Invoke AdvertisingIdClient$Info: getId

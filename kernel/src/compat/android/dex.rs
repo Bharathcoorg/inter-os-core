@@ -681,11 +681,21 @@ fn charge_string_bytes(budget: &mut usize, bytes: usize) -> Result<(), DexError>
 /// Reads an unsigned LEB128 integer from slice at `*offset`.
 pub fn read_uleb128(bytes: &[u8], offset: &mut usize) -> Result<u32, DexError> {
     let mut result: u32 = 0;
-    let mut shift = 0;
+    let mut shift: u32 = 0;
     while *offset < bytes.len() {
         let byte = bytes[*offset];
         *offset += 1;
-        result |= ((byte & 0x7F) as u32) << shift;
+        let payload = (byte & 0x7F) as u32;
+        if shift < 28 {
+            result |= payload << shift;
+        } else if shift == 28 {
+            if (payload & 0x70) != 0 {
+                return Err(DexError::MalformedUleb128);
+            }
+            result |= payload << 28;
+        } else {
+            return Err(DexError::MalformedUleb128);
+        }
         if (byte & 0x80) == 0 {
             return Ok(result);
         }
@@ -698,25 +708,53 @@ pub fn read_uleb128(bytes: &[u8], offset: &mut usize) -> Result<u32, DexError> {
 }
 
 /// Reads a signed LEB128 integer from slice at `*offset`.
+///
+/// Fully hardened against integer overflow, invalid shift values,
+/// and safely decodes `i32::MIN` (-2147483648).
 pub fn read_sleb128(bytes: &[u8], offset: &mut usize) -> Result<i32, DexError> {
-    let mut result: i32 = 0;
-    let mut shift = 0;
-    while *offset < bytes.len() {
-        let byte = bytes[*offset];
+    let mut result: u32 = 0;
+    let mut shift: u32 = 0;
+    let mut byte: u8;
+    loop {
+        if *offset >= bytes.len() {
+            return Err(DexError::UnexpectedEof);
+        }
+        byte = bytes[*offset];
         *offset += 1;
-        result |= ((byte & 0x7F) as i32) << shift;
+
+        let payload = (byte & 0x7F) as u32;
+        if shift < 28 {
+            result |= payload << shift;
+        } else if shift == 28 {
+            // In a 32-bit signed int, the 5th byte provides bits 28..31 (4 bits).
+            // Bits 4..6 are sign extension bits and must match the sign bit.
+            result |= (payload & 0x0F) << 28;
+            let sign_bit = (byte & 0x40) != 0;
+            if sign_bit {
+                if (payload & 0x70) != 0x70 || (payload & 0x08) == 0 {
+                    return Err(DexError::MalformedUleb128);
+                }
+            } else if (payload & 0x70) != 0 || (payload & 0x08) != 0 {
+                return Err(DexError::MalformedUleb128);
+            }
+        } else {
+            return Err(DexError::MalformedUleb128);
+        }
+
         shift += 7;
         if (byte & 0x80) == 0 {
-            if shift < 32 && (byte & 0x40) != 0 {
-                result |= -1 << shift;
-            }
-            return Ok(result);
+            break;
         }
         if shift > 35 {
             return Err(DexError::MalformedUleb128);
         }
     }
-    Err(DexError::UnexpectedEof)
+
+    if shift < 32 && (byte & 0x40) != 0 {
+        result |= !0u32 << shift;
+    }
+
+    Ok(result as i32)
 }
 
 /// Computes the standard Adler-32 checksum (modulo 65521).

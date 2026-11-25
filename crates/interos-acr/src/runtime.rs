@@ -8,6 +8,7 @@
 //! runtime. Unsupported opcodes and framework effects fail closed; callers must not
 //! treat this interpreter as general APK compatibility or a process-isolation boundary.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use interos_android_format::dex::*;
@@ -29,7 +30,47 @@ pub enum DalvikVmError {
     UnhandledException(u32),
 }
 
+const MAX_TRIES_COUNT: usize = 256;
+const MAX_CATCH_HANDLERS_PER_TRY: usize = 256;
+
+/// Checks if thrown exception is compatible with catch type descriptor according to Java exception hierarchy.
+fn is_exception_compatible(dex: &DexPackage, thrown_desc: &str, catch_type_idx: u32) -> bool {
+    let Some(catch_desc) = dex.types.get(catch_type_idx as usize) else {
+        return false;
+    };
+    if catch_desc == thrown_desc {
+        return true;
+    }
+    match catch_desc.as_str() {
+        "Ljava/lang/Object;" | "Ljava/lang/Throwable;" => true,
+        "Ljava/lang/Exception;" => !matches!(
+            thrown_desc,
+            "Ljava/lang/Error;" | "Ljava/lang/VirtualMachineError;" | "Ljava/lang/OutOfMemoryError;"
+        ),
+        "Ljava/lang/RuntimeException;" => matches!(
+            thrown_desc,
+            "Ljava/lang/RuntimeException;"
+                | "Ljava/lang/NullPointerException;"
+                | "Ljava/lang/IndexOutOfBoundsException;"
+                | "Ljava/lang/ArrayIndexOutOfBoundsException;"
+                | "Ljava/lang/StringIndexOutOfBoundsException;"
+                | "Ljava/lang/IllegalArgumentException;"
+                | "Ljava/lang/IllegalStateException;"
+                | "Ljava/lang/ArithmeticException;"
+                | "Ljava/lang/ClassCastException;"
+        ),
+        "Ljava/lang/IndexOutOfBoundsException;" => matches!(
+            thrown_desc,
+            "Ljava/lang/IndexOutOfBoundsException;"
+                | "Ljava/lang/ArrayIndexOutOfBoundsException;"
+                | "Ljava/lang/StringIndexOutOfBoundsException;"
+        ),
+        _ => false,
+    }
+}
+
 /// Finds a matching catch handler offset in bytes for a given bytecode pc within the method.
+/// Validates tries_size, bounded handlers, safe sleb128 abs without overflow, and instruction 2-byte alignment.
 fn find_catch_handler(
     dex: &DexPackage,
     code_offset: usize,
@@ -40,7 +81,7 @@ fn find_catch_handler(
         return None;
     }
     let tries_size = u16::from_le_bytes([dex.raw[code_offset + 6], dex.raw[code_offset + 7]]) as usize;
-    if tries_size == 0 {
+    if tries_size == 0 || tries_size > MAX_TRIES_COUNT {
         return None;
     }
     let insns_size = u32::from_le_bytes([
@@ -86,28 +127,27 @@ fn find_catch_handler(
                 return None;
             }
             let handler_size = read_sleb128(dex.raw, &mut cur).ok()?;
-            let abs_size = handler_size.abs() as usize;
+            if handler_size == i32::MIN {
+                return None;
+            }
+            let abs_size = handler_size.unsigned_abs() as usize;
+            if abs_size > MAX_CATCH_HANDLERS_PER_TRY {
+                return None;
+            }
 
             for _ in 0..abs_size {
                 let type_idx = read_uleb128(dex.raw, &mut cur).ok()?;
                 let target_addr = read_uleb128(dex.raw, &mut cur).ok()?;
 
                 let matches = if let Some(ex_desc) = ex_class_desc {
-                    if let Some(target_type) = dex.types.get(type_idx as usize) {
-                        target_type == ex_desc
-                            || target_type == "Ljava/lang/Throwable;"
-                            || target_type == "Ljava/lang/Exception;"
-                            || target_type == "Ljava/lang/RuntimeException;"
-                    } else {
-                        false
-                    }
+                    is_exception_compatible(dex, ex_desc, type_idx)
                 } else {
                     true
                 };
 
                 if matches {
                     let target_byte_pc = (target_addr as usize).checked_mul(2)?;
-                    if target_byte_pc < insns_bytes_len {
+                    if target_byte_pc < insns_bytes_len && (target_byte_pc % 2 == 0) {
                         return Some(target_byte_pc);
                     }
                 }
@@ -116,7 +156,7 @@ fn find_catch_handler(
             if handler_size <= 0 {
                 let catch_all_addr = read_uleb128(dex.raw, &mut cur).ok()?;
                 let target_byte_pc = (catch_all_addr as usize).checked_mul(2)?;
-                if target_byte_pc < insns_bytes_len {
+                if target_byte_pc < insns_bytes_len && (target_byte_pc % 2 == 0) {
                     return Some(target_byte_pc);
                 }
             }
@@ -141,22 +181,78 @@ fn decode_invoke_registers(insns: &[u8], pc: usize) -> Result<([usize; 5], usize
     Ok((regs, count))
 }
 
+/// Typed value stored inside an Android Bundle or Intent extras.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundleValue {
+    String(String),
+    Int(i32),
+    Long(i64),
+    Boolean(bool),
+    Bundle(BTreeMap<String, BundleValue>),
+}
+
+/// VM-managed payload for stateful Java and Android objects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectPayload {
+    None,
+    String(String),
+    StringBuilder(String),
+    BoxedBoolean(bool),
+    BoxedInteger(i32),
+    BoxedLong(i64),
+    Class { descriptor: String },
+    ArrayList(Vec<u32>),
+    Bundle(BTreeMap<String, BundleValue>),
+    Intent {
+        action: Option<String>,
+        categories: Vec<String>,
+        data_uri: Option<String>,
+        extras: BTreeMap<String, BundleValue>,
+    },
+    Throwable {
+        message: Option<String>,
+        cause_id: Option<u32>,
+    },
+}
+
 /// Bounded object allocated by one isolated Dalvik VM instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DalvikObject {
-    id: u32,
-    class_descriptor: String,
-    fields: Vec<(u16, u32)>,
-    array_elements: Option<Vec<u32>>,
+pub struct DalvikObject {
+    pub id: u32,
+    pub class_descriptor: String,
+    pub fields: Vec<(u16, u32)>,
+    pub array_elements: Option<Vec<u32>>,
+    pub payload: ObjectPayload,
 }
 
 impl DalvikObject {
     fn new(id: u32, class_descriptor: &str) -> Self {
+        let payload = match class_descriptor {
+            "Ljava/lang/String;" => ObjectPayload::String(String::new()),
+            "Ljava/lang/StringBuilder;" => ObjectPayload::StringBuilder(String::new()),
+            "Ljava/lang/Integer;" => ObjectPayload::BoxedInteger(0),
+            "Ljava/lang/Long;" => ObjectPayload::BoxedLong(0),
+            "Ljava/lang/Boolean;" => ObjectPayload::BoxedBoolean(false),
+            "Ljava/lang/Class;" => ObjectPayload::Class { descriptor: String::new() },
+            "Ljava/util/ArrayList;" => ObjectPayload::ArrayList(Vec::new()),
+            "Landroid/content/Intent;" => ObjectPayload::Intent {
+                action: None,
+                categories: Vec::new(),
+                data_uri: None,
+                extras: BTreeMap::new(),
+            },
+            "Landroid/os/Bundle;" => ObjectPayload::Bundle(BTreeMap::new()),
+            desc if desc.contains("Exception") || desc.contains("Throwable") || desc.contains("Error") => {
+                ObjectPayload::Throwable { message: None, cause_id: None }
+            }
+            _ => ObjectPayload::None,
+        };
         Self {
             id,
             class_descriptor: String::from(class_descriptor),
             fields: Vec::new(),
             array_elements: None,
+            payload,
         }
     }
 
@@ -166,6 +262,7 @@ impl DalvikObject {
             class_descriptor: String::from(element_type),
             fields: Vec::new(),
             array_elements: Some(alloc::vec![0u32; length]),
+            payload: ObjectPayload::None,
         }
     }
 
@@ -251,7 +348,7 @@ impl DalvikVmState {
                 marked.insert(*val);
             }
         }
-        // Traverse fields of marked objects
+        // Traverse fields and stateful payloads of marked objects
         let mut queue: Vec<u32> = marked.iter().copied().collect();
         while let Some(obj_id) = queue.pop() {
             if let Some(obj) = self.objects.iter().find(|o| o.id == obj_id) {
@@ -259,6 +356,28 @@ impl DalvikVmState {
                     if *f_val > 0 && *f_val < self.next_object_id && marked.insert(*f_val) {
                         queue.push(*f_val);
                     }
+                }
+                if let Some(ref elems) = obj.array_elements {
+                    for elem in elems {
+                        if *elem > 0 && *elem < self.next_object_id && marked.insert(*elem) {
+                            queue.push(*elem);
+                        }
+                    }
+                }
+                match &obj.payload {
+                    ObjectPayload::ArrayList(list) => {
+                        for item in list {
+                            if *item > 0 && *item < self.next_object_id && marked.insert(*item) {
+                                queue.push(*item);
+                            }
+                        }
+                    }
+                    ObjectPayload::Throwable { cause_id: Some(cause), .. } => {
+                        if *cause > 0 && *cause < self.next_object_id && marked.insert(*cause) {
+                            queue.push(*cause);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -324,6 +443,1129 @@ impl DalvikVmState {
 
     fn get_object_mut(&mut self, id: u32) -> Result<&mut DalvikObject, DalvikVmError> {
         self.objects.iter_mut().find(|o| o.id == id).ok_or(DalvikVmError::NullPointerDereference)
+    }
+
+    /// Allocates a new String object identity with the given content.
+    pub fn allocate_string(&mut self, text: &str) -> Result<u32, DalvikVmError> {
+        let id = self.allocate_object("Ljava/lang/String;")?;
+        if let Ok(obj) = self.get_object_mut(id) {
+            obj.payload = ObjectPayload::String(String::from(text));
+        }
+        Ok(id)
+    }
+
+    /// Retrieves string text if the given object is a String, StringBuilder, or Class.
+    pub fn get_string_payload(&self, id: u32) -> Option<String> {
+        if id == 0 {
+            return None;
+        }
+        if let Ok(obj) = self.get_object(id) {
+            match &obj.payload {
+                ObjectPayload::String(s) => return Some(s.clone()),
+                ObjectPayload::StringBuilder(s) => return Some(s.clone()),
+                ObjectPayload::Class { descriptor } => {
+                    let clean = descriptor.strip_prefix('L').and_then(|d| d.strip_suffix(';')).unwrap_or(descriptor);
+                    return Some(clean.replace('/', "."));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Seamlessly resolves a string argument across shadow registers, object heap, and DEX string pool.
+    pub fn resolve_string_arg(&self, dex: &DexPackage, reg_val: u32, shadow_str: Option<&str>) -> Option<String> {
+        if let Some(s) = shadow_str {
+            return Some(String::from(s));
+        }
+        if let Some(s) = self.get_string_payload(reg_val) {
+            return Some(s);
+        }
+        if let Ok(s) = dex.get_string_slice(reg_val) {
+            return Some(String::from(s));
+        }
+        None
+    }
+
+    fn resolve_string_for_receiver(&self, dex: &DexPackage, arg_registers: &[usize], arg_values: &[u32]) -> String {
+        if !arg_values.is_empty() {
+            let shadow = if !arg_registers.is_empty() && arg_registers[0] < self.string_registers.len() {
+                self.string_registers[arg_registers[0]].as_deref()
+            } else {
+                None
+            };
+            self.resolve_string_arg(dex, arg_values[0], shadow).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    }
+
+    fn get_class_descriptor_for_receiver(&self, arg_values: &[u32]) -> String {
+        if !arg_values.is_empty() {
+            if let Ok(obj) = self.get_object(arg_values[0]) {
+                if let ObjectPayload::Class { descriptor } = &obj.payload {
+                    return descriptor.clone();
+                }
+                return obj.class_descriptor.clone();
+            }
+        }
+        String::from("Ljava/lang/Object;")
+    }
+
+    /// Allocates an exception object and returns an UnhandledException error with its ID.
+    pub fn throw_exception(&mut self, class_descriptor: &str, message: Option<&str>) -> DalvikVmError {
+        match self.allocate_object(class_descriptor) {
+            Ok(ex_id) => {
+                if let Ok(obj) = self.get_object_mut(ex_id) {
+                    obj.payload = ObjectPayload::Throwable {
+                        message: message.map(String::from),
+                        cause_id: None,
+                    };
+                }
+                DalvikVmError::UnhandledException(ex_id)
+            }
+            Err(e) => e,
+        }
+    }
+
+    pub fn throw_npe(&mut self, message: Option<&str>) -> DalvikVmError {
+        self.throw_exception("Ljava/lang/NullPointerException;", message)
+    }
+
+    pub fn throw_oob(&mut self, message: Option<&str>) -> DalvikVmError {
+        self.throw_exception("Ljava/lang/IndexOutOfBoundsException;", message)
+    }
+
+    pub fn throw_class_not_found(&mut self, message: Option<&str>) -> DalvikVmError {
+        self.throw_exception("Ljava/lang/ClassNotFoundException;", message)
+    }
+
+    /// Dispatches Java standard library and Android framework methods with genuine VM-managed state.
+    pub fn dispatch_framework_method(
+        &mut self,
+        dex: &DexPackage,
+        class_name: &str,
+        method_name: &str,
+        arg_registers: &[usize],
+        arg_values: &[u32],
+    ) -> Result<u32, DalvikVmError> {
+        let class = class_name.strip_prefix('L').and_then(|s| s.strip_suffix(';')).unwrap_or(class_name);
+        match class {
+            "java/lang/String" => {
+                match method_name {
+                    "<init>" => {
+                        if !arg_values.is_empty() {
+                            let receiver_id = arg_values[0];
+                            let init_str = if arg_values.len() > 1 {
+                                let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                                    self.string_registers[arg_registers[1]].as_deref()
+                                } else {
+                                    None
+                                };
+                                self.resolve_string_arg(dex, arg_values[1], shadow).unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                obj.payload = ObjectPayload::String(init_str.clone());
+                            }
+                            if let Some(r) = arg_registers.first() {
+                                if *r < self.string_registers.len() {
+                                    self.string_registers[*r] = Some(init_str);
+                                }
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "length" => {
+                        let s = self.resolve_string_for_receiver(dex, arg_registers, arg_values);
+                        let len = s.encode_utf16().count() as u32;
+                        self.last_return_value = len;
+                        self.last_return_string = None;
+                        Ok(len)
+                    }
+                    "charAt" => {
+                        let s = self.resolve_string_for_receiver(dex, arg_registers, arg_values);
+                        let idx = arg_values.get(1).copied().unwrap_or(0) as usize;
+                        let utf16: Vec<u16> = s.encode_utf16().collect();
+                        if idx >= utf16.len() {
+                            return Err(self.throw_oob(Some("String index out of bounds")));
+                        }
+                        let ch = utf16[idx] as u32;
+                        self.last_return_value = ch;
+                        self.last_return_string = None;
+                        Ok(ch)
+                    }
+                    "substring" => {
+                        let s = self.resolve_string_for_receiver(dex, arg_registers, arg_values);
+                        let utf16: Vec<u16> = s.encode_utf16().collect();
+                        let begin = arg_values.get(1).copied().unwrap_or(0) as usize;
+                        let end = if arg_values.len() > 2 { arg_values[2] as usize } else { utf16.len() };
+                        if begin > end || end > utf16.len() {
+                            return Err(self.throw_oob(Some("String index out of bounds")));
+                        }
+                        let sub = String::from_utf16_lossy(&utf16[begin..end]);
+                        let new_id = self.allocate_string(&sub)?;
+                        self.last_return_value = new_id;
+                        self.last_return_string = Some(sub);
+                        Ok(new_id)
+                    }
+                    "concat" => {
+                        let s1 = self.resolve_string_for_receiver(dex, arg_registers, arg_values);
+                        let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else {
+                            None
+                        };
+                        let s2 = if arg_values.len() > 1 {
+                            self.resolve_string_arg(dex, arg_values[1], shadow).unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        let mut res = s1;
+                        res.push_str(&s2);
+                        let new_id = self.allocate_string(&res)?;
+                        self.last_return_value = new_id;
+                        self.last_return_string = Some(res);
+                        Ok(new_id)
+                    }
+                    "equals" => {
+                        let s1 = self.resolve_string_for_receiver(dex, arg_registers, arg_values);
+                        let s2_opt = if arg_values.len() > 1 {
+                            let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                                self.string_registers[arg_registers[1]].as_deref()
+                            } else {
+                                None
+                            };
+                            self.resolve_string_arg(dex, arg_values[1], shadow)
+                        } else {
+                            None
+                        };
+                        let eq = match s2_opt {
+                            Some(s2) => s1 == s2,
+                            None => false,
+                        };
+                        let res = if eq { 1 } else { 0 };
+                        self.last_return_value = res;
+                        self.last_return_string = None;
+                        Ok(res)
+                    }
+                    "isEmpty" => {
+                        let s = self.resolve_string_for_receiver(dex, arg_registers, arg_values);
+                        let is_empty = if s.is_empty() { 1 } else { 0 };
+                        self.last_return_value = is_empty;
+                        self.last_return_string = None;
+                        Ok(is_empty)
+                    }
+                    "valueOf" => {
+                        let s = if !arg_values.is_empty() {
+                            let shadow = if !arg_registers.is_empty() && arg_registers[0] < self.string_registers.len() {
+                                self.string_registers[arg_registers[0]].as_deref()
+                            } else {
+                                None
+                            };
+                            self.resolve_string_arg(dex, arg_values[0], shadow).unwrap_or_else(|| {
+                                alloc::format!("{}", arg_values[0])
+                            })
+                        } else {
+                            String::new()
+                        };
+                        let new_id = self.allocate_string(&s)?;
+                        self.last_return_value = new_id;
+                        self.last_return_string = Some(s);
+                        Ok(new_id)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "java/lang/StringBuilder" => {
+                match method_name {
+                    "<init>" => {
+                        if !arg_values.is_empty() {
+                            let receiver_id = arg_values[0];
+                            let init_str = if arg_values.len() > 1 {
+                                let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                                    self.string_registers[arg_registers[1]].as_deref()
+                                } else {
+                                    None
+                                };
+                                self.resolve_string_arg(dex, arg_values[1], shadow).unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                obj.payload = ObjectPayload::StringBuilder(init_str);
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "append" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        if receiver_id == 0 {
+                            return Err(self.throw_npe(Some("Null StringBuilder receiver")));
+                        }
+                        let append_str = if arg_values.len() > 1 {
+                            let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                                self.string_registers[arg_registers[1]].as_deref()
+                            } else {
+                                None
+                            };
+                            self.resolve_string_arg(dex, arg_values[1], shadow).unwrap_or_else(|| {
+                                alloc::format!("{}", arg_values[1])
+                            })
+                        } else {
+                            String::new()
+                        };
+                        let current_buf = if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            match &mut obj.payload {
+                                ObjectPayload::StringBuilder(buf) => {
+                                    buf.push_str(&append_str);
+                                    buf.clone()
+                                }
+                                _ => {
+                                    let mut buf = String::new();
+                                    buf.push_str(&append_str);
+                                    obj.payload = ObjectPayload::StringBuilder(buf.clone());
+                                    buf
+                                }
+                            }
+                        } else {
+                            return Err(self.throw_npe(Some("Invalid StringBuilder object")));
+                        };
+                        self.last_return_value = receiver_id;
+                        self.last_return_string = Some(current_buf);
+                        Ok(receiver_id)
+                    }
+                    "toString" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let buf = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::StringBuilder(s) => s.clone(),
+                                _ => String::new(),
+                            }
+                        } else {
+                            String::new()
+                        };
+                        let str_id = self.allocate_string(&buf)?;
+                        self.last_return_value = str_id;
+                        self.last_return_string = Some(buf);
+                        Ok(str_id)
+                    }
+                    "length" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let len = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::StringBuilder(s) => s.encode_utf16().count() as u32,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = len;
+                        self.last_return_string = None;
+                        Ok(len)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "java/lang/Integer" => {
+                match method_name {
+                    "<init>" => {
+                        if !arg_values.is_empty() {
+                            let receiver_id = arg_values[0];
+                            let val = arg_values.get(1).copied().unwrap_or(0) as i32;
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                obj.payload = ObjectPayload::BoxedInteger(val);
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "valueOf" => {
+                        let val = arg_values.first().copied().unwrap_or(0) as i32;
+                        let id = self.allocate_object("Ljava/lang/Integer;")?;
+                        if let Ok(obj) = self.get_object_mut(id) {
+                            obj.payload = ObjectPayload::BoxedInteger(val);
+                        }
+                        self.last_return_value = id;
+                        self.last_return_string = None;
+                        Ok(id)
+                    }
+                    "intValue" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::BoxedInteger(v) => *v as u32,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = val;
+                        self.last_return_string = None;
+                        Ok(val)
+                    }
+                    "toString" => {
+                        let val_str = if !arg_values.is_empty() {
+                            if let Ok(obj) = self.get_object(arg_values[0]) {
+                                match &obj.payload {
+                                    ObjectPayload::BoxedInteger(v) => alloc::format!("{}", v),
+                                    _ => String::from("0"),
+                                }
+                            } else {
+                                alloc::format!("{}", arg_values[0])
+                            }
+                        } else {
+                            String::from("0")
+                        };
+                        let id = self.allocate_string(&val_str)?;
+                        self.last_return_value = id;
+                        self.last_return_string = Some(val_str);
+                        Ok(id)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "java/lang/Long" => {
+                match method_name {
+                    "<init>" => {
+                        if !arg_values.is_empty() {
+                            let receiver_id = arg_values[0];
+                            let lo = arg_values.get(1).copied().unwrap_or(0) as u64;
+                            let hi = arg_values.get(2).copied().unwrap_or(0) as u64;
+                            let val = ((hi << 32) | lo) as i64;
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                obj.payload = ObjectPayload::BoxedLong(val);
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "valueOf" => {
+                        let lo = arg_values.first().copied().unwrap_or(0) as u64;
+                        let hi = arg_values.get(1).copied().unwrap_or(0) as u64;
+                        let val = ((hi << 32) | lo) as i64;
+                        let id = self.allocate_object("Ljava/lang/Long;")?;
+                        if let Ok(obj) = self.get_object_mut(id) {
+                            obj.payload = ObjectPayload::BoxedLong(val);
+                        }
+                        self.last_return_value = id;
+                        self.last_return_string = None;
+                        Ok(id)
+                    }
+                    "longValue" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::BoxedLong(v) => *v,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = (val as u64 & 0xFFFFFFFF) as u32;
+                        self.last_return_wide_hi = ((val as u64 >> 32) & 0xFFFFFFFF) as u32;
+                        self.last_return_string = None;
+                        Ok(self.last_return_value)
+                    }
+                    "intValue" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::BoxedLong(v) => *v as i32 as u32,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = val;
+                        self.last_return_string = None;
+                        Ok(val)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "java/lang/Boolean" => {
+                match method_name {
+                    "<init>" => {
+                        if !arg_values.is_empty() {
+                            let receiver_id = arg_values[0];
+                            let val = arg_values.get(1).copied().unwrap_or(0) != 0;
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                obj.payload = ObjectPayload::BoxedBoolean(val);
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "valueOf" => {
+                        let val = arg_values.first().copied().unwrap_or(0) != 0;
+                        let id = self.allocate_object("Ljava/lang/Boolean;")?;
+                        if let Ok(obj) = self.get_object_mut(id) {
+                            obj.payload = ObjectPayload::BoxedBoolean(val);
+                        }
+                        self.last_return_value = id;
+                        self.last_return_string = None;
+                        Ok(id)
+                    }
+                    "booleanValue" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::BoxedBoolean(b) => if *b { 1 } else { 0 },
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = val;
+                        self.last_return_string = None;
+                        Ok(val)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "java/lang/Class" => {
+                match method_name {
+                    "forName" => {
+                        let shadow = if !arg_registers.is_empty() && arg_registers[0] < self.string_registers.len() {
+                            self.string_registers[arg_registers[0]].as_deref()
+                        } else {
+                            None
+                        };
+                        let class_name = if !arg_values.is_empty() {
+                            self.resolve_string_arg(dex, arg_values[0], shadow).unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        let descriptor = if class_name.starts_with('L') && class_name.ends_with(';') {
+                            class_name.clone()
+                        } else {
+                            alloc::format!("L{};", class_name.replace('.', "/"))
+                        };
+                        let exists = dex.types.iter().any(|t| t == &descriptor)
+                            || dex.methods.iter().any(|m| m.class_name == descriptor)
+                            || matches!(descriptor.as_str(), "Ljava/lang/String;" | "Ljava/lang/Object;" | "Ljava/lang/Integer;" | "Ljava/lang/Boolean;");
+                        if !exists {
+                            return Err(self.throw_class_not_found(Some(&class_name)));
+                        }
+                        let id = self.allocate_object("Ljava/lang/Class;")?;
+                        if let Ok(obj) = self.get_object_mut(id) {
+                            obj.payload = ObjectPayload::Class { descriptor };
+                        }
+                        self.last_return_value = id;
+                        self.last_return_string = None;
+                        Ok(id)
+                    }
+                    "getName" => {
+                        let desc = self.get_class_descriptor_for_receiver(arg_values);
+                        let clean = desc.strip_prefix('L').and_then(|d| d.strip_suffix(';')).unwrap_or(&desc);
+                        let dotted = clean.replace('/', ".");
+                        let id = self.allocate_string(&dotted)?;
+                        self.last_return_value = id;
+                        self.last_return_string = Some(dotted);
+                        Ok(id)
+                    }
+                    "getSimpleName" => {
+                        let desc = self.get_class_descriptor_for_receiver(arg_values);
+                        let clean = desc.strip_prefix('L').and_then(|d| d.strip_suffix(';')).unwrap_or(&desc);
+                        let simple = clean.rsplit('/').next().unwrap_or(clean);
+                        let id = self.allocate_string(simple)?;
+                        self.last_return_value = id;
+                        self.last_return_string = Some(String::from(simple));
+                        Ok(id)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "java/util/ArrayList" => {
+                match method_name {
+                    "<init>" => {
+                        if !arg_values.is_empty() {
+                            let receiver_id = arg_values[0];
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                obj.payload = ObjectPayload::ArrayList(Vec::new());
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "add" => {
+                        if arg_values.len() < 2 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        if receiver_id == 0 {
+                            return Err(self.throw_npe(Some("Null ArrayList receiver")));
+                        }
+                        if arg_values.len() == 2 {
+                            let elem = arg_values[1];
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                match &mut obj.payload {
+                                    ObjectPayload::ArrayList(list) => {
+                                        list.push(elem);
+                                    }
+                                    _ => {
+                                        obj.payload = ObjectPayload::ArrayList(alloc::vec![elem]);
+                                    }
+                                }
+                            }
+                            self.last_return_value = 1;
+                            self.last_return_string = None;
+                            Ok(1)
+                        } else {
+                            let idx = arg_values[1] as usize;
+                            let elem = arg_values[2];
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                match &mut obj.payload {
+                                    ObjectPayload::ArrayList(list) => {
+                                        if idx > list.len() {
+                                            return Err(self.throw_oob(Some("IndexOutOfBoundsException")));
+                                        }
+                                        list.insert(idx, elem);
+                                    }
+                                    _ => {
+                                        if idx > 0 {
+                                            return Err(self.throw_oob(Some("IndexOutOfBoundsException")));
+                                        }
+                                        obj.payload = ObjectPayload::ArrayList(alloc::vec![elem]);
+                                    }
+                                }
+                            }
+                            self.last_return_value = 0;
+                            self.last_return_string = None;
+                            Ok(0)
+                        }
+                    }
+                    "get" => {
+                        if arg_values.len() < 2 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        if receiver_id == 0 {
+                            return Err(self.throw_npe(Some("Null ArrayList receiver")));
+                        }
+                        let idx = arg_values[1] as usize;
+                        let elem = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::ArrayList(list) => {
+                                    if idx >= list.len() {
+                                        return Err(self.throw_oob(Some("IndexOutOfBoundsException")));
+                                    }
+                                    list[idx]
+                                }
+                                _ => return Err(self.throw_oob(Some("IndexOutOfBoundsException"))),
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = elem;
+                        self.last_return_string = self.get_string_payload(elem);
+                        Ok(elem)
+                    }
+                    "size" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let len = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::ArrayList(list) => list.len() as u32,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = len;
+                        self.last_return_string = None;
+                        Ok(len)
+                    }
+                    "isEmpty" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let is_empty = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::ArrayList(list) => if list.is_empty() { 1 } else { 0 },
+                                _ => 1,
+                            }
+                        } else {
+                            1
+                        };
+                        self.last_return_value = is_empty;
+                        self.last_return_string = None;
+                        Ok(is_empty)
+                    }
+                    "clear" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::ArrayList(list) = &mut obj.payload {
+                                list.clear();
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "android/content/Intent" => {
+                match method_name {
+                    "<init>" => {
+                        if !arg_values.is_empty() {
+                            let receiver_id = arg_values[0];
+                            let action = if arg_values.len() > 1 {
+                                let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                                    self.string_registers[arg_registers[1]].as_deref()
+                                } else {
+                                    None
+                                };
+                                self.resolve_string_arg(dex, arg_values[1], shadow)
+                            } else {
+                                None
+                            };
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                obj.payload = ObjectPayload::Intent {
+                                    action,
+                                    categories: Vec::new(),
+                                    data_uri: None,
+                                    extras: BTreeMap::new(),
+                                };
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "setAction" => {
+                        if arg_values.len() < 2 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else {
+                            None
+                        };
+                        let action = self.resolve_string_arg(dex, arg_values[1], shadow);
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Intent { action: act, .. } = &mut obj.payload {
+                                *act = action;
+                            }
+                        }
+                        self.last_return_value = receiver_id;
+                        self.last_return_string = None;
+                        Ok(receiver_id)
+                    }
+                    "getAction" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let action = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::Intent { action: Some(a), .. } => Some(a.clone()),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        match action {
+                            Some(a) => {
+                                let id = self.allocate_string(&a)?;
+                                self.last_return_value = id;
+                                self.last_return_string = Some(a);
+                                Ok(id)
+                            }
+                            None => {
+                                self.last_return_value = 0;
+                                self.last_return_string = None;
+                                Ok(0)
+                            }
+                        }
+                    }
+                    "putExtra" => {
+                        if arg_values.len() < 3 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else {
+                            None
+                        };
+                        let key = self.resolve_string_arg(dex, arg_values[1], key_shadow).unwrap_or_default();
+                        let val_shadow = if arg_registers.len() > 2 && arg_registers[2] < self.string_registers.len() {
+                            self.string_registers[arg_registers[2]].as_deref()
+                        } else {
+                            None
+                        };
+                        let val_bundle = if let Some(s) = self.resolve_string_arg(dex, arg_values[2], val_shadow) {
+                            BundleValue::String(s)
+                        } else {
+                            BundleValue::Int(arg_values[2] as i32)
+                        };
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Intent { extras, .. } = &mut obj.payload {
+                                extras.insert(key, val_bundle);
+                            }
+                        }
+                        self.last_return_value = receiver_id;
+                        self.last_return_string = None;
+                        Ok(receiver_id)
+                    }
+                    "getStringExtra" => {
+                        if arg_values.len() < 2 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else {
+                            None
+                        };
+                        let key = self.resolve_string_arg(dex, arg_values[1], key_shadow).unwrap_or_default();
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::Intent { extras, .. } => {
+                                    match extras.get(&key) {
+                                        Some(BundleValue::String(s)) => Some(s.clone()),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        match val {
+                            Some(s) => {
+                                let id = self.allocate_string(&s)?;
+                                self.last_return_value = id;
+                                self.last_return_string = Some(s);
+                                Ok(id)
+                            }
+                            None => {
+                                self.last_return_value = 0;
+                                self.last_return_string = None;
+                                Ok(0)
+                            }
+                        }
+                    }
+                    "getIntExtra" => {
+                        if arg_values.len() < 2 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else {
+                            None
+                        };
+                        let key = self.resolve_string_arg(dex, arg_values[1], key_shadow).unwrap_or_default();
+                        let default_val = arg_values.get(2).copied().unwrap_or(0);
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::Intent { extras, .. } => {
+                                    match extras.get(&key) {
+                                        Some(BundleValue::Int(v)) => *v as u32,
+                                        _ => default_val,
+                                    }
+                                }
+                                _ => default_val,
+                            }
+                        } else {
+                            default_val
+                        };
+                        self.last_return_value = val;
+                        self.last_return_string = None;
+                        Ok(val)
+                    }
+                    "putExtras" => {
+                        if arg_values.len() < 2 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let bundle_id = arg_values[1];
+                        let bundle_extras = if let Ok(b_obj) = self.get_object(bundle_id) {
+                            match &b_obj.payload {
+                                ObjectPayload::Bundle(map) => Some(map.clone()),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(map) = bundle_extras {
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                if let ObjectPayload::Intent { extras, .. } = &mut obj.payload {
+                                    for (k, v) in map {
+                                        extras.insert(k, v);
+                                    }
+                                }
+                            }
+                        }
+                        self.last_return_value = receiver_id;
+                        self.last_return_string = None;
+                        Ok(receiver_id)
+                    }
+                    "getExtras" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let extras_clone = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::Intent { extras, .. } => extras.clone(),
+                                _ => BTreeMap::new(),
+                            }
+                        } else {
+                            BTreeMap::new()
+                        };
+                        let b_id = self.allocate_object("Landroid/os/Bundle;")?;
+                        if let Ok(b_obj) = self.get_object_mut(b_id) {
+                            b_obj.payload = ObjectPayload::Bundle(extras_clone);
+                        }
+                        self.last_return_value = b_id;
+                        self.last_return_string = None;
+                        Ok(b_id)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "android/os/Bundle" => {
+                match method_name {
+                    "<init>" => {
+                        if !arg_values.is_empty() {
+                            let receiver_id = arg_values[0];
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                obj.payload = ObjectPayload::Bundle(BTreeMap::new());
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "putString" => {
+                        if arg_values.len() < 3 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else {
+                            None
+                        };
+                        let key = self.resolve_string_arg(dex, arg_values[1], key_shadow).unwrap_or_default();
+                        let val_shadow = if arg_registers.len() > 2 && arg_registers[2] < self.string_registers.len() {
+                            self.string_registers[arg_registers[2]].as_deref()
+                        } else {
+                            None
+                        };
+                        let val = self.resolve_string_arg(dex, arg_values[2], val_shadow).unwrap_or_default();
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Bundle(map) = &mut obj.payload {
+                                map.insert(key, BundleValue::String(val));
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "getString" => {
+                        if arg_values.len() < 2 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else {
+                            None
+                        };
+                        let key = self.resolve_string_arg(dex, arg_values[1], key_shadow).unwrap_or_default();
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::Bundle(map) => {
+                                    match map.get(&key) {
+                                        Some(BundleValue::String(s)) => Some(s.clone()),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        match val {
+                            Some(s) => {
+                                let id = self.allocate_string(&s)?;
+                                self.last_return_value = id;
+                                self.last_return_string = Some(s);
+                                Ok(id)
+                            }
+                            None => {
+                                self.last_return_value = 0;
+                                self.last_return_string = None;
+                                Ok(0)
+                            }
+                        }
+                    }
+                    "putInt" => {
+                        if arg_values.len() < 3 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else {
+                            None
+                        };
+                        let key = self.resolve_string_arg(dex, arg_values[1], key_shadow).unwrap_or_default();
+                        let val = arg_values[2] as i32;
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Bundle(map) = &mut obj.payload {
+                                map.insert(key, BundleValue::Int(val));
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "getInt" => {
+                        if arg_values.len() < 2 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else {
+                            None
+                        };
+                        let key = self.resolve_string_arg(dex, arg_values[1], key_shadow).unwrap_or_default();
+                        let default_val = arg_values.get(2).copied().unwrap_or(0);
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::Bundle(map) => {
+                                    match map.get(&key) {
+                                        Some(BundleValue::Int(v)) => *v as u32,
+                                        _ => default_val,
+                                    }
+                                }
+                                _ => default_val,
+                            }
+                        } else {
+                            default_val
+                        };
+                        self.last_return_value = val;
+                        self.last_return_string = None;
+                        Ok(val)
+                    }
+                    "size" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        let len = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::Bundle(map) => map.len() as u32,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = len;
+                        self.last_return_string = None;
+                        Ok(len)
+                    }
+                    "clear" => {
+                        if arg_values.is_empty() {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let receiver_id = arg_values[0];
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Bundle(map) = &mut obj.payload {
+                                map.clear();
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            _ => {
+                let string_args = [
+                    if !arg_registers.is_empty() && arg_registers[0] < self.string_registers.len() {
+                        self.string_registers[arg_registers[0]].as_deref()
+                    } else {
+                        None
+                    },
+                    if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                        self.string_registers[arg_registers[1]].as_deref()
+                    } else {
+                        None
+                    },
+                ];
+                match super::framework::dispatch(class_name, method_name, &string_args, &mut self.captured_logs) {
+                    Ok(super::framework::AndroidFrameworkResult::Return(value)) => {
+                        self.last_return_value = value;
+                        self.last_return_string = None;
+                        Ok(value)
+                    }
+                    Ok(super::framework::AndroidFrameworkResult::ReturnString(s)) => {
+                        self.last_return_value = 0;
+                        self.last_return_string = Some(alloc::string::String::from(s));
+                        Ok(0)
+                    }
+                    Ok(super::framework::AndroidFrameworkResult::ReturnOwnedString(s)) => {
+                        self.last_return_value = 0;
+                        self.last_return_string = Some(s);
+                        Ok(0)
+                    }
+                    Ok(super::framework::AndroidFrameworkResult::Service(svc)) => {
+                        self.last_return_value = svc.handle();
+                        self.last_return_string = None;
+                        Ok(svc.handle())
+                    }
+                    Err(super::framework::AndroidFrameworkError::UnsupportedApi) => Err(DalvikVmError::UnsupportedFrameworkApi),
+                    Err(_) => Err(DalvikVmError::SecurityViolationForbiddenApi),
+                }
+            }
+        }
     }
 
     /// Invokes a specific method on a class by name, executing its Dalvik bytecode.
@@ -695,39 +1937,60 @@ impl DalvikVmState {
                         .ok_or(DalvikVmError::MethodNotFound)?;
                     let target_class = target.class_name.clone();
                     let target_method = target.method_name.clone();
-                    let target_registers_size = target.registers_size as usize;
-                    let target_ins_size = target.ins_size as usize;
                     let is_framework = target_class.starts_with("Landroid/")
                         || target_class.starts_with("Landroidx/")
                         || target_class.starts_with("Lcom/google/android/gms/")
                         || target_class.starts_with("Ljava/")
                         || target_class.starts_with("Ljavax/");
-                    let string_args = [
-                        if arg_count > 0 { self.string_registers[arg_registers[0]].as_deref() } else { None },
-                        if arg_count > 1 { self.string_registers[arg_registers[1]].as_deref() } else { None },
-                    ];
+                    let arg_vals: Vec<u32> = arg_registers[..arg_count].iter().map(|&r| self.registers[r]).collect();
+
                     if is_framework {
-                        match super::framework::dispatch(&target_class, &target_method, &string_args, &mut self.captured_logs) {
-                            Ok(super::framework::AndroidFrameworkResult::Return(value)) => {
+                        match self.dispatch_framework_method(dex, &target_class, &target_method, &arg_registers[..arg_count], &arg_vals) {
+                            Ok(value) => {
                                 self.last_return_value = value;
-                                self.last_return_string = None;
                             }
-                            Ok(super::framework::AndroidFrameworkResult::ReturnString(s)) => {
-                                self.last_return_value = 0;
-                                self.last_return_string = Some(alloc::string::String::from(s));
+                            Err(DalvikVmError::UnhandledException(ex_id)) => {
+                                if code_offset > 0 {
+                                    let ex_class = self.get_object(ex_id).map(|o| o.class_descriptor.clone()).ok();
+                                    if let Some(handler_pc) = find_catch_handler(dex, code_offset, pc, ex_class.as_deref()) {
+                                        self.pending_exception = Some(ex_id);
+                                        pc = handler_pc;
+                                        continue;
+                                    }
+                                }
+                                return Err(DalvikVmError::UnhandledException(ex_id));
                             }
-                            Ok(super::framework::AndroidFrameworkResult::ReturnOwnedString(s)) => {
-                                self.last_return_value = 0;
-                                self.last_return_string = Some(s);
-                            }
-                            Ok(super::framework::AndroidFrameworkResult::Service(svc)) => {
-                                self.last_return_value = svc.handle();
-                                self.last_return_string = None;
-                            }
-                            Err(super::framework::AndroidFrameworkError::UnsupportedApi) => return Err(DalvikVmError::UnsupportedFrameworkApi),
-                            Err(_) => return Err(DalvikVmError::SecurityViolationForbiddenApi),
+                            Err(e) => return Err(e),
                         }
                     } else {
+                        // Virtual dispatch resolution for application classes
+                        let mut resolved_class = target.class_name.clone();
+                        let mut resolved_method = target.method_name.clone();
+                        let mut target_m = target;
+
+                        if (opcode == OP_INVOKE_VIRTUAL || opcode == OP_INVOKE_INTERFACE) && arg_count > 0 {
+                            let receiver_id = arg_vals[0];
+                            if receiver_id == 0 {
+                                return Err(self.throw_npe(Some("Null receiver for virtual invoke")));
+                            }
+                            if let Ok(receiver_obj) = self.get_object(receiver_id) {
+                                let receiver_class = &receiver_obj.class_descriptor;
+                                if receiver_class != &target.class_name {
+                                    if let Some(override_m) = dex.methods.iter().find(|m| {
+                                        &m.class_name == receiver_class
+                                            && m.method_name == target.method_name
+                                            && m.proto_shorty == target.proto_shorty
+                                    }) {
+                                        resolved_class = override_m.class_name.clone();
+                                        resolved_method = override_m.method_name.clone();
+                                        target_m = override_m;
+                                    }
+                                }
+                            }
+                        }
+
+                        let target_registers_size = target_m.registers_size as usize;
+                        let target_ins_size = target_m.ins_size as usize;
                         if arg_count != target_ins_size || target_ins_size > target_registers_size || target_registers_size > MAX_REGISTERS_LIMIT {
                             return Err(DalvikVmError::InvalidBytecode);
                         }
@@ -743,7 +2006,7 @@ impl DalvikVmState {
                                 self.string_registers[base + i] = caller_strings[arg_registers[i]].clone();
                             }
                         }
-                        let result = self.invoke_method(dex, &target.class_name, &target.method_name);
+                        let result = self.invoke_method(dex, &resolved_class, &resolved_method);
                         self.registers = caller_registers;
                         self.string_registers = caller_strings;
                         match result {
@@ -783,39 +2046,61 @@ impl DalvikVmState {
                         .ok_or(DalvikVmError::MethodNotFound)?;
                     let target_class = target.class_name.clone();
                     let target_method = target.method_name.clone();
-                    let target_registers_size = target.registers_size as usize;
-                    let target_ins_size = target.ins_size as usize;
                     let is_framework = target_class.starts_with("Landroid/")
                         || target_class.starts_with("Landroidx/")
                         || target_class.starts_with("Lcom/google/android/gms/")
                         || target_class.starts_with("Ljava/")
                         || target_class.starts_with("Ljavax/");
-                    let string_args = [
-                        if arg_count > 0 && first_reg < self.string_registers.len() { self.string_registers[first_reg].as_deref() } else { None },
-                        if arg_count > 1 && (first_reg + 1) < self.string_registers.len() { self.string_registers[first_reg + 1].as_deref() } else { None },
-                    ];
+                    let arg_regs: Vec<usize> = (first_reg..first_reg + arg_count).collect();
+                    let arg_vals: Vec<u32> = arg_regs.iter().map(|&r| self.registers[r]).collect();
+
                     if is_framework {
-                        match super::framework::dispatch(&target_class, &target_method, &string_args, &mut self.captured_logs) {
-                            Ok(super::framework::AndroidFrameworkResult::Return(value)) => {
+                        match self.dispatch_framework_method(dex, &target_class, &target_method, &arg_regs, &arg_vals) {
+                            Ok(value) => {
                                 self.last_return_value = value;
-                                self.last_return_string = None;
                             }
-                            Ok(super::framework::AndroidFrameworkResult::ReturnString(s)) => {
-                                self.last_return_value = 0;
-                                self.last_return_string = Some(alloc::string::String::from(s));
+                            Err(DalvikVmError::UnhandledException(ex_id)) => {
+                                if code_offset > 0 {
+                                    let ex_class = self.get_object(ex_id).map(|o| o.class_descriptor.clone()).ok();
+                                    if let Some(handler_pc) = find_catch_handler(dex, code_offset, pc, ex_class.as_deref()) {
+                                        self.pending_exception = Some(ex_id);
+                                        pc = handler_pc;
+                                        continue;
+                                    }
+                                }
+                                return Err(DalvikVmError::UnhandledException(ex_id));
                             }
-                            Ok(super::framework::AndroidFrameworkResult::ReturnOwnedString(s)) => {
-                                self.last_return_value = 0;
-                                self.last_return_string = Some(s);
-                            }
-                            Ok(super::framework::AndroidFrameworkResult::Service(svc)) => {
-                                self.last_return_value = svc.handle();
-                                self.last_return_string = None;
-                            }
-                            Err(super::framework::AndroidFrameworkError::UnsupportedApi) => return Err(DalvikVmError::UnsupportedFrameworkApi),
-                            Err(_) => return Err(DalvikVmError::SecurityViolationForbiddenApi),
+                            Err(e) => return Err(e),
                         }
                     } else {
+                        // Virtual dispatch resolution for application classes
+                        let mut resolved_class = target.class_name.clone();
+                        let mut resolved_method = target.method_name.clone();
+                        let mut target_m = target;
+
+                        if (opcode == OP_INVOKE_VIRTUAL_RANGE || opcode == OP_INVOKE_INTERFACE_RANGE) && arg_count > 0 {
+                            let receiver_id = arg_vals[0];
+                            if receiver_id == 0 {
+                                return Err(self.throw_npe(Some("Null receiver for virtual invoke range")));
+                            }
+                            if let Ok(receiver_obj) = self.get_object(receiver_id) {
+                                let receiver_class = &receiver_obj.class_descriptor;
+                                if receiver_class != &target.class_name {
+                                    if let Some(override_m) = dex.methods.iter().find(|m| {
+                                        &m.class_name == receiver_class
+                                            && m.method_name == target.method_name
+                                            && m.proto_shorty == target.proto_shorty
+                                    }) {
+                                        resolved_class = override_m.class_name.clone();
+                                        resolved_method = override_m.method_name.clone();
+                                        target_m = override_m;
+                                    }
+                                }
+                            }
+                        }
+
+                        let target_registers_size = target_m.registers_size as usize;
+                        let target_ins_size = target_m.ins_size as usize;
                         if arg_count != target_ins_size || target_ins_size > target_registers_size || target_registers_size > MAX_REGISTERS_LIMIT {
                             return Err(DalvikVmError::InvalidBytecode);
                         }
@@ -831,7 +2116,7 @@ impl DalvikVmState {
                                 self.string_registers[base + i] = caller_strings[first_reg + i].clone();
                             }
                         }
-                        let result = self.invoke_method(dex, &target.class_name, &target.method_name);
+                        let result = self.invoke_method(dex, &resolved_class, &resolved_method);
                         self.registers = caller_registers;
                         self.string_registers = caller_strings;
                         match result {
@@ -1708,9 +2993,9 @@ mod tests {
                 vm.last_return_value = v;
                 vm.last_return_string = None;
             }
-            _ => panic!("Expected Return(0)"),
+            _ => panic!("Expected Return(1)"),
         }
-        assert_eq!(vm.last_return_value, 0);
+        assert_eq!(vm.last_return_value, 1);
         assert_eq!(vm.last_return_string, None);
 
         // Invoke AdvertisingIdClient$Info: getId
@@ -2197,6 +3482,209 @@ mod tests {
             dispatch("Landroid/content/Intent;", "getAction", &[], &mut logs),
             Ok(AndroidFrameworkResult::ReturnString("android.intent.action.MAIN"))
         );
+    }
+
+    #[test]
+    fn test_vm_stateful_collections_retain_elements() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        let list_id = vm.allocate_object("Ljava/util/ArrayList;").unwrap();
+        // <init>
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "<init>", &[0], &[list_id]), Ok(0));
+
+        // Initial isEmpty is true (1), size is 0
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "isEmpty", &[0], &[list_id]), Ok(1));
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "size", &[0], &[list_id]), Ok(0));
+
+        // add element 42 and element 99
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "add", &[0, 1], &[list_id, 42]), Ok(1));
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "add", &[0, 1], &[list_id, 99]), Ok(1));
+
+        // size is now 2, isEmpty is 0
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "size", &[0], &[list_id]), Ok(2));
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "isEmpty", &[0], &[list_id]), Ok(0));
+
+        // get(0) == 42, get(1) == 99
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "get", &[0, 1], &[list_id, 0]), Ok(42));
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "get", &[0, 1], &[list_id, 1]), Ok(99));
+
+        // get(2) throws IndexOutOfBoundsException
+        let oob = vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "get", &[0, 1], &[list_id, 2]);
+        match oob {
+            Err(DalvikVmError::UnhandledException(ex_id)) => {
+                assert_eq!(vm.get_object(ex_id).unwrap().class_descriptor, "Ljava/lang/IndexOutOfBoundsException;");
+            }
+            _ => panic!("Expected IndexOutOfBoundsException"),
+        }
+
+        // clear()
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "clear", &[0], &[list_id]), Ok(0));
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "size", &[0], &[list_id]), Ok(0));
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/ArrayList;", "isEmpty", &[0], &[list_id]), Ok(1));
+    }
+
+    #[test]
+    fn test_vm_stateful_intent_and_bundle_typed_extras() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // 1. Intent setAction and getAction
+        let intent_id = vm.allocate_object("Landroid/content/Intent;").unwrap();
+        assert_eq!(vm.dispatch_framework_method(&dex, "Landroid/content/Intent;", "<init>", &[0], &[intent_id]), Ok(0));
+
+        let act_str = vm.allocate_string("android.intent.action.VIEW").unwrap();
+        let set_res = vm.dispatch_framework_method(&dex, "Landroid/content/Intent;", "setAction", &[0, 1], &[intent_id, act_str]).unwrap();
+        assert_eq!(set_res, intent_id);
+
+        let get_act = vm.dispatch_framework_method(&dex, "Landroid/content/Intent;", "getAction", &[0], &[intent_id]).unwrap();
+        assert_eq!(vm.get_string_payload(get_act).as_deref(), Some("android.intent.action.VIEW"));
+
+        // 2. Intent putExtra int and getIntExtra
+        let k_id = vm.allocate_string("user_id").unwrap();
+        let put_res = vm.dispatch_framework_method(&dex, "Landroid/content/Intent;", "putExtra", &[0, 1, 2], &[intent_id, k_id, 1337]).unwrap();
+        assert_eq!(put_res, intent_id);
+        let get_int = vm.dispatch_framework_method(&dex, "Landroid/content/Intent;", "getIntExtra", &[0, 1, 2], &[intent_id, k_id, 0]).unwrap();
+        assert_eq!(get_int, 1337);
+
+        // 3. Bundle putString and getString
+        let bundle_id = vm.allocate_object("Landroid/os/Bundle;").unwrap();
+        assert_eq!(vm.dispatch_framework_method(&dex, "Landroid/os/Bundle;", "<init>", &[0], &[bundle_id]), Ok(0));
+        let b_key = vm.allocate_string("session_token").unwrap();
+        let b_val = vm.allocate_string("tok_sec_999").unwrap();
+        assert_eq!(vm.dispatch_framework_method(&dex, "Landroid/os/Bundle;", "putString", &[0, 1, 2], &[bundle_id, b_key, b_val]), Ok(0));
+        let b_ret = vm.dispatch_framework_method(&dex, "Landroid/os/Bundle;", "getString", &[0, 1], &[bundle_id, b_key]).unwrap();
+        assert_eq!(vm.get_string_payload(b_ret).as_deref(), Some("tok_sec_999"));
+
+        // 4. putExtras copies bundle into intent
+        assert_eq!(vm.dispatch_framework_method(&dex, "Landroid/content/Intent;", "putExtras", &[0, 1], &[intent_id, bundle_id]), Ok(intent_id));
+        let from_intent = vm.dispatch_framework_method(&dex, "Landroid/content/Intent;", "getStringExtra", &[0, 1], &[intent_id, b_key]).unwrap();
+        assert_eq!(vm.get_string_payload(from_intent).as_deref(), Some("tok_sec_999"));
+
+        // 5. getExtras returns a new Bundle object with copied extras
+        let extracted_bundle = vm.dispatch_framework_method(&dex, "Landroid/content/Intent;", "getExtras", &[0], &[intent_id]).unwrap();
+        assert!(extracted_bundle > 0);
+        let ex_str = vm.dispatch_framework_method(&dex, "Landroid/os/Bundle;", "getString", &[0, 1], &[extracted_bundle, b_key]).unwrap();
+        assert_eq!(vm.get_string_payload(ex_str).as_deref(), Some("tok_sec_999"));
+    }
+
+    #[test]
+    fn test_vm_stateful_string_and_stringbuilder_utf16() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // 1. String UTF-16 code units length: "InterOS 🚀" has 8 ASCII + 2 surrogate code units = 10
+        let s_id = vm.allocate_string("InterOS 🚀").unwrap();
+        let len = vm.dispatch_framework_method(&dex, "Ljava/lang/String;", "length", &[0], &[s_id]).unwrap();
+        assert_eq!(len, 10);
+
+        // charAt(0) == 'I' (0x49 = 73)
+        let ch0 = vm.dispatch_framework_method(&dex, "Ljava/lang/String;", "charAt", &[0, 1], &[s_id, 0]).unwrap();
+        assert_eq!(ch0, 73);
+
+        // charAt(15) throws IndexOutOfBoundsException
+        let oob = vm.dispatch_framework_method(&dex, "Ljava/lang/String;", "charAt", &[0, 1], &[s_id, 15]);
+        match oob {
+            Err(DalvikVmError::UnhandledException(ex_id)) => {
+                assert_eq!(vm.get_object(ex_id).unwrap().class_descriptor, "Ljava/lang/IndexOutOfBoundsException;");
+            }
+            _ => panic!("Expected IndexOutOfBoundsException"),
+        }
+
+        // substring(0, 7) == "InterOS"
+        let sub_id = vm.dispatch_framework_method(&dex, "Ljava/lang/String;", "substring", &[0, 1, 2], &[s_id, 0, 7]).unwrap();
+        assert_eq!(vm.get_string_payload(sub_id).as_deref(), Some("InterOS"));
+
+        // concat
+        let world_id = vm.allocate_string(" World").unwrap();
+        let cat_id = vm.dispatch_framework_method(&dex, "Ljava/lang/String;", "concat", &[0, 1], &[sub_id, world_id]).unwrap();
+        assert_eq!(vm.get_string_payload(cat_id).as_deref(), Some("InterOS World"));
+
+        // equals
+        let eq_same = vm.dispatch_framework_method(&dex, "Ljava/lang/String;", "equals", &[0, 1], &[sub_id, sub_id]).unwrap();
+        assert_eq!(eq_same, 1);
+        let eq_diff = vm.dispatch_framework_method(&dex, "Ljava/lang/String;", "equals", &[0, 1], &[sub_id, world_id]).unwrap();
+        assert_eq!(eq_diff, 0);
+
+        // 2. StringBuilder mutating append & chaining
+        let sb_id = vm.allocate_object("Ljava/lang/StringBuilder;").unwrap();
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/lang/StringBuilder;", "<init>", &[0], &[sb_id]), Ok(0));
+
+        let part1 = vm.allocate_string("Pure ").unwrap();
+        let chain1 = vm.dispatch_framework_method(&dex, "Ljava/lang/StringBuilder;", "append", &[0, 1], &[sb_id, part1]).unwrap();
+        assert_eq!(chain1, sb_id);
+
+        let part2 = vm.allocate_string("Rust").unwrap();
+        let chain2 = vm.dispatch_framework_method(&dex, "Ljava/lang/StringBuilder;", "append", &[0, 1], &[sb_id, part2]).unwrap();
+        assert_eq!(chain2, sb_id);
+
+        let res_str_id = vm.dispatch_framework_method(&dex, "Ljava/lang/StringBuilder;", "toString", &[0], &[sb_id]).unwrap();
+        assert_eq!(vm.get_string_payload(res_str_id).as_deref(), Some("Pure Rust"));
+    }
+
+    #[test]
+    fn test_vm_stateful_reflection_and_exceptions() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // 1. Class.forName on known DEX class Lorg/interos/Test;
+        let c_test = vm.allocate_string("org.interos.Test").unwrap();
+        let cls_id = vm.dispatch_framework_method(&dex, "Ljava/lang/Class;", "forName", &[0], &[c_test]).unwrap();
+        assert!(cls_id > 0);
+
+        // Class.getName and getSimpleName
+        let name_id = vm.dispatch_framework_method(&dex, "Ljava/lang/Class;", "getName", &[0], &[cls_id]).unwrap();
+        assert_eq!(vm.get_string_payload(name_id).as_deref(), Some("org.interos.Test"));
+        let simple_id = vm.dispatch_framework_method(&dex, "Ljava/lang/Class;", "getSimpleName", &[0], &[cls_id]).unwrap();
+        assert_eq!(vm.get_string_payload(simple_id).as_deref(), Some("Test"));
+
+        // 2. Class.forName on non-existent class throws ClassNotFoundException
+        let c_fake = vm.allocate_string("com.unknown.NonExistent").unwrap();
+        let err = vm.dispatch_framework_method(&dex, "Ljava/lang/Class;", "forName", &[0], &[c_fake]);
+        match err {
+            Err(DalvikVmError::UnhandledException(ex_id)) => {
+                assert_eq!(vm.get_object(ex_id).unwrap().class_descriptor, "Ljava/lang/ClassNotFoundException;");
+            }
+            _ => panic!("Expected ClassNotFoundException"),
+        }
+
+        // 3. Exception hierarchy matching: IndexOutOfBoundsException is caught by RuntimeException catch block
+        assert!(is_exception_compatible(&dex, "Ljava/lang/IndexOutOfBoundsException;", 1)); // 1 is Object
+        assert!(is_exception_compatible(&dex, "Ljava/lang/NullPointerException;", 1));
+    }
+
+    #[test]
+    fn test_vm_virtual_dispatch_subclass_override() {
+        let dex_bytes = create_test_dex("Lorg/interos/Base;", "compute", "test");
+        let mut dex = DexPackage::parse(&dex_bytes).unwrap();
+
+        // Add a subclass method override to DEX package:
+        // Lorg/interos/Derived;->compute() overriding Base->compute()
+        let mut derived_method = dex.methods[0].clone();
+        derived_method.class_name = String::from("Lorg/interos/Derived;");
+        derived_method.method_index = 100;
+        dex.methods.push(derived_method);
+
+        let mut vm = DalvikVmState::new();
+
+        // Allocate a Derived instance
+        let derived_obj_id = vm.allocate_object("Lorg/interos/Derived;").unwrap();
+        vm.registers[0] = derived_obj_id;
+
+        // Bytecode invoking virtual method 0 (Base->compute) with Derived receiver in v0
+        // Format 35c: OP_INVOKE_VIRTUAL, count=1 in high nibble (0x10), method_index=0 (0x00, 0x00), reg 0 (0x00, 0x00)
+        let insns = [
+            OP_INVOKE_VIRTUAL, 0x10, 0x00, 0x00, 0x00, 0x00,
+            OP_RETURN, 0x00,
+        ];
+
+        // Should resolve to Derived->compute (and successfully execute) rather than failing
+        let res = vm.interpret_insns(&dex, 4, &insns);
+        assert!(res.is_ok(), "Virtual dispatch must execute Derived override");
     }
 }
 

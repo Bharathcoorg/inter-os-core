@@ -101,6 +101,27 @@ def verify_acr_static_invariants():
     print("  [OK] Fault containment: hardware memory fault injection handler verified")
 
 
+def verify_real_world_apk_acceptance():
+    print("--- [2/3] Verifying Real-World APK Acceptance (fossify_file_manager.apk) ---")
+    fossify_apk = ROOT / "emulator" / "data" / "apps" / "fossify_file_manager.apk"
+    assert fossify_apk.exists(), f"Real-world APK missing at {fossify_apk}"
+    size = fossify_apk.stat().st_size
+    assert size == 9982225, f"Expected fossify_file_manager.apk size 9982225, got {size}"
+
+    # Execute tools/test_android_app.py on fossify_file_manager.apk
+    cmd = [sys.executable, str(ROOT / "tools" / "test_android_app.py"), str(fossify_apk)]
+    res = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    assert res.returncode == 0, f"Real-world APK verification failed:\n{res.stdout}\n{res.stderr}"
+    assert "Package Name:         org.fossify.filemanager" in res.stdout
+    assert "classes.dex" in res.stdout
+    assert "Adler-32: 0x82343f0d" in res.stdout
+    assert "Signing Block:        PRESENT" in res.stdout
+    assert "Schemes Detected:     v2, verity_padding" in res.stdout
+    assert "ACR Audit Decision:   AttestationFailed" in res.stdout
+    assert "Inspection complete: PASS" in res.stdout
+    print("  [OK] Real-world APK parsed, classes.dex Adler-32 checksum verified, and fail-closed attestation enforced")
+
+
 def ensure_test_apk_generator():
     bin_path = ROOT / "target" / "debug" / ("gen-test-apk.exe" if os.name == "nt" else "gen-test-apk")
     if not bin_path.exists():
@@ -155,24 +176,31 @@ def stage_apk_to_qemu(reader, package_name: str, apk_bytes: bytes) -> int:
 
 
 def verify_acr_qemu():
-    print("--- [2/2] Running Real QEMU Execution & Full Acceptance Test ---")
+    print("--- [3/3] Running Real QEMU Execution & Full Acceptance Test ---")
     sys.path.insert(0, str(ROOT / "tests"))
     from test_interactive_lifecycle import find_qemu, SerialReader, get_free_port, qemu_x86_audio_args
     from verify_x86_boot import kill_proc_on_port
 
     qemu_exe = find_qemu("qemu-system-x86_64.exe")
     if not qemu_exe or not os.path.exists(qemu_exe):
-        print("  [SKIP] QEMU binary not found; static verification complete.")
-        return True
+        raise RuntimeError("QEMU binary (qemu-system-x86_64) is required for ACR QEMU acceptance verification; skipping is not permitted.")
 
+    # Image freshness and provenance validation: rebuild fresh if sources are newer
     dev_kernel_img = ROOT / "target" / "verify" / "e2e_acceptance" / "inter-os-bios-tls-dev.img"
+    kernel_src = ROOT / "kernel" / "src"
+    acr_src = ROOT / "crates" / "interos-acr" / "src"
+    rebuild = not dev_kernel_img.exists()
     if dev_kernel_img.exists():
-        boot_img = dev_kernel_img
-    else:
-        boot_img = ROOT / "target" / "inter-os-bios.img"
-        if not boot_img.exists():
-            print("  Building demo boot image with tools/interos.py...")
-            subprocess.run([sys.executable, "tools/interos.py", "build", "demo"], cwd=ROOT, check=True)
+        img_mtime = dev_kernel_img.stat().st_mtime
+        for src_dir in (kernel_src, acr_src):
+            if any(p.stat().st_mtime > img_mtime for p in src_dir.rglob("*.rs")):
+                rebuild = True
+                break
+    if rebuild:
+        print("  Acceptance dev image missing or older than kernel/ACR sources; building fresh acceptance-dev image...")
+        subprocess.run([sys.executable, "tools/interos.py", "build", "acceptance-dev"], cwd=ROOT, check=True)
+    assert dev_kernel_img.exists(), f"Acceptance dev boot image {dev_kernel_img} must exist"
+    boot_img = dev_kernel_img
 
     data_disk = ROOT / "target" / "inter-os-data-master.img"
     if not data_disk.exists():
@@ -348,9 +376,10 @@ def main():
     print("============================================================")
     try:
         verify_acr_static_invariants()
+        verify_real_world_apk_acceptance()
         verify_acr_qemu()
         print("\n============================================================")
-        print("  [SUCCESS] All 27 ACR acceptance criteria verified (100%)  ")
+        print("  [SUCCESS] All 28 ACR acceptance criteria verified (100%)  ")
         print("============================================================")
         sys.exit(0)
     except Exception as exc:

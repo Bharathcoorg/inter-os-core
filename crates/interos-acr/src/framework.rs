@@ -363,8 +363,8 @@ pub fn dispatch(
         // Sovereign native microG shims: pure Rust, fail-closed, zero-heap
         "com/google/android/gms/common/GoogleApiAvailability" => {
             match method_name {
-                // ConnectionResult.SUCCESS = 0
-                "isGooglePlayServicesAvailable" => Ok(AndroidFrameworkResult::Return(0)),
+                // ConnectionResult.SERVICE_MISSING = 1 (Platform truth: Google Play Services is missing)
+                "isGooglePlayServicesAvailable" => Ok(AndroidFrameworkResult::Return(1)),
                 _ => Err(AndroidFrameworkError::UnsupportedApi),
             }
         }
@@ -738,10 +738,10 @@ mod tests {
     fn microg_native_shims_and_fail_closed_boundaries() {
         let mut logs = Vec::new();
 
-        // 1. GoogleApiAvailability: isGooglePlayServicesAvailable returns SUCCESS (0)
+        // 1. GoogleApiAvailability: isGooglePlayServicesAvailable returns SERVICE_MISSING (1)
         assert_eq!(
             dispatch("Lcom/google/android/gms/common/GoogleApiAvailability;", "isGooglePlayServicesAvailable", &[], &mut logs),
-            Ok(AndroidFrameworkResult::Return(0))
+            Ok(AndroidFrameworkResult::Return(1))
         );
 
         // 2. AdvertisingIdClient$Info: isLimitAdTrackingEnabled returns true (1), getId returns zeroed UUID
