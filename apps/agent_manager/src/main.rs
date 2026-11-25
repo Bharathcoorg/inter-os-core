@@ -1309,6 +1309,15 @@ impl AgentManagerApp {
             |path| app.chat.load_from_storage(path),
         );
         app.set_action(b"Measurements taken from the platform.", Tone::Muted);
+        // The Calculator is the one tool whose arguments come from the person,
+        // not from the platform: it evaluates the expression in the chat
+        // composer, which is empty at startup and so yields the no-expression
+        // outcome until something is typed.
+        let calc = AgentToolOutcome::execute_expression_with_authority(
+            app.chat.prompt_text(),
+            &app.tool_authority,
+        );
+        app.agent_tools[0] = calc;
         app.rebuild();
         app
     }
@@ -1354,6 +1363,14 @@ impl AgentManagerApp {
             AgentToolOutcome::execute_with_authority(AgentTool::SettingsQuery, &authority),
             AgentToolOutcome::execute_with_authority(AgentTool::CapabilityCheck, &authority),
         ];
+        // The Calculator evaluates whatever the person has typed in the chat
+        // composer, so its outcome is rebuilt from the live prompt rather than
+        // the generic gate that carries no expression.
+        let calc = AgentToolOutcome::execute_expression_with_authority(
+            self.chat.prompt_text(),
+            &self.tool_authority,
+        );
+        self.agent_tools[0] = calc;
         self.set_action(b"Re-measured: device, grants and search configuration.", Tone::Muted);
         self.rebuild();
     }
@@ -1375,6 +1392,12 @@ impl AgentManagerApp {
             AgentToolOutcome::execute_with_authority(AgentTool::SettingsQuery, &authority),
             AgentToolOutcome::execute_with_authority(AgentTool::CapabilityCheck, &authority),
         ];
+        // The Calculator runs the expression the person typed, not a demo.
+        let calc = AgentToolOutcome::execute_expression_with_authority(
+            self.chat.prompt_text(),
+            &self.tool_authority,
+        );
+        self.agent_tools[0] = calc;
         match self.tool_consent {
             ConsentOutcome::Granted => {
                 self.set_action(b"Agent tools ran under the platform's grant.", Tone::Good);
@@ -1413,11 +1436,28 @@ impl AgentManagerApp {
             3 => AgentTool::SettingsQuery,
             _ => AgentTool::CapabilityCheck,
         };
-        self.agent_tools[index] = AgentToolOutcome::execute_with_authority(tool, &authority);
+        self.agent_tools[index] = if index == 0 {
+            AgentToolOutcome::execute_expression_with_authority(self.chat.prompt_text(), &authority)
+        } else {
+            AgentToolOutcome::execute_with_authority(tool, &authority)
+        };
         if self.agent_tools[index].ok {
             self.set_action(b"Tool executed successfully under granted capability.", Tone::Good);
         } else {
-            self.set_action(b"Tool execution refused: agent-task capability not held.", Tone::Bad);
+            // A Calculator that ran but had no/invalid expression is not a
+            // capability refusal: only the kernel's own refusal message is.
+            let refused = {
+                let text = self.agent_tools[index].text();
+                text.as_bytes() == agent_manager::TOOL_REFUSED_MESSAGE || text.contains("Refused")
+            };
+            if refused {
+                self.set_action(b"Tool execution refused: agent-task capability not held.", Tone::Bad);
+            } else {
+                self.set_action(
+                    b"Calculator needs an expression: type it in Chat, then run it.",
+                    Tone::Bad,
+                );
+            }
         }
         self.rebuild();
     }

@@ -2422,6 +2422,14 @@ pub const TOOL_LABEL_MAX: usize = 30;
 /// on the screen can be checked by hand.
 pub const CALCULATOR_DEMO_EXPRESSION: &[u8] = b"1024*768/256";
 
+/// The message the generic Calculator entry returns when no expression was
+/// supplied.
+///
+/// WHY this is named: the generic entry has no expression argument, so it must
+/// not compute the demo; it reports that no expression was supplied and the
+/// caller must use the expression-taking path instead.
+pub const CALCULATOR_NO_EXPRESSION_MESSAGE: &[u8] = b"Calculator: no expression supplied";
+
 /// Evaluates a bounded integer expression: `+ - * /` over decimal
 /// literals, with the usual precedence, unary operators, and parentheses.
 ///
@@ -2718,9 +2726,10 @@ impl ToolAuthority {
                 mask |= tool.mask();
             }
         }
-        if mask == 0 {
-            mask = 0x1F;
-        }
+        // WHY the mask stays empty rather than filling: the kernel's per-tool
+        // capability lookups are the only source of grant, and absence of every
+        // per-tool capability must leave the mask empty (default-deny) rather
+        // than grant all five bits.
         Self {
             inner: AuthorityInner::Granted { handle },
             mask,
@@ -2925,10 +2934,19 @@ impl AgentToolOutcome {
 
         match tool {
             AgentTool::Calculator => {
-                return Self::execute_expression_with_authority(
-                    CALCULATOR_DEMO_EXPRESSION,
-                    authority,
-                );
+                // WHY this does not compute the demo: the generic entry has
+                // no expression argument, so it must not evaluate the
+                // hardcoded demo expression. The caller that holds an
+                // expression uses `execute_expression_with_authority`.
+                let msg = CALCULATOR_NO_EXPRESSION_MESSAGE;
+                let len = msg.len().min(output.len());
+                output[..len].copy_from_slice(&msg[..len]);
+                return Self {
+                    tool,
+                    output,
+                    output_len: len as u8,
+                    ok: false,
+                };
             }
             AgentTool::CalendarClock => {
                 let mut time_buf = [0u8; 64];
