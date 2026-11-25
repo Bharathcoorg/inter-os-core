@@ -914,7 +914,7 @@ fn handle_rapp_command(s: &str) -> bool {
     if verb.eq_ignore_ascii_case("APK_STAGE_BEGIN") {
         let Some(id) = parts.next() else { return true; };
         let Some(len) = parts.next().and_then(|v| v.parse::<usize>().ok()) else { return true; };
-        if id.is_empty() || id.len() > 128 || len == 0 || len > crate::package::store::MAX_BLOB_SIZE {
+        if id.is_empty() || id.len() > 128 || len == 0 || len > crate::package::store::MAX_RUNTIME_ARTIFACT_SIZE {
             serial_println!("[APK_HOST] REJECT invalid package dimensions");
             return true;
         }

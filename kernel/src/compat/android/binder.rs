@@ -24,6 +24,52 @@ pub const fn binder_service_object(handle: u32) -> u64 {
     BINDER_SERVICE_OBJECT_BASE | handle as u64
 }
 
+pub const MAX_PARCEL_CAPACITY: usize = 64 * 1024;
+pub const MAX_STRING_LENGTH: usize = 32 * 1024;
+pub const MAX_ARRAY_LENGTH: usize = 64 * 1024;
+
+// Standard IBinder transaction codes
+pub const FIRST_CALL_TRANSACTION: u32 = 0x0000_0001;
+pub const LAST_CALL_TRANSACTION: u32 = 0x00FF_FFFF;
+pub const PING_TRANSACTION: u32 = 0x5F50_4E47;          // "_PNG"
+pub const DUMP_TRANSACTION: u32 = 0x5F44_4D50;          // "_DMP"
+pub const SHELL_COMMAND_TRANSACTION: u32 = 0x5F43_4D44; // "_CMD"
+pub const INTERFACE_TRANSACTION: u32 = 0x5F4E_5446;     // "_NTF"
+pub const SYSPROPS_TRANSACTION: u32 = 0x5F53_5052;      // "_SPR"
+
+// Binder transaction flags
+pub const FLAG_ONEWAY: u32 = 0x0000_0001;
+pub const FLAG_CLEAR_BUF: u32 = 0x0000_0020;
+
+// AIDL Exception codes
+pub const EX_NONE: i32 = 0;
+pub const EX_SECURITY: i32 = -1;
+pub const EX_BAD_PARCELABLE: i32 = -2;
+pub const EX_ILLEGAL_ARGUMENT: i32 = -3;
+pub const EX_NULL_POINTER: i32 = -4;
+pub const EX_ILLEGAL_STATE: i32 = -5;
+pub const EX_NETWORK_MAIN_THREAD: i32 = -6;
+pub const EX_UNSUPPORTED_OPERATION: i32 = -7;
+pub const EX_SERVICE_SPECIFIC: i32 = -8;
+pub const EX_PARCELABLE: i32 = -9;
+pub const EX_TRANSACTION_FAILED: i32 = -129;
+
+pub const STRICT_MODE_PENALTY_GATHER: i32 = 0x0040_0000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParcelError {
+    BufferOverRead,
+    BufferOverflow,
+    MalformedNegativeLength(i32),
+    UnboundedLength(usize),
+    ArithmeticOverflow,
+    InvalidUtf8,
+    InvalidUtf16,
+    MissingNullTerminator,
+    MalformedPadding,
+    InterfaceMismatch,
+}
+
 /// Sovereign native microG / GMS Compatibility Binder Handles.
 pub const HANDLE_MICROG_GMS_BROKER: u32 = 0x1001;
 pub const HANDLE_MICROG_LOCATION: u32 = 0x1002;
@@ -281,25 +327,34 @@ impl Parcel {
 
     pub fn write_string(&mut self, val: &str) {
         let bytes = val.as_bytes();
-        self.write_int(bytes.len() as i32);
-        self.data.extend_from_slice(bytes);
-        let pad = (4 - (bytes.len() % 4)) % 4;
+        let len = bytes.len().min(MAX_STRING_LENGTH);
+        self.write_int(len as i32);
+        self.data.extend_from_slice(&bytes[..len]);
+        let pad = (4 - (len % 4)) % 4;
         for _ in 0..pad {
             self.data.push(0);
         }
     }
 
     pub fn read_string(&mut self) -> Option<String> {
-        let len = self.read_int()? as usize;
-        if self.position + len <= self.data.len() {
-            let s = String::from(core::str::from_utf8(&self.data[self.position..self.position + len]).ok()?);
-            self.position += len;
-            let pad = (4 - (len % 4)) % 4;
-            self.position = (self.position + pad).min(self.data.len());
-            Some(s)
-        } else {
-            None
+        let raw_len = self.read_int()?;
+        if raw_len == -1 {
+            return None; // null string representation
         }
+        if raw_len < 0 {
+            return None; // malformed negative length rejected
+        }
+        let len = raw_len as usize;
+        if len > MAX_STRING_LENGTH || len > self.data.len().saturating_sub(self.position) {
+            return None; // bounded allocation enforcement
+        }
+        let end = self.position.checked_add(len)?;
+        let str_bytes = self.data.get(self.position..end)?;
+        let s = String::from(core::str::from_utf8(str_bytes).ok()?);
+        self.position = end;
+        let pad = (4 - (len % 4)) % 4;
+        self.position = self.position.checked_add(pad)?.min(self.data.len());
+        Some(s)
     }
 
     pub fn write_strong_binder(&mut self, handle: u32) {
@@ -317,25 +372,33 @@ impl Parcel {
     }
 
     pub fn write_byte_array(&mut self, slice: &[u8]) {
-        self.write_int(slice.len() as i32);
-        self.data.extend_from_slice(slice);
-        let pad = (4 - (slice.len() % 4)) % 4;
+        let len = slice.len().min(MAX_ARRAY_LENGTH);
+        self.write_int(len as i32);
+        self.data.extend_from_slice(&slice[..len]);
+        let pad = (4 - (len % 4)) % 4;
         for _ in 0..pad {
             self.data.push(0);
         }
     }
 
     pub fn create_byte_array(&mut self) -> Option<Vec<u8>> {
-        let len = self.read_int()? as usize;
-        if self.position + len <= self.data.len() {
-            let bytes = self.data[self.position..self.position + len].to_vec();
-            self.position += len;
-            let pad = (4 - (len % 4)) % 4;
-            self.position = (self.position + pad).min(self.data.len());
-            Some(bytes)
-        } else {
-            None
+        let raw_len = self.read_int()?;
+        if raw_len == -1 {
+            return None; // null array representation
         }
+        if raw_len < 0 {
+            return None; // malformed negative length rejected
+        }
+        let len = raw_len as usize;
+        if len > MAX_ARRAY_LENGTH || len > self.data.len().saturating_sub(self.position) {
+            return None; // bounded allocation enforcement
+        }
+        let end = self.position.checked_add(len)?;
+        let bytes = self.data.get(self.position..end)?.to_vec();
+        self.position = end;
+        let pad = (4 - (len % 4)) % 4;
+        self.position = self.position.checked_add(pad)?.min(self.data.len());
+        Some(bytes)
     }
 }
 
@@ -348,6 +411,14 @@ pub struct ParcelReader<'a> {
 impl<'a> ParcelReader<'a> {
     pub const fn new(data: &'a [u8]) -> Self {
         Self { data, offset: 0 }
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.offset)
     }
 
     pub fn read_i32(&mut self) -> Option<i32> {
@@ -387,6 +458,119 @@ impl<'a> ParcelReader<'a> {
         Some(val)
     }
 
+    pub fn read_float(&mut self) -> Option<f32> {
+        self.read_u32().map(f32::from_bits)
+    }
+
+    pub fn read_double(&mut self) -> Option<f64> {
+        self.read_i64().map(|v| f64::from_bits(v as u64))
+    }
+
+    /// Reads an AOSP UTF-8 string (length + bytes + '\0' + padding).
+    pub fn read_string8(&mut self) -> Result<Option<&'a str>, ParcelError> {
+        let raw_len = self.read_i32().ok_or(ParcelError::BufferOverRead)?;
+        if raw_len == -1 {
+            return Ok(None);
+        }
+        if raw_len < -1 {
+            return Err(ParcelError::MalformedNegativeLength(raw_len));
+        }
+        let byte_len = raw_len as usize;
+        if byte_len > MAX_STRING_LENGTH || byte_len > self.remaining() {
+            return Err(ParcelError::UnboundedLength(byte_len));
+        }
+        let with_null = byte_len.checked_add(1).ok_or(ParcelError::ArithmeticOverflow)?;
+        let pad = (4 - (with_null % 4)) % 4;
+        let total_wire_len = with_null.checked_add(pad).ok_or(ParcelError::ArithmeticOverflow)?;
+        let end = self.offset.checked_add(total_wire_len).ok_or(ParcelError::ArithmeticOverflow)?;
+        if end > self.data.len() {
+            return Err(ParcelError::BufferOverRead);
+        }
+
+        let str_bytes = &self.data[self.offset..self.offset + byte_len];
+        if self.data[self.offset + byte_len] != 0 {
+            return Err(ParcelError::MissingNullTerminator);
+        }
+        let s = core::str::from_utf8(str_bytes).map_err(|_| ParcelError::InvalidUtf8)?;
+        self.offset = end;
+        Ok(Some(s))
+    }
+
+    /// Reads an AOSP UTF-16 string (length + code units + 0x0000 + padding).
+    pub fn read_string16(&mut self) -> Result<Option<String>, ParcelError> {
+        let raw_len = self.read_i32().ok_or(ParcelError::BufferOverRead)?;
+        if raw_len == -1 {
+            return Ok(None);
+        }
+        if raw_len < -1 {
+            return Err(ParcelError::MalformedNegativeLength(raw_len));
+        }
+        let char_count = raw_len as usize;
+        if char_count > MAX_STRING_LENGTH {
+            return Err(ParcelError::UnboundedLength(char_count));
+        }
+        let byte_len = char_count.checked_mul(2).ok_or(ParcelError::ArithmeticOverflow)?;
+        let with_null = byte_len.checked_add(2).ok_or(ParcelError::ArithmeticOverflow)?;
+        let pad = (4 - (with_null % 4)) % 4;
+        let total_wire_len = with_null.checked_add(pad).ok_or(ParcelError::ArithmeticOverflow)?;
+        let end = self.offset.checked_add(total_wire_len).ok_or(ParcelError::ArithmeticOverflow)?;
+        if end > self.data.len() {
+            return Err(ParcelError::BufferOverRead);
+        }
+
+        // Verify 16-bit null terminator
+        let term_start = self.offset + byte_len;
+        let term_bytes = [self.data[term_start], self.data[term_start + 1]];
+        if u16::from_le_bytes(term_bytes) != 0 {
+            return Err(ParcelError::MissingNullTerminator);
+        }
+
+        // Decode UTF-16 LE code units
+        let u16_iter = (0..char_count).map(|i| {
+            let start = self.offset + i * 2;
+            u16::from_le_bytes([self.data[start], self.data[start + 1]])
+        });
+        let s = char::decode_utf16(u16_iter)
+            .collect::<Result<String, _>>()
+            .map_err(|_| ParcelError::InvalidUtf16)?;
+
+        self.offset = end;
+        Ok(Some(s))
+    }
+
+    /// Validates and enforces an AIDL interface token against an expected descriptor.
+    pub fn enforce_interface(&mut self, expected_descriptor: &str) -> Result<(), ParcelError> {
+        let _strict_mode = self.read_i32().ok_or(ParcelError::BufferOverRead)?;
+        let descriptor = self.read_string16()?.ok_or(ParcelError::InterfaceMismatch)?;
+        if descriptor != expected_descriptor {
+            return Err(ParcelError::InterfaceMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn read_byte_array(&mut self) -> Result<Option<&'a [u8]>, ParcelError> {
+        let raw_len = self.read_i32().ok_or(ParcelError::BufferOverRead)?;
+        if raw_len == -1 {
+            return Ok(None);
+        }
+        if raw_len < -1 {
+            return Err(ParcelError::MalformedNegativeLength(raw_len));
+        }
+        let len = raw_len as usize;
+        if len > MAX_ARRAY_LENGTH || len > self.remaining() {
+            return Err(ParcelError::UnboundedLength(len));
+        }
+        let pad = (4 - (len % 4)) % 4;
+        let total_wire_len = len.checked_add(pad).ok_or(ParcelError::ArithmeticOverflow)?;
+        let end = self.offset.checked_add(total_wire_len).ok_or(ParcelError::ArithmeticOverflow)?;
+        if end > self.data.len() {
+            return Err(ParcelError::BufferOverRead);
+        }
+        let slice = &self.data[self.offset..self.offset + len];
+        self.offset = end;
+        Ok(Some(slice))
+    }
+
     pub fn read_interface_token(&mut self) -> Option<&'a [u8]> {
         let _strict_mode = self.read_i32()?;
         let char_count = self.read_i32()? as usize;
@@ -398,10 +582,6 @@ impl<'a> ParcelReader<'a> {
         let token_bytes = &self.data[self.offset..self.offset + byte_len];
         self.offset += padded_len;
         Some(token_bytes)
-    }
-
-    pub fn remaining(&self) -> usize {
-        self.data.len().saturating_sub(self.offset)
     }
 }
 
@@ -438,26 +618,102 @@ impl<'a> ParcelWriter<'a> {
         Ok(())
     }
 
+    pub fn write_float(&mut self, val: f32) -> Result<(), ()> {
+        self.write_u32(val.to_bits())
+    }
+
+    pub fn write_double(&mut self, val: f64) -> Result<(), ()> {
+        self.write_i64(val.to_bits() as i64)
+    }
+
     pub fn write_no_exception(&mut self) -> Result<(), ()> {
-        self.write_i32(0) // EX_NONE = 0
+        self.write_i32(EX_NONE)
+    }
+
+    pub fn write_exception(&mut self, code: i32, msg: &str) -> Result<(), ()> {
+        self.write_i32(code)?;
+        self.write_string16_utf8(msg)
     }
 
     pub fn write_string16_utf8(&mut self, text: &str) -> Result<(), ()> {
-        let char_count = text.chars().count();
-        self.write_i32(char_count as i32)?;
-        let byte_len = char_count * 2;
-        let padded_len = (byte_len + 3) & !3;
-        if self.offset + padded_len > self.buffer.len() {
+        let utf16_units = text.encode_utf16().count();
+        if utf16_units > MAX_STRING_LENGTH {
             return Err(());
         }
-        for (i, c) in text.encode_utf16().enumerate() {
-            let start = self.offset + i * 2;
-            self.buffer[start..start + 2].copy_from_slice(&c.to_le_bytes());
+        self.write_i32(utf16_units as i32)?;
+
+        let byte_len = utf16_units.checked_mul(2).ok_or(())?;
+        let with_null = byte_len.checked_add(2).ok_or(())?;
+        let pad = (4 - (with_null % 4)) % 4;
+        let total_wire_len = with_null.checked_add(pad).ok_or(())?;
+        let end = self.offset.checked_add(total_wire_len).ok_or(())?;
+        if end > self.buffer.len() {
+            return Err(());
         }
-        for i in byte_len..padded_len {
+
+        // Write UTF-16 LE code units
+        for (i, unit) in text.encode_utf16().enumerate() {
+            let start = self.offset + i * 2;
+            self.buffer[start..start + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+        // Write 16-bit null terminator (0x0000)
+        self.buffer[self.offset + byte_len..self.offset + byte_len + 2].copy_from_slice(&[0, 0]);
+        // Zero-fill padding
+        for i in with_null..total_wire_len {
             self.buffer[self.offset + i] = 0;
         }
-        self.offset += padded_len;
+
+        self.offset = end;
+        Ok(())
+    }
+
+    pub fn write_string8_utf8(&mut self, text: &str) -> Result<(), ()> {
+        let byte_len = text.len();
+        if byte_len > MAX_STRING_LENGTH {
+            return Err(());
+        }
+        self.write_i32(byte_len as i32)?;
+
+        let with_null = byte_len.checked_add(1).ok_or(())?;
+        let pad = (4 - (with_null % 4)) % 4;
+        let total_wire_len = with_null.checked_add(pad).ok_or(())?;
+        let end = self.offset.checked_add(total_wire_len).ok_or(())?;
+        if end > self.buffer.len() {
+            return Err(());
+        }
+
+        self.buffer[self.offset..self.offset + byte_len].copy_from_slice(text.as_bytes());
+        self.buffer[self.offset + byte_len] = 0; // null terminator
+        for i in with_null..total_wire_len {
+            self.buffer[self.offset + i] = 0;
+        }
+
+        self.offset = end;
+        Ok(())
+    }
+
+    pub fn write_interface_token(&mut self, descriptor: &str) -> Result<(), ()> {
+        self.write_i32(STRICT_MODE_PENALTY_GATHER)?;
+        self.write_string16_utf8(descriptor)
+    }
+
+    pub fn write_byte_array(&mut self, slice: &[u8]) -> Result<(), ()> {
+        let len = slice.len();
+        if len > MAX_ARRAY_LENGTH {
+            return Err(());
+        }
+        self.write_i32(len as i32)?;
+        let pad = (4 - (len % 4)) % 4;
+        let total_wire_len = len.checked_add(pad).ok_or(())?;
+        let end = self.offset.checked_add(total_wire_len).ok_or(())?;
+        if end > self.buffer.len() {
+            return Err(());
+        }
+        self.buffer[self.offset..self.offset + len].copy_from_slice(slice);
+        for i in len..total_wire_len {
+            self.buffer[self.offset + i] = 0;
+        }
+        self.offset = end;
         Ok(())
     }
 
@@ -476,7 +732,7 @@ pub static BINDER_MEDIATOR: Mutex<BinderMediator> = Mutex::new(BinderMediator::n
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::Capability;
+    use crate::capability::{Capability, CapabilityId};
 
     #[test]
     fn test_service_manager_enumeration_contract() {
@@ -550,7 +806,7 @@ mod tests {
         // 2. Grant capability only for HANDLE_MICROG_LOCATION
         let mut location_caps = CapabilityTable::new(4);
         location_caps.insert(Capability {
-            id: crate::capability::CapabilityId(1),
+            id: CapabilityId(1),
             cap_type: CapabilityType::IpcSend,
             rights: Rights::WRITE,
             object_id: binder_service_object(HANDLE_MICROG_LOCATION),
@@ -632,5 +888,113 @@ mod tests {
         let mut reader = ParcelReader::new(&reply[..len]);
         assert_eq!(reader.read_i32(), Some(0)); // no exception
         assert_eq!(reader.read_i32(), Some(0)); // has_location = false
+    }
+
+    #[test]
+    fn test_negative_length_handling() {
+        // 1. Valid null string (-1)
+        let mut buf = [0u8; 16];
+        buf[0..4].copy_from_slice(&(-1i32).to_le_bytes());
+        let mut reader = ParcelReader::new(&buf);
+        assert_eq!(reader.read_string8(), Ok(None));
+        assert_eq!(reader.offset(), 4);
+
+        // 2. Malformed negative length (-2) must fail closed
+        let mut bad_buf = [0u8; 16];
+        bad_buf[0..4].copy_from_slice(&(-2i32).to_le_bytes());
+        let mut bad_reader = ParcelReader::new(&bad_buf);
+        assert_eq!(bad_reader.read_string8(), Err(ParcelError::MalformedNegativeLength(-2)));
+
+        // 3. Minimum i32 (-2147483648) must fail closed without underflow/panic
+        let mut min_buf = [0u8; 16];
+        min_buf[0..4].copy_from_slice(&i32::MIN.to_le_bytes());
+        let mut min_reader = ParcelReader::new(&min_buf);
+        assert_eq!(min_reader.read_string16(), Err(ParcelError::MalformedNegativeLength(i32::MIN)));
+    }
+
+    #[test]
+    fn test_unbounded_allocation_rejected() {
+        // Declared string length of 10 MB in a 16-byte parcel
+        let mut buf = [0u8; 16];
+        buf[0..4].copy_from_slice(&(10_000_000i32).to_le_bytes());
+        let mut reader = ParcelReader::new(&buf);
+        assert_eq!(reader.read_string8(), Err(ParcelError::UnboundedLength(10_000_000)));
+
+        // Declared byte array of 10 MB
+        let mut reader2 = ParcelReader::new(&buf);
+        assert_eq!(reader2.read_byte_array(), Err(ParcelError::UnboundedLength(10_000_000)));
+    }
+
+    #[test]
+    fn test_arithmetic_overflow_protection() {
+        // Declared UTF-16 count near i32::MAX would overflow `count * 2`
+        let mut buf = [0u8; 16];
+        buf[0..4].copy_from_slice(&(0x7FFF_FFFFi32).to_le_bytes());
+        let mut reader = ParcelReader::new(&buf);
+        assert_eq!(reader.read_string16(), Err(ParcelError::UnboundedLength(0x7FFF_FFFF)));
+    }
+
+    #[test]
+    fn test_truncated_buffer_overread_prevention() {
+        // String declared length = 8, but only 4 payload bytes present
+        let mut buf = [0u8; 8];
+        buf[0..4].copy_from_slice(&(8i32).to_le_bytes());
+        buf[4..8].copy_from_slice(b"test");
+        let mut reader = ParcelReader::new(&buf);
+        assert_eq!(reader.read_string8(), Err(ParcelError::UnboundedLength(8)));
+
+        // Buffer truncated right inside padding
+        let mut buf2 = [0u8; 9];
+        buf2[0..4].copy_from_slice(&(2i32).to_le_bytes());
+        buf2[4..6].copy_from_slice(b"hi");
+        buf2[6] = 0; // null terminator
+        let mut reader2 = ParcelReader::new(&buf2[..7]);
+        assert_eq!(reader2.read_string8(), Err(ParcelError::BufferOverRead));
+    }
+
+    #[test]
+    fn test_utf16_surrogate_pairs_and_null_terminator() {
+        let mut buf = [0u8; 64];
+        let mut writer = ParcelWriter::new(&mut buf);
+        writer.write_string16_utf8("Hi 🎉!").unwrap();
+        let written_len = writer.len();
+
+        let mut reader = ParcelReader::new(&buf[..written_len]);
+        let decoded = reader.read_string16().unwrap().unwrap();
+        assert_eq!(decoded, "Hi 🎉!");
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn test_aidl_interface_enforce_and_security_denial() {
+        let mut buf = [0u8; 128];
+        let mut writer = ParcelWriter::new(&mut buf);
+        writer.write_interface_token("android.location.ILocationManager").unwrap();
+        let written_len = writer.len();
+
+        // 1. Enforcing correct descriptor succeeds
+        let mut reader_ok = ParcelReader::new(&buf[..written_len]);
+        assert_eq!(reader_ok.enforce_interface("android.location.ILocationManager"), Ok(()));
+
+        // 2. Enforcing mismatched descriptor fails closed
+        let mut reader_bad = ParcelReader::new(&buf[..written_len]);
+        assert_eq!(
+            reader_bad.enforce_interface("android.os.IPowerManager"),
+            Err(ParcelError::InterfaceMismatch)
+        );
+    }
+
+    #[test]
+    fn test_aidl_status_code_reply_roundtrip() {
+        let mut buf = [0u8; 128];
+        let mut writer = ParcelWriter::new(&mut buf);
+        writer.write_exception(EX_SECURITY, "Permission Denial: Requires ACCESS_FINE_LOCATION").unwrap();
+        let written_len = writer.len();
+
+        let mut reader = ParcelReader::new(&buf[..written_len]);
+        let exception_code = reader.read_i32().unwrap();
+        assert_eq!(exception_code, EX_SECURITY);
+        let msg = reader.read_string16().unwrap().unwrap();
+        assert_eq!(msg, "Permission Denial: Requires ACCESS_FINE_LOCATION");
     }
 }

@@ -10,12 +10,14 @@
 //! Complies with standard Android JNI specification:
 //! - `JNIEnv`: Thread-local JNI interface table.
 //! - `JavaVM`: Process-wide virtual machine handle.
-//! - Method / Field resolution: `FindClass`, `GetMethodID`, `GetStaticMethodID`.
+//! - Method / Field resolution: `FindClass`, `GetMethodID`, `GetStaticMethodID`, `GetFieldID`.
 //! - Invocations: `CallObjectMethod`, `CallIntMethod`, `CallVoidMethod`.
 //! - String & Array memory management: `NewStringUTF`, `GetStringUTFChars`.
+//! - Reference management: `PushLocalFrame`, `PopLocalFrame`, `NewGlobalRef`, `DeleteLocalRef`, `DeleteGlobalRef`.
+//! - 64-bit field access: `GetLongField`, `SetLongField` for native pointer handles.
 //! - Native method registration: `RegisterNatives`.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -23,6 +25,22 @@ use alloc::vec::Vec;
 pub const JNI_VERSION_1_6: u32 = 0x00010006;
 pub const JNI_OK: i32 = 0;
 pub const JNI_ERR: i32 = -1;
+
+/// JNI reference type categorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JniRefType {
+    InvalidRefType = 0,
+    LocalRefType = 1,
+    GlobalRefType = 2,
+    WeakGlobalRefType = 3,
+}
+
+/// A local reference frame pushed onto the JNI frame stack.
+#[derive(Debug, Clone)]
+pub struct LocalFrame {
+    pub capacity: usize,
+    pub refs: Vec<u32>,
+}
 
 /// A native method descriptor registered via `RegisterNatives`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +68,7 @@ pub struct JniObject {
     pub class_id: u32,
     pub string_val: Option<String>,
     pub int_fields: BTreeMap<u32, i32>,
+    pub long_fields: BTreeMap<u32, i64>,
     pub object_fields: BTreeMap<u32, u32>,
     pub array_elements: Option<Vec<u32>>,
 }
@@ -60,6 +79,8 @@ pub struct JniEnv {
     classes: BTreeMap<u32, JniClass>,
     class_name_map: BTreeMap<String, u32>,
     objects: BTreeMap<u32, JniObject>,
+    local_frames: Vec<LocalFrame>,
+    global_refs: BTreeSet<u32>,
     next_class_id: u32,
     next_method_id: u32,
     next_field_id: u32,
@@ -69,13 +90,18 @@ pub struct JniEnv {
 }
 
 impl JniEnv {
-    /// Creates a fresh JNIEnv initialized with standard core classes.
+    /// Creates a fresh JNIEnv initialized with standard core classes and pre-registered symbols.
     pub fn new() -> Self {
         let mut env = Self {
             version: JNI_VERSION_1_6,
             classes: BTreeMap::new(),
             class_name_map: BTreeMap::new(),
             objects: BTreeMap::new(),
+            local_frames: alloc::vec![LocalFrame {
+                capacity: 512,
+                refs: Vec::new(),
+            }],
+            global_refs: BTreeSet::new(),
             next_class_id: 1,
             next_method_id: 1,
             next_field_id: 1,
@@ -84,12 +110,37 @@ impl JniEnv {
             pending_exception: None,
         };
 
-        // Pre-register standard core classes
-        env.register_class("java/lang/Object");
-        env.register_class("java/lang/String");
+        // Pre-register standard core classes and their members
+        let obj_cls = env.register_class("java/lang/Object");
+        env.register_method(obj_cls, "<init>", "()V");
+
+        let str_cls = env.register_class("java/lang/String");
+        env.register_method(str_cls, "<init>", "()V");
+        env.register_method(str_cls, "<init>", "([B)V");
+        env.register_field(str_cls, "value", "[C");
+
         env.register_class("java/lang/Class");
         env.register_class("android/app/Activity");
         env.register_class("android/content/Context");
+
+        // Pre-register Android graphics objects with 64-bit native pointer fields
+        let path_cls = env.register_class("android/graphics/Path");
+        env.register_field(path_cls, "mNativePath", "J");
+        env.register_method(path_cls, "<init>", "()V");
+
+        let paint_cls = env.register_class("android/graphics/Paint");
+        env.register_field(paint_cls, "mNativePaint", "J");
+        env.register_method(paint_cls, "<init>", "()V");
+
+        let bmp_cls = env.register_class("android/graphics/Bitmap");
+        env.register_field(bmp_cls, "mNativeBitmap", "J");
+
+        let canvas_cls = env.register_class("android/graphics/Canvas");
+        env.register_field(canvas_cls, "mNativeCanvas", "J");
+
+        let view_cls = env.register_class("android/view/View");
+        env.register_field(view_cls, "mNativeView", "J");
+
         env
     }
 
@@ -116,6 +167,45 @@ impl JniEnv {
         id
     }
 
+    /// Registers an instance field for a class, returning the field ID.
+    pub fn register_field(&mut self, class_id: u32, name: &str, sig: &str) -> u32 {
+        let cls = self.classes.get_mut(&class_id).expect("class must exist");
+        let key = format!("{}:{}", name, sig);
+        if let Some(id) = cls.fields.get(&key) {
+            return *id;
+        }
+        let id = self.next_field_id;
+        self.next_field_id += 1;
+        cls.fields.insert(key, id);
+        id
+    }
+
+    /// Registers an instance method for a class, returning the method ID.
+    pub fn register_method(&mut self, class_id: u32, name: &str, sig: &str) -> u32 {
+        let cls = self.classes.get_mut(&class_id).expect("class must exist");
+        let key = format!("{}:{}", name, sig);
+        if let Some(id) = cls.methods.get(&key) {
+            return *id;
+        }
+        let id = self.next_method_id;
+        self.next_method_id += 1;
+        cls.methods.insert(key, id);
+        id
+    }
+
+    /// Registers a static method for a class, returning the method ID.
+    pub fn register_static_method(&mut self, class_id: u32, name: &str, sig: &str) -> u32 {
+        let cls = self.classes.get_mut(&class_id).expect("class must exist");
+        let key = format!("{}:{}", name, sig);
+        if let Some(id) = cls.static_methods.get(&key) {
+            return *id;
+        }
+        let id = self.next_method_id;
+        self.next_method_id += 1;
+        cls.static_methods.insert(key, id);
+        id
+    }
+
     /// JNI `FindClass(const char* name)`
     pub fn find_class(&mut self, name: &str) -> Option<u32> {
         self.class_name_map.get(name).copied().or_else(|| {
@@ -124,32 +214,43 @@ impl JniEnv {
         })
     }
 
-    /// JNI `GetMethodID(jclass clazz, const char* name, const char* sig)`
+    /// JNI `GetMethodID(jclass clazz, const char* name, const char* sig)`.
+    /// Fails closed with NoSuchMethodError if the method is not registered.
     pub fn get_method_id(&mut self, class_id: u32, name: &str, sig: &str) -> Option<u32> {
-        let cls = self.classes.get_mut(&class_id)?;
+        let cls = self.classes.get(&class_id)?;
         let key = format!("{}:{}", name, sig);
         if let Some(id) = cls.methods.get(&key) {
             return Some(*id);
         }
-
-        let id = self.next_method_id;
-        self.next_method_id += 1;
-        cls.methods.insert(key, id);
-        Some(id)
+        let cls_name = cls.name.clone();
+        self.throw_new("java/lang/NoSuchMethodError", &format!("Method {}:{} not found on {}", name, sig, cls_name));
+        None
     }
 
-    /// JNI `GetStaticMethodID(jclass clazz, const char* name, const char* sig)`
+    /// JNI `GetStaticMethodID(jclass clazz, const char* name, const char* sig)`.
+    /// Fails closed with NoSuchMethodError if the method is not registered.
     pub fn get_static_method_id(&mut self, class_id: u32, name: &str, sig: &str) -> Option<u32> {
-        let cls = self.classes.get_mut(&class_id)?;
+        let cls = self.classes.get(&class_id)?;
         let key = format!("{}:{}", name, sig);
         if let Some(id) = cls.static_methods.get(&key) {
             return Some(*id);
         }
+        let cls_name = cls.name.clone();
+        self.throw_new("java/lang/NoSuchMethodError", &format!("Static method {}:{} not found on {}", name, sig, cls_name));
+        None
+    }
 
-        let id = self.next_method_id;
-        self.next_method_id += 1;
-        cls.static_methods.insert(key, id);
-        Some(id)
+    /// JNI `GetFieldID(jclass clazz, const char* name, const char* sig)`.
+    /// Fails closed with NoSuchFieldError if the field is not registered.
+    pub fn get_field_id(&mut self, class_id: u32, name: &str, sig: &str) -> Option<u32> {
+        let cls = self.classes.get(&class_id)?;
+        let key = format!("{}:{}", name, sig);
+        if let Some(id) = cls.fields.get(&key) {
+            return Some(*id);
+        }
+        let cls_name = cls.name.clone();
+        self.throw_new("java/lang/NoSuchFieldError", &format!("Field {}:{} not found on {}", name, sig, cls_name));
+        None
     }
 
     /// JNI `RegisterNatives(jclass clazz, const JNINativeMethod* methods, jint nMethods)`
@@ -165,6 +266,92 @@ impl JniEnv {
         JNI_OK
     }
 
+    /// Tracks a newly allocated object in the active local frame.
+    fn track_local_ref(&mut self, obj_id: u32) {
+        if let Some(frame) = self.local_frames.last_mut() {
+            frame.refs.push(obj_id);
+        }
+    }
+
+    /// JNI `PushLocalFrame(jint capacity)`
+    pub fn push_local_frame(&mut self, capacity: usize) -> i32 {
+        self.local_frames.push(LocalFrame {
+            capacity,
+            refs: Vec::new(),
+        });
+        JNI_OK
+    }
+
+    /// JNI `PopLocalFrame(jobject result)`
+    /// Pops the active frame and releases references created within it, returning result promoted to the parent frame.
+    pub fn pop_local_frame(&mut self, result: u32) -> u32 {
+        if self.local_frames.len() > 1 {
+            if let Some(frame) = self.local_frames.pop() {
+                for id in frame.refs {
+                    if id != result && !self.global_refs.contains(&id) {
+                        self.objects.remove(&id);
+                    }
+                }
+            }
+        }
+        if result > 0 {
+            self.track_local_ref(result);
+        }
+        result
+    }
+
+    /// JNI `DeleteLocalRef(jobject obj)`
+    pub fn delete_local_ref(&mut self, obj_id: u32) {
+        if let Some(frame) = self.local_frames.last_mut() {
+            if let Some(pos) = frame.refs.iter().position(|&x| x == obj_id) {
+                frame.refs.remove(pos);
+            }
+        }
+        if !self.global_refs.contains(&obj_id) {
+            let is_in_any_frame = self.local_frames.iter().any(|f| f.refs.contains(&obj_id));
+            if !is_in_any_frame {
+                self.objects.remove(&obj_id);
+            }
+        }
+    }
+
+    /// JNI `NewGlobalRef(jobject lobj)`
+    pub fn new_global_ref(&mut self, obj_id: u32) -> u32 {
+        if obj_id == 0 || !self.objects.contains_key(&obj_id) {
+            return 0;
+        }
+        self.global_refs.insert(obj_id);
+        obj_id
+    }
+
+    /// JNI `DeleteGlobalRef(jobject gref)`
+    pub fn delete_global_ref(&mut self, obj_id: u32) {
+        self.global_refs.remove(&obj_id);
+        let is_in_any_frame = self.local_frames.iter().any(|f| f.refs.contains(&obj_id));
+        if !is_in_any_frame {
+            self.objects.remove(&obj_id);
+        }
+    }
+
+    /// JNI `IsSameObject(jobject ref1, jobject ref2)`
+    pub fn is_same_object(&self, ref1: u32, ref2: u32) -> bool {
+        ref1 == ref2
+    }
+
+    /// JNI `GetObjectRefType(jobject obj)`
+    pub fn get_object_ref_type(&self, obj_id: u32) -> JniRefType {
+        if obj_id == 0 || !self.objects.contains_key(&obj_id) {
+            return JniRefType::InvalidRefType;
+        }
+        if self.global_refs.contains(&obj_id) {
+            return JniRefType::GlobalRefType;
+        }
+        if self.local_frames.iter().any(|f| f.refs.contains(&obj_id)) {
+            return JniRefType::LocalRefType;
+        }
+        JniRefType::InvalidRefType
+    }
+
     /// JNI `NewStringUTF(const char* bytes)`
     pub fn new_string_utf(&mut self, s: &str) -> u32 {
         let str_class = self.register_class("java/lang/String");
@@ -176,11 +363,13 @@ impl JniEnv {
             class_id: str_class,
             string_val: Some(String::from(s)),
             int_fields: BTreeMap::new(),
+            long_fields: BTreeMap::new(),
             object_fields: BTreeMap::new(),
             array_elements: None,
         };
 
         self.objects.insert(id, obj);
+        self.track_local_ref(id);
         id
     }
 
@@ -209,19 +398,6 @@ impl JniEnv {
         // No-op for managed string references
     }
 
-    /// JNI `GetFieldID(jclass clazz, const char* name, const char* sig)`
-    pub fn get_field_id(&mut self, class_id: u32, name: &str, sig: &str) -> Option<u32> {
-        let cls = self.classes.get_mut(&class_id)?;
-        let key = format!("{}:{}", name, sig);
-        if let Some(id) = cls.fields.get(&key) {
-            return Some(*id);
-        }
-        let id = self.next_field_id;
-        self.next_field_id += 1;
-        cls.fields.insert(key, id);
-        Some(id)
-    }
-
     /// JNI `GetIntField(jobject obj, jfieldID fieldID)`
     pub fn get_int_field(&self, obj_id: u32, field_id: u32) -> i32 {
         self.objects.get(&obj_id)
@@ -233,6 +409,20 @@ impl JniEnv {
     pub fn set_int_field(&mut self, obj_id: u32, field_id: u32, val: i32) {
         if let Some(obj) = self.objects.get_mut(&obj_id) {
             obj.int_fields.insert(field_id, val);
+        }
+    }
+
+    /// JNI `GetLongField(jobject obj, jfieldID fieldID)` - 64-bit native pointer fields
+    pub fn get_long_field(&self, obj_id: u32, field_id: u32) -> i64 {
+        self.objects.get(&obj_id)
+            .and_then(|o| o.long_fields.get(&field_id).copied())
+            .unwrap_or(0)
+    }
+
+    /// JNI `SetLongField(jobject obj, jfieldID fieldID, jlong val)` - 64-bit native pointer fields
+    pub fn set_long_field(&mut self, obj_id: u32, field_id: u32, val: i64) {
+        if let Some(obj) = self.objects.get_mut(&obj_id) {
+            obj.long_fields.insert(field_id, val);
         }
     }
 
@@ -260,11 +450,13 @@ impl JniEnv {
             class_id,
             string_val: None,
             int_fields: BTreeMap::new(),
+            long_fields: BTreeMap::new(),
             object_fields: BTreeMap::new(),
             array_elements: None,
         };
 
         self.objects.insert(id, obj);
+        self.track_local_ref(id);
         id
     }
 
@@ -278,11 +470,13 @@ impl JniEnv {
             class_id: element_class_id,
             string_val: None,
             int_fields: BTreeMap::new(),
+            long_fields: BTreeMap::new(),
             object_fields: BTreeMap::new(),
             array_elements: Some(alloc::vec![initial_element; length]),
         };
 
         self.objects.insert(id, obj);
+        self.track_local_ref(id);
         id
     }
 
@@ -386,8 +580,10 @@ mod tests {
         let my_class_id = env.register_class("org/whispersystems/curve25519/Curve25519");
         assert!(my_class_id > 0);
 
-        let mid = env.get_static_method_id(my_class_id, "calculateAgreement", "([B[B)[B").expect("method ID");
+        let mid = env.register_static_method(my_class_id, "calculateAgreement", "([B[B)[B");
         assert!(mid > 0);
+        let found_mid = env.get_static_method_id(my_class_id, "calculateAgreement", "([B[B)[B");
+        assert_eq!(found_mid, Some(mid));
 
         let native_fn = 0xDEADBEEF;
         assert_eq!(env.register_natives(my_class_id, &[JNINativeMethod {
@@ -406,5 +602,83 @@ mod tests {
         let obj = env.new_object(my_class_id);
         assert!(obj > 0);
     }
-}
 
+    #[test]
+    fn test_jni_field_and_method_fail_closed_exceptions() {
+        let mut env = JniEnv::new();
+        let cls_id = env.find_class("java/lang/String").unwrap();
+
+        // 1. Missing field must fail closed and throw NoSuchFieldError
+        assert!(!env.exception_check());
+        let missing_field = env.get_field_id(cls_id, "mMissingField", "I");
+        assert_eq!(missing_field, None);
+        assert!(env.exception_check());
+        let ex_obj = env.exception_occurred().unwrap();
+        let obj = env.objects.get(&ex_obj).unwrap();
+        let cls = env.classes.get(&obj.class_id).unwrap();
+        assert_eq!(cls.name, "java/lang/NoSuchFieldError");
+        let ex_str = obj.string_val.as_deref().unwrap();
+        assert!(ex_str.contains("mMissingField"));
+
+        env.exception_clear();
+        assert!(!env.exception_check());
+
+        // 2. Missing method must fail closed and throw NoSuchMethodError
+        let missing_method = env.get_method_id(cls_id, "nonExistentMethod", "()V");
+        assert_eq!(missing_method, None);
+        assert!(env.exception_check());
+        let ex_obj2 = env.exception_occurred().unwrap();
+        let obj2 = env.objects.get(&ex_obj2).unwrap();
+        let cls2 = env.classes.get(&obj2.class_id).unwrap();
+        assert_eq!(cls2.name, "java/lang/NoSuchMethodError");
+        let ex_str2 = obj2.string_val.as_deref().unwrap();
+        assert!(ex_str2.contains("nonExistentMethod"));
+    }
+
+    #[test]
+    fn test_jni_64bit_long_pointer_fields() {
+        let mut env = JniEnv::new();
+        let path_cls = env.find_class("android/graphics/Path").unwrap();
+        let m_native_path_id = env.get_field_id(path_cls, "mNativePath", "J").expect("pre-registered mNativePath");
+
+        let path_obj = env.new_object(path_cls);
+        assert_eq!(env.get_long_field(path_obj, m_native_path_id), 0);
+
+        // Store and read 64-bit native pointer handle
+        let native_ptr: i64 = 0x7FFF_ABCD_EF01_2345i64;
+        env.set_long_field(path_obj, m_native_path_id, native_ptr);
+        assert_eq!(env.get_long_field(path_obj, m_native_path_id), native_ptr);
+    }
+
+    #[test]
+    fn test_jni_reference_scoping_and_lifecycle() {
+        let mut env = JniEnv::new();
+        let _str_cls = env.find_class("java/lang/String").unwrap();
+
+        let root_obj = env.new_string_utf("root");
+        assert_eq!(env.get_object_ref_type(root_obj), JniRefType::LocalRefType);
+
+        // Push local frame with capacity 16
+        assert_eq!(env.push_local_frame(16), JNI_OK);
+        let frame_obj1 = env.new_string_utf("child_frame_1");
+        let frame_obj2 = env.new_string_utf("child_frame_2");
+
+        // Convert frame_obj1 to global ref
+        let global_obj = env.new_global_ref(frame_obj1);
+        assert_eq!(env.get_object_ref_type(global_obj), JniRefType::GlobalRefType);
+
+        // Pop local frame returning frame_obj2 (promoted to parent frame)
+        let promoted = env.pop_local_frame(frame_obj2);
+        assert_eq!(promoted, frame_obj2);
+
+        // frame_obj1 is still alive as global ref
+        assert_eq!(env.get_object_ref_type(global_obj), JniRefType::GlobalRefType);
+        // frame_obj2 is alive in parent local frame
+        assert_eq!(env.get_object_ref_type(frame_obj2), JniRefType::LocalRefType);
+
+        // Delete global ref
+        env.delete_global_ref(global_obj);
+        // Now global_obj is no longer in any local frame, so it should be Invalid
+        assert_eq!(env.get_object_ref_type(global_obj), JniRefType::InvalidRefType);
+    }
+}

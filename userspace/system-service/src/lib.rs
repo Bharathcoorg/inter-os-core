@@ -581,7 +581,7 @@ pub fn run_acr() -> ! {
                                         lnch[0..4].copy_from_slice(b"LNCH");
                                         lnch[4..6].copy_from_slice(&1u16.to_le_bytes());
                                         lnch[6..10].copy_from_slice(&surface_id.to_le_bytes());
-                                        lnch[10..14].copy_from_slice(&(8 * 1024 * 1024u32).to_le_bytes());
+                                        lnch[10..14].copy_from_slice(&(32 * 1024 * 1024u32).to_le_bytes());
                                         lnch[14..18].copy_from_slice(&target_sdk.to_le_bytes());
                                         lnch[18..22].copy_from_slice(&app_uid.to_le_bytes());
                                         lnch[22..54].copy_from_slice(&computed_candidate_digest);
@@ -643,7 +643,7 @@ pub fn run_acr() -> ! {
                                                 lnch[0..4].copy_from_slice(b"LNCH");
                                                 lnch[4..6].copy_from_slice(&1u16.to_le_bytes());
                                                 lnch[6..10].copy_from_slice(&surface_id.to_le_bytes());
-                                                lnch[10..14].copy_from_slice(&(8 * 1024 * 1024u32).to_le_bytes());
+                                                lnch[10..14].copy_from_slice(&(32 * 1024 * 1024u32).to_le_bytes());
                                                 lnch[14..18].copy_from_slice(&target_sdk.to_le_bytes());
                                                 lnch[18..22].copy_from_slice(&app_uid.to_le_bytes());
                                                 lnch[22..54].copy_from_slice(&code_digest);
@@ -806,7 +806,18 @@ pub fn run_acr_app_runtime() -> ! {
                                 };
 
                                 let main_class_path = pkg_name.replace('.', "/");
-                                let main_activity_class = alloc::format!("L{}/MainActivity;", main_class_path);
+                                let candidate_activities = [
+                                    alloc::format!("L{}/activities/MainActivity;", main_class_path),
+                                    alloc::format!("L{}/MainActivity;", main_class_path),
+                                    alloc::format!("L{}/activities/SplashActivity;", main_class_path),
+                                    alloc::format!("L{}/SplashActivity;", main_class_path),
+                                ];
+                                let entry_activity = candidate_activities.iter().find(|act| {
+                                    parsed_dex.types.iter().any(|t| t == *act)
+                                        || parsed_dex.methods.iter().any(|m| &m.class_name == *act)
+                                }).cloned().unwrap_or_else(|| alloc::format!("L{}/MainActivity;", main_class_path));
+
+                                let main_activity_class = entry_activity;
                                 let class_exists = parsed_dex.types.iter().any(|t| t == &main_activity_class)
                                     || parsed_dex.methods.iter().any(|m| m.class_name == main_activity_class);
                                 if !class_exists {

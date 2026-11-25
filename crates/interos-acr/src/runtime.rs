@@ -349,12 +349,238 @@ pub struct DalvikVmState {
     pub call_depth: u8,
     /// Pending exception object ID if an exception is currently unwinding.
     pub pending_exception: Option<u32>,
+    /// Task/thread identity executing in this VM instance.
+    pub current_task_id: u64,
+    /// Monitor lock table tracking object identities, thread ownership, and recursion depth.
+    pub monitors: BTreeMap<u32, MonitorRecord>,
     objects: Vec<DalvikObject>,
     next_object_id: u32,
     static_fields: Vec<(u16, u32)>,
     pub gc_cycles: u64,
     pub gc_reclaimed_objects: usize,
     pub gc_total_pause_ticks: u64,
+}
+
+/// State of a synchronized Java monitor lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorRecord {
+    pub owner_task_id: u64,
+    pub recursion_count: u32,
+}
+
+/// Returns true if a source class descriptor is assignable to target class descriptor.
+pub fn is_type_compatible(dex: &DexPackage, source_desc: &str, target_desc: &str) -> bool {
+    if source_desc == target_desc {
+        return true;
+    }
+    if target_desc == "Ljava/lang/Object;" {
+        return true;
+    }
+    if source_desc.starts_with('[') {
+        if target_desc == "Ljava/lang/Cloneable;" || target_desc == "Ljava/io/Serializable;" {
+            return true;
+        }
+        if target_desc.starts_with('[') {
+            let elem_source = &source_desc[1..];
+            let elem_target = &target_desc[1..];
+            if (elem_source.starts_with('L') || elem_source.starts_with('['))
+                && (elem_target.starts_with('L') || elem_target.starts_with('['))
+            {
+                return is_type_compatible(dex, elem_source, elem_target);
+            }
+        }
+        return false;
+    }
+    if class_implements_framework_interface(source_desc, target_desc) {
+        return true;
+    }
+
+    let mut curr = source_desc;
+    let mut depth = 0;
+    while depth < 32 {
+        if curr == target_desc {
+            return true;
+        }
+        if class_implements_framework_interface(curr, target_desc) {
+            return true;
+        }
+        if check_dex_interfaces(dex, curr, target_desc) {
+            return true;
+        }
+
+        if let Some(super_desc) = find_dex_superclass(dex, curr) {
+            curr = super_desc;
+        } else if let Some(framework_super) = get_framework_superclass(curr) {
+            curr = framework_super;
+        } else {
+            break;
+        }
+        depth += 1;
+    }
+
+    false
+}
+
+/// Zero-copy resolution of a class's declared superclass from DEX class_defs.
+pub fn find_dex_superclass<'a>(dex: &'a DexPackage<'a>, class_desc: &str) -> Option<&'a str> {
+    let class_defs_size = u32::from_le(dex.header.class_defs_size) as usize;
+    let class_defs_off = u32::from_le(dex.header.class_defs_off) as usize;
+    for i in 0..class_defs_size {
+        let off = class_defs_off.checked_add(i.checked_mul(32)?)?;
+        if off + 32 > dex.raw.len() { break; }
+        let c_idx = u32::from_le_bytes(dex.raw[off..off + 4].try_into().ok()?);
+        if let Ok(c_name) = dex.get_type_slice(c_idx) {
+            if c_name == class_desc {
+                let super_idx = u32::from_le_bytes(dex.raw[off + 8..off + 12].try_into().ok()?);
+                if super_idx != 0xFFFF_FFFF {
+                    return dex.get_type_slice(super_idx).ok();
+                }
+                return None;
+            }
+        }
+    }
+    None
+}
+
+/// Zero-copy check if a DEX class implements an interface directly or transitively.
+pub fn check_dex_interfaces(dex: &DexPackage, class_desc: &str, target_iface: &str) -> bool {
+    let class_defs_size = u32::from_le(dex.header.class_defs_size) as usize;
+    let class_defs_off = u32::from_le(dex.header.class_defs_off) as usize;
+    for i in 0..class_defs_size {
+        let off = match class_defs_off.checked_add(i * 32) {
+            Some(o) if o + 32 <= dex.raw.len() => o,
+            _ => break,
+        };
+        let c_idx = match dex.raw[off..off + 4].try_into() {
+            Ok(b) => u32::from_le_bytes(b),
+            Err(_) => break,
+        };
+        if let Ok(c_name) = dex.get_type_slice(c_idx) {
+            if c_name == class_desc {
+                let if_off = match dex.raw[off + 12..off + 16].try_into() {
+                    Ok(b) => u32::from_le_bytes(b) as usize,
+                    Err(_) => 0,
+                };
+                if if_off > 0 && if_off + 4 <= dex.raw.len() {
+                    let count = match dex.raw[if_off..if_off + 4].try_into() {
+                        Ok(b) => u32::from_le_bytes(b) as usize,
+                        Err(_) => 0,
+                    };
+                    for k in 0..count.min(64) {
+                        let item_pos = if_off + 4 + k * 2;
+                        if item_pos + 2 <= dex.raw.len() {
+                            let type_idx = u16::from_le_bytes([dex.raw[item_pos], dex.raw[item_pos + 1]]) as u32;
+                            if let Ok(if_name) = dex.get_type_slice(type_idx) {
+                                if if_name == target_iface || is_type_compatible(dex, if_name, target_iface) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Known Android and Java standard framework class hierarchy.
+pub fn get_framework_superclass(class_desc: &str) -> Option<&'static str> {
+    match class_desc {
+        "Landroid/app/Activity;" => Some("Landroid/view/ContextThemeWrapper;"),
+        "Landroid/view/ContextThemeWrapper;" => Some("Landroid/content/ContextWrapper;"),
+        "Landroid/app/Service;" | "Landroid/app/Application;" => Some("Landroid/content/ContextWrapper;"),
+        "Landroid/content/ContextWrapper;" => Some("Landroid/content/Context;"),
+        "Landroid/content/Context;" => Some("Ljava/lang/Object;"),
+        "Landroid/view/ViewGroup;" | "Landroid/widget/TextView;" | "Landroid/widget/ImageView;" => Some("Landroid/view/View;"),
+        "Landroid/widget/Button;" => Some("Landroid/widget/TextView;"),
+        "Landroid/widget/LinearLayout;" | "Landroid/widget/RelativeLayout;" | "Landroid/widget/FrameLayout;" => Some("Landroid/view/ViewGroup;"),
+        "Landroid/view/View;" => Some("Ljava/lang/Object;"),
+        "Ljava/lang/Throwable;" => Some("Ljava/lang/Object;"),
+        "Ljava/lang/Exception;" | "Ljava/lang/Error;" => Some("Ljava/lang/Throwable;"),
+        "Ljava/lang/RuntimeException;" => Some("Ljava/lang/Exception;"),
+        "Ljava/lang/NullPointerException;"
+        | "Ljava/lang/IndexOutOfBoundsException;"
+        | "Ljava/lang/IllegalArgumentException;"
+        | "Ljava/lang/IllegalStateException;"
+        | "Ljava/lang/IllegalMonitorStateException;"
+        | "Ljava/lang/ArrayStoreException;"
+        | "Ljava/lang/ClassCastException;"
+        | "Ljava/lang/ArithmeticException;" => Some("Ljava/lang/RuntimeException;"),
+        "Ljava/lang/ArrayIndexOutOfBoundsException;" | "Ljava/lang/StringIndexOutOfBoundsException;" => Some("Ljava/lang/IndexOutOfBoundsException;"),
+        "Ljava/lang/ClassNotFoundException;" => Some("Ljava/lang/Exception;"),
+        "Ljava/lang/Number;" => Some("Ljava/lang/Object;"),
+        "Ljava/lang/Integer;" | "Ljava/lang/Long;" | "Ljava/lang/Float;" | "Ljava/lang/Double;" | "Ljava/lang/Byte;" | "Ljava/lang/Short;" => Some("Ljava/lang/Number;"),
+        "Ljava/lang/Boolean;" | "Ljava/lang/Character;" | "Ljava/lang/String;" | "Ljava/lang/StringBuilder;" | "Ljava/lang/StringBuffer;" => Some("Ljava/lang/Object;"),
+        "Ljava/util/AbstractCollection;" => Some("Ljava/lang/Object;"),
+        "Ljava/util/AbstractList;" => Some("Ljava/util/AbstractCollection;"),
+        "Ljava/util/ArrayList;" => Some("Ljava/util/AbstractList;"),
+        "Ljava/util/AbstractMap;" => Some("Ljava/lang/Object;"),
+        "Ljava/util/HashMap;" => Some("Ljava/util/AbstractMap;"),
+        _ => None,
+    }
+}
+
+/// Known interfaces implemented by Java standard library and Android framework classes.
+pub fn class_implements_framework_interface(class_desc: &str, iface_desc: &str) -> bool {
+    match iface_desc {
+        "Ljava/lang/CharSequence;" => matches!(
+            class_desc,
+            "Ljava/lang/String;" | "Ljava/lang/StringBuilder;" | "Ljava/lang/StringBuffer;"
+        ),
+        "Ljava/io/Serializable;" => matches!(
+            class_desc,
+            "Ljava/lang/String;"
+                | "Ljava/lang/StringBuilder;"
+                | "Ljava/lang/Number;"
+                | "Ljava/lang/Integer;"
+                | "Ljava/lang/Long;"
+                | "Ljava/lang/Float;"
+                | "Ljava/lang/Double;"
+                | "Ljava/lang/Boolean;"
+                | "Ljava/lang/Character;"
+                | "Ljava/lang/Byte;"
+                | "Ljava/lang/Short;"
+                | "Ljava/lang/Throwable;"
+                | "Ljava/lang/Exception;"
+                | "Ljava/lang/RuntimeException;"
+                | "Ljava/lang/NullPointerException;"
+                | "Ljava/lang/IndexOutOfBoundsException;"
+                | "Ljava/lang/ArrayIndexOutOfBoundsException;"
+                | "Ljava/lang/IllegalArgumentException;"
+                | "Ljava/lang/IllegalStateException;"
+                | "Ljava/lang/IllegalMonitorStateException;"
+                | "Ljava/lang/ArrayStoreException;"
+                | "Ljava/lang/ClassCastException;"
+                | "Ljava/util/ArrayList;"
+                | "Ljava/util/HashMap;"
+        ),
+        "Ljava/lang/Comparable;" => matches!(
+            class_desc,
+            "Ljava/lang/String;"
+                | "Ljava/lang/Integer;"
+                | "Ljava/lang/Long;"
+                | "Ljava/lang/Float;"
+                | "Ljava/lang/Double;"
+                | "Ljava/lang/Boolean;"
+                | "Ljava/lang/Character;"
+                | "Ljava/lang/Byte;"
+                | "Ljava/lang/Short;"
+        ),
+        "Ljava/lang/Cloneable;" => matches!(
+            class_desc,
+            "Ljava/util/ArrayList;" | "Ljava/util/HashMap;" | "Landroid/content/Intent;" | "Landroid/os/Bundle;"
+        ),
+        "Ljava/util/List;" => matches!(class_desc, "Ljava/util/ArrayList;" | "Ljava/util/AbstractList;"),
+        "Ljava/util/Collection;" | "Ljava/lang/Iterable;" => matches!(
+            class_desc,
+            "Ljava/util/ArrayList;" | "Ljava/util/AbstractList;" | "Ljava/util/AbstractCollection;"
+        ),
+        "Ljava/util/Map;" => matches!(class_desc, "Ljava/util/HashMap;" | "Ljava/util/AbstractMap;"),
+        "Landroid/os/Parcelable;" => matches!(class_desc, "Landroid/content/Intent;" | "Landroid/os/Bundle;"),
+        _ => false,
+    }
 }
 
 impl DalvikVmState {
@@ -370,6 +596,8 @@ impl DalvikVmState {
             captured_logs: Vec::new(),
             call_depth: 0,
             pending_exception: None,
+            current_task_id: 1,
+            monitors: BTreeMap::new(),
             objects: Vec::new(),
             next_object_id: 1,
             static_fields: Vec::new(),
@@ -637,6 +865,18 @@ impl DalvikVmState {
 
     pub fn throw_class_not_found(&mut self, message: Option<&str>) -> DalvikVmError {
         self.throw_exception("Ljava/lang/ClassNotFoundException;", message)
+    }
+
+    pub fn throw_illegal_monitor_state(&mut self, message: Option<&str>) -> DalvikVmError {
+        self.throw_exception("Ljava/lang/IllegalMonitorStateException;", message)
+    }
+
+    pub fn throw_array_store(&mut self, message: Option<&str>) -> DalvikVmError {
+        self.throw_exception("Ljava/lang/ArrayStoreException;", message)
+    }
+
+    pub fn throw_arithmetic(&mut self, message: Option<&str>) -> DalvikVmError {
+        self.throw_exception("Ljava/lang/ArithmeticException;", message)
     }
 
     /// Dispatches Java standard library and Android framework methods with genuine VM-managed state.
@@ -2705,6 +2945,43 @@ impl DalvikVmState {
         self.interpret_insns_with_code_offset(dex, method.registers_size, method.code_offset, insns)
     }
 
+    /// Resolves virtual method implementation by traversing runtime receiver class inheritance hierarchy.
+    pub fn resolve_virtual_method<'a>(
+        &self,
+        dex: &'a DexPackage<'a>,
+        receiver_class: &str,
+        method_name: &str,
+        proto_shorty: &str,
+    ) -> Option<&'a DexMethod> {
+        let mut curr = receiver_class;
+        let mut depth = 0;
+        while depth < 32 {
+            if let Some(m) = dex.methods.iter().find(|m| {
+                m.class_name == curr
+                    && m.method_name == method_name
+                    && m.proto_shorty == proto_shorty
+                    && !m.is_direct
+            }) {
+                return Some(m);
+            }
+
+            if let Some(super_desc) = find_dex_superclass(dex, curr) {
+                curr = super_desc;
+            } else if let Some(framework_super) = get_framework_superclass(curr) {
+                curr = framework_super;
+            } else {
+                break;
+            }
+            depth += 1;
+        }
+        None
+    }
+
+    /// Checks if a source class is compatible with/assignable to target class descriptor.
+    pub fn is_type_compatible(&self, dex: &DexPackage, source_desc: &str, target_desc: &str) -> bool {
+        is_type_compatible(dex, source_desc, target_desc)
+    }
+
     /// Interprets a sequence of Dalvik bytecode instructions directly.
     pub fn interpret_insns(
         &mut self,
@@ -3087,11 +3364,7 @@ impl DalvikVmState {
                             if let Ok(receiver_obj) = self.get_object(receiver_id) {
                                 let receiver_class = &receiver_obj.class_descriptor;
                                 if receiver_class != &target.class_name {
-                                    if let Some(override_m) = dex.methods.iter().find(|m| {
-                                        &m.class_name == receiver_class
-                                            && m.method_name == target.method_name
-                                            && m.proto_shorty == target.proto_shorty
-                                    }) {
+                                    if let Some(override_m) = self.resolve_virtual_method(dex, receiver_class, &target.method_name, &target.proto_shorty) {
                                         resolved_class = override_m.class_name.clone();
                                         resolved_method = override_m.method_name.clone();
                                         target_m = override_m;
@@ -3197,11 +3470,7 @@ impl DalvikVmState {
                             if let Ok(receiver_obj) = self.get_object(receiver_id) {
                                 let receiver_class = &receiver_obj.class_descriptor;
                                 if receiver_class != &target.class_name {
-                                    if let Some(override_m) = dex.methods.iter().find(|m| {
-                                        &m.class_name == receiver_class
-                                            && m.method_name == target.method_name
-                                            && m.proto_shorty == target.proto_shorty
-                                    }) {
+                                    if let Some(override_m) = self.resolve_virtual_method(dex, receiver_class, &target.method_name, &target.proto_shorty) {
                                         resolved_class = override_m.class_name.clone();
                                         resolved_method = override_m.method_name.clone();
                                         target_m = override_m;
@@ -3701,8 +3970,21 @@ impl DalvikVmState {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let arr_id = self.registers[v_arr];
+                    if arr_id == 0 {
+                        return Err(self.throw_npe(Some("Null array reference in aput")));
+                    }
                     let idx = self.registers[v_idx] as usize;
                     let val = self.registers[v_val];
+                    if opcode == OP_APUT_OBJECT && val != 0 {
+                        let val_obj = self.get_object(val)?;
+                        let val_desc = val_obj.class_descriptor.clone();
+                        let arr_obj = self.get_object(arr_id)?;
+                        if let Some(comp_type) = arr_obj.class_descriptor.strip_prefix('[') {
+                            if !self.is_type_compatible(dex, &val_desc, comp_type) {
+                                return Err(self.throw_array_store(Some("Incompatible array element type")));
+                            }
+                        }
+                    }
                     let obj = self.get_object_mut(arr_id)?;
                     let elements = obj.array_elements.as_mut().ok_or(DalvikVmError::NullPointerDereference)?;
                     if idx >= elements.len() {
@@ -4158,10 +4440,48 @@ impl DalvikVmState {
                     self.string_registers[v_dest] = self.last_return_string.clone();
                     pc += 2;
                 }
-                OP_MONITOR_ENTER | OP_MONITOR_EXIT => {
+                OP_MONITOR_ENTER => {
                     if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_src = insns[pc + 1] as usize;
                     if v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let obj_id = self.registers[v_src];
+                    if obj_id == 0 {
+                        return Err(self.throw_npe(Some("Null object reference in monitor-enter")));
+                    }
+                    let rec = self.monitors.entry(obj_id).or_insert(MonitorRecord {
+                        owner_task_id: self.current_task_id,
+                        recursion_count: 0,
+                    });
+                    if rec.owner_task_id != self.current_task_id && rec.recursion_count > 0 {
+                        return Err(self.throw_illegal_monitor_state(Some("Lock held by another task")));
+                    }
+                    rec.owner_task_id = self.current_task_id;
+                    rec.recursion_count = rec.recursion_count.saturating_add(1);
+                    pc += 2;
+                }
+                OP_MONITOR_EXIT => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_src = insns[pc + 1] as usize;
+                    if v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let obj_id = self.registers[v_src];
+                    if obj_id == 0 {
+                        return Err(self.throw_npe(Some("Null object reference in monitor-exit")));
+                    }
+                    let mut should_remove = false;
+                    if let Some(rec) = self.monitors.get_mut(&obj_id) {
+                        if rec.owner_task_id != self.current_task_id || rec.recursion_count == 0 {
+                            return Err(self.throw_illegal_monitor_state(Some("Current thread does not own monitor")));
+                        }
+                        rec.recursion_count -= 1;
+                        if rec.recursion_count == 0 {
+                            should_remove = true;
+                        }
+                    } else {
+                        return Err(self.throw_illegal_monitor_state(Some("Monitor not locked")));
+                    }
+                    if should_remove {
+                        self.monitors.remove(&obj_id);
+                    }
                     pc += 2;
                 }
                 OP_CHECK_CAST => {
@@ -4173,12 +4493,7 @@ impl DalvikVmState {
                     if obj_id > 0 {
                         let target_type = dex.get_type_slice(type_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
                         let obj = self.get_object(obj_id)?;
-                        let compatible = target_type == "Ljava/lang/Object;"
-                            || obj.class_descriptor == target_type
-                            || (target_type == "Ljava/lang/CharSequence;" && (obj.class_descriptor == "Ljava/lang/String;" || obj.class_descriptor == "Ljava/lang/StringBuilder;"))
-                            || (target_type == "Ljava/util/Map;" && obj.class_descriptor == "Ljava/util/HashMap;")
-                            || (target_type == "Ljava/util/List;" && obj.class_descriptor == "Ljava/util/ArrayList;");
-                        if !compatible {
+                        if !self.is_type_compatible(dex, &obj.class_descriptor, target_type) {
                             return Err(self.throw_class_cast(Some("Incompatible cast")));
                         }
                     }
@@ -4194,11 +4509,7 @@ impl DalvikVmState {
                     let is_inst = if obj_id > 0 {
                         if let Ok(target_type) = dex.get_type_slice(type_idx as u32) {
                             if let Ok(obj) = self.get_object(obj_id) {
-                                target_type == "Ljava/lang/Object;"
-                                    || obj.class_descriptor == target_type
-                                    || (target_type == "Ljava/lang/CharSequence;" && (obj.class_descriptor == "Ljava/lang/String;" || obj.class_descriptor == "Ljava/lang/StringBuilder;"))
-                                    || (target_type == "Ljava/util/Map;" && obj.class_descriptor == "Ljava/util/HashMap;")
-                                    || (target_type == "Ljava/util/List;" && obj.class_descriptor == "Ljava/util/ArrayList;")
+                                self.is_type_compatible(dex, &obj.class_descriptor, target_type)
                             } else {
                                 false
                             }
@@ -5549,6 +5860,145 @@ mod tests {
         assert_eq!(read_i, 98765);
         let read_s = vm.dispatch_framework_method(&dex, "Landroid/os/Parcel;", "readString", &[0], &[p_id]).unwrap();
         assert_eq!(vm.get_string_payload(read_s).as_deref(), Some("ParcelTestString"));
+    }
+
+    #[test]
+    fn test_dalvik_monitor_synchronization_reentrancy_and_mismatched_unlock() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "test", "()V");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        let obj_id = vm.allocate_object("Ljava/lang/Object;").unwrap();
+        vm.registers[0] = obj_id;
+
+        // Bytecode: monitor-enter v0, monitor-enter v0, monitor-exit v0, monitor-exit v0, return-void
+        let insns = [
+            OP_MONITOR_ENTER, 0x00,
+            OP_MONITOR_ENTER, 0x00,
+            OP_MONITOR_EXIT, 0x00,
+            OP_MONITOR_EXIT, 0x00,
+            OP_RETURN_VOID, 0x00,
+        ];
+
+        let res = vm.interpret_insns(&dex, 2, &insns);
+        assert!(res.is_ok(), "Reentrant monitor enter/exit must succeed");
+        assert!(vm.monitors.is_empty(), "All monitors must be cleared after matching exits");
+
+        // Test mismatched unlock throws IllegalMonitorStateException
+        let bad_insns = [
+            OP_MONITOR_EXIT, 0x00,
+            OP_RETURN_VOID, 0x00,
+        ];
+        let err = vm.interpret_insns(&dex, 2, &bad_insns).unwrap_err();
+        match err {
+            DalvikVmError::UnhandledException(ex_id) => {
+                let obj = vm.get_object(ex_id).unwrap();
+                assert_eq!(obj.class_descriptor, "Ljava/lang/IllegalMonitorStateException;");
+            }
+            other => panic!("Expected IllegalMonitorStateException, got {:?}", other),
+        }
+
+        // Test null monitor enter throws NullPointerException
+        vm.registers[0] = 0;
+        let null_insns = [
+            OP_MONITOR_ENTER, 0x00,
+            OP_RETURN_VOID, 0x00,
+        ];
+        let err2 = vm.interpret_insns(&dex, 2, &null_insns).unwrap_err();
+        match err2 {
+            DalvikVmError::UnhandledException(ex_id) => {
+                let obj = vm.get_object(ex_id).unwrap();
+                assert_eq!(obj.class_descriptor, "Ljava/lang/NullPointerException;");
+            }
+            other => panic!("Expected NullPointerException, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_dalvik_runtime_type_checking_checkcast_and_instanceof_hierarchy() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "test", "()V");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let vm = DalvikVmState::new();
+
+        // Exact match
+        assert!(vm.is_type_compatible(&dex, "Ljava/lang/String;", "Ljava/lang/String;"));
+        // Superclass Object
+        assert!(vm.is_type_compatible(&dex, "Ljava/lang/String;", "Ljava/lang/Object;"));
+        // Interfaces for String
+        assert!(vm.is_type_compatible(&dex, "Ljava/lang/String;", "Ljava/lang/CharSequence;"));
+        assert!(vm.is_type_compatible(&dex, "Ljava/lang/String;", "Ljava/io/Serializable;"));
+        assert!(vm.is_type_compatible(&dex, "Ljava/lang/String;", "Ljava/lang/Comparable;"));
+
+        // Interfaces and superclass for ArrayList
+        assert!(vm.is_type_compatible(&dex, "Ljava/util/ArrayList;", "Ljava/util/List;"));
+        assert!(vm.is_type_compatible(&dex, "Ljava/util/ArrayList;", "Ljava/util/Collection;"));
+        assert!(vm.is_type_compatible(&dex, "Ljava/util/ArrayList;", "Ljava/lang/Iterable;"));
+        assert!(vm.is_type_compatible(&dex, "Ljava/util/ArrayList;", "Ljava/lang/Object;"));
+
+        // Incompatible types fail closed
+        assert!(!vm.is_type_compatible(&dex, "Ljava/lang/String;", "Ljava/util/List;"));
+        assert!(!vm.is_type_compatible(&dex, "Ljava/util/HashMap;", "Ljava/util/List;"));
+        assert!(!vm.is_type_compatible(&dex, "Landroid/content/Context;", "Ljava/util/Map;"));
+    }
+
+    #[test]
+    fn test_dalvik_array_store_exception_and_wide_register_bounds() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "test", "()V");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // Create String array: [Ljava/lang/String;
+        let arr_id = vm.allocate_array("[Ljava/lang/String;", 2).unwrap();
+        let str_id = vm.allocate_string("valid_str").unwrap();
+        let int_id = vm.allocate_object("Ljava/lang/Integer;").unwrap();
+
+        vm.registers[0] = str_id;
+        vm.registers[1] = arr_id;
+        vm.registers[2] = 0; // index 0
+
+        // aput-object v0, v1, v2
+        let valid_aput = [
+            OP_APUT_OBJECT, 0x00, 0x01, 0x02,
+            OP_RETURN_VOID, 0x00,
+        ];
+        assert!(vm.interpret_insns(&dex, 4, &valid_aput).is_ok());
+
+        // Now attempt storing Integer into String array: aput-object v0 (with Integer), v1, v2
+        vm.registers[0] = int_id;
+        let err = vm.interpret_insns(&dex, 4, &valid_aput).unwrap_err();
+        match err {
+            DalvikVmError::UnhandledException(ex_id) => {
+                let obj = vm.get_object(ex_id).unwrap();
+                assert_eq!(obj.class_descriptor, "Ljava/lang/ArrayStoreException;");
+            }
+            other => panic!("Expected ArrayStoreException, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_dalvik_multi_level_virtual_dispatch() {
+        let dex_bytes = create_test_dex("Landroid/view/View;", "getId", "()I");
+        let mut dex = DexPackage::parse(&dex_bytes).unwrap();
+
+        // Grandparent defines getId() -> returns 42
+        dex.methods.push(DexMethod {
+            method_index: dex.methods.len(),
+            class_name: String::from("Landroid/view/View;"),
+            method_name: String::from("getId"),
+            proto_shorty: String::from("I"),
+            is_direct: false,
+            code_offset: 0,
+            registers_size: 1,
+            ins_size: 0,
+            outs_size: 0,
+            instruction_count: 2,
+        });
+
+        let vm = DalvikVmState::new();
+        // Landroid/widget/Button; -> TextView -> View (defined in framework hierarchy)
+        let resolved = vm.resolve_virtual_method(&dex, "Landroid/widget/Button;", "getId", "I");
+        assert!(resolved.is_some(), "Multi-level virtual dispatch must find View::getId from Button receiver");
+        assert_eq!(resolved.unwrap().class_name, "Landroid/view/View;");
     }
 }
 

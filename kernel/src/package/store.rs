@@ -9,6 +9,7 @@ use spin::Mutex;
 
 const MAX_BLOBS:usize=32;
 pub const MAX_BLOB_SIZE:usize=60000;
+pub const MAX_RUNTIME_ARTIFACT_SIZE:usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct PackageBlob { pub package_id:String, pub version:(u16,u16,u16), pub code_digest:[u8; 32], pub bytes:Vec<u8> }
@@ -29,13 +30,15 @@ impl PackageBlobStore {
   Ok(())
  }
  pub fn put_verified(&mut self,package_id:&str,version:(u16,u16,u16),code_digest:[u8;32],bytes:&[u8])->Result<(),()>{
-  if bytes.is_empty()||bytes.len()>MAX_BLOB_SIZE{return Err(());}
+  if bytes.is_empty()||bytes.len()>MAX_RUNTIME_ARTIFACT_SIZE{return Err(());}
   let previous=self.blobs.clone();
   if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){b.version=version;b.code_digest=code_digest;b.bytes.clear();b.bytes.extend_from_slice(bytes);}
   else {if self.blobs.len()>=MAX_BLOBS{return Err(());}self.blobs.push(PackageBlob{package_id:package_id.to_string(),version,code_digest,bytes:bytes.to_vec()});}
-  if self.persist().is_err() {
-   self.blobs=previous;
-   return Err(());
+  if bytes.len()<=MAX_BLOB_SIZE {
+   if self.persist().is_err() {
+    self.blobs=previous;
+    return Err(());
+   }
   }
   Ok(())
  }
@@ -175,7 +178,7 @@ impl CandidateArtifactStore {
 
     /// Allocates an out-of-band candidate staging session.
     pub fn allocate_session(&mut self, package_name: &str, expected_len: usize) -> Result<u32, ()> {
-        if self.candidates.len() >= 8 || expected_len == 0 || expected_len > MAX_BLOB_SIZE {
+        if self.candidates.len() >= 8 || expected_len == 0 || expected_len > MAX_RUNTIME_ARTIFACT_SIZE {
             return Err(());
         }
         let h = self.next_handle;
@@ -193,7 +196,7 @@ impl CandidateArtifactStore {
     /// Appends a raw chunk to an existing candidate staging session.
     pub fn append_chunk(&mut self, handle: u32, chunk: &[u8]) -> Result<(), ()> {
         let candidate = self.candidates.iter_mut().find(|c| c.handle == handle).ok_or(())?;
-        if candidate.bytes.len().saturating_add(chunk.len()) > MAX_BLOB_SIZE {
+        if candidate.bytes.len().saturating_add(chunk.len()) > MAX_RUNTIME_ARTIFACT_SIZE {
             return Err(());
         }
         candidate.bytes.extend_from_slice(chunk);
@@ -220,7 +223,7 @@ impl CandidateArtifactStore {
             if self.candidates.len() >= 8 {
                 return Err(());
             }
-            if chunk.len() > MAX_BLOB_SIZE {
+            if chunk.len() > MAX_RUNTIME_ARTIFACT_SIZE {
                 return Err(());
             }
             let h = self.next_handle;
@@ -243,12 +246,12 @@ impl CandidateArtifactStore {
                 return Err(());
             }
             if append {
-                if candidate.bytes.len().saturating_add(chunk.len()) > MAX_BLOB_SIZE {
+                if candidate.bytes.len().saturating_add(chunk.len()) > MAX_RUNTIME_ARTIFACT_SIZE {
                     return Err(());
                 }
                 candidate.bytes.extend_from_slice(chunk);
             } else {
-                if chunk.len() > MAX_BLOB_SIZE {
+                if chunk.len() > MAX_RUNTIME_ARTIFACT_SIZE {
                     return Err(());
                 }
                 candidate.bytes.clear();
