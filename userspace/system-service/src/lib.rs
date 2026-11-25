@@ -981,7 +981,20 @@ pub fn run_acr_app_runtime() -> ! {
                 let now_nanos = now.saturating_mul(1_000_000);
                 let _ = inst.looper.loop_once(now);
                 let _ = inst.choreographer.do_frame(now_nanos);
-                let _ = inst.vm.step_scheduler_slice(4, now);
+                // WHY the DEX-executing scheduler: `step_scheduler_slice` only
+                // swaps thread contexts and never advances the program counter,
+                // so a service that called it left every managed thread frozen
+                // at the bytecode it had already run. The runnable threads must
+                // actually interpret their DEX instructions, block on monitors
+                // and resume; that is `step_scheduler_slice_with_dex`. The DEX
+                // is parsed from the instance's own verified `classes_dex`
+                // (disjoint field borrows), and only a parse failure falls back
+                // to context-only scheduling rather than executing nothing.
+                let scheduled = match interos_android_format::dex::DexPackage::parse(&inst.classes_dex) {
+                    Ok(dex) => inst.vm.step_scheduler_slice_with_dex(&dex, 4, now),
+                    Err(_) => inst.vm.step_scheduler_slice(4, now),
+                };
+                let _ = scheduled;
             }
 
             if let (Some(ref mut inst), Some(ref mut root)) = (&mut instance, &mut root_widget) {

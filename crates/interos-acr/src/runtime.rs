@@ -7146,6 +7146,53 @@ mod tests {
         vm.step_scheduler_slice(2, 50);
         assert_eq!(vm.current_thread_id, 2);
     }
+
+    #[test]
+    fn scheduler_with_dex_executes_bytecode_while_context_only_does_not() {
+        // WHAT THIS IS FOR: the ACR service loop must drive the bytecode-executing
+        // scheduler, not the context-only one. This pins the difference on the
+        // same runnable thread: `step_scheduler_slice` switches context but never
+        // advances the PC, while `step_scheduler_slice_with_dex` interprets the
+        // thread's `return-void` and terminates it.
+        let dex_bytes = create_test_dex("Lorg/interos/Sched;", "run", "()V");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let code_off = dex.methods[0].code_offset;
+        let reg_sz = dex.methods[0].registers_size;
+        assert!(code_off > 0, "the fixture method must carry a code item");
+
+        // Context-only path: the thread is switched but its PC never moves and
+        // it stays Runnable -- no bytecode executed.
+        let mut ctx_only = DalvikVmState::new();
+        ctx_only.spawn_thread(1, "T1");
+        {
+            let t = ctx_only.threads.get_mut(&1).unwrap();
+            t.code_offset = code_off;
+            t.registers_size = reg_sz;
+        }
+        assert_eq!(ctx_only.step_scheduler_slice(1, 10), 1);
+        assert_eq!(ctx_only.threads.get(&1).unwrap().pc, 0);
+        assert!(matches!(
+            ctx_only.threads.get(&1).unwrap().status,
+            JavaThreadStatus::Runnable
+        ));
+
+        // DEX path: the same thread interprets its instruction and terminates.
+        let mut with_dex = DalvikVmState::new();
+        with_dex.spawn_thread(1, "T1");
+        {
+            let t = with_dex.threads.get_mut(&1).unwrap();
+            t.code_offset = code_off;
+            t.registers_size = reg_sz;
+        }
+        assert_eq!(with_dex.step_scheduler_slice_with_dex(&dex, 1, 10), 1);
+        assert!(
+            matches!(
+                with_dex.threads.get(&1).unwrap().status,
+                JavaThreadStatus::Terminated
+            ),
+            "the DEX scheduler must execute the thread's return-void and terminate it"
+        );
+    }
 }
 
 
