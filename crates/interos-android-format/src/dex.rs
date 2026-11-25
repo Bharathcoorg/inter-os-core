@@ -45,7 +45,12 @@ pub const OP_RETURN: u8 = 0x0F;
 pub const OP_RETURN_WIDE: u8 = 0x10;
 pub const OP_CONST_4: u8 = 0x12;
 pub const OP_CONST_16: u8 = 0x13;
+pub const OP_CONST_HIGH16: u8 = 0x15;
 pub const OP_CONST_WIDE: u8 = 0x16;
+pub const OP_CONST_WIDE_16: u8 = 0x16;
+pub const OP_CONST_WIDE_32: u8 = 0x17;
+pub const OP_CONST_WIDE_FULL: u8 = 0x18;
+pub const OP_CONST_WIDE_HIGH16: u8 = 0x19;
 pub const OP_CONST_STRING: u8 = 0x1A;
 pub const OP_CONST_STRING_JUMBO: u8 = 0x1B;
 pub const OP_CONST_CLASS: u8 = 0x1C;
@@ -80,6 +85,8 @@ pub const OP_USHR_INT_2ADDR: u8 = 0xBA;
 
 pub const OP_ARRAY_LENGTH: u8 = 0x21;
 pub const OP_NEW_ARRAY: u8 = 0x23;
+pub const OP_FILLED_NEW_ARRAY: u8 = 0x24;
+pub const OP_FILLED_NEW_ARRAY_RANGE: u8 = 0x25;
 
 pub const OP_IF_LT: u8 = 0x34;
 pub const OP_IF_GE: u8 = 0x35;
@@ -90,25 +97,124 @@ pub const OP_IF_GEZ: u8 = 0x3B;
 pub const OP_IF_GTZ: u8 = 0x3C;
 pub const OP_IF_LEZ: u8 = 0x3D;
 
+pub const OP_CMPL_DOUBLE: u8 = 0x2F;
+pub const OP_CMPG_DOUBLE: u8 = 0x30;
+pub const OP_CMP_LONG: u8 = 0x31;
+
 pub const OP_AGET: u8 = 0x44;
+pub const OP_AGET_WIDE: u8 = 0x45;
+pub const OP_AGET_OBJECT: u8 = 0x46;
+pub const OP_AGET_BOOLEAN: u8 = 0x47;
+pub const OP_AGET_BYTE: u8 = 0x48;
+pub const OP_AGET_CHAR: u8 = 0x49;
+pub const OP_AGET_SHORT: u8 = 0x4A;
+
 pub const OP_APUT: u8 = 0x4B;
+pub const OP_APUT_WIDE: u8 = 0x4C;
+pub const OP_APUT_OBJECT: u8 = 0x4D;
+pub const OP_APUT_BOOLEAN: u8 = 0x4E;
+pub const OP_APUT_BYTE: u8 = 0x4F;
+pub const OP_APUT_CHAR: u8 = 0x50;
+pub const OP_APUT_SHORT: u8 = 0x51;
 
 pub const OP_IGET: u8 = 0x52;
+pub const OP_IGET_WIDE: u8 = 0x53;
+pub const OP_IGET_OBJECT: u8 = 0x54;
+pub const OP_IGET_BOOLEAN: u8 = 0x55;
+pub const OP_IGET_BYTE: u8 = 0x56;
+pub const OP_IGET_CHAR: u8 = 0x57;
+pub const OP_IGET_SHORT: u8 = 0x58;
+
 pub const OP_IPUT: u8 = 0x59;
+pub const OP_IPUT_WIDE: u8 = 0x5A;
+pub const OP_IPUT_OBJECT: u8 = 0x5B;
+pub const OP_IPUT_BOOLEAN: u8 = 0x5C;
+pub const OP_IPUT_BYTE: u8 = 0x5D;
+pub const OP_IPUT_CHAR: u8 = 0x5E;
+pub const OP_IPUT_SHORT: u8 = 0x5F;
 
 pub const OP_CMPL_FLOAT: u8 = 0x2D;
 pub const OP_CMPG_FLOAT: u8 = 0x2E;
 
 pub const OP_SGET: u8 = 0x60;
+pub const OP_SGET_WIDE: u8 = 0x61;
+pub const OP_SGET_OBJECT: u8 = 0x62;
 pub const OP_SGET_BOOLEAN: u8 = 0x63;
-pub const OP_SPUT: u8 = 0x67;
-pub const OP_SPUT_BOOLEAN: u8 = 0x6A;
+pub const OP_SGET_BYTE: u8 = 0x64;
+pub const OP_SGET_CHAR: u8 = 0x65;
+pub const OP_SGET_SHORT: u8 = 0x66;
 
+pub const OP_SPUT: u8 = 0x67;
+pub const OP_SPUT_WIDE: u8 = 0x68;
+pub const OP_SPUT_OBJECT: u8 = 0x69;
+pub const OP_SPUT_BOOLEAN: u8 = 0x6A;
+pub const OP_SPUT_BYTE: u8 = 0x6B;
+pub const OP_SPUT_CHAR: u8 = 0x6C;
+pub const OP_SPUT_SHORT: u8 = 0x6D;
+
+pub const OP_INT_TO_LONG: u8 = 0x81;
+pub const OP_LONG_TO_INT: u8 = 0x82;
+pub const OP_INT_TO_DOUBLE: u8 = 0x83;
 pub const OP_INT_TO_FLOAT: u8 = 0x84;
+pub const OP_LONG_TO_FLOAT: u8 = 0x85;
+pub const OP_LONG_TO_DOUBLE: u8 = 0x86;
 pub const OP_FLOAT_TO_INT: u8 = 0x87;
+pub const OP_FLOAT_TO_LONG: u8 = 0x88;
+pub const OP_FLOAT_TO_DOUBLE: u8 = 0x89;
+pub const OP_DOUBLE_TO_INT: u8 = 0x8A;
+pub const OP_DOUBLE_TO_LONG: u8 = 0x8B;
+pub const OP_DOUBLE_TO_FLOAT: u8 = 0x8C;
 pub const OP_INT_TO_BYTE: u8 = 0x8D;
 pub const OP_INT_TO_CHAR: u8 = 0x8E;
 pub const OP_INT_TO_SHORT: u8 = 0x8F;
+
+pub const OP_ADD_LONG: u8 = 0x9B;
+pub const OP_SUB_LONG: u8 = 0x9C;
+pub const OP_MUL_LONG: u8 = 0x9D;
+pub const OP_DIV_LONG: u8 = 0x9E;
+pub const OP_REM_LONG: u8 = 0x9F;
+pub const OP_AND_LONG: u8 = 0xA0;
+pub const OP_OR_LONG: u8 = 0xA1;
+pub const OP_XOR_LONG: u8 = 0xA2;
+pub const OP_SHL_LONG: u8 = 0xA3;
+pub const OP_SHR_LONG: u8 = 0xA4;
+pub const OP_USHR_LONG: u8 = 0xA5;
+
+pub const OP_ADD_FLOAT: u8 = 0xA6;
+pub const OP_SUB_FLOAT: u8 = 0xA7;
+pub const OP_MUL_FLOAT: u8 = 0xA8;
+pub const OP_DIV_FLOAT: u8 = 0xA9;
+pub const OP_REM_FLOAT: u8 = 0xAA;
+
+pub const OP_ADD_DOUBLE: u8 = 0xAB;
+pub const OP_SUB_DOUBLE: u8 = 0xAC;
+pub const OP_MUL_DOUBLE: u8 = 0xAD;
+pub const OP_DIV_DOUBLE: u8 = 0xAE;
+pub const OP_REM_DOUBLE: u8 = 0xAF;
+
+pub const OP_ADD_LONG_2ADDR: u8 = 0xBB;
+pub const OP_SUB_LONG_2ADDR: u8 = 0xBC;
+pub const OP_MUL_LONG_2ADDR: u8 = 0xBD;
+pub const OP_DIV_LONG_2ADDR: u8 = 0xBE;
+pub const OP_REM_LONG_2ADDR: u8 = 0xBF;
+pub const OP_AND_LONG_2ADDR: u8 = 0xC0;
+pub const OP_OR_LONG_2ADDR: u8 = 0xC1;
+pub const OP_XOR_LONG_2ADDR: u8 = 0xC2;
+pub const OP_SHL_LONG_2ADDR: u8 = 0xC3;
+pub const OP_SHR_LONG_2ADDR: u8 = 0xC4;
+pub const OP_USHR_LONG_2ADDR: u8 = 0xC5;
+
+pub const OP_ADD_FLOAT_2ADDR: u8 = 0xC6;
+pub const OP_SUB_FLOAT_2ADDR: u8 = 0xC7;
+pub const OP_MUL_FLOAT_2ADDR: u8 = 0xC8;
+pub const OP_DIV_FLOAT_2ADDR: u8 = 0xC9;
+pub const OP_REM_FLOAT_2ADDR: u8 = 0xCA;
+
+pub const OP_ADD_DOUBLE_2ADDR: u8 = 0xCB;
+pub const OP_SUB_DOUBLE_2ADDR: u8 = 0xCC;
+pub const OP_MUL_DOUBLE_2ADDR: u8 = 0xCD;
+pub const OP_DIV_DOUBLE_2ADDR: u8 = 0xCE;
+pub const OP_REM_DOUBLE_2ADDR: u8 = 0xCF;
 
 pub const OP_ADD_INT: u8 = 0x90;
 pub const OP_SUB_INT: u8 = 0x91;

@@ -118,6 +118,68 @@ impl AndroidSandboxFs {
         }
     }
 
+    /// Writes a file into the Android sandbox with strict boundary checking.
+    pub fn open_write(&mut self, target_path: &str, data: &[u8]) -> Result<(), AndroidFsError> {
+        if target_path.starts_with("/system/etc")
+            || target_path.starts_with("/packages")
+            || target_path == "/data/audit.log"
+            || target_path.contains("..")
+        {
+            self.security_violations += 1;
+            return Err(AndroidFsError::SecurityViolation);
+        }
+        self.create_file(target_path, data);
+        Ok(())
+    }
+
+    /// Deletes a file or directory from the sandbox.
+    pub fn delete_file(&mut self, target_path: &str) -> Result<bool, AndroidFsError> {
+        if target_path.starts_with("/system/etc")
+            || target_path.starts_with("/packages")
+            || target_path == "/data/audit.log"
+            || target_path.contains("..")
+        {
+            self.security_violations += 1;
+            return Err(AndroidFsError::SecurityViolation);
+        }
+        Ok(self.inodes.remove(target_path).is_some())
+    }
+
+    /// Checks if a path exists in the sandbox.
+    pub fn exists(&self, target_path: &str) -> bool {
+        if target_path.starts_with("/system/etc")
+            || target_path.starts_with("/packages")
+            || target_path == "/data/audit.log"
+            || target_path.contains("..")
+        {
+            return false;
+        }
+        self.inodes.contains_key(target_path)
+    }
+
+    /// Checks if a path is a directory.
+    pub fn is_directory(&self, target_path: &str) -> bool {
+        self.inodes.get(target_path).map(|i| i.is_directory).unwrap_or(false)
+    }
+
+    /// Lists directory entries directly under target_path.
+    pub fn list_directory(&self, target_path: &str) -> Result<Vec<String>, AndroidFsError> {
+        let prefix = if target_path.ends_with('/') {
+            String::from(target_path)
+        } else {
+            alloc::format!("{}/", target_path)
+        };
+        let mut entries = Vec::new();
+        for key in self.inodes.keys() {
+            if let Some(sub) = key.strip_prefix(&prefix) {
+                if !sub.is_empty() && !sub.contains('/') {
+                    entries.push(String::from(sub));
+                }
+            }
+        }
+        Ok(entries)
+    }
+
     /// Returns the total number of intercepted security boundary breaches.
     pub fn security_violations(&self) -> usize {
         self.security_violations

@@ -189,6 +189,158 @@ impl BinderMediator {
     }
 }
 
+/// Heap-allocated, serialization-safe Android Parcel implementation for IPC and framework usage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parcel {
+    pub data: Vec<u8>,
+    pub position: usize,
+}
+
+impl Parcel {
+    pub fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            position: 0,
+        }
+    }
+
+    pub fn obtain() -> Self {
+        Self::new()
+    }
+
+    pub fn recycle(&mut self) {
+        self.data.clear();
+        self.position = 0;
+    }
+
+    pub fn data_size(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn data_position(&self) -> usize {
+        self.position
+    }
+
+    pub fn set_data_position(&mut self, pos: usize) {
+        self.position = pos.min(self.data.len());
+    }
+
+    pub fn write_int(&mut self, val: i32) {
+        self.data.extend_from_slice(&val.to_le_bytes());
+    }
+
+    pub fn read_int(&mut self) -> Option<i32> {
+        if self.position + 4 <= self.data.len() {
+            let val = i32::from_le_bytes(self.data[self.position..self.position + 4].try_into().ok()?);
+            self.position += 4;
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    pub fn write_long(&mut self, val: i64) {
+        self.data.extend_from_slice(&val.to_le_bytes());
+    }
+
+    pub fn read_long(&mut self) -> Option<i64> {
+        if self.position + 8 <= self.data.len() {
+            let val = i64::from_le_bytes(self.data[self.position..self.position + 8].try_into().ok()?);
+            self.position += 8;
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    pub fn write_float(&mut self, val: f32) {
+        self.data.extend_from_slice(&val.to_bits().to_le_bytes());
+    }
+
+    pub fn read_float(&mut self) -> Option<f32> {
+        if self.position + 4 <= self.data.len() {
+            let val = u32::from_le_bytes(self.data[self.position..self.position + 4].try_into().ok()?);
+            self.position += 4;
+            Some(f32::from_bits(val))
+        } else {
+            None
+        }
+    }
+
+    pub fn write_double(&mut self, val: f64) {
+        self.data.extend_from_slice(&val.to_bits().to_le_bytes());
+    }
+
+    pub fn read_double(&mut self) -> Option<f64> {
+        if self.position + 8 <= self.data.len() {
+            let val = u64::from_le_bytes(self.data[self.position..self.position + 8].try_into().ok()?);
+            self.position += 8;
+            Some(f64::from_bits(val))
+        } else {
+            None
+        }
+    }
+
+    pub fn write_string(&mut self, val: &str) {
+        let bytes = val.as_bytes();
+        self.write_int(bytes.len() as i32);
+        self.data.extend_from_slice(bytes);
+        let pad = (4 - (bytes.len() % 4)) % 4;
+        for _ in 0..pad {
+            self.data.push(0);
+        }
+    }
+
+    pub fn read_string(&mut self) -> Option<String> {
+        let len = self.read_int()? as usize;
+        if self.position + len <= self.data.len() {
+            let s = String::from(core::str::from_utf8(&self.data[self.position..self.position + len]).ok()?);
+            self.position += len;
+            let pad = (4 - (len % 4)) % 4;
+            self.position = (self.position + pad).min(self.data.len());
+            Some(s)
+        } else {
+            None
+        }
+    }
+
+    pub fn write_strong_binder(&mut self, handle: u32) {
+        self.data.extend_from_slice(&handle.to_le_bytes());
+    }
+
+    pub fn read_strong_binder(&mut self) -> Option<u32> {
+        if self.position + 4 <= self.data.len() {
+            let h = u32::from_le_bytes(self.data[self.position..self.position + 4].try_into().ok()?);
+            self.position += 4;
+            Some(h)
+        } else {
+            None
+        }
+    }
+
+    pub fn write_byte_array(&mut self, slice: &[u8]) {
+        self.write_int(slice.len() as i32);
+        self.data.extend_from_slice(slice);
+        let pad = (4 - (slice.len() % 4)) % 4;
+        for _ in 0..pad {
+            self.data.push(0);
+        }
+    }
+
+    pub fn create_byte_array(&mut self) -> Option<Vec<u8>> {
+        let len = self.read_int()? as usize;
+        if self.position + len <= self.data.len() {
+            let bytes = self.data[self.position..self.position + len].to_vec();
+            self.position += len;
+            let pad = (4 - (len % 4)) % 4;
+            self.position = (self.position + pad).min(self.data.len());
+            Some(bytes)
+        } else {
+            None
+        }
+    }
+}
+
 /// Zero-allocation bounded AIDL Parcel reader for microG and Android Binder transactions.
 pub struct ParcelReader<'a> {
     data: &'a [u8],

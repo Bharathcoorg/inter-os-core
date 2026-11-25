@@ -11,6 +11,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use crate::binder::Parcel;
 use interos_android_format::dex::*;
 
 /// Errors encountered during Dalvik bytecode execution.
@@ -191,6 +192,26 @@ pub enum BundleValue {
     Bundle(BTreeMap<String, BundleValue>),
 }
 
+/// Software square root using Newton-Raphson method for no_std targets.
+pub fn soft_sqrt(val: f64) -> f64 {
+    if val < 0.0 || val.is_nan() {
+        f64::NAN
+    } else if val == 0.0 || val.is_infinite() {
+        val
+    } else {
+        let mut curr = val;
+        let mut prev = 0.0;
+        for _ in 0..64 {
+            if (curr - prev).abs() < 1e-15 {
+                break;
+            }
+            prev = curr;
+            curr = 0.5 * (curr + val / curr);
+        }
+        curr
+    }
+}
+
 /// VM-managed payload for stateful Java and Android objects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectPayload {
@@ -202,6 +223,20 @@ pub enum ObjectPayload {
     BoxedLong(i64),
     Class { descriptor: String },
     ArrayList(Vec<u32>),
+    HashMap(BTreeMap<String, u32>),
+    SharedPreferences {
+        name: String,
+        values: BTreeMap<String, BundleValue>,
+    },
+    SharedPreferencesEditor {
+        pref_name: String,
+        staged: BTreeMap<String, Option<BundleValue>>,
+        clear_staged: bool,
+    },
+    File {
+        path: String,
+    },
+    Parcel(Parcel),
     Bundle(BTreeMap<String, BundleValue>),
     Intent {
         action: Option<String>,
@@ -235,6 +270,18 @@ impl DalvikObject {
             "Ljava/lang/Boolean;" => ObjectPayload::BoxedBoolean(false),
             "Ljava/lang/Class;" => ObjectPayload::Class { descriptor: String::new() },
             "Ljava/util/ArrayList;" => ObjectPayload::ArrayList(Vec::new()),
+            "Ljava/util/HashMap;" | "Ljava/util/Map;" => ObjectPayload::HashMap(BTreeMap::new()),
+            "Ljava/io/File;" => ObjectPayload::File { path: String::new() },
+            "Landroid/os/Parcel;" => ObjectPayload::Parcel(Parcel::obtain()),
+            "Landroid/content/SharedPreferences;" => ObjectPayload::SharedPreferences {
+                name: String::from("default"),
+                values: BTreeMap::new(),
+            },
+            "Landroid/content/SharedPreferences$Editor;" => ObjectPayload::SharedPreferencesEditor {
+                pref_name: String::from("default"),
+                staged: BTreeMap::new(),
+                clear_staged: false,
+            },
             "Landroid/content/Intent;" => ObjectPayload::Intent {
                 action: None,
                 categories: Vec::new(),
@@ -372,6 +419,13 @@ impl DalvikVmState {
                             }
                         }
                     }
+                    ObjectPayload::HashMap(map) => {
+                        for (_, val) in map {
+                            if *val > 0 && *val < self.next_object_id && marked.insert(*val) {
+                                queue.push(*val);
+                            }
+                        }
+                    }
                     ObjectPayload::Throwable { cause_id: Some(cause), .. } => {
                         if *cause > 0 && *cause < self.next_object_id && marked.insert(*cause) {
                             queue.push(*cause);
@@ -433,8 +487,53 @@ impl DalvikVmState {
         }
         let id = self.next_object_id;
         self.next_object_id = id.checked_add(1).ok_or(DalvikVmError::ObjectHeapLimitExceeded)?;
-        self.objects.push(DalvikObject::new_array(id, element_type, length));
+        let slots = if element_type.starts_with("[J") || element_type.starts_with("[D") {
+            length.saturating_mul(2)
+        } else {
+            length
+        };
+        self.objects.push(DalvikObject::new_array(id, element_type, slots));
         Ok(id)
+    }
+
+    pub fn get_wide_reg(&self, reg: usize) -> u64 {
+        if reg + 1 < self.registers.len() {
+            (self.registers[reg] as u64) | ((self.registers[reg + 1] as u64) << 32)
+        } else if reg < self.registers.len() {
+            self.registers[reg] as u64
+        } else {
+            0
+        }
+    }
+
+    pub fn set_wide_reg(&mut self, reg: usize, val: u64) -> Result<(), DalvikVmError> {
+        let reg_cap = self.registers.len();
+        if reg + 1 >= reg_cap {
+            return Err(DalvikVmError::RegisterOutOfBounds);
+        }
+        self.registers[reg] = val as u32;
+        self.registers[reg + 1] = (val >> 32) as u32;
+        if reg < self.string_registers.len() {
+            self.string_registers[reg] = None;
+        }
+        if reg + 1 < self.string_registers.len() {
+            self.string_registers[reg + 1] = None;
+        }
+        Ok(())
+    }
+
+    pub fn throw_class_cast(&mut self, msg: Option<&str>) -> DalvikVmError {
+        if let Ok(obj_id) = self.allocate_object("Ljava/lang/ClassCastException;") {
+            if let Ok(obj) = self.get_object_mut(obj_id) {
+                obj.payload = ObjectPayload::Throwable {
+                    message: msg.map(String::from),
+                    cause_id: None,
+                };
+            }
+            DalvikVmError::UnhandledException(obj_id)
+        } else {
+            DalvikVmError::InvalidBytecode
+        }
     }
 
     fn get_object(&self, id: u32) -> Result<&DalvikObject, DalvikVmError> {
@@ -1527,6 +1626,969 @@ impl DalvikVmState {
                     _ => Err(DalvikVmError::UnsupportedFrameworkApi),
                 }
             }
+            "java/util/HashMap" | "java/util/Map" => {
+                match method_name {
+                    "<init>" => {
+                        if !arg_values.is_empty() {
+                            let receiver_id = arg_values[0];
+                            if let Ok(obj) = self.get_object_mut(receiver_id) {
+                                obj.payload = ObjectPayload::HashMap(BTreeMap::new());
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "put" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        if receiver_id == 0 {
+                            return Err(self.throw_npe(Some("Null HashMap receiver")));
+                        }
+                        let key = if arg_values.len() > 1 {
+                            let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                                self.string_registers[arg_registers[1]].as_deref()
+                            } else {
+                                None
+                            };
+                            self.resolve_string_arg(dex, arg_values[1], shadow).unwrap_or_else(|| alloc::format!("id_{}", arg_values[1]))
+                        } else {
+                            String::new()
+                        };
+                        let val = arg_values.get(2).copied().unwrap_or(0);
+                        let prev = if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            match &mut obj.payload {
+                                ObjectPayload::HashMap(map) => map.insert(key, val).unwrap_or(0),
+                                _ => {
+                                    let mut m = BTreeMap::new();
+                                    m.insert(key, val);
+                                    obj.payload = ObjectPayload::HashMap(m);
+                                    0
+                                }
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = prev;
+                        self.last_return_string = None;
+                        Ok(prev)
+                    }
+                    "get" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        if receiver_id == 0 {
+                            return Err(self.throw_npe(Some("Null HashMap receiver")));
+                        }
+                        let key = if arg_values.len() > 1 {
+                            let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                                self.string_registers[arg_registers[1]].as_deref()
+                            } else {
+                                None
+                            };
+                            self.resolve_string_arg(dex, arg_values[1], shadow).unwrap_or_else(|| alloc::format!("id_{}", arg_values[1]))
+                        } else {
+                            String::new()
+                        };
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::HashMap(map) => map.get(&key).copied().unwrap_or(0),
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = val;
+                        self.last_return_string = self.get_string_payload(val);
+                        Ok(val)
+                    }
+                    "remove" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        if receiver_id == 0 {
+                            return Err(self.throw_npe(Some("Null HashMap receiver")));
+                        }
+                        let key = if arg_values.len() > 1 {
+                            let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                                self.string_registers[arg_registers[1]].as_deref()
+                            } else {
+                                None
+                            };
+                            self.resolve_string_arg(dex, arg_values[1], shadow).unwrap_or_else(|| alloc::format!("id_{}", arg_values[1]))
+                        } else {
+                            String::new()
+                        };
+                        let prev = if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            match &mut obj.payload {
+                                ObjectPayload::HashMap(map) => map.remove(&key).unwrap_or(0),
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = prev;
+                        self.last_return_string = None;
+                        Ok(prev)
+                    }
+                    "containsKey" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        if receiver_id == 0 {
+                            return Err(self.throw_npe(Some("Null HashMap receiver")));
+                        }
+                        let key = if arg_values.len() > 1 {
+                            let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                                self.string_registers[arg_registers[1]].as_deref()
+                            } else {
+                                None
+                            };
+                            self.resolve_string_arg(dex, arg_values[1], shadow).unwrap_or_else(|| alloc::format!("id_{}", arg_values[1]))
+                        } else {
+                            String::new()
+                        };
+                        let contains = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::HashMap(map) => if map.contains_key(&key) { 1 } else { 0 },
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = contains;
+                        self.last_return_string = None;
+                        Ok(contains)
+                    }
+                    "size" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let len = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::HashMap(map) => map.len() as u32,
+                                _ => 0,
+                            }
+                        } else {
+                            0
+                        };
+                        self.last_return_value = len;
+                        self.last_return_string = None;
+                        Ok(len)
+                    }
+                    "isEmpty" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let is_empty = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::HashMap(map) => if map.is_empty() { 1 } else { 0 },
+                                _ => 1,
+                            }
+                        } else {
+                            1
+                        };
+                        self.last_return_value = is_empty;
+                        self.last_return_string = None;
+                        Ok(is_empty)
+                    }
+                    "clear" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::HashMap(map) = &mut obj.payload {
+                                map.clear();
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "android/content/SharedPreferences" => {
+                match method_name {
+                    "edit" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let pref_name = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::SharedPreferences { name, .. } => name.clone(),
+                                _ => String::from("default"),
+                            }
+                        } else {
+                            String::from("default")
+                        };
+                        let ed_id = self.allocate_object("Landroid/content/SharedPreferences$Editor;")?;
+                        if let Ok(obj) = self.get_object_mut(ed_id) {
+                            obj.payload = ObjectPayload::SharedPreferencesEditor {
+                                pref_name,
+                                staged: BTreeMap::new(),
+                                clear_staged: false,
+                            };
+                        }
+                        self.last_return_value = ed_id;
+                        self.last_return_string = None;
+                        Ok(ed_id)
+                    }
+                    "getString" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else { None };
+                        let key = self.resolve_string_arg(dex, arg_values.get(1).copied().unwrap_or(0), key_shadow).unwrap_or_default();
+                        let def_shadow = if arg_registers.len() > 2 && arg_registers[2] < self.string_registers.len() {
+                            self.string_registers[arg_registers[2]].as_deref()
+                        } else { None };
+                        let def_val = self.resolve_string_arg(dex, arg_values.get(2).copied().unwrap_or(0), def_shadow);
+
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::SharedPreferences { values, .. } => {
+                                    match values.get(&key) {
+                                        Some(BundleValue::String(s)) => Some(s.clone()),
+                                        _ => def_val,
+                                    }
+                                }
+                                _ => def_val,
+                            }
+                        } else {
+                            def_val
+                        };
+                        if let Some(s) = val {
+                            let s_id = self.allocate_string(&s)?;
+                            self.last_return_value = s_id;
+                            self.last_return_string = Some(s);
+                            Ok(s_id)
+                        } else {
+                            self.last_return_value = 0;
+                            self.last_return_string = None;
+                            Ok(0)
+                        }
+                    }
+                    "getInt" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else { None };
+                        let key = self.resolve_string_arg(dex, arg_values.get(1).copied().unwrap_or(0), key_shadow).unwrap_or_default();
+                        let def_val = arg_values.get(2).copied().unwrap_or(0);
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::SharedPreferences { values, .. } => {
+                                    match values.get(&key) {
+                                        Some(BundleValue::Int(v)) => *v as u32,
+                                        _ => def_val,
+                                    }
+                                }
+                                _ => def_val,
+                            }
+                        } else {
+                            def_val
+                        };
+                        self.last_return_value = val;
+                        self.last_return_string = None;
+                        Ok(val)
+                    }
+                    "getLong" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else { None };
+                        let key = self.resolve_string_arg(dex, arg_values.get(1).copied().unwrap_or(0), key_shadow).unwrap_or_default();
+                        let def_lo = arg_values.get(2).copied().unwrap_or(0) as u64;
+                        let def_hi = arg_values.get(3).copied().unwrap_or(0) as u64;
+                        let def_val = ((def_hi << 32) | def_lo) as i64;
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::SharedPreferences { values, .. } => {
+                                    match values.get(&key) {
+                                        Some(BundleValue::Long(v)) => *v,
+                                        _ => def_val,
+                                    }
+                                }
+                                _ => def_val,
+                            }
+                        } else {
+                            def_val
+                        };
+                        self.last_return_value = (val as u64 & 0xFFFFFFFF) as u32;
+                        self.last_return_wide_hi = ((val as u64 >> 32) & 0xFFFFFFFF) as u32;
+                        self.last_return_string = None;
+                        Ok(self.last_return_value)
+                    }
+                    "getBoolean" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else { None };
+                        let key = self.resolve_string_arg(dex, arg_values.get(1).copied().unwrap_or(0), key_shadow).unwrap_or_default();
+                        let def_val = arg_values.get(2).copied().unwrap_or(0) != 0;
+                        let val = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::SharedPreferences { values, .. } => {
+                                    match values.get(&key) {
+                                        Some(BundleValue::Boolean(b)) => *b,
+                                        _ => def_val,
+                                    }
+                                }
+                                _ => def_val,
+                            }
+                        } else {
+                            def_val
+                        };
+                        let res = if val { 1 } else { 0 };
+                        self.last_return_value = res;
+                        self.last_return_string = None;
+                        Ok(res)
+                    }
+                    "contains" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else { None };
+                        let key = self.resolve_string_arg(dex, arg_values.get(1).copied().unwrap_or(0), key_shadow).unwrap_or_default();
+                        let has = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::SharedPreferences { values, .. } => if values.contains_key(&key) { 1 } else { 0 },
+                                _ => 0,
+                            }
+                        } else { 0 };
+                        self.last_return_value = has;
+                        self.last_return_string = None;
+                        Ok(has)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "android/content/SharedPreferences$Editor" => {
+                match method_name {
+                    "putString" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else { None };
+                        let key = self.resolve_string_arg(dex, arg_values.get(1).copied().unwrap_or(0), key_shadow).unwrap_or_default();
+                        let val_shadow = if arg_registers.len() > 2 && arg_registers[2] < self.string_registers.len() {
+                            self.string_registers[arg_registers[2]].as_deref()
+                        } else { None };
+                        let val = self.resolve_string_arg(dex, arg_values.get(2).copied().unwrap_or(0), val_shadow).unwrap_or_default();
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::SharedPreferencesEditor { staged, .. } = &mut obj.payload {
+                                staged.insert(key, Some(BundleValue::String(val)));
+                            }
+                        }
+                        self.last_return_value = receiver_id;
+                        self.last_return_string = None;
+                        Ok(receiver_id)
+                    }
+                    "putInt" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else { None };
+                        let key = self.resolve_string_arg(dex, arg_values.get(1).copied().unwrap_or(0), key_shadow).unwrap_or_default();
+                        let val = arg_values.get(2).copied().unwrap_or(0) as i32;
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::SharedPreferencesEditor { staged, .. } = &mut obj.payload {
+                                staged.insert(key, Some(BundleValue::Int(val)));
+                            }
+                        }
+                        self.last_return_value = receiver_id;
+                        self.last_return_string = None;
+                        Ok(receiver_id)
+                    }
+                    "putLong" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else { None };
+                        let key = self.resolve_string_arg(dex, arg_values.get(1).copied().unwrap_or(0), key_shadow).unwrap_or_default();
+                        let lo = arg_values.get(2).copied().unwrap_or(0) as u64;
+                        let hi = arg_values.get(3).copied().unwrap_or(0) as u64;
+                        let val = ((hi << 32) | lo) as i64;
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::SharedPreferencesEditor { staged, .. } = &mut obj.payload {
+                                staged.insert(key, Some(BundleValue::Long(val)));
+                            }
+                        }
+                        self.last_return_value = receiver_id;
+                        self.last_return_string = None;
+                        Ok(receiver_id)
+                    }
+                    "putBoolean" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else { None };
+                        let key = self.resolve_string_arg(dex, arg_values.get(1).copied().unwrap_or(0), key_shadow).unwrap_or_default();
+                        let val = arg_values.get(2).copied().unwrap_or(0) != 0;
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::SharedPreferencesEditor { staged, .. } = &mut obj.payload {
+                                staged.insert(key, Some(BundleValue::Boolean(val)));
+                            }
+                        }
+                        self.last_return_value = receiver_id;
+                        self.last_return_string = None;
+                        Ok(receiver_id)
+                    }
+                    "remove" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let key_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else { None };
+                        let key = self.resolve_string_arg(dex, arg_values.get(1).copied().unwrap_or(0), key_shadow).unwrap_or_default();
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::SharedPreferencesEditor { staged, .. } = &mut obj.payload {
+                                staged.insert(key, None);
+                            }
+                        }
+                        self.last_return_value = receiver_id;
+                        self.last_return_string = None;
+                        Ok(receiver_id)
+                    }
+                    "clear" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::SharedPreferencesEditor { clear_staged, staged, .. } = &mut obj.payload {
+                                *clear_staged = true;
+                                staged.clear();
+                            }
+                        }
+                        self.last_return_value = receiver_id;
+                        self.last_return_string = None;
+                        Ok(receiver_id)
+                    }
+                    "apply" | "commit" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let (target_pref, staged_muts, do_clear) = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::SharedPreferencesEditor { pref_name, staged, clear_staged } => {
+                                    (pref_name.clone(), staged.clone(), *clear_staged)
+                                }
+                                _ => (String::new(), BTreeMap::new(), false),
+                            }
+                        } else {
+                            (String::new(), BTreeMap::new(), false)
+                        };
+
+                        if let Some(sp_obj) = self.objects.iter_mut().find(|o| {
+                            if let ObjectPayload::SharedPreferences { name, .. } = &o.payload {
+                                name == &target_pref
+                            } else {
+                                false
+                            }
+                        }) {
+                            if let ObjectPayload::SharedPreferences { values, .. } = &mut sp_obj.payload {
+                                if do_clear {
+                                    values.clear();
+                                }
+                                for (k, v_opt) in staged_muts {
+                                    match v_opt {
+                                        Some(v) => { values.insert(k, v); }
+                                        None => { values.remove(&k); }
+                                    }
+                                }
+                            }
+                        }
+
+                        let ret = if method_name == "commit" { 1 } else { 0 };
+                        self.last_return_value = ret;
+                        self.last_return_string = None;
+                        Ok(ret)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "java/io/File" => {
+                match method_name {
+                    "<init>" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let path = if arg_values.len() > 2 {
+                            let parent = self.get_string_payload(arg_values[1]).unwrap_or_default();
+                            let shadow = if arg_registers.len() > 2 && arg_registers[2] < self.string_registers.len() {
+                                self.string_registers[arg_registers[2]].as_deref()
+                            } else { None };
+                            let child = self.resolve_string_arg(dex, arg_values[2], shadow).unwrap_or_default();
+                            if parent.ends_with('/') {
+                                alloc::format!("{}{}", parent, child)
+                            } else {
+                                alloc::format!("{}/{}", parent, child)
+                            }
+                        } else if arg_values.len() > 1 {
+                            let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                                self.string_registers[arg_registers[1]].as_deref()
+                            } else { None };
+                            self.resolve_string_arg(dex, arg_values[1], shadow).unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            obj.payload = ObjectPayload::File { path };
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "getPath" | "getAbsolutePath" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let path = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::File { path } => path.clone(),
+                                _ => String::new(),
+                            }
+                        } else { String::new() };
+                        let id = self.allocate_string(&path)?;
+                        self.last_return_value = id;
+                        self.last_return_string = Some(path);
+                        Ok(id)
+                    }
+                    "getName" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let path = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::File { path } => path.clone(),
+                                _ => String::new(),
+                            }
+                        } else { String::new() };
+                        let name = path.rsplit('/').next().unwrap_or(&path);
+                        let id = self.allocate_string(name)?;
+                        self.last_return_value = id;
+                        self.last_return_string = Some(String::from(name));
+                        Ok(id)
+                    }
+                    "exists" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let path = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::File { path } => path.clone(),
+                                _ => String::new(),
+                            }
+                        } else { String::new() };
+                        let exists = if super::vfs::ANDROID_SANDBOX_FS.lock().exists(&path) { 1 } else { 0 };
+                        self.last_return_value = exists;
+                        self.last_return_string = None;
+                        Ok(exists)
+                    }
+                    "isDirectory" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let path = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::File { path } => path.clone(),
+                                _ => String::new(),
+                            }
+                        } else { String::new() };
+                        let is_dir = if super::vfs::ANDROID_SANDBOX_FS.lock().is_directory(&path) { 1 } else { 0 };
+                        self.last_return_value = is_dir;
+                        self.last_return_string = None;
+                        Ok(is_dir)
+                    }
+                    "isFile" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let path = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::File { path } => path.clone(),
+                                _ => String::new(),
+                            }
+                        } else { String::new() };
+                        let fs = super::vfs::ANDROID_SANDBOX_FS.lock();
+                        let is_file = if fs.exists(&path) && !fs.is_directory(&path) { 1 } else { 0 };
+                        self.last_return_value = is_file;
+                        self.last_return_string = None;
+                        Ok(is_file)
+                    }
+                    "length" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let path = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::File { path } => path.clone(),
+                                _ => String::new(),
+                            }
+                        } else { String::new() };
+                        let len = super::vfs::ANDROID_SANDBOX_FS.lock().open_read(&path).map(|d| d.len() as u64).unwrap_or(0);
+                        self.last_return_value = (len & 0xFFFFFFFF) as u32;
+                        self.last_return_wide_hi = ((len >> 32) & 0xFFFFFFFF) as u32;
+                        self.last_return_string = None;
+                        Ok(self.last_return_value)
+                    }
+                    "delete" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let path = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::File { path } => path.clone(),
+                                _ => String::new(),
+                            }
+                        } else { String::new() };
+                        let ok = match super::vfs::ANDROID_SANDBOX_FS.lock().delete_file(&path) {
+                            Ok(deleted) => if deleted { 1 } else { 0 },
+                            Err(_) => 0,
+                        };
+                        self.last_return_value = ok;
+                        self.last_return_string = None;
+                        Ok(ok)
+                    }
+                    "list" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let path = if let Ok(obj) = self.get_object(receiver_id) {
+                            match &obj.payload {
+                                ObjectPayload::File { path } => path.clone(),
+                                _ => String::new(),
+                            }
+                        } else { String::new() };
+                        let entries = super::vfs::ANDROID_SANDBOX_FS.lock().list_directory(&path).unwrap_or_default();
+                        let arr_id = self.allocate_array("[Ljava/lang/String;", entries.len())?;
+                        for (i, entry) in entries.into_iter().enumerate() {
+                            let s_id = self.allocate_string(&entry)?;
+                            if let Ok(arr_obj) = self.get_object_mut(arr_id) {
+                                if let Some(elems) = arr_obj.array_elements.as_mut() {
+                                    if i < elems.len() { elems[i] = s_id; }
+                                }
+                            }
+                        }
+                        self.last_return_value = arr_id;
+                        self.last_return_string = None;
+                        Ok(arr_id)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "android/os/Parcel" => {
+                match method_name {
+                    "obtain" => {
+                        let p_id = self.allocate_object("Landroid/os/Parcel;")?;
+                        if let Ok(obj) = self.get_object_mut(p_id) {
+                            obj.payload = ObjectPayload::Parcel(Parcel::obtain());
+                        }
+                        self.last_return_value = p_id;
+                        self.last_return_string = None;
+                        Ok(p_id)
+                    }
+                    "recycle" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.recycle();
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "writeInt" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let val = arg_values.get(1).copied().unwrap_or(0) as i32;
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.write_int(val);
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "readInt" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let val = if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.read_int().unwrap_or(0) as u32
+                            } else { 0 }
+                        } else { 0 };
+                        self.last_return_value = val;
+                        self.last_return_string = None;
+                        Ok(val)
+                    }
+                    "writeLong" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let lo = arg_values.get(1).copied().unwrap_or(0) as u64;
+                        let hi = arg_values.get(2).copied().unwrap_or(0) as u64;
+                        let val = ((hi << 32) | lo) as i64;
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.write_long(val);
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "readLong" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let val = if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.read_long().unwrap_or(0)
+                            } else { 0 }
+                        } else { 0 };
+                        self.last_return_value = (val as u64 & 0xFFFFFFFF) as u32;
+                        self.last_return_wide_hi = ((val as u64 >> 32) & 0xFFFFFFFF) as u32;
+                        self.last_return_string = None;
+                        Ok(self.last_return_value)
+                    }
+                    "writeFloat" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let bits = arg_values.get(1).copied().unwrap_or(0);
+                        let val = f32::from_bits(bits);
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.write_float(val);
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "readFloat" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let val = if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.read_float().unwrap_or(0.0).to_bits()
+                            } else { 0 }
+                        } else { 0 };
+                        self.last_return_value = val;
+                        self.last_return_string = None;
+                        Ok(val)
+                    }
+                    "writeDouble" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let lo = arg_values.get(1).copied().unwrap_or(0) as u64;
+                        let hi = arg_values.get(2).copied().unwrap_or(0) as u64;
+                        let val = f64::from_bits((hi << 32) | lo);
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.write_double(val);
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "readDouble" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let val = if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.read_double().unwrap_or(0.0).to_bits()
+                            } else { 0 }
+                        } else { 0 };
+                        self.last_return_value = (val & 0xFFFFFFFF) as u32;
+                        self.last_return_wide_hi = ((val >> 32) & 0xFFFFFFFF) as u32;
+                        self.last_return_string = None;
+                        Ok(self.last_return_value)
+                    }
+                    "writeString" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else { None };
+                        let s = if arg_values.len() > 1 {
+                            self.resolve_string_arg(dex, arg_values[1], shadow).unwrap_or_default()
+                        } else { String::new() };
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.write_string(&s);
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "readString" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let opt_s = if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.read_string()
+                            } else { None }
+                        } else { None };
+                        if let Some(s) = opt_s {
+                            let s_id = self.allocate_string(&s)?;
+                            self.last_return_value = s_id;
+                            self.last_return_string = Some(s);
+                            Ok(s_id)
+                        } else {
+                            self.last_return_value = 0;
+                            self.last_return_string = None;
+                            Ok(0)
+                        }
+                    }
+                    "dataSize" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let sz = if let Ok(obj) = self.get_object(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &obj.payload {
+                                p.data_size() as u32
+                            } else { 0 }
+                        } else { 0 };
+                        self.last_return_value = sz;
+                        self.last_return_string = None;
+                        Ok(sz)
+                    }
+                    "dataPosition" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let pos = if let Ok(obj) = self.get_object(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &obj.payload {
+                                p.data_position() as u32
+                            } else { 0 }
+                        } else { 0 };
+                        self.last_return_value = pos;
+                        self.last_return_string = None;
+                        Ok(pos)
+                    }
+                    "setDataPosition" => {
+                        let receiver_id = *arg_values.first().ok_or(DalvikVmError::InvalidBytecode)?;
+                        let pos = arg_values.get(1).copied().unwrap_or(0) as usize;
+                        if let Ok(obj) = self.get_object_mut(receiver_id) {
+                            if let ObjectPayload::Parcel(p) = &mut obj.payload {
+                                p.set_data_position(pos);
+                            }
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "java/lang/Math" => {
+                match method_name {
+                    "min" => {
+                        let a = arg_values.get(0).copied().unwrap_or(0) as i32;
+                        let b = arg_values.get(1).copied().unwrap_or(0) as i32;
+                        let res = a.min(b) as u32;
+                        self.last_return_value = res;
+                        self.last_return_string = None;
+                        Ok(res)
+                    }
+                    "max" => {
+                        let a = arg_values.get(0).copied().unwrap_or(0) as i32;
+                        let b = arg_values.get(1).copied().unwrap_or(0) as i32;
+                        let res = a.max(b) as u32;
+                        self.last_return_value = res;
+                        self.last_return_string = None;
+                        Ok(res)
+                    }
+                    "abs" => {
+                        let a = arg_values.get(0).copied().unwrap_or(0) as i32;
+                        let res = a.abs() as u32;
+                        self.last_return_value = res;
+                        self.last_return_string = None;
+                        Ok(res)
+                    }
+                    "sqrt" => {
+                        let lo = arg_values.get(0).copied().unwrap_or(0) as u64;
+                        let hi = arg_values.get(1).copied().unwrap_or(0) as u64;
+                        let val = f64::from_bits((hi << 32) | lo);
+                        let root = soft_sqrt(val);
+                        let bits = root.to_bits();
+                        self.last_return_value = (bits & 0xFFFFFFFF) as u32;
+                        self.last_return_wide_hi = ((bits >> 32) & 0xFFFFFFFF) as u32;
+                        self.last_return_string = None;
+                        Ok(self.last_return_value)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "java/lang/System" => {
+                match method_name {
+                    "currentTimeMillis" => {
+                        let ts = 1774300000000i64.wrapping_add(self.instructions_executed as i64);
+                        self.last_return_value = (ts as u64 & 0xFFFFFFFF) as u32;
+                        self.last_return_wide_hi = ((ts as u64 >> 32) & 0xFFFFFFFF) as u32;
+                        self.last_return_string = None;
+                        Ok(self.last_return_value)
+                    }
+                    "nanoTime" => {
+                        let nt = 1774300000000000000i64.wrapping_add(self.instructions_executed as i64 * 100);
+                        self.last_return_value = (nt as u64 & 0xFFFFFFFF) as u32;
+                        self.last_return_wide_hi = ((nt as u64 >> 32) & 0xFFFFFFFF) as u32;
+                        self.last_return_string = None;
+                        Ok(self.last_return_value)
+                    }
+                    "arraycopy" => {
+                        if arg_values.len() < 5 {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let src_id = arg_values[0];
+                        let src_pos = arg_values[1] as usize;
+                        let dest_id = arg_values[2];
+                        let dest_pos = arg_values[3] as usize;
+                        let len = arg_values[4] as usize;
+                        if src_id == 0 || dest_id == 0 {
+                            return Err(self.throw_npe(Some("Null array in arraycopy")));
+                        }
+                        let src_slice: Vec<u32> = {
+                            let src_obj = self.get_object(src_id)?;
+                            let elems = src_obj.array_elements.as_ref().ok_or(DalvikVmError::NullPointerDereference)?;
+                            if src_pos.checked_add(len).map_or(true, |end| end > elems.len()) {
+                                return Err(self.throw_oob(Some("Source arraycopy index out of bounds")));
+                            }
+                            elems[src_pos..src_pos + len].to_vec()
+                        };
+                        {
+                            let dest_obj = self.get_object_mut(dest_id)?;
+                            let elems = dest_obj.array_elements.as_mut().ok_or(DalvikVmError::NullPointerDereference)?;
+                            if dest_pos.checked_add(len).map_or(true, |end| end > elems.len()) {
+                                return Err(self.throw_oob(Some("Destination arraycopy index out of bounds")));
+                            }
+                            elems[dest_pos..dest_pos + len].copy_from_slice(&src_slice);
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
+            "android/content/Context" | "android/content/ContextWrapper" => {
+                match method_name {
+                    "getSharedPreferences" => {
+                        let name_shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                            self.string_registers[arg_registers[1]].as_deref()
+                        } else {
+                            None
+                        };
+                        let name = if arg_values.len() > 1 {
+                            self.resolve_string_arg(dex, arg_values[1], name_shadow).unwrap_or_else(|| String::from("default"))
+                        } else {
+                            String::from("default")
+                        };
+                        let existing = self.objects.iter().find(|o| {
+                            if let ObjectPayload::SharedPreferences { name: n, .. } = &o.payload {
+                                n == &name
+                            } else {
+                                false
+                            }
+                        }).map(|o| o.id);
+
+                        let sp_id = match existing {
+                            Some(id) => id,
+                            None => {
+                                let id = self.allocate_object("Landroid/content/SharedPreferences;")?;
+                                if let Ok(obj) = self.get_object_mut(id) {
+                                    obj.payload = ObjectPayload::SharedPreferences {
+                                        name,
+                                        values: BTreeMap::new(),
+                                    };
+                                }
+                                id
+                            }
+                        };
+                        self.last_return_value = sp_id;
+                        self.last_return_string = None;
+                        Ok(sp_id)
+                    }
+                    "getFilesDir" => {
+                        let f_id = self.allocate_object("Ljava/io/File;")?;
+                        if let Ok(obj) = self.get_object_mut(f_id) {
+                            obj.payload = ObjectPayload::File { path: String::from("/data/data/files") };
+                        }
+                        self.last_return_value = f_id;
+                        self.last_return_string = None;
+                        Ok(f_id)
+                    }
+                    "getCacheDir" => {
+                        let f_id = self.allocate_object("Ljava/io/File;")?;
+                        if let Ok(obj) = self.get_object_mut(f_id) {
+                            obj.payload = ObjectPayload::File { path: String::from("/data/data/cache") };
+                        }
+                        self.last_return_value = f_id;
+                        self.last_return_string = None;
+                        Ok(f_id)
+                    }
+                    "getPackageName" => {
+                        let pkg = String::from("org.interos.acr");
+                        let id = self.allocate_string(&pkg)?;
+                        self.last_return_value = id;
+                        self.last_return_string = Some(pkg);
+                        Ok(id)
+                    }
+                    _ => Err(DalvikVmError::UnsupportedFrameworkApi),
+                }
+            }
             _ => {
                 let string_args = [
                     if !arg_registers.is_empty() && arg_registers[0] < self.string_registers.len() {
@@ -1747,19 +2809,68 @@ impl DalvikVmState {
                     self.string_registers[v_dest] = None;
                     pc += 4;
                 }
+                OP_CONST_HIGH16 => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let val = (u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as u32) << 16;
+                    if v_dest >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    self.registers[v_dest] = val;
+                    self.string_registers[v_dest] = None;
+                    pc += 4;
+                }
                 OP_CONST_WIDE => {
                     if pc + 4 > insns.len() {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
                     let v_dest = insns[pc + 1] as usize;
-                    let val = i16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as i32 as u32;
+                    let val = i16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as i64;
                     if v_dest >= reg_cap || v_dest + 1 >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
-                    self.registers[v_dest] = val;
-                    self.string_registers[v_dest] = None;
-                    self.registers[v_dest + 1] = if (val as i32) < 0 { 0xFFFFFFFF } else { 0 };
-                    self.string_registers[v_dest + 1] = None;
+                    self.set_wide_reg(v_dest, val as u64)?;
+                    pc += 4;
+                }
+                OP_CONST_WIDE_32 => {
+                    if pc + 6 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let val = i32::from_le_bytes([insns[pc + 2], insns[pc + 3], insns[pc + 4], insns[pc + 5]]) as i64;
+                    if v_dest >= reg_cap || v_dest + 1 >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    self.set_wide_reg(v_dest, val as u64)?;
+                    pc += 6;
+                }
+                OP_CONST_WIDE_FULL => {
+                    if pc + 10 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let val = u64::from_le_bytes([
+                        insns[pc + 2], insns[pc + 3], insns[pc + 4], insns[pc + 5],
+                        insns[pc + 6], insns[pc + 7], insns[pc + 8], insns[pc + 9],
+                    ]);
+                    if v_dest >= reg_cap || v_dest + 1 >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    self.set_wide_reg(v_dest, val)?;
+                    pc += 10;
+                }
+                OP_CONST_WIDE_HIGH16 => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let val = (u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as u64) << 48;
+                    if v_dest >= reg_cap || v_dest + 1 >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    self.set_wide_reg(v_dest, val)?;
                     pc += 4;
                 }
                 OP_CONST_STRING => {
@@ -2424,7 +3535,103 @@ impl DalvikVmState {
                     self.string_registers[v_a] = None;
                     pc += 4;
                 }
-                OP_AGET => {
+                OP_FILLED_NEW_ARRAY => {
+                    if pc + 6 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let (arg_regs, count) = decode_invoke_registers(insns, pc)?;
+                    let type_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
+                    let elem_type = dex.get_type_slice(type_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
+                    let mut vals = [0u32; 5];
+                    for i in 0..count {
+                        if arg_regs[i] >= reg_cap {
+                            return Err(DalvikVmError::RegisterOutOfBounds);
+                        }
+                        vals[i] = self.registers[arg_regs[i]];
+                    }
+                    let obj_id = self.allocate_array(elem_type, count)?;
+                    if let Ok(obj) = self.get_object_mut(obj_id) {
+                        if let Some(elements) = obj.array_elements.as_mut() {
+                            for i in 0..count {
+                                elements[i] = vals[i];
+                            }
+                        }
+                    }
+                    self.last_return_value = obj_id;
+                    self.last_return_string = None;
+                    pc += 6;
+                }
+                OP_FILLED_NEW_ARRAY_RANGE => {
+                    if pc + 6 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let count = insns[pc + 1] as usize;
+                    let type_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
+                    let start_reg = u16::from_le_bytes([insns[pc + 4], insns[pc + 5]]) as usize;
+                    let elem_type = dex.get_type_slice(type_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
+                    let mut vals = Vec::with_capacity(count);
+                    for i in 0..count {
+                        let reg = start_reg + i;
+                        if reg >= reg_cap {
+                            return Err(DalvikVmError::RegisterOutOfBounds);
+                        }
+                        vals.push(self.registers[reg]);
+                    }
+                    let obj_id = self.allocate_array(elem_type, count)?;
+                    if let Ok(obj) = self.get_object_mut(obj_id) {
+                        if let Some(elements) = obj.array_elements.as_mut() {
+                            for i in 0..count {
+                                elements[i] = vals[i];
+                            }
+                        }
+                    }
+                    self.last_return_value = obj_id;
+                    self.last_return_string = None;
+                    pc += 6;
+                }
+                OP_CMP_LONG => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_b = insns[pc + 2] as usize;
+                    let v_c = insns[pc + 3] as usize;
+                    if v_dest >= reg_cap || v_b + 1 >= reg_cap || v_c + 1 >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let b = self.get_wide_reg(v_b) as i64;
+                    let c = self.get_wide_reg(v_c) as i64;
+                    let res: i32 = if b < c { -1 } else if b > c { 1 } else { 0 };
+                    self.registers[v_dest] = res as u32;
+                    self.string_registers[v_dest] = None;
+                    pc += 4;
+                }
+                OP_CMPL_DOUBLE | OP_CMPG_DOUBLE => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_b = insns[pc + 2] as usize;
+                    let v_c = insns[pc + 3] as usize;
+                    if v_dest >= reg_cap || v_b + 1 >= reg_cap || v_c + 1 >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let db = f64::from_bits(self.get_wide_reg(v_b));
+                    let dc = f64::from_bits(self.get_wide_reg(v_c));
+                    let res: i32 = if db.is_nan() || dc.is_nan() {
+                        if opcode == OP_CMPL_DOUBLE { -1 } else { 1 }
+                    } else if db < dc {
+                        -1
+                    } else if db > dc {
+                        1
+                    } else {
+                        0
+                    };
+                    self.registers[v_dest] = res as u32;
+                    self.string_registers[v_dest] = None;
+                    pc += 4;
+                }
+                OP_AGET | OP_AGET_OBJECT | OP_AGET_BOOLEAN | OP_AGET_BYTE | OP_AGET_CHAR | OP_AGET_SHORT => {
                     if pc + 4 > insns.len() {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
@@ -2441,11 +3648,49 @@ impl DalvikVmState {
                     if idx >= elements.len() {
                         return Err(DalvikVmError::ArrayIndexOutOfBounds);
                     }
-                    self.registers[v_dest] = elements[idx];
-                    self.string_registers[v_dest] = None;
+                    let raw = elements[idx];
+                    self.registers[v_dest] = match opcode {
+                        OP_AGET_BOOLEAN => raw & 0x01,
+                        OP_AGET_BYTE => (raw as i8 as i32) as u32,
+                        OP_AGET_CHAR => (raw as u16) as u32,
+                        OP_AGET_SHORT => (raw as i16 as i32) as u32,
+                        _ => raw,
+                    };
+                    self.string_registers[v_dest] = if opcode == OP_AGET_OBJECT {
+                        self.get_string_payload(raw)
+                    } else {
+                        None
+                    };
                     pc += 4;
                 }
-                OP_APUT => {
+                OP_AGET_WIDE => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_arr = insns[pc + 2] as usize;
+                    let v_idx = insns[pc + 3] as usize;
+                    if v_dest + 1 >= reg_cap || v_arr >= reg_cap || v_idx >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let arr_id = self.registers[v_arr];
+                    let idx = self.registers[v_idx] as usize;
+                    let (val_lo, val_hi) = {
+                        let obj = self.get_object(arr_id)?;
+                        let elements = obj.array_elements.as_ref().ok_or(DalvikVmError::NullPointerDereference)?;
+                        let slot = idx * 2;
+                        if slot + 1 >= elements.len() {
+                            return Err(DalvikVmError::ArrayIndexOutOfBounds);
+                        }
+                        (elements[slot], elements[slot + 1])
+                    };
+                    self.registers[v_dest] = val_lo;
+                    self.registers[v_dest + 1] = val_hi;
+                    self.string_registers[v_dest] = None;
+                    self.string_registers[v_dest + 1] = None;
+                    pc += 4;
+                }
+                OP_APUT | OP_APUT_OBJECT | OP_APUT_BOOLEAN | OP_APUT_BYTE | OP_APUT_CHAR | OP_APUT_SHORT => {
                     if pc + 4 > insns.len() {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
@@ -2463,10 +3708,40 @@ impl DalvikVmState {
                     if idx >= elements.len() {
                         return Err(DalvikVmError::ArrayIndexOutOfBounds);
                     }
-                    elements[idx] = val;
+                    elements[idx] = match opcode {
+                        OP_APUT_BOOLEAN => val & 0x01,
+                        OP_APUT_BYTE => (val as u8) as u32,
+                        OP_APUT_CHAR => (val as u16) as u32,
+                        OP_APUT_SHORT => (val as u16) as u32,
+                        _ => val,
+                    };
                     pc += 4;
                 }
-                OP_IGET => {
+                OP_APUT_WIDE => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_val = insns[pc + 1] as usize;
+                    let v_arr = insns[pc + 2] as usize;
+                    let v_idx = insns[pc + 3] as usize;
+                    if v_val + 1 >= reg_cap || v_arr >= reg_cap || v_idx >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let arr_id = self.registers[v_arr];
+                    let idx = self.registers[v_idx] as usize;
+                    let val_lo = self.registers[v_val];
+                    let val_hi = self.registers[v_val + 1];
+                    let obj = self.get_object_mut(arr_id)?;
+                    let elements = obj.array_elements.as_mut().ok_or(DalvikVmError::NullPointerDereference)?;
+                    let slot = idx * 2;
+                    if slot + 1 >= elements.len() {
+                        return Err(DalvikVmError::ArrayIndexOutOfBounds);
+                    }
+                    elements[slot] = val_lo;
+                    elements[slot + 1] = val_hi;
+                    pc += 4;
+                }
+                OP_IGET | OP_IGET_OBJECT | OP_IGET_BOOLEAN | OP_IGET_BYTE | OP_IGET_CHAR | OP_IGET_SHORT => {
                     if pc + 4 > insns.len() {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
@@ -2481,11 +3756,46 @@ impl DalvikVmState {
                     if obj.array_elements.is_some() || obj.class_descriptor.starts_with('[') {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
-                    self.registers[v_a] = obj.get_field(field_idx);
-                    self.string_registers[v_a] = None;
+                    let raw = obj.get_field(field_idx);
+                    self.registers[v_a] = match opcode {
+                        OP_IGET_BOOLEAN => raw & 0x01,
+                        OP_IGET_BYTE => (raw as i8 as i32) as u32,
+                        OP_IGET_CHAR => (raw as u16) as u32,
+                        OP_IGET_SHORT => (raw as i16 as i32) as u32,
+                        _ => raw,
+                    };
+                    self.string_registers[v_a] = if opcode == OP_IGET_OBJECT {
+                        self.get_string_payload(raw)
+                    } else {
+                        None
+                    };
                     pc += 4;
                 }
-                OP_IPUT => {
+                OP_IGET_WIDE => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
+                    if v_a + 1 >= reg_cap || v_b >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let obj_id = self.registers[v_b];
+                    let (val_lo, val_hi) = {
+                        let obj = self.get_object(obj_id)?;
+                        if obj.array_elements.is_some() || obj.class_descriptor.starts_with('[') {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        (obj.get_field(field_idx), obj.get_field(field_idx.wrapping_add(1)))
+                    };
+                    self.registers[v_a] = val_lo;
+                    self.registers[v_a + 1] = val_hi;
+                    self.string_registers[v_a] = None;
+                    self.string_registers[v_a + 1] = None;
+                    pc += 4;
+                }
+                OP_IPUT | OP_IPUT_OBJECT | OP_IPUT_BOOLEAN | OP_IPUT_BYTE | OP_IPUT_CHAR | OP_IPUT_SHORT => {
                     if pc + 4 > insns.len() {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
@@ -2501,10 +3811,35 @@ impl DalvikVmState {
                     if obj.array_elements.is_some() || obj.class_descriptor.starts_with('[') {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
-                    obj.set_field(field_idx, val);
+                    let store_val = match opcode {
+                        OP_IPUT_BOOLEAN => val & 0x01,
+                        _ => val,
+                    };
+                    obj.set_field(field_idx, store_val);
                     pc += 4;
                 }
-                OP_SGET | OP_SGET_BOOLEAN => {
+                OP_IPUT_WIDE => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
+                    if v_a + 1 >= reg_cap || v_b >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let val_lo = self.registers[v_a];
+                    let val_hi = self.registers[v_a + 1];
+                    let obj_id = self.registers[v_b];
+                    let obj = self.get_object_mut(obj_id)?;
+                    if obj.array_elements.is_some() || obj.class_descriptor.starts_with('[') {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    obj.set_field(field_idx, val_lo);
+                    obj.set_field(field_idx.wrapping_add(1), val_hi);
+                    pc += 4;
+                }
+                OP_SGET | OP_SGET_OBJECT | OP_SGET_BOOLEAN | OP_SGET_BYTE | OP_SGET_CHAR | OP_SGET_SHORT => {
                     if pc + 4 > insns.len() {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
@@ -2513,11 +3848,37 @@ impl DalvikVmState {
                     if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
-                    self.registers[v_dest] = self.get_static_field(field_idx);
-                    self.string_registers[v_dest] = None;
+                    let raw = self.get_static_field(field_idx);
+                    self.registers[v_dest] = match opcode {
+                        OP_SGET_BOOLEAN => raw & 0x01,
+                        OP_SGET_BYTE => (raw as i8 as i32) as u32,
+                        OP_SGET_CHAR => (raw as u16) as u32,
+                        OP_SGET_SHORT => (raw as i16 as i32) as u32,
+                        _ => raw,
+                    };
+                    self.string_registers[v_dest] = if opcode == OP_SGET_OBJECT {
+                        self.get_string_payload(raw)
+                    } else {
+                        None
+                    };
                     pc += 4;
                 }
-                OP_SPUT | OP_SPUT_BOOLEAN => {
+                OP_SGET_WIDE => {
+                    if pc + 4 > insns.len() {
+                        return Err(DalvikVmError::InvalidBytecode);
+                    }
+                    let v_dest = insns[pc + 1] as usize;
+                    let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
+                    if v_dest + 1 >= reg_cap {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    self.registers[v_dest] = self.get_static_field(field_idx);
+                    self.registers[v_dest + 1] = self.get_static_field(field_idx.wrapping_add(1));
+                    self.string_registers[v_dest] = None;
+                    self.string_registers[v_dest + 1] = None;
+                    pc += 4;
+                }
+                OP_SPUT | OP_SPUT_OBJECT | OP_SPUT_BOOLEAN | OP_SPUT_BYTE | OP_SPUT_CHAR | OP_SPUT_SHORT => {
                     if pc + 4 > insns.len() {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
@@ -2527,75 +3888,164 @@ impl DalvikVmState {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
                     let val = self.registers[v_src];
-                    self.set_static_field(field_idx, val)?;
+                    let store_val = match opcode {
+                        OP_SPUT_BOOLEAN => val & 0x01,
+                        _ => val,
+                    };
+                    self.set_static_field(field_idx, store_val)?;
                     pc += 4;
                 }
-                OP_INT_TO_FLOAT => {
-                    if pc + 2 > insns.len() {
+                OP_SPUT_WIDE => {
+                    if pc + 4 > insns.len() {
                         return Err(DalvikVmError::InvalidBytecode);
                     }
-                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
-                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= reg_cap || v_src >= reg_cap {
+                    let v_src = insns[pc + 1] as usize;
+                    let field_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]);
+                    if v_src + 1 >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
+                    self.set_static_field(field_idx, self.registers[v_src])?;
+                    self.set_static_field(field_idx.wrapping_add(1), self.registers[v_src + 1])?;
+                    pc += 4;
+                }
+                OP_INT_TO_LONG => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest + 1 >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let val = (self.registers[v_src] as i32) as i64;
+                    self.set_wide_reg(v_dest, val as u64)?;
+                    pc += 2;
+                }
+                OP_LONG_TO_INT => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= reg_cap || v_src + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    self.registers[v_dest] = self.get_wide_reg(v_src) as u32;
+                    self.string_registers[v_dest] = None;
+                    pc += 2;
+                }
+                OP_INT_TO_DOUBLE => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest + 1 >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let val = (self.registers[v_src] as i32) as f64;
+                    self.set_wide_reg(v_dest, val.to_bits())?;
+                    pc += 2;
+                }
+                OP_INT_TO_FLOAT => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let int_val = self.registers[v_src] as i32;
                     let float_val = int_val as f32;
                     self.registers[v_dest] = float_val.to_bits();
                     self.string_registers[v_dest] = None;
                     pc += 2;
                 }
-                OP_FLOAT_TO_INT => {
-                    if pc + 2 > insns.len() {
-                        return Err(DalvikVmError::InvalidBytecode);
-                    }
+                OP_LONG_TO_FLOAT => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= reg_cap || v_src >= reg_cap {
-                        return Err(DalvikVmError::RegisterOutOfBounds);
-                    }
+                    if v_dest >= reg_cap || v_src + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let val = (self.get_wide_reg(v_src) as i64) as f32;
+                    self.registers[v_dest] = val.to_bits();
+                    self.string_registers[v_dest] = None;
+                    pc += 2;
+                }
+                OP_LONG_TO_DOUBLE => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest + 1 >= reg_cap || v_src + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let val = (self.get_wide_reg(v_src) as i64) as f64;
+                    self.set_wide_reg(v_dest, val.to_bits())?;
+                    pc += 2;
+                }
+                OP_FLOAT_TO_INT => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let float_val = f32::from_bits(self.registers[v_src]);
-                    let int_val = float_val as i32;
-                    self.registers[v_dest] = int_val as u32;
+                    self.registers[v_dest] = (float_val as i32) as u32;
+                    self.string_registers[v_dest] = None;
+                    pc += 2;
+                }
+                OP_FLOAT_TO_LONG => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest + 1 >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let float_val = f32::from_bits(self.registers[v_src]);
+                    self.set_wide_reg(v_dest, (float_val as i64) as u64)?;
+                    pc += 2;
+                }
+                OP_FLOAT_TO_DOUBLE => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest + 1 >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let float_val = f32::from_bits(self.registers[v_src]) as f64;
+                    self.set_wide_reg(v_dest, float_val.to_bits())?;
+                    pc += 2;
+                }
+                OP_DOUBLE_TO_INT => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= reg_cap || v_src + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let d = f64::from_bits(self.get_wide_reg(v_src));
+                    self.registers[v_dest] = (d as i32) as u32;
+                    self.string_registers[v_dest] = None;
+                    pc += 2;
+                }
+                OP_DOUBLE_TO_LONG => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest + 1 >= reg_cap || v_src + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let d = f64::from_bits(self.get_wide_reg(v_src));
+                    self.set_wide_reg(v_dest, (d as i64) as u64)?;
+                    pc += 2;
+                }
+                OP_DOUBLE_TO_FLOAT => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = (insns[pc + 1] & 0x0F) as usize;
+                    let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_dest >= reg_cap || v_src + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let d = f64::from_bits(self.get_wide_reg(v_src)) as f32;
+                    self.registers[v_dest] = d.to_bits();
                     self.string_registers[v_dest] = None;
                     pc += 2;
                 }
                 OP_INT_TO_BYTE => {
-                    if pc + 2 > insns.len() {
-                        return Err(DalvikVmError::InvalidBytecode);
-                    }
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= reg_cap || v_src >= reg_cap {
-                        return Err(DalvikVmError::RegisterOutOfBounds);
-                    }
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let byte_val = (self.registers[v_src] as i8) as i32;
                     self.registers[v_dest] = byte_val as u32;
                     self.string_registers[v_dest] = None;
                     pc += 2;
                 }
                 OP_INT_TO_CHAR => {
-                    if pc + 2 > insns.len() {
-                        return Err(DalvikVmError::InvalidBytecode);
-                    }
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= reg_cap || v_src >= reg_cap {
-                        return Err(DalvikVmError::RegisterOutOfBounds);
-                    }
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     self.registers[v_dest] = (self.registers[v_src] as u16) as u32;
                     self.string_registers[v_dest] = None;
                     pc += 2;
                 }
                 OP_INT_TO_SHORT => {
-                    if pc + 2 > insns.len() {
-                        return Err(DalvikVmError::InvalidBytecode);
-                    }
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
-                    if v_dest >= reg_cap || v_src >= reg_cap {
-                        return Err(DalvikVmError::RegisterOutOfBounds);
-                    }
+                    if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let short_val = (self.registers[v_src] as i16) as i32;
                     self.registers[v_dest] = short_val as u32;
                     self.string_registers[v_dest] = None;
@@ -2717,16 +4167,48 @@ impl DalvikVmState {
                 OP_CHECK_CAST => {
                     if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = insns[pc + 1] as usize;
+                    let type_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
                     if v_dest >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let obj_id = self.registers[v_dest];
+                    if obj_id > 0 {
+                        let target_type = dex.get_type_slice(type_idx as u32).map_err(|_| DalvikVmError::InvalidBytecode)?;
+                        let obj = self.get_object(obj_id)?;
+                        let compatible = target_type == "Ljava/lang/Object;"
+                            || obj.class_descriptor == target_type
+                            || (target_type == "Ljava/lang/CharSequence;" && (obj.class_descriptor == "Ljava/lang/String;" || obj.class_descriptor == "Ljava/lang/StringBuilder;"))
+                            || (target_type == "Ljava/util/Map;" && obj.class_descriptor == "Ljava/util/HashMap;")
+                            || (target_type == "Ljava/util/List;" && obj.class_descriptor == "Ljava/util/ArrayList;");
+                        if !compatible {
+                            return Err(self.throw_class_cast(Some("Incompatible cast")));
+                        }
+                    }
                     pc += 4;
                 }
                 OP_INSTANCE_OF => {
                     if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let v_dest = (insns[pc + 1] & 0x0F) as usize;
                     let v_src = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    let type_idx = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
                     if v_dest >= reg_cap || v_src >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let obj_id = self.registers[v_src];
-                    self.registers[v_dest] = if obj_id > 0 { 1 } else { 0 };
+                    let is_inst = if obj_id > 0 {
+                        if let Ok(target_type) = dex.get_type_slice(type_idx as u32) {
+                            if let Ok(obj) = self.get_object(obj_id) {
+                                target_type == "Ljava/lang/Object;"
+                                    || obj.class_descriptor == target_type
+                                    || (target_type == "Ljava/lang/CharSequence;" && (obj.class_descriptor == "Ljava/lang/String;" || obj.class_descriptor == "Ljava/lang/StringBuilder;"))
+                                    || (target_type == "Ljava/util/Map;" && obj.class_descriptor == "Ljava/util/HashMap;")
+                                    || (target_type == "Ljava/util/List;" && obj.class_descriptor == "Ljava/util/ArrayList;")
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    self.registers[v_dest] = if is_inst { 1 } else { 0 };
                     self.string_registers[v_dest] = None;
                     pc += 4;
                 }
@@ -2913,6 +4395,169 @@ impl DalvikVmState {
                     self.registers[v_dest] = res;
                     self.string_registers[v_dest] = None;
                     pc += 4;
+                }
+                OP_ADD_LONG | OP_SUB_LONG | OP_MUL_LONG | OP_DIV_LONG | OP_REM_LONG
+                | OP_AND_LONG | OP_OR_LONG | OP_XOR_LONG | OP_SHL_LONG | OP_SHR_LONG | OP_USHR_LONG => {
+                    if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_b = insns[pc + 2] as usize;
+                    let v_c = insns[pc + 3] as usize;
+                    if v_dest + 1 >= reg_cap || v_b + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let b = self.get_wide_reg(v_b) as i64;
+                    let res: i64 = match opcode {
+                        OP_SHL_LONG | OP_SHR_LONG | OP_USHR_LONG => {
+                            if v_c >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                            let shift = (self.registers[v_c] & 0x3F) as u32;
+                            match opcode {
+                                OP_SHL_LONG => b.wrapping_shl(shift),
+                                OP_SHR_LONG => b.wrapping_shr(shift),
+                                OP_USHR_LONG => ((b as u64).wrapping_shr(shift)) as i64,
+                                _ => 0,
+                            }
+                        }
+                        _ => {
+                            if v_c + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                            let c = self.get_wide_reg(v_c) as i64;
+                            match opcode {
+                                OP_ADD_LONG => b.wrapping_add(c),
+                                OP_SUB_LONG => b.wrapping_sub(c),
+                                OP_MUL_LONG => b.wrapping_mul(c),
+                                OP_DIV_LONG => {
+                                    if c == 0 { return Err(DalvikVmError::DivideByZero); }
+                                    b.wrapping_div(c)
+                                }
+                                OP_REM_LONG => {
+                                    if c == 0 { return Err(DalvikVmError::DivideByZero); }
+                                    b.wrapping_rem(c)
+                                }
+                                OP_AND_LONG => b & c,
+                                OP_OR_LONG => b | c,
+                                OP_XOR_LONG => b ^ c,
+                                _ => 0,
+                            }
+                        }
+                    };
+                    self.set_wide_reg(v_dest, res as u64)?;
+                    pc += 4;
+                }
+                OP_ADD_LONG_2ADDR | OP_SUB_LONG_2ADDR | OP_MUL_LONG_2ADDR | OP_DIV_LONG_2ADDR | OP_REM_LONG_2ADDR
+                | OP_AND_LONG_2ADDR | OP_OR_LONG_2ADDR | OP_XOR_LONG_2ADDR | OP_SHL_LONG_2ADDR | OP_SHR_LONG_2ADDR | OP_USHR_LONG_2ADDR => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let a = self.get_wide_reg(v_a) as i64;
+                    let res: i64 = match opcode {
+                        OP_SHL_LONG_2ADDR | OP_SHR_LONG_2ADDR | OP_USHR_LONG_2ADDR => {
+                            if v_b >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                            let shift = (self.registers[v_b] & 0x3F) as u32;
+                            match opcode {
+                                OP_SHL_LONG_2ADDR => a.wrapping_shl(shift),
+                                OP_SHR_LONG_2ADDR => a.wrapping_shr(shift),
+                                OP_USHR_LONG_2ADDR => ((a as u64).wrapping_shr(shift)) as i64,
+                                _ => 0,
+                            }
+                        }
+                        _ => {
+                            if v_b + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                            let b = self.get_wide_reg(v_b) as i64;
+                            match opcode {
+                                OP_ADD_LONG_2ADDR => a.wrapping_add(b),
+                                OP_SUB_LONG_2ADDR => a.wrapping_sub(b),
+                                OP_MUL_LONG_2ADDR => a.wrapping_mul(b),
+                                OP_DIV_LONG_2ADDR => {
+                                    if b == 0 { return Err(DalvikVmError::DivideByZero); }
+                                    a.wrapping_div(b)
+                                }
+                                OP_REM_LONG_2ADDR => {
+                                    if b == 0 { return Err(DalvikVmError::DivideByZero); }
+                                    a.wrapping_rem(b)
+                                }
+                                OP_AND_LONG_2ADDR => a & b,
+                                OP_OR_LONG_2ADDR => a | b,
+                                OP_XOR_LONG_2ADDR => a ^ b,
+                                _ => 0,
+                            }
+                        }
+                    };
+                    self.set_wide_reg(v_a, res as u64)?;
+                    pc += 2;
+                }
+                OP_ADD_FLOAT | OP_SUB_FLOAT | OP_MUL_FLOAT | OP_DIV_FLOAT | OP_REM_FLOAT => {
+                    if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_b = insns[pc + 2] as usize;
+                    let v_c = insns[pc + 3] as usize;
+                    if v_dest >= reg_cap || v_b >= reg_cap || v_c >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let fb = f32::from_bits(self.registers[v_b]);
+                    let fc = f32::from_bits(self.registers[v_c]);
+                    let res = match opcode {
+                        OP_ADD_FLOAT => fb + fc,
+                        OP_SUB_FLOAT => fb - fc,
+                        OP_MUL_FLOAT => fb * fc,
+                        OP_DIV_FLOAT => fb / fc,
+                        OP_REM_FLOAT => fb % fc,
+                        _ => 0.0,
+                    };
+                    self.registers[v_dest] = res.to_bits();
+                    self.string_registers[v_dest] = None;
+                    pc += 4;
+                }
+                OP_ADD_FLOAT_2ADDR | OP_SUB_FLOAT_2ADDR | OP_MUL_FLOAT_2ADDR | OP_DIV_FLOAT_2ADDR | OP_REM_FLOAT_2ADDR => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a >= reg_cap || v_b >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let fa = f32::from_bits(self.registers[v_a]);
+                    let fb = f32::from_bits(self.registers[v_b]);
+                    let res = match opcode {
+                        OP_ADD_FLOAT_2ADDR => fa + fb,
+                        OP_SUB_FLOAT_2ADDR => fa - fb,
+                        OP_MUL_FLOAT_2ADDR => fa * fb,
+                        OP_DIV_FLOAT_2ADDR => fa / fb,
+                        OP_REM_FLOAT_2ADDR => fa % fb,
+                        _ => 0.0,
+                    };
+                    self.registers[v_a] = res.to_bits();
+                    self.string_registers[v_a] = None;
+                    pc += 2;
+                }
+                OP_ADD_DOUBLE | OP_SUB_DOUBLE | OP_MUL_DOUBLE | OP_DIV_DOUBLE | OP_REM_DOUBLE => {
+                    if pc + 4 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_dest = insns[pc + 1] as usize;
+                    let v_b = insns[pc + 2] as usize;
+                    let v_c = insns[pc + 3] as usize;
+                    if v_dest + 1 >= reg_cap || v_b + 1 >= reg_cap || v_c + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let db = f64::from_bits(self.get_wide_reg(v_b));
+                    let dc = f64::from_bits(self.get_wide_reg(v_c));
+                    let res = match opcode {
+                        OP_ADD_DOUBLE => db + dc,
+                        OP_SUB_DOUBLE => db - dc,
+                        OP_MUL_DOUBLE => db * dc,
+                        OP_DIV_DOUBLE => db / dc,
+                        OP_REM_DOUBLE => db % dc,
+                        _ => 0.0,
+                    };
+                    self.set_wide_reg(v_dest, res.to_bits())?;
+                    pc += 4;
+                }
+                OP_ADD_DOUBLE_2ADDR | OP_SUB_DOUBLE_2ADDR | OP_MUL_DOUBLE_2ADDR | OP_DIV_DOUBLE_2ADDR | OP_REM_DOUBLE_2ADDR => {
+                    if pc + 2 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let v_a = (insns[pc + 1] & 0x0F) as usize;
+                    let v_b = ((insns[pc + 1] >> 4) & 0x0F) as usize;
+                    if v_a + 1 >= reg_cap || v_b + 1 >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
+                    let da = f64::from_bits(self.get_wide_reg(v_a));
+                    let db = f64::from_bits(self.get_wide_reg(v_b));
+                    let res = match opcode {
+                        OP_ADD_DOUBLE_2ADDR => da + db,
+                        OP_SUB_DOUBLE_2ADDR => da - db,
+                        OP_MUL_DOUBLE_2ADDR => da * db,
+                        OP_DIV_DOUBLE_2ADDR => da / db,
+                        OP_REM_DOUBLE_2ADDR => da % db,
+                        _ => 0.0,
+                    };
+                    self.set_wide_reg(v_a, res.to_bits())?;
+                    pc += 2;
                 }
                 unknown_op => {
                     return Err(DalvikVmError::IllegalInstruction(unknown_op));
@@ -3685,6 +5330,225 @@ mod tests {
         // Should resolve to Derived->compute (and successfully execute) rather than failing
         let res = vm.interpret_insns(&dex, 4, &insns);
         assert!(res.is_ok(), "Virtual dispatch must execute Derived override");
+    }
+
+    #[test]
+    fn test_dalvik_long_and_double_arithmetic() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "compute", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // 1. Long addition: v0:v1 (1_000_000_000_000L) + v2:v3 (2_000_000_000_000L) -> v4:v5
+        vm.set_wide_reg(0, 1_000_000_000_000u64).unwrap();
+        vm.set_wide_reg(2, 2_000_000_000_000u64).unwrap();
+        let insns = [
+            OP_ADD_LONG, 0x04, 0x00, 0x02,
+            OP_RETURN_WIDE, 0x04,
+        ];
+        let res = vm.interpret_insns(&dex, 6, &insns).unwrap();
+        let wide_res = vm.get_wide_reg(4);
+        assert_eq!(wide_res, 3_000_000_000_000u64);
+        assert_eq!(res, (3_000_000_000_000u64 & 0xFFFFFFFF) as u32);
+
+        // 2. Long 2addr subtraction: v0:v1 -= v2:v3
+        let insns_sub = [
+            OP_SUB_LONG_2ADDR, 0x20, // v_a = 0, v_b = 2
+            OP_RETURN_VOID,
+        ];
+        vm.interpret_insns(&dex, 4, &insns_sub).unwrap();
+        assert_eq!(vm.get_wide_reg(0) as i64, -1_000_000_000_000i64);
+
+        // 3. Double multiplication: v0:v1 (2.5) * v2:v3 (4.0) -> v4:v5 (10.0)
+        vm.set_wide_reg(0, 2.5f64.to_bits()).unwrap();
+        vm.set_wide_reg(2, 4.0f64.to_bits()).unwrap();
+        let insns_mul = [
+            OP_MUL_DOUBLE, 0x04, 0x00, 0x02,
+            OP_RETURN_VOID,
+        ];
+        vm.interpret_insns(&dex, 6, &insns_mul).unwrap();
+        assert_eq!(f64::from_bits(vm.get_wide_reg(4)), 10.0f64);
+
+        // 4. Double comparisons (cmpl-double and cmpg-double)
+        vm.set_wide_reg(0, 1.5f64.to_bits()).unwrap();
+        vm.set_wide_reg(2, 3.5f64.to_bits()).unwrap();
+        let insns_cmp = [
+            OP_CMPL_DOUBLE, 0x04, 0x00, 0x02,
+            OP_RETURN, 0x04,
+        ];
+        let cmp_val = vm.interpret_insns(&dex, 6, &insns_cmp).unwrap() as i32;
+        assert_eq!(cmp_val, -1);
+
+        // 5. Long comparison (cmp-long)
+        vm.set_wide_reg(0, 500u64).unwrap();
+        vm.set_wide_reg(2, 500u64).unwrap();
+        let insns_cmpl = [
+            OP_CMP_LONG, 0x04, 0x00, 0x02,
+            OP_RETURN, 0x04,
+        ];
+        let cmp_long_val = vm.interpret_insns(&dex, 6, &insns_cmpl).unwrap() as i32;
+        assert_eq!(cmp_long_val, 0);
+    }
+
+    #[test]
+    fn test_dalvik_full_conversions_and_casts() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "compute", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // 1. int-to-long: v0 (12345) -> v2:v3
+        vm.registers[0] = 12345;
+        let insns = [
+            OP_INT_TO_LONG, 0x02, // v_dest=2, v_src=0
+            OP_RETURN_VOID,
+        ];
+        vm.interpret_insns(&dex, 4, &insns).unwrap();
+        assert_eq!(vm.get_wide_reg(2), 12345u64);
+
+        // 2. long-to-int: v2:v3 (12345) -> v4
+        let insns2 = [
+            OP_LONG_TO_INT, 0x24, // v_dest=4, v_src=2
+            OP_RETURN, 0x04,
+        ];
+        let int_val = vm.interpret_insns(&dex, 5, &insns2).unwrap();
+        assert_eq!(int_val, 12345);
+
+        // 3. int-to-double: v0 (42) -> v2:v3 (42.0)
+        vm.registers[0] = 42;
+        let insns3 = [
+            OP_INT_TO_DOUBLE, 0x02,
+            OP_RETURN_VOID,
+        ];
+        vm.interpret_insns(&dex, 4, &insns3).unwrap();
+        assert_eq!(f64::from_bits(vm.get_wide_reg(2)), 42.0f64);
+
+        // 4. check-cast valid: HashMap to Map
+        let map_id = vm.allocate_object("Ljava/util/HashMap;").unwrap();
+        vm.registers[0] = map_id;
+        let insns_cast = [
+            OP_CHECK_CAST, 0x00, 0x01, 0x00, // v0 against type 1 (Ljava/lang/Object;)
+            OP_RETURN, 0x00,
+        ];
+        assert_eq!(vm.interpret_insns(&dex, 2, &insns_cast).unwrap(), map_id);
+
+        // 5. instance-of: v0 is instance of Object -> v1 = 1
+        let insns_inst = [
+            OP_INSTANCE_OF, 0x01, 0x01, 0x00, // v_dest=1, v_src=0, type 1 (Object)
+            OP_RETURN, 0x01,
+        ];
+        assert_eq!(vm.interpret_insns(&dex, 2, &insns_inst).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_dalvik_typed_arrays_and_filled_new_array() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "compute", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // 1. filled-new-array with 3 elements: v0=10, v1=20, v2=30
+        vm.registers[0] = 10;
+        vm.registers[1] = 20;
+        vm.registers[2] = 30;
+        let insns = [
+            OP_FILLED_NEW_ARRAY, 0x30, 0x00, 0x00, 0x10, 0x02,
+            OP_MOVE_RESULT, 0x03,
+            OP_RETURN, 0x03,
+        ];
+        let arr_id = vm.interpret_insns(&dex, 4, &insns).unwrap();
+        assert!(arr_id > 0);
+        let obj = vm.get_object(arr_id).unwrap();
+        let elems = obj.array_elements.as_ref().unwrap();
+        assert_eq!(elems.len(), 3);
+        assert_eq!(elems[0], 10);
+        assert_eq!(elems[1], 20);
+        assert_eq!(elems[2], 30);
+
+        // 2. Wide array aput-wide and aget-wide
+        let wide_arr = vm.allocate_array("[J", 4).unwrap();
+        vm.registers[0] = wide_arr;
+        vm.registers[1] = 2; // index 2
+        vm.set_wide_reg(2, 0x0123_4567_89AB_CDEFu64).unwrap(); // val in v2:v3
+        let insns_wide = [
+            OP_APUT_WIDE, 0x02, 0x00, 0x01, // aput-wide v2 into arr v0 at idx v1
+            OP_AGET_WIDE, 0x04, 0x00, 0x01, // aget-wide v4 from arr v0 at idx v1
+            OP_RETURN_VOID,
+        ];
+        vm.interpret_insns(&dex, 6, &insns_wide).unwrap();
+        assert_eq!(vm.get_wide_reg(4), 0x0123_4567_89AB_CDEFu64);
+    }
+
+    #[test]
+    fn test_vm_framework_dispatch_math_and_system() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "compute", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // 1. Math.abs(-999) -> 999
+        let res = vm.dispatch_framework_method(&dex, "Ljava/lang/Math;", "abs", &[0], &[(-999i32) as u32]).unwrap();
+        assert_eq!(res, 999);
+
+        // 2. Math.max(15, 88) -> 88
+        let res = vm.dispatch_framework_method(&dex, "Ljava/lang/Math;", "max", &[0, 1], &[15, 88]).unwrap();
+        assert_eq!(res, 88);
+
+        // 3. System.currentTimeMillis() -> timestamp > 0
+        let res = vm.dispatch_framework_method(&dex, "Ljava/lang/System;", "currentTimeMillis", &[], &[]).unwrap();
+        assert!(res > 0);
+
+        // 4. System.arraycopy
+        let src = vm.allocate_array("[I", 5).unwrap();
+        let dst = vm.allocate_array("[I", 5).unwrap();
+        {
+            let s_obj = vm.get_object_mut(src).unwrap();
+            s_obj.array_elements.as_mut().unwrap().copy_from_slice(&[10, 20, 30, 40, 50]);
+        }
+        vm.dispatch_framework_method(&dex, "Ljava/lang/System;", "arraycopy", &[0, 1, 2, 3, 4], &[src, 1, dst, 2, 3]).unwrap();
+        let d_obj = vm.get_object(dst).unwrap();
+        let d_elems = d_obj.array_elements.as_ref().unwrap();
+        assert_eq!(d_elems, &[0, 0, 20, 30, 40]);
+    }
+
+    #[test]
+    fn test_vm_framework_dispatch_collections_and_parcel() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "compute", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // 1. HashMap operations: new, put, get, containsKey, size, remove
+        let map_id = vm.allocate_object("Ljava/util/HashMap;").unwrap();
+        vm.dispatch_framework_method(&dex, "Ljava/util/HashMap;", "<init>", &[0], &[map_id]).unwrap();
+        let k1 = vm.allocate_string("itemKey").unwrap();
+        let v1 = vm.allocate_string("itemValue").unwrap();
+        vm.dispatch_framework_method(&dex, "Ljava/util/HashMap;", "put", &[0, 1, 2], &[map_id, k1, v1]).unwrap();
+
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/HashMap;", "size", &[0], &[map_id]).unwrap(), 1);
+        assert_eq!(vm.dispatch_framework_method(&dex, "Ljava/util/HashMap;", "containsKey", &[0, 1], &[map_id, k1]).unwrap(), 1);
+        let retrieved = vm.dispatch_framework_method(&dex, "Ljava/util/HashMap;", "get", &[0, 1], &[map_id, k1]).unwrap();
+        assert_eq!(retrieved, v1);
+        assert_eq!(vm.get_string_payload(retrieved).as_deref(), Some("itemValue"));
+
+        // 2. SharedPreferences & Editor
+        let sp_id = vm.allocate_object("Landroid/content/SharedPreferences;").unwrap();
+        let ed_id = vm.dispatch_framework_method(&dex, "Landroid/content/SharedPreferences;", "edit", &[0], &[sp_id]).unwrap();
+        let pref_key = vm.allocate_string("theme").unwrap();
+        let pref_val = vm.allocate_string("dark").unwrap();
+        vm.dispatch_framework_method(&dex, "Landroid/content/SharedPreferences$Editor;", "putString", &[0, 1, 2], &[ed_id, pref_key, pref_val]).unwrap();
+        vm.dispatch_framework_method(&dex, "Landroid/content/SharedPreferences$Editor;", "apply", &[0], &[ed_id]).unwrap();
+
+        let got_val = vm.dispatch_framework_method(&dex, "Landroid/content/SharedPreferences;", "getString", &[0, 1, 2], &[sp_id, pref_key, 0]).unwrap();
+        assert_eq!(vm.get_string_payload(got_val).as_deref(), Some("dark"));
+
+        // 3. Parcel serialization and deserialization roundtrip
+        let p_id = vm.dispatch_framework_method(&dex, "Landroid/os/Parcel;", "obtain", &[], &[]).unwrap();
+        vm.dispatch_framework_method(&dex, "Landroid/os/Parcel;", "writeInt", &[0, 1], &[p_id, 98765]).unwrap();
+        let p_str = vm.allocate_string("ParcelTestString").unwrap();
+        vm.dispatch_framework_method(&dex, "Landroid/os/Parcel;", "writeString", &[0, 1], &[p_id, p_str]).unwrap();
+
+        // Rewind parcel position to 0
+        vm.dispatch_framework_method(&dex, "Landroid/os/Parcel;", "setDataPosition", &[0, 1], &[p_id, 0]).unwrap();
+        let read_i = vm.dispatch_framework_method(&dex, "Landroid/os/Parcel;", "readInt", &[0], &[p_id]).unwrap();
+        assert_eq!(read_i, 98765);
+        let read_s = vm.dispatch_framework_method(&dex, "Landroid/os/Parcel;", "readString", &[0], &[p_id]).unwrap();
+        assert_eq!(vm.get_string_payload(read_s).as_deref(), Some("ParcelTestString"));
     }
 }
 

@@ -39,6 +39,7 @@ pub struct JniClass {
     pub name: String,
     pub methods: BTreeMap<String, u32>,
     pub static_methods: BTreeMap<String, u32>,
+    pub fields: BTreeMap<String, u32>,
     pub registered_natives: Vec<JNINativeMethod>,
 }
 
@@ -49,6 +50,8 @@ pub struct JniObject {
     pub class_id: u32,
     pub string_val: Option<String>,
     pub int_fields: BTreeMap<u32, i32>,
+    pub object_fields: BTreeMap<u32, u32>,
+    pub array_elements: Option<Vec<u32>>,
 }
 
 /// Thread-local JNI execution environment (`JNIEnv`).
@@ -59,8 +62,10 @@ pub struct JniEnv {
     objects: BTreeMap<u32, JniObject>,
     next_class_id: u32,
     next_method_id: u32,
+    next_field_id: u32,
     next_object_id: u32,
     pub native_calls_executed: u64,
+    pub pending_exception: Option<u32>,
 }
 
 impl JniEnv {
@@ -73,8 +78,10 @@ impl JniEnv {
             objects: BTreeMap::new(),
             next_class_id: 1,
             next_method_id: 1,
+            next_field_id: 1,
             next_object_id: 1,
             native_calls_executed: 0,
+            pending_exception: None,
         };
 
         // Pre-register standard core classes
@@ -100,6 +107,7 @@ impl JniEnv {
             name: String::from(name),
             methods: BTreeMap::new(),
             static_methods: BTreeMap::new(),
+            fields: BTreeMap::new(),
             registered_natives: Vec::new(),
         };
 
@@ -168,6 +176,8 @@ impl JniEnv {
             class_id: str_class,
             string_val: Some(String::from(s)),
             int_fields: BTreeMap::new(),
+            object_fields: BTreeMap::new(),
+            array_elements: None,
         };
 
         self.objects.insert(id, obj);
@@ -180,6 +190,66 @@ impl JniEnv {
         obj.string_val.as_deref()
     }
 
+    /// JNI `GetStringLength(jstring str)`
+    pub fn get_string_length(&self, str_obj_id: u32) -> usize {
+        self.get_string_utf_chars(str_obj_id)
+            .map(|s| s.encode_utf16().count())
+            .unwrap_or(0)
+    }
+
+    /// JNI `GetStringUTFLength(jstring str)`
+    pub fn get_string_utf_length(&self, str_obj_id: u32) -> usize {
+        self.get_string_utf_chars(str_obj_id)
+            .map(|s| s.len())
+            .unwrap_or(0)
+    }
+
+    /// JNI `ReleaseStringUTFChars(jstring str, const char* chars)`
+    pub fn release_string_utf_chars(&self, _str_obj_id: u32, _chars: &str) {
+        // No-op for managed string references
+    }
+
+    /// JNI `GetFieldID(jclass clazz, const char* name, const char* sig)`
+    pub fn get_field_id(&mut self, class_id: u32, name: &str, sig: &str) -> Option<u32> {
+        let cls = self.classes.get_mut(&class_id)?;
+        let key = format!("{}:{}", name, sig);
+        if let Some(id) = cls.fields.get(&key) {
+            return Some(*id);
+        }
+        let id = self.next_field_id;
+        self.next_field_id += 1;
+        cls.fields.insert(key, id);
+        Some(id)
+    }
+
+    /// JNI `GetIntField(jobject obj, jfieldID fieldID)`
+    pub fn get_int_field(&self, obj_id: u32, field_id: u32) -> i32 {
+        self.objects.get(&obj_id)
+            .and_then(|o| o.int_fields.get(&field_id).copied())
+            .unwrap_or(0)
+    }
+
+    /// JNI `SetIntField(jobject obj, jfieldID fieldID, jint val)`
+    pub fn set_int_field(&mut self, obj_id: u32, field_id: u32, val: i32) {
+        if let Some(obj) = self.objects.get_mut(&obj_id) {
+            obj.int_fields.insert(field_id, val);
+        }
+    }
+
+    /// JNI `GetObjectField(jobject obj, jfieldID fieldID)`
+    pub fn get_object_field(&self, obj_id: u32, field_id: u32) -> u32 {
+        self.objects.get(&obj_id)
+            .and_then(|o| o.object_fields.get(&field_id).copied())
+            .unwrap_or(0)
+    }
+
+    /// JNI `SetObjectField(jobject obj, jfieldID fieldID, jobject val)`
+    pub fn set_object_field(&mut self, obj_id: u32, field_id: u32, val: u32) {
+        if let Some(obj) = self.objects.get_mut(&obj_id) {
+            obj.object_fields.insert(field_id, val);
+        }
+    }
+
     /// JNI `NewObject(jclass clazz, jmethodID methodID, ...)`
     pub fn new_object(&mut self, class_id: u32) -> u32 {
         let id = self.next_object_id;
@@ -190,10 +260,83 @@ impl JniEnv {
             class_id,
             string_val: None,
             int_fields: BTreeMap::new(),
+            object_fields: BTreeMap::new(),
+            array_elements: None,
         };
 
         self.objects.insert(id, obj);
         id
+    }
+
+    /// JNI `NewObjectArray(jsize length, jclass elementClass, jobject initialElement)`
+    pub fn new_object_array(&mut self, length: usize, element_class_id: u32, initial_element: u32) -> u32 {
+        let id = self.next_object_id;
+        self.next_object_id += 1;
+
+        let obj = JniObject {
+            id,
+            class_id: element_class_id,
+            string_val: None,
+            int_fields: BTreeMap::new(),
+            object_fields: BTreeMap::new(),
+            array_elements: Some(alloc::vec![initial_element; length]),
+        };
+
+        self.objects.insert(id, obj);
+        id
+    }
+
+    /// JNI `GetObjectArrayElement(jobjectArray array, jsize index)`
+    pub fn get_object_array_element(&self, array_id: u32, index: usize) -> Option<u32> {
+        let obj = self.objects.get(&array_id)?;
+        let elements = obj.array_elements.as_ref()?;
+        elements.get(index).copied()
+    }
+
+    /// JNI `SetObjectArrayElement(jobjectArray array, jsize index, jobject val)`
+    pub fn set_object_array_element(&mut self, array_id: u32, index: usize, val: u32) -> bool {
+        if let Some(obj) = self.objects.get_mut(&array_id) {
+            if let Some(elements) = obj.array_elements.as_mut() {
+                if index < elements.len() {
+                    elements[index] = val;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// JNI `GetArrayLength(jarray array)`
+    pub fn get_array_length(&self, array_id: u32) -> usize {
+        self.objects.get(&array_id)
+            .and_then(|o| o.array_elements.as_ref().map(|a| a.len()))
+            .unwrap_or(0)
+    }
+
+    /// JNI `ExceptionCheck()`
+    pub fn exception_check(&self) -> bool {
+        self.pending_exception.is_some()
+    }
+
+    /// JNI `ExceptionOccurred()`
+    pub fn exception_occurred(&self) -> Option<u32> {
+        self.pending_exception
+    }
+
+    /// JNI `ExceptionClear()`
+    pub fn exception_clear(&mut self) {
+        self.pending_exception = None;
+    }
+
+    /// JNI `ThrowNew(jclass clazz, const char* message)`
+    pub fn throw_new(&mut self, class_name: &str, message: &str) -> i32 {
+        let class_id = self.find_class(class_name).unwrap_or_else(|| self.register_class(class_name));
+        let ex_obj = self.new_object(class_id);
+        if let Some(obj) = self.objects.get_mut(&ex_obj) {
+            obj.string_val = Some(String::from(message));
+        }
+        self.pending_exception = Some(ex_obj);
+        JNI_OK
     }
 
     /// Invokes a registered native function for a method ID.
