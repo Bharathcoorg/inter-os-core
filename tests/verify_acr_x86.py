@@ -165,10 +165,14 @@ def verify_acr_qemu():
         print("  [SKIP] QEMU binary not found; static verification complete.")
         return True
 
-    boot_img = ROOT / "target" / "inter-os-bios.img"
-    if not boot_img.exists():
-        print("  Building demo boot image with tools/interos.py...")
-        subprocess.run([sys.executable, "tools/interos.py", "build", "demo"], cwd=ROOT, check=True)
+    dev_kernel_img = ROOT / "target" / "verify" / "e2e_acceptance" / "inter-os-bios-tls-dev.img"
+    if dev_kernel_img.exists():
+        boot_img = dev_kernel_img
+    else:
+        boot_img = ROOT / "target" / "inter-os-bios.img"
+        if not boot_img.exists():
+            print("  Building demo boot image with tools/interos.py...")
+            subprocess.run([sys.executable, "tools/interos.py", "build", "demo"], cwd=ROOT, check=True)
 
     data_disk = ROOT / "target" / "inter-os-data-master.img"
     if not data_disk.exists():

@@ -29,6 +29,103 @@ pub enum DalvikVmError {
     UnhandledException(u32),
 }
 
+/// Finds a matching catch handler offset in bytes for a given bytecode pc within the method.
+fn find_catch_handler(
+    dex: &DexPackage,
+    code_offset: usize,
+    pc_bytes: usize,
+    ex_class_desc: Option<&str>,
+) -> Option<usize> {
+    if code_offset == 0 || code_offset + 16 > dex.raw.len() {
+        return None;
+    }
+    let tries_size = u16::from_le_bytes([dex.raw[code_offset + 6], dex.raw[code_offset + 7]]) as usize;
+    if tries_size == 0 {
+        return None;
+    }
+    let insns_size = u32::from_le_bytes([
+        dex.raw[code_offset + 12],
+        dex.raw[code_offset + 13],
+        dex.raw[code_offset + 14],
+        dex.raw[code_offset + 15],
+    ]) as usize;
+    let insns_bytes_len = insns_size.checked_mul(2)?;
+    let padding = if insns_size % 2 == 1 { 2 } else { 0 };
+    let tries_start = code_offset.checked_add(16)?.checked_add(insns_bytes_len)?.checked_add(padding)?;
+    let tries_bytes = tries_size.checked_mul(8)?;
+    let handlers_list_start = tries_start.checked_add(tries_bytes)?;
+    if handlers_list_start > dex.raw.len() {
+        return None;
+    }
+
+    let code_unit_pc = (pc_bytes / 2) as u32;
+
+    for i in 0..tries_size {
+        let try_offset = tries_start + i * 8;
+        if try_offset + 8 > dex.raw.len() {
+            break;
+        }
+        let start_addr = u32::from_le_bytes([
+            dex.raw[try_offset],
+            dex.raw[try_offset + 1],
+            dex.raw[try_offset + 2],
+            dex.raw[try_offset + 3],
+        ]);
+        let insn_count = u16::from_le_bytes([
+            dex.raw[try_offset + 4],
+            dex.raw[try_offset + 5],
+        ]) as u32;
+        let handler_off = u16::from_le_bytes([
+            dex.raw[try_offset + 6],
+            dex.raw[try_offset + 7],
+        ]) as usize;
+
+        if code_unit_pc >= start_addr && code_unit_pc < start_addr.saturating_add(insn_count) {
+            let mut cur = handlers_list_start.checked_add(handler_off)?;
+            if cur >= dex.raw.len() {
+                return None;
+            }
+            let handler_size = read_sleb128(dex.raw, &mut cur).ok()?;
+            let abs_size = handler_size.abs() as usize;
+
+            for _ in 0..abs_size {
+                let type_idx = read_uleb128(dex.raw, &mut cur).ok()?;
+                let target_addr = read_uleb128(dex.raw, &mut cur).ok()?;
+
+                let matches = if let Some(ex_desc) = ex_class_desc {
+                    if let Some(target_type) = dex.types.get(type_idx as usize) {
+                        target_type == ex_desc
+                            || target_type == "Ljava/lang/Throwable;"
+                            || target_type == "Ljava/lang/Exception;"
+                            || target_type == "Ljava/lang/RuntimeException;"
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                };
+
+                if matches {
+                    let target_byte_pc = (target_addr as usize).checked_mul(2)?;
+                    if target_byte_pc < insns_bytes_len {
+                        return Some(target_byte_pc);
+                    }
+                }
+            }
+
+            if handler_size <= 0 {
+                let catch_all_addr = read_uleb128(dex.raw, &mut cur).ok()?;
+                let target_byte_pc = (catch_all_addr as usize).checked_mul(2)?;
+                if target_byte_pc < insns_bytes_len {
+                    return Some(target_byte_pc);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Decodes Dalvik format 35c's C/D/E/F/G register list and validates the count.
 fn decode_invoke_registers(insns: &[u8], pc: usize) -> Result<([usize; 5], usize), DalvikVmError> {
     if pc.checked_add(6).filter(|end| *end <= insns.len()).is_none() { return Err(DalvikVmError::InvalidBytecode); }
@@ -106,6 +203,8 @@ pub struct DalvikVmState {
     pub captured_logs: Vec<String>,
     /// Nested DEX calls are bounded to prevent recursive bytecode exhaustion.
     pub call_depth: u8,
+    /// Pending exception object ID if an exception is currently unwinding.
+    pub pending_exception: Option<u32>,
     objects: Vec<DalvikObject>,
     next_object_id: u32,
     static_fields: Vec<(u16, u32)>,
@@ -126,6 +225,7 @@ impl DalvikVmState {
             last_return_string: None,
             captured_logs: Vec::new(),
             call_depth: 0,
+            pending_exception: None,
             objects: Vec::new(),
             next_object_id: 1,
             static_fields: Vec::new(),
@@ -298,7 +398,7 @@ impl DalvikVmState {
         }
 
         let insns = &dex.raw[insns_start..insns_end];
-        self.interpret_insns(dex, method.registers_size, insns)
+        self.interpret_insns_with_code_offset(dex, method.registers_size, method.code_offset, insns)
     }
 
     /// Interprets a sequence of Dalvik bytecode instructions directly.
@@ -306,6 +406,17 @@ impl DalvikVmState {
         &mut self,
         dex: &DexPackage,
         registers_size: u16,
+        insns: &[u8],
+    ) -> Result<u32, DalvikVmError> {
+        self.interpret_insns_with_code_offset(dex, registers_size, 0, insns)
+    }
+
+    /// Interprets a sequence of Dalvik bytecode instructions with method code_offset for try-catch table resolution.
+    pub fn interpret_insns_with_code_offset(
+        &mut self,
+        dex: &DexPackage,
+        registers_size: u16,
+        code_offset: usize,
         insns: &[u8],
     ) -> Result<u32, DalvikVmError> {
         struct MethodFrame {
@@ -364,7 +475,7 @@ impl DalvikVmState {
                     if v_dest >= reg_cap {
                         return Err(DalvikVmError::RegisterOutOfBounds);
                     }
-                    self.registers[v_dest] = 0;
+                    self.registers[v_dest] = self.pending_exception.take().unwrap_or(0);
                     self.string_registers[v_dest] = None;
                     pc += 2;
                 }
@@ -573,7 +684,7 @@ impl DalvikVmState {
                         pc += 4;
                     }
                 }
-                OP_INVOKE_VIRTUAL | OP_INVOKE_DIRECT | OP_INVOKE_STATIC => {
+                OP_INVOKE_VIRTUAL | OP_INVOKE_DIRECT | OP_INVOKE_STATIC | OP_INVOKE_SUPER | OP_INVOKE_INTERFACE => {
                     if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
                     let (arg_registers, arg_count) = decode_invoke_registers(insns, pc)?;
                     if arg_registers[..arg_count].iter().any(|register| *register >= method.registers_size as usize) {
@@ -588,7 +699,9 @@ impl DalvikVmState {
                     let target_ins_size = target.ins_size as usize;
                     let is_framework = target_class.starts_with("Landroid/")
                         || target_class.starts_with("Landroidx/")
-                        || target_class.starts_with("Lcom/google/android/gms/");
+                        || target_class.starts_with("Lcom/google/android/gms/")
+                        || target_class.starts_with("Ljava/")
+                        || target_class.starts_with("Ljavax/");
                     let string_args = [
                         if arg_count > 0 { self.string_registers[arg_registers[0]].as_deref() } else { None },
                         if arg_count > 1 { self.string_registers[arg_registers[1]].as_deref() } else { None },
@@ -602,6 +715,10 @@ impl DalvikVmState {
                             Ok(super::framework::AndroidFrameworkResult::ReturnString(s)) => {
                                 self.last_return_value = 0;
                                 self.last_return_string = Some(alloc::string::String::from(s));
+                            }
+                            Ok(super::framework::AndroidFrameworkResult::ReturnOwnedString(s)) => {
+                                self.last_return_value = 0;
+                                self.last_return_string = Some(s);
                             }
                             Ok(super::framework::AndroidFrameworkResult::Service(svc)) => {
                                 self.last_return_value = svc.handle();
@@ -629,8 +746,112 @@ impl DalvikVmState {
                         let result = self.invoke_method(dex, &target.class_name, &target.method_name);
                         self.registers = caller_registers;
                         self.string_registers = caller_strings;
-                        self.last_return_value = result?;
-                        self.last_return_string = None;
+                        match result {
+                            Ok(val) => {
+                                self.last_return_value = val;
+                                self.last_return_string = None;
+                            }
+                            Err(DalvikVmError::UnhandledException(ex_id)) => {
+                                if code_offset > 0 {
+                                    let ex_class = self.get_object(ex_id).map(|o| o.class_descriptor.clone()).ok();
+                                    if let Some(handler_pc) = find_catch_handler(dex, code_offset, pc, ex_class.as_deref()) {
+                                        self.pending_exception = Some(ex_id);
+                                        pc = handler_pc;
+                                        continue;
+                                    }
+                                }
+                                return Err(DalvikVmError::UnhandledException(ex_id));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    pc += 6;
+                }
+                OP_INVOKE_VIRTUAL_RANGE
+                | OP_INVOKE_SUPER_RANGE
+                | OP_INVOKE_DIRECT_RANGE
+                | OP_INVOKE_STATIC_RANGE
+                | OP_INVOKE_INTERFACE_RANGE => {
+                    if pc + 6 > insns.len() { return Err(DalvikVmError::InvalidBytecode); }
+                    let arg_count = insns[pc + 1] as usize;
+                    let method_index = u16::from_le_bytes([insns[pc + 2], insns[pc + 3]]) as usize;
+                    let first_reg = u16::from_le_bytes([insns[pc + 4], insns[pc + 5]]) as usize;
+                    if first_reg.checked_add(arg_count).map_or(true, |end| end > method.registers_size as usize) {
+                        return Err(DalvikVmError::RegisterOutOfBounds);
+                    }
+                    let target = dex.methods.iter().find(|m| m.method_index == method_index)
+                        .ok_or(DalvikVmError::MethodNotFound)?;
+                    let target_class = target.class_name.clone();
+                    let target_method = target.method_name.clone();
+                    let target_registers_size = target.registers_size as usize;
+                    let target_ins_size = target.ins_size as usize;
+                    let is_framework = target_class.starts_with("Landroid/")
+                        || target_class.starts_with("Landroidx/")
+                        || target_class.starts_with("Lcom/google/android/gms/")
+                        || target_class.starts_with("Ljava/")
+                        || target_class.starts_with("Ljavax/");
+                    let string_args = [
+                        if arg_count > 0 && first_reg < self.string_registers.len() { self.string_registers[first_reg].as_deref() } else { None },
+                        if arg_count > 1 && (first_reg + 1) < self.string_registers.len() { self.string_registers[first_reg + 1].as_deref() } else { None },
+                    ];
+                    if is_framework {
+                        match super::framework::dispatch(&target_class, &target_method, &string_args, &mut self.captured_logs) {
+                            Ok(super::framework::AndroidFrameworkResult::Return(value)) => {
+                                self.last_return_value = value;
+                                self.last_return_string = None;
+                            }
+                            Ok(super::framework::AndroidFrameworkResult::ReturnString(s)) => {
+                                self.last_return_value = 0;
+                                self.last_return_string = Some(alloc::string::String::from(s));
+                            }
+                            Ok(super::framework::AndroidFrameworkResult::ReturnOwnedString(s)) => {
+                                self.last_return_value = 0;
+                                self.last_return_string = Some(s);
+                            }
+                            Ok(super::framework::AndroidFrameworkResult::Service(svc)) => {
+                                self.last_return_value = svc.handle();
+                                self.last_return_string = None;
+                            }
+                            Err(super::framework::AndroidFrameworkError::UnsupportedApi) => return Err(DalvikVmError::UnsupportedFrameworkApi),
+                            Err(_) => return Err(DalvikVmError::SecurityViolationForbiddenApi),
+                        }
+                    } else {
+                        if arg_count != target_ins_size || target_ins_size > target_registers_size || target_registers_size > MAX_REGISTERS_LIMIT {
+                            return Err(DalvikVmError::InvalidBytecode);
+                        }
+                        let caller_registers = self.registers.clone();
+                        let caller_strings = self.string_registers.clone();
+                        let base = target_registers_size - target_ins_size;
+                        let frame_len = target_registers_size.max(32);
+                        self.registers = alloc::vec![0u32; frame_len];
+                        self.string_registers = alloc::vec![None; frame_len];
+                        for i in 0..arg_count {
+                            self.registers[base + i] = caller_registers[first_reg + i];
+                            if (first_reg + i) < caller_strings.len() {
+                                self.string_registers[base + i] = caller_strings[first_reg + i].clone();
+                            }
+                        }
+                        let result = self.invoke_method(dex, &target.class_name, &target.method_name);
+                        self.registers = caller_registers;
+                        self.string_registers = caller_strings;
+                        match result {
+                            Ok(val) => {
+                                self.last_return_value = val;
+                                self.last_return_string = None;
+                            }
+                            Err(DalvikVmError::UnhandledException(ex_id)) => {
+                                if code_offset > 0 {
+                                    let ex_class = self.get_object(ex_id).map(|o| o.class_descriptor.clone()).ok();
+                                    if let Some(handler_pc) = find_catch_handler(dex, code_offset, pc, ex_class.as_deref()) {
+                                        self.pending_exception = Some(ex_id);
+                                        pc = handler_pc;
+                                        continue;
+                                    }
+                                }
+                                return Err(DalvikVmError::UnhandledException(ex_id));
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                     pc += 6;
                 }
@@ -1260,6 +1481,14 @@ impl DalvikVmState {
                     if v_ex >= reg_cap { return Err(DalvikVmError::RegisterOutOfBounds); }
                     let ex_id = self.registers[v_ex];
                     if ex_id == 0 { return Err(DalvikVmError::NullPointerDereference); }
+                    if code_offset > 0 {
+                        let ex_class = self.get_object(ex_id).map(|o| o.class_descriptor.clone()).ok();
+                        if let Some(handler_pc) = find_catch_handler(dex, code_offset, pc, ex_class.as_deref()) {
+                            self.pending_exception = Some(ex_id);
+                            pc = handler_pc;
+                            continue;
+                        }
+                    }
                     return Err(DalvikVmError::UnhandledException(ex_id));
                 }
                 OP_PACKED_SWITCH => {
@@ -1417,6 +1646,7 @@ impl DalvikVmState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::framework::*;
     use interos_android_format::dex::create_test_dex;
 
     #[test]
@@ -1867,6 +2097,106 @@ mod tests {
         let dex = DexPackage::parse(&dex_bytes).unwrap();
         let res = vm.invoke_method(&dex, "Lorg/interos/Test;", "onCreate");
         assert_eq!(res, Err(DalvikVmError::RegisterOutOfBounds));
+    }
+
+    #[test]
+    fn test_dalvik_range_invoke_opcodes() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // Test range invoke with 3 arguments starting at register 4
+        let insns = [
+            OP_INVOKE_STATIC_RANGE, 0x03, 0x00, 0x00, 0x04, 0x00,
+            OP_RETURN, 0x00,
+        ];
+        let res = vm.interpret_insns(&dex, 16, &insns);
+        assert_eq!(res, Err(DalvikVmError::InvalidBytecode));
+
+        // Range invoke with first_reg + count exceeding registers_size fails closed with RegisterOutOfBounds
+        let out_of_bounds = [
+            OP_INVOKE_STATIC_RANGE, 0x05, 0x00, 0x00, 0x0C, 0x00,
+            OP_RETURN, 0x00,
+        ];
+        let res = vm.interpret_insns(&dex, 16, &out_of_bounds);
+        assert_eq!(res, Err(DalvikVmError::RegisterOutOfBounds));
+    }
+
+    #[test]
+    fn test_dalvik_exception_handling_and_throw() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+
+        // 1. Throwing null (reg = 0) returns NullPointerDereference
+        let throw_null = [OP_THROW, 0x01, OP_RETURN_VOID];
+        vm.registers[1] = 0;
+        assert_eq!(vm.interpret_insns(&dex, 8, &throw_null), Err(DalvikVmError::NullPointerDereference));
+
+        // 2. Throwing a valid object without try-catch returns UnhandledException
+        let obj_id = vm.allocate_object("Ljava/lang/RuntimeException;").unwrap();
+        vm.registers[1] = obj_id;
+        assert_eq!(vm.interpret_insns(&dex, 8, &throw_null), Err(DalvikVmError::UnhandledException(obj_id)));
+
+        // 3. Move exception clears pending_exception into destination register
+        vm.pending_exception = Some(obj_id);
+        let move_ex = [OP_MOVE_EXCEPTION, 0x02, OP_RETURN, 0x02];
+        let caught = vm.interpret_insns(&dex, 8, &move_ex).unwrap();
+        assert_eq!(caught, obj_id);
+        assert_eq!(vm.registers[2], obj_id);
+        assert_eq!(vm.pending_exception, None);
+    }
+
+    #[test]
+    fn test_dalvik_java_standard_library_framework_dispatch() {
+        let mut logs = Vec::new();
+        // 1. java/lang/String length & equals
+        assert_eq!(
+            dispatch("Ljava/lang/String;", "length", &[Some("InterOS")], &mut logs),
+            Ok(AndroidFrameworkResult::Return(7))
+        );
+        assert_eq!(
+            dispatch("Ljava/lang/String;", "isEmpty", &[Some("")], &mut logs),
+            Ok(AndroidFrameworkResult::Return(1))
+        );
+        assert_eq!(
+            dispatch("Ljava/lang/String;", "equals", &[Some("abc"), Some("abc")], &mut logs),
+            Ok(AndroidFrameworkResult::Return(1))
+        );
+        assert_eq!(
+            dispatch("Ljava/lang/String;", "equals", &[Some("abc"), Some("xyz")], &mut logs),
+            Ok(AndroidFrameworkResult::Return(0))
+        );
+
+        // 2. java/lang/StringBuilder append & toString
+        assert_eq!(
+            dispatch("Ljava/lang/StringBuilder;", "<init>", &[], &mut logs),
+            Ok(AndroidFrameworkResult::Return(0))
+        );
+        assert_eq!(
+            dispatch("Ljava/lang/StringBuilder;", "append", &[Some("Hello "), Some("World")], &mut logs),
+            Ok(AndroidFrameworkResult::ReturnOwnedString(String::from("Hello World")))
+        );
+
+        // 3. java/lang/Class reflection
+        assert_eq!(
+            dispatch("Ljava/lang/Class;", "forName", &[Some("java.lang.String")], &mut logs),
+            Ok(AndroidFrameworkResult::Return(1))
+        );
+        assert_eq!(
+            dispatch("Ljava/lang/Class;", "getSimpleName", &[Some("java.lang.String")], &mut logs),
+            Ok(AndroidFrameworkResult::ReturnOwnedString(String::from("String")))
+        );
+
+        // 4. android/content/Intent
+        assert_eq!(
+            dispatch("Landroid/content/Intent;", "<init>", &[], &mut logs),
+            Ok(AndroidFrameworkResult::Return(0))
+        );
+        assert_eq!(
+            dispatch("Landroid/content/Intent;", "getAction", &[], &mut logs),
+            Ok(AndroidFrameworkResult::ReturnString("android.intent.action.MAIN"))
+        );
     }
 }
 

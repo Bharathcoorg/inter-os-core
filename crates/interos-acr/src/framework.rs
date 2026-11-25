@@ -76,10 +76,11 @@ impl AndroidFrameworkService {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AndroidFrameworkResult {
     Return(u32),
     ReturnString(&'static str),
+    ReturnOwnedString(String),
     Service(AndroidFrameworkService),
 }
 
@@ -378,6 +379,126 @@ pub fn dispatch(
         "com/google/android/gms/ads/identifier/AdvertisingIdClient" => {
             match method_name {
                 "getAdvertisingIdInfo" => Ok(AndroidFrameworkResult::Return(1)),
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        // Standard Java Library APIs: java/lang/String
+        "java/lang/String" => {
+            match method_name {
+                "length" => {
+                    let len = string_args.first().and_then(|v| *v).map(|s| s.len() as u32).unwrap_or(0);
+                    Ok(AndroidFrameworkResult::Return(len))
+                }
+                "isEmpty" => {
+                    let is_empty = string_args.first().and_then(|v| *v).map(|s| s.is_empty()).unwrap_or(true);
+                    Ok(AndroidFrameworkResult::Return(if is_empty { 1 } else { 0 }))
+                }
+                "equals" => {
+                    let s1 = string_args.first().and_then(|v| *v).unwrap_or("");
+                    let s2 = string_args.get(1).and_then(|v| *v).unwrap_or("");
+                    Ok(AndroidFrameworkResult::Return(if s1 == s2 { 1 } else { 0 }))
+                }
+                "valueOf" => {
+                    let val = string_args.first().and_then(|v| *v).unwrap_or("");
+                    Ok(AndroidFrameworkResult::ReturnOwnedString(String::from(val)))
+                }
+                "concat" => {
+                    let s1 = string_args.first().and_then(|v| *v).unwrap_or("");
+                    let s2 = string_args.get(1).and_then(|v| *v).unwrap_or("");
+                    let mut res = String::from(s1);
+                    res.push_str(s2);
+                    Ok(AndroidFrameworkResult::ReturnOwnedString(res))
+                }
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        // Standard Java Library APIs: java/lang/StringBuilder
+        "java/lang/StringBuilder" => {
+            match method_name {
+                "<init>" => Ok(AndroidFrameworkResult::Return(0)),
+                "append" => {
+                    let s1 = string_args.first().and_then(|v| *v).unwrap_or("");
+                    let s2 = string_args.get(1).and_then(|v| *v).unwrap_or("");
+                    let mut res = String::from(s1);
+                    res.push_str(s2);
+                    Ok(AndroidFrameworkResult::ReturnOwnedString(res))
+                }
+                "toString" => {
+                    let val = string_args.first().and_then(|v| *v).unwrap_or("");
+                    Ok(AndroidFrameworkResult::ReturnOwnedString(String::from(val)))
+                }
+                "length" => {
+                    let len = string_args.first().and_then(|v| *v).map(|s| s.len() as u32).unwrap_or(0);
+                    Ok(AndroidFrameworkResult::Return(len))
+                }
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        // Standard Java Library APIs: java/lang/Integer, Long, Boolean
+        "java/lang/Integer" | "java/lang/Long" => {
+            match method_name {
+                "valueOf" => {
+                    let val = string_args.first().and_then(|v| *v).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                    Ok(AndroidFrameworkResult::Return(val))
+                }
+                "intValue" | "longValue" => {
+                    let val = string_args.first().and_then(|v| *v).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                    Ok(AndroidFrameworkResult::Return(val))
+                }
+                "toString" => {
+                    let val = string_args.first().and_then(|v| *v).unwrap_or("0");
+                    Ok(AndroidFrameworkResult::ReturnOwnedString(String::from(val)))
+                }
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        "java/lang/Boolean" => {
+            match method_name {
+                "valueOf" => {
+                    let val = string_args.first().and_then(|v| *v).map(|s| s == "true" || s == "1").unwrap_or(false);
+                    Ok(AndroidFrameworkResult::Return(if val { 1 } else { 0 }))
+                }
+                "booleanValue" => Ok(AndroidFrameworkResult::Return(0)),
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        // Standard Java Reflection: java/lang/Class
+        "java/lang/Class" => {
+            match method_name {
+                "forName" => Ok(AndroidFrameworkResult::Return(1)),
+                "getName" => {
+                    let name = string_args.first().and_then(|v| *v).unwrap_or("java.lang.Object");
+                    Ok(AndroidFrameworkResult::ReturnOwnedString(String::from(name)))
+                }
+                "getSimpleName" => {
+                    let name = string_args.first().and_then(|v| *v).unwrap_or("Object");
+                    let simple = name.rsplit('.').next().unwrap_or(name);
+                    Ok(AndroidFrameworkResult::ReturnOwnedString(String::from(simple)))
+                }
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        // Collections: java/util/ArrayList
+        "java/util/ArrayList" => {
+            match method_name {
+                "<init>" => Ok(AndroidFrameworkResult::Return(0)),
+                "add" => Ok(AndroidFrameworkResult::Return(1)),
+                "get" => Ok(AndroidFrameworkResult::Return(0)),
+                "size" => Ok(AndroidFrameworkResult::Return(0)),
+                "isEmpty" => Ok(AndroidFrameworkResult::Return(1)),
+                "clear" => Ok(AndroidFrameworkResult::Return(0)),
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        // Android Intent: android/content/Intent
+        "android/content/Intent" => {
+            match method_name {
+                "<init>" => Ok(AndroidFrameworkResult::Return(0)),
+                "getAction" => Ok(AndroidFrameworkResult::ReturnString("android.intent.action.MAIN")),
+                "setAction" => Ok(AndroidFrameworkResult::Return(0)),
+                "putExtra" => Ok(AndroidFrameworkResult::Return(0)),
+                "getStringExtra" => Ok(AndroidFrameworkResult::ReturnString("")),
+                "getIntExtra" => Ok(AndroidFrameworkResult::Return(0)),
                 _ => Err(AndroidFrameworkError::UnsupportedApi),
             }
         }

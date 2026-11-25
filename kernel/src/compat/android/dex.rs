@@ -57,8 +57,15 @@ pub const OP_IF_NE: u8 = 0x33;
 pub const OP_IF_EQZ: u8 = 0x38;
 pub const OP_IF_NEZ: u8 = 0x39;
 pub const OP_INVOKE_VIRTUAL: u8 = 0x6E;
+pub const OP_INVOKE_SUPER: u8 = 0x6F;
 pub const OP_INVOKE_DIRECT: u8 = 0x70;
 pub const OP_INVOKE_STATIC: u8 = 0x71;
+pub const OP_INVOKE_INTERFACE: u8 = 0x72;
+pub const OP_INVOKE_VIRTUAL_RANGE: u8 = 0x74;
+pub const OP_INVOKE_SUPER_RANGE: u8 = 0x75;
+pub const OP_INVOKE_DIRECT_RANGE: u8 = 0x76;
+pub const OP_INVOKE_STATIC_RANGE: u8 = 0x77;
+pub const OP_INVOKE_INTERFACE_RANGE: u8 = 0x78;
 pub const OP_ADD_INT_2ADDR: u8 = 0xB0;
 pub const OP_SUB_INT_2ADDR: u8 = 0xB1;
 pub const OP_MUL_INT_2ADDR: u8 = 0xB2;
@@ -683,6 +690,28 @@ pub fn read_uleb128(bytes: &[u8], offset: &mut usize) -> Result<u32, DexError> {
             return Ok(result);
         }
         shift += 7;
+        if shift > 35 {
+            return Err(DexError::MalformedUleb128);
+        }
+    }
+    Err(DexError::UnexpectedEof)
+}
+
+/// Reads a signed LEB128 integer from slice at `*offset`.
+pub fn read_sleb128(bytes: &[u8], offset: &mut usize) -> Result<i32, DexError> {
+    let mut result: i32 = 0;
+    let mut shift = 0;
+    while *offset < bytes.len() {
+        let byte = bytes[*offset];
+        *offset += 1;
+        result |= ((byte & 0x7F) as i32) << shift;
+        shift += 7;
+        if (byte & 0x80) == 0 {
+            if shift < 32 && (byte & 0x40) != 0 {
+                result |= -1 << shift;
+            }
+            return Ok(result);
+        }
         if shift > 35 {
             return Err(DexError::MalformedUleb128);
         }
