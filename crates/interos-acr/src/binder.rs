@@ -72,6 +72,25 @@ pub enum ParcelError {
     InterfaceMismatch,
 }
 
+/// Standard Android System Service Binder Handles.
+pub const HANDLE_SERVICE_MANAGER: u32 = 0;
+pub const HANDLE_ACTIVITY: u32 = 1;
+pub const HANDLE_WINDOW: u32 = 2;
+pub const HANDLE_INPUT: u32 = 3;
+pub const HANDLE_AUDIO: u32 = 4;
+pub const HANDLE_NOTIFICATION: u32 = 5;
+pub const HANDLE_STORAGE: u32 = 6;
+pub const HANDLE_NETWORK: u32 = 7;
+pub const HANDLE_TELEPHONY: u32 = 8;
+pub const HANDLE_LOCATION: u32 = 9;
+pub const HANDLE_PACKAGE: u32 = 10;
+pub const HANDLE_POWER: u32 = 11;
+pub const HANDLE_CAMERA: u32 = 12;
+pub const HANDLE_SENSOR: u32 = 13;
+pub const HANDLE_TELEPHONY_REGISTRY: u32 = 14;
+
+pub const HANDLE_AUDIO_PLAYER_BASE: u32 = 0x2000;
+
 /// Sovereign native microG / GMS Compatibility Binder Handles.
 pub const HANDLE_MICROG_GMS_BROKER: u32 = 0x1001;
 pub const HANDLE_MICROG_LOCATION: u32 = 0x1002;
@@ -728,6 +747,246 @@ impl<'a> ParcelWriter<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioTrackPlayState {
+    Stopped = 1,
+    Paused = 2,
+    Playing = 3,
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioTrackState {
+    pub sample_rate: u32,
+    pub channel_count: u32,
+    pub format: u32,
+    pub state: AudioTrackPlayState,
+    pub bytes_written: usize,
+    pub volume: f32,
+}
+
+/// Sovereign Native AIDL Service Dispatcher for Core Android Framework Services.
+pub struct AidlServiceManager {
+    pub audio_volume: u32,
+    pub audio_tracks: BTreeMap<u32, AudioTrackState>,
+    pub next_track_id: u32,
+}
+
+impl AidlServiceManager {
+    pub const fn new() -> Self {
+        Self {
+            audio_volume: 50,
+            audio_tracks: BTreeMap::new(),
+            next_track_id: 1,
+        }
+    }
+
+    pub fn handle_aidl_transaction(
+        &mut self,
+        target_handle: u32,
+        code: u32,
+        data: &[u8],
+        reply: &mut [u8],
+        caller_caps: &CapabilityTable,
+    ) -> Result<usize, BinderReturn> {
+        // Enforce capability gating:
+        // Must have IpcSend for binder_service_object(target_handle)
+        if !caller_caps.authorize_object(CapabilityType::IpcSend, Rights::WRITE, binder_service_object(target_handle)) {
+            return Err(BinderReturn::BrSecurityDenied);
+        }
+
+        let mut reader = ParcelReader::new(data);
+        let mut writer = ParcelWriter::new(reply);
+
+        match target_handle {
+            HANDLE_AUDIO => {
+                let _ = reader.enforce_interface("android.media.IAudioService");
+                match code {
+                    1 => { // getStreamVolume
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        writer.write_i32(self.audio_volume as i32).map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    2 => { // setStreamVolume
+                        let vol = reader.read_i32().unwrap_or(50);
+                        self.audio_volume = vol.max(0).min(100) as u32;
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    3 => { // openAudioTrack
+                        let sample_rate = reader.read_i32().unwrap_or(44100) as u32;
+                        let channel_count = reader.read_i32().unwrap_or(2) as u32;
+                        let format = reader.read_i32().unwrap_or(1) as u32;
+                        let track_handle = HANDLE_AUDIO_PLAYER_BASE.saturating_add(self.next_track_id);
+                        self.next_track_id = self.next_track_id.saturating_add(1);
+                        self.audio_tracks.insert(track_handle, AudioTrackState {
+                            sample_rate,
+                            channel_count,
+                            format,
+                            state: AudioTrackPlayState::Stopped,
+                            bytes_written: 0,
+                            volume: 1.0,
+                        });
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        writer.write_u32(track_handle).map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    _ => {
+                        writer.write_exception(EX_UNSUPPORTED_OPERATION, "Unsupported audio transaction")
+                            .map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                }
+            }
+            h if h >= HANDLE_AUDIO_PLAYER_BASE => {
+                let track = self.audio_tracks.get_mut(&h).ok_or(BinderReturn::BrFailedReply)?;
+                match code {
+                    1 => { // play
+                        track.state = AudioTrackPlayState::Playing;
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    2 => { // pause
+                        track.state = AudioTrackPlayState::Paused;
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    3 => { // stop
+                        track.state = AudioTrackPlayState::Stopped;
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    4 => { // write
+                        if let Ok(Some(bytes)) = reader.read_byte_array() {
+                            track.bytes_written = track.bytes_written.saturating_add(bytes.len());
+                            writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                            writer.write_i32(bytes.len() as i32).map_err(|_| BinderReturn::BrFailedReply)?;
+                        } else {
+                            writer.write_exception(EX_ILLEGAL_ARGUMENT, "Invalid PCM buffer").map_err(|_| BinderReturn::BrFailedReply)?;
+                        }
+                        Ok(writer.len())
+                    }
+                    5 => { // setVolume
+                        if let Some(vol) = reader.read_float() {
+                            track.volume = vol;
+                            writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        } else {
+                            writer.write_exception(EX_ILLEGAL_ARGUMENT, "Invalid volume").map_err(|_| BinderReturn::BrFailedReply)?;
+                        }
+                        Ok(writer.len())
+                    }
+                    6 => { // getPlayState
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        writer.write_i32(track.state as i32).map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    _ => {
+                        writer.write_exception(EX_UNSUPPORTED_OPERATION, "Unsupported track transaction")
+                            .map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                }
+            }
+            HANDLE_CAMERA => {
+                let _ = reader.enforce_interface("android.hardware.ICameraService");
+                match code {
+                    1 => { // getNumberOfCameras -> Platform truth: 0 cameras in QEMU default configuration
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        writer.write_i32(0).map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    2 => { // getCameraInfo -> Fail closed with EX_SERVICE_SPECIFIC
+                        writer.write_exception(EX_SERVICE_SPECIFIC, "No camera devices present")
+                            .map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    3 => { // connectDevice
+                        writer.write_exception(EX_SERVICE_SPECIFIC, "Camera hardware unavailable")
+                            .map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    _ => {
+                        writer.write_exception(EX_UNSUPPORTED_OPERATION, "Unsupported camera transaction")
+                            .map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                }
+            }
+            HANDLE_SENSOR => {
+                let _ = reader.enforce_interface("android.gui.SensorServer");
+                match code {
+                    1 => { // getSensorList -> 0 sensors
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        writer.write_i32(0).map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    2 => { // createSensorEventConnection -> null binder
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        writer.write_i32(0).map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    _ => {
+                        writer.write_exception(EX_UNSUPPORTED_OPERATION, "Unsupported sensor transaction")
+                            .map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                }
+            }
+            HANDLE_TELEPHONY => {
+                let _ = reader.enforce_interface("com.android.internal.telephony.ITelephony");
+                match code {
+                    1 => { // getCallState -> CALL_STATE_IDLE (0)
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        writer.write_i32(0).map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    2 => { // getSimState -> SIM_STATE_READY (5)
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        writer.write_i32(5).map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    3 => { // getNetworkOperator
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        writer.write_string16_utf8("InterOS Sovereign").map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    4 | 5 => { // getDeviceId / getImei -> Unconditionally denied!
+                        writer.write_exception(EX_SECURITY, "Permission Denial: READ_PRIVILEGED_PHONE_STATE required")
+                            .map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    _ => {
+                        writer.write_exception(EX_UNSUPPORTED_OPERATION, "Unsupported telephony transaction")
+                            .map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                }
+            }
+            HANDLE_TELEPHONY_REGISTRY => {
+                let _ = reader.enforce_interface("com.android.internal.telephony.ITelephonyRegistry");
+                match code {
+                    1 => { // listen
+                        writer.write_no_exception().map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    2 => { // notifyCallState -> Caller container is guest, system API forbidden
+                        writer.write_exception(EX_SECURITY, "Permission Denial: notifyCallState is a system-only API")
+                            .map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                    _ => {
+                        writer.write_exception(EX_UNSUPPORTED_OPERATION, "Unsupported telephony registry transaction")
+                            .map_err(|_| BinderReturn::BrFailedReply)?;
+                        Ok(writer.len())
+                    }
+                }
+            }
+            _ => Err(BinderReturn::BrSecurityDenied),
+        }
+    }
+}
+
+pub static AIDL_SERVICE_MANAGER: Mutex<AidlServiceManager> = Mutex::new(AidlServiceManager::new());
+
 /// Global system-wide Android Binder mediator.
 pub static BINDER_MEDIATOR: Mutex<BinderMediator> = Mutex::new(BinderMediator::new());
 
@@ -998,5 +1257,188 @@ mod tests {
         assert_eq!(exception_code, EX_SECURITY);
         let msg = reader.read_string16().unwrap().unwrap();
         assert_eq!(msg, "Permission Denial: Requires ACCESS_FINE_LOCATION");
+    }
+
+    #[test]
+    fn test_aidl_service_manager_audio_and_track_lifecycle() {
+        let mut sm = AidlServiceManager::new();
+        let mut caps = CapabilityTable::new(8);
+        caps.insert(Capability {
+            id: CapabilityId(1),
+            cap_type: CapabilityType::IpcSend,
+            rights: Rights::WRITE,
+            object_id: binder_service_object(HANDLE_AUDIO),
+        }).unwrap();
+        caps.insert(Capability {
+            id: CapabilityId(2),
+            cap_type: CapabilityType::IpcSend,
+            rights: Rights::WRITE,
+            object_id: binder_service_object(HANDLE_AUDIO_PLAYER_BASE + 1),
+        }).unwrap();
+
+        let mut reply = [0u8; 256];
+
+        // 1. Get initial volume (50)
+        let mut in_buf = [0u8; 128];
+        let mut writer = ParcelWriter::new(&mut in_buf);
+        writer.write_interface_token("android.media.IAudioService").unwrap();
+        let in_len = writer.len();
+
+        let len = sm.handle_aidl_transaction(HANDLE_AUDIO, 1, &in_buf[..in_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_NONE));
+        assert_eq!(reader.read_i32(), Some(50));
+
+        // 2. Set volume to 80
+        let mut set_buf = [0u8; 128];
+        let mut writer = ParcelWriter::new(&mut set_buf);
+        writer.write_interface_token("android.media.IAudioService").unwrap();
+        writer.write_i32(80).unwrap();
+        let set_len = writer.len();
+
+        let len = sm.handle_aidl_transaction(HANDLE_AUDIO, 2, &set_buf[..set_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_NONE));
+        assert_eq!(sm.audio_volume, 80);
+
+        // 3. Open AudioTrack
+        let mut open_buf = [0u8; 128];
+        let mut writer = ParcelWriter::new(&mut open_buf);
+        writer.write_interface_token("android.media.IAudioService").unwrap();
+        writer.write_i32(48000).unwrap(); // sample_rate
+        writer.write_i32(2).unwrap();     // channel_count
+        writer.write_i32(1).unwrap();     // format
+        let open_len = writer.len();
+
+        let len = sm.handle_aidl_transaction(HANDLE_AUDIO, 3, &open_buf[..open_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_NONE));
+        let track_handle = reader.read_u32().unwrap();
+        assert_eq!(track_handle, HANDLE_AUDIO_PLAYER_BASE + 1);
+
+        // 4. Play track
+        let len = sm.handle_aidl_transaction(track_handle, 1, &[], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_NONE));
+        assert_eq!(sm.audio_tracks.get(&track_handle).unwrap().state, AudioTrackPlayState::Playing);
+
+        // 5. Write PCM buffer
+        let mut write_buf = [0u8; 128];
+        let mut writer = ParcelWriter::new(&mut write_buf);
+        writer.write_byte_array(&[0x10, 0x20, 0x30, 0x40]).unwrap();
+        let write_len = writer.len();
+
+        let len = sm.handle_aidl_transaction(track_handle, 4, &write_buf[..write_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_NONE));
+        assert_eq!(reader.read_i32(), Some(4));
+        assert_eq!(sm.audio_tracks.get(&track_handle).unwrap().bytes_written, 4);
+
+        // 6. Stop track
+        let len = sm.handle_aidl_transaction(track_handle, 3, &[], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_NONE));
+        assert_eq!(sm.audio_tracks.get(&track_handle).unwrap().state, AudioTrackPlayState::Stopped);
+    }
+
+    #[test]
+    fn test_aidl_camera_sensor_telephony_services() {
+        let mut sm = AidlServiceManager::new();
+        let mut caps = CapabilityTable::new(8);
+        caps.insert(Capability {
+            id: CapabilityId(1),
+            cap_type: CapabilityType::IpcSend,
+            rights: Rights::WRITE,
+            object_id: binder_service_object(HANDLE_CAMERA),
+        }).unwrap();
+        caps.insert(Capability {
+            id: CapabilityId(2),
+            cap_type: CapabilityType::IpcSend,
+            rights: Rights::WRITE,
+            object_id: binder_service_object(HANDLE_SENSOR),
+        }).unwrap();
+        caps.insert(Capability {
+            id: CapabilityId(3),
+            cap_type: CapabilityType::IpcSend,
+            rights: Rights::WRITE,
+            object_id: binder_service_object(HANDLE_TELEPHONY),
+        }).unwrap();
+        caps.insert(Capability {
+            id: CapabilityId(4),
+            cap_type: CapabilityType::IpcSend,
+            rights: Rights::WRITE,
+            object_id: binder_service_object(HANDLE_TELEPHONY_REGISTRY),
+        }).unwrap();
+
+        let mut reply = [0u8; 256];
+
+        // 1. Camera: getNumberOfCameras returns 0 (Platform truth)
+        let mut cam_buf = [0u8; 128];
+        let mut writer = ParcelWriter::new(&mut cam_buf);
+        writer.write_interface_token("android.hardware.ICameraService").unwrap();
+        let cam_len = writer.len();
+
+        let len = sm.handle_aidl_transaction(HANDLE_CAMERA, 1, &cam_buf[..cam_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_NONE));
+        assert_eq!(reader.read_i32(), Some(0));
+
+        // Camera: connectDevice fails closed with EX_SERVICE_SPECIFIC
+        let len = sm.handle_aidl_transaction(HANDLE_CAMERA, 3, &cam_buf[..cam_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_SERVICE_SPECIFIC));
+
+        // 2. Sensor: getSensorList returns 0 sensors
+        let mut sensor_buf = [0u8; 128];
+        let mut writer = ParcelWriter::new(&mut sensor_buf);
+        writer.write_interface_token("android.gui.SensorServer").unwrap();
+        let sensor_len = writer.len();
+
+        let len = sm.handle_aidl_transaction(HANDLE_SENSOR, 1, &sensor_buf[..sensor_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_NONE));
+        assert_eq!(reader.read_i32(), Some(0));
+
+        // 3. Telephony: getCallState, getSimState, getNetworkOperator
+        let mut tel_buf = [0u8; 128];
+        let mut writer = ParcelWriter::new(&mut tel_buf);
+        writer.write_interface_token("com.android.internal.telephony.ITelephony").unwrap();
+        let tel_len = writer.len();
+
+        let len = sm.handle_aidl_transaction(HANDLE_TELEPHONY, 1, &tel_buf[..tel_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_NONE));
+        assert_eq!(reader.read_i32(), Some(0)); // CALL_STATE_IDLE
+
+        let len = sm.handle_aidl_transaction(HANDLE_TELEPHONY, 2, &tel_buf[..tel_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_NONE));
+        assert_eq!(reader.read_i32(), Some(5)); // SIM_STATE_READY
+
+        // Telephony: getDeviceId is unconditionally denied!
+        let len = sm.handle_aidl_transaction(HANDLE_TELEPHONY, 4, &tel_buf[..tel_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_SECURITY));
+
+        // 4. Telephony Registry: listen succeeds, notifyCallState denied
+        let mut reg_buf = [0u8; 128];
+        let mut writer = ParcelWriter::new(&mut reg_buf);
+        writer.write_interface_token("com.android.internal.telephony.ITelephonyRegistry").unwrap();
+        let reg_len = writer.len();
+
+        let len = sm.handle_aidl_transaction(HANDLE_TELEPHONY_REGISTRY, 1, &reg_buf[..reg_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_NONE));
+
+        let len = sm.handle_aidl_transaction(HANDLE_TELEPHONY_REGISTRY, 2, &reg_buf[..reg_len], &mut reply, &caps).unwrap();
+        let mut reader = ParcelReader::new(&reply[..len]);
+        assert_eq!(reader.read_i32(), Some(EX_SECURITY));
+
+        // 5. Capability denial: caller without IpcSend capability for handle is rejected
+        let empty_caps = CapabilityTable::new(4);
+        assert_eq!(
+            sm.handle_aidl_transaction(HANDLE_CAMERA, 1, &cam_buf[..cam_len], &mut reply, &empty_caps),
+            Err(BinderReturn::BrSecurityDenied)
+        );
     }
 }

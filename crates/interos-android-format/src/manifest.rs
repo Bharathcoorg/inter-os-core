@@ -20,6 +20,9 @@ pub enum CapabilityType {
     NetworkSocket,
     AudioStream,
     CameraCapture,
+    Sensors,
+    TelephonyRead,
+    TelephonyCall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +68,13 @@ impl CapabilityTable {
     pub fn authorize_object(&self, cap_type: CapabilityType, rights: Rights, object_id: u64) -> bool {
         self.capabilities.iter().any(|c| {
             c.cap_type == cap_type && (c.rights.0 & rights.0) == rights.0 && (c.object_id == 0 || c.object_id == object_id)
+        })
+    }
+
+    /// Strictly verifies that the capability is held for this specific non-zero object ID.
+    pub fn authorize_exact_object(&self, cap_type: CapabilityType, rights: Rights, object_id: u64) -> bool {
+        self.capabilities.iter().any(|c| {
+            c.cap_type == cap_type && (c.rights.0 & rights.0) == rights.0 && c.object_id == object_id && object_id != 0
         })
     }
 

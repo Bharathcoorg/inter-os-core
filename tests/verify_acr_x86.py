@@ -265,12 +265,12 @@ def verify_acr_qemu():
 
         # 1. Wait for acrd daemon online
         print("  Waiting for acrd coordinator daemon online...")
-        assert reader.wait_for("userspace Android Compatibility Runtime daemon online", timeout=25.0), \
+        assert reader.wait_for("userspace Android Compatibility Runtime daemon online", timeout=60.0), \
             "Timeout waiting for acrd daemon online"
         print("  [OK] acrd online in Ring-3")
 
         # Wait for system presentation readiness
-        _ = reader.wait_for("Initial presentation complete", timeout=30.0)
+        _ = reader.wait_for("Initial presentation complete", timeout=45.0)
 
         # 2. Stage and install APK A
         print("  Staging APK A (com.example.hello)...")

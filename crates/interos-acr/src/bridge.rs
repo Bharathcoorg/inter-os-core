@@ -65,10 +65,23 @@ impl AndroidIntentBridge {
                 }
             }
             "android.intent.action.DIAL" | "android.intent.action.CALL" => {
+                if !intent.data_uri.is_empty() {
+                    let num = if let Some(tel) = intent.data_uri.strip_prefix("tel:") {
+                        tel
+                    } else {
+                        return Err(AndroidBridgeError::MalformedUri);
+                    };
+                    if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit() || c == '+' || c == '-' || c == '*' || c == '#') {
+                        return Err(AndroidBridgeError::MalformedUri);
+                    }
+                }
                 Ok("INTENT_TELEPHONY_DIAL")
             }
             "android.intent.action.SEND" => {
                 Ok("INTENT_SHARE_PAYLOAD")
+            }
+            "android.media.action.IMAGE_CAPTURE" => {
+                Ok("INTENT_CAMERA_CAPTURE")
             }
             _ => Err(AndroidBridgeError::UnsupportedAction),
         }
@@ -104,6 +117,16 @@ mod tests {
 
         let i_send = AndroidIntent::new("android.intent.action.SEND", "text/plain");
         assert_eq!(AndroidIntentBridge::translate_intent(&i_send), Ok("INTENT_SHARE_PAYLOAD"));
+
+        let i_camera = AndroidIntent::new("android.media.action.IMAGE_CAPTURE", "");
+        assert_eq!(AndroidIntentBridge::translate_intent(&i_camera), Ok("INTENT_CAMERA_CAPTURE"));
+
+        // Malformed URI for DIAL
+        let bad_dial = AndroidIntent::new("android.intent.action.DIAL", "http://evil.com");
+        assert_eq!(AndroidIntentBridge::translate_intent(&bad_dial), Err(AndroidBridgeError::MalformedUri));
+
+        let bad_chars = AndroidIntent::new("android.intent.action.DIAL", "tel:123abc456");
+        assert_eq!(AndroidIntentBridge::translate_intent(&bad_chars), Err(AndroidBridgeError::MalformedUri));
     }
 
     #[test]

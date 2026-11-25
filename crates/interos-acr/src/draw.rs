@@ -60,6 +60,10 @@ pub enum DrawOp {
     DrawText { x: i32, y: i32, text: String, color: u32, size: u32 },
     /// Blits a decoded bitmap onto the surface.
     DrawBitmap { x: i32, y: i32, width: u32, height: u32, pixels: Vec<u32> },
+    /// Pushes a clipping boundary for subsequent drawing commands.
+    PushClip { x: i32, y: i32, width: u32, height: u32 },
+    /// Pops the active clipping boundary.
+    PopClip,
 }
 
 /// A validated list of drawing operations to execute on an Android activity surface.
@@ -118,6 +122,12 @@ impl DrawList {
                     return Err(DrawError::MalformedCommand);
                 }
             }
+            DrawOp::PushClip { width, height, .. } => {
+                if *width == 0 || *height == 0 || *width > MAX_PRIMITIVE_DIMENSION || *height > MAX_PRIMITIVE_DIMENSION {
+                    return Err(DrawError::InvalidDimensions);
+                }
+            }
+            DrawOp::PopClip => {}
         }
 
         self.ops.push(op);
@@ -200,43 +210,94 @@ pub fn get_glyph_bitmap(c: u8) -> [u8; 16] {
     }
 }
 
-/// Software rasterizer that executes a DrawList onto a raw RGBA32/ARGB32 frame buffer.
+/// Blends source color over destination pixel using standard Porter-Duff alpha compositing.
+#[inline(always)]
+pub fn blend_argb(src: u32, dst: u32) -> u32 {
+    let sa = ((src >> 24) & 0xFF) as u32;
+    if sa == 255 {
+        return src;
+    }
+    if sa == 0 {
+        return dst;
+    }
+    let da = ((dst >> 24) & 0xFF) as u32;
+    let sr = (src >> 16) & 0xFF;
+    let sg = (src >> 8) & 0xFF;
+    let sb = src & 0xFF;
+
+    let dr = (dst >> 16) & 0xFF;
+    let dg = (dst >> 8) & 0xFF;
+    let db = dst & 0xFF;
+
+    let inv_sa = 255 - sa;
+    let out_r = (sr * sa + dr * inv_sa + 127) / 255;
+    let out_g = (sg * sa + dg * inv_sa + 127) / 255;
+    let out_b = (sb * sa + db * inv_sa + 127) / 255;
+    let out_a = (sa * 255 + da * inv_sa + 127) / 255;
+
+    (out_a.min(255) << 24) | (out_r.min(255) << 16) | (out_g.min(255) << 8) | out_b.min(255)
+}
+
+/// Software rasterizer that executes a DrawList onto a raw RGBA32/ARGB32 frame buffer with clipping and alpha blending.
 pub fn render_draw_list_to_buffer(draw_list: &DrawList, buffer: &mut [u32], buf_w: u32, buf_h: u32) {
+    let mut clip_stack = alloc::vec![(0i32, 0i32, buf_w as i32, buf_h as i32)];
+
     for op in &draw_list.ops {
         match op {
+            DrawOp::PushClip { x, y, width, height } => {
+                let cur = clip_stack.last().copied().unwrap_or((0, 0, buf_w as i32, buf_h as i32));
+                let new_clip = (
+                    cur.0.max(*x),
+                    cur.1.max(*y),
+                    cur.2.min(*x + *width as i32),
+                    cur.3.min(*y + *height as i32),
+                );
+                clip_stack.push(new_clip);
+            }
+            DrawOp::PopClip => {
+                if clip_stack.len() > 1 {
+                    clip_stack.pop();
+                }
+            }
             DrawOp::Clear { color } => {
                 buffer.fill(*color);
             }
             DrawOp::FillRect { x, y, width, height, color } => {
-                let x0 = (*x).max(0) as u32;
-                let y0 = (*y).max(0) as u32;
-                let x1 = ((*x + *width as i32).max(0) as u32).min(buf_w);
-                let y1 = ((*y + *height as i32).max(0) as u32).min(buf_h);
+                let clip = clip_stack.last().copied().unwrap_or((0, 0, buf_w as i32, buf_h as i32));
+                let x0 = (*x).max(clip.0).max(0) as u32;
+                let y0 = (*y).max(clip.1).max(0) as u32;
+                let x1 = ((*x + *width as i32).min(clip.2).max(0) as u32).min(buf_w);
+                let y1 = ((*y + *height as i32).min(clip.3).max(0) as u32).min(buf_h);
 
                 for py in y0..y1 {
                     let row_start = (py * buf_w) as usize;
                     for px in x0..x1 {
-                        buffer[row_start + px as usize] = *color;
+                        let idx = row_start + px as usize;
+                        buffer[idx] = blend_argb(*color, buffer[idx]);
                     }
                 }
             }
             DrawOp::DrawHLine { x, y, width, color } => {
-                if *y >= 0 && (*y as u32) < buf_h {
-                    let x0 = (*x).max(0) as u32;
-                    let x1 = ((*x + *width as i32).max(0) as u32).min(buf_w);
+                let clip = clip_stack.last().copied().unwrap_or((0, 0, buf_w as i32, buf_h as i32));
+                if *y >= clip.1 && *y < clip.3 && *y >= 0 && (*y as u32) < buf_h {
+                    let x0 = (*x).max(clip.0).max(0) as u32;
+                    let x1 = ((*x + *width as i32).min(clip.2).max(0) as u32).min(buf_w);
                     let row = (*y as u32 * buf_w) as usize;
                     for px in x0..x1 {
-                        buffer[row + px as usize] = *color;
+                        let idx = row + px as usize;
+                        buffer[idx] = blend_argb(*color, buffer[idx]);
                     }
                 }
             }
             DrawOp::DrawVLine { x, y, height, color } => {
-                if *x >= 0 && (*x as u32) < buf_w {
-                    let y0 = (*y).max(0) as u32;
-                    let y1 = ((*y + *height as i32).max(0) as u32).min(buf_h);
+                let clip = clip_stack.last().copied().unwrap_or((0, 0, buf_w as i32, buf_h as i32));
+                if *x >= clip.0 && *x < clip.2 && *x >= 0 && (*x as u32) < buf_w {
+                    let y0 = (*y).max(clip.1).max(0) as u32;
+                    let y1 = ((*y + *height as i32).min(clip.3).max(0) as u32).min(buf_h);
                     let px = *x as usize;
                     for py in y0..y1 {
-                        buffer[(py * buf_w) as usize + px] = *color;
+                        let idx = (py * buf_w) as usize + px;
+                        buffer[idx] = blend_argb(*color, buffer[idx]);
                     }
                 }
             }
@@ -253,36 +314,40 @@ pub fn render_draw_list_to_buffer(draw_list: &DrawList, buffer: &mut [u32], buf_
                 }, buffer, buf_w, buf_h);
             }
             DrawOp::DrawGlyph { x, y, ascii, color } => {
+                let clip = clip_stack.last().copied().unwrap_or((0, 0, buf_w as i32, buf_h as i32));
                 let bitmap = get_glyph_bitmap(*ascii);
                 for (row, &byte) in bitmap.iter().enumerate() {
                     let py = *y + row as i32;
-                    if py < 0 || py >= buf_h as i32 {
+                    if py < clip.1 || py >= clip.3 || py < 0 || py >= buf_h as i32 {
                         continue;
                     }
                     for col in 0..8 {
                         if (byte & (0x80 >> col)) != 0 {
                             let px = *x + col as i32;
-                            if px >= 0 && px < buf_w as i32 {
-                                buffer[(py as u32 * buf_w + px as u32) as usize] = *color;
+                            if px >= clip.0 && px < clip.2 && px >= 0 && px < buf_w as i32 {
+                                let idx = (py as u32 * buf_w + px as u32) as usize;
+                                buffer[idx] = blend_argb(*color, buffer[idx]);
                             }
                         }
                     }
                 }
             }
             DrawOp::DrawText { x, y, text, color, .. } => {
+                let clip = clip_stack.last().copied().unwrap_or((0, 0, buf_w as i32, buf_h as i32));
                 let mut cur_x = *x;
                 for b in text.bytes() {
                     let bitmap = get_glyph_bitmap(b);
                     for (row, &byte) in bitmap.iter().enumerate() {
                         let py = *y + row as i32;
-                        if py < 0 || py >= buf_h as i32 {
+                        if py < clip.1 || py >= clip.3 || py < 0 || py >= buf_h as i32 {
                             continue;
                         }
                         for col in 0..8 {
                             if (byte & (0x80 >> col)) != 0 {
                                 let px = cur_x + col as i32;
-                                if px >= 0 && px < buf_w as i32 {
-                                    buffer[(py as u32 * buf_w + px as u32) as usize] = *color;
+                                if px >= clip.0 && px < clip.2 && px >= 0 && px < buf_w as i32 {
+                                    let idx = (py as u32 * buf_w + px as u32) as usize;
+                                    buffer[idx] = blend_argb(*color, buffer[idx]);
                                 }
                             }
                         }
@@ -291,10 +356,11 @@ pub fn render_draw_list_to_buffer(draw_list: &DrawList, buffer: &mut [u32], buf_
                 }
             }
             DrawOp::DrawBitmap { x, y, width, height, pixels } => {
-                let x0 = (*x).max(0) as u32;
-                let y0 = (*y).max(0) as u32;
-                let x1 = ((*x + *width as i32).max(0) as u32).min(buf_w);
-                let y1 = ((*y + *height as i32).max(0) as u32).min(buf_h);
+                let clip = clip_stack.last().copied().unwrap_or((0, 0, buf_w as i32, buf_h as i32));
+                let x0 = (*x).max(clip.0).max(0) as u32;
+                let y0 = (*y).max(clip.1).max(0) as u32;
+                let x1 = ((*x + *width as i32).min(clip.2).max(0) as u32).min(buf_w);
+                let y1 = ((*y + *height as i32).min(clip.3).max(0) as u32).min(buf_h);
 
                 for py in y0..y1 {
                     let src_y = (py as i32 - *y) as usize;
@@ -302,7 +368,9 @@ pub fn render_draw_list_to_buffer(draw_list: &DrawList, buffer: &mut [u32], buf_
                     let src_row = src_y * (*width as usize);
                     for px in x0..x1 {
                         let src_x = (px as i32 - *x) as usize;
-                        buffer[dst_row + px as usize] = pixels[src_row + src_x];
+                        let src_col = pixels[src_row + src_x];
+                        let idx = dst_row + px as usize;
+                        buffer[idx] = blend_argb(src_col, buffer[idx]);
                     }
                 }
             }

@@ -76,6 +76,32 @@ impl ViewRect {
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
+
+    pub fn intersects(&self, other: &ViewRect) -> bool {
+        self.left < other.right && self.right > other.left &&
+        self.top < other.bottom && self.bottom > other.top
+    }
+
+    pub fn intersect(&self, other: &ViewRect) -> Option<ViewRect> {
+        let left = self.left.max(other.left);
+        let top = self.top.max(other.top);
+        let right = self.right.min(other.right);
+        let bottom = self.bottom.min(other.bottom);
+        if left < right && top < bottom {
+            Some(ViewRect { left, top, right, bottom })
+        } else {
+            None
+        }
+    }
+
+    pub fn union(&self, other: &ViewRect) -> ViewRect {
+        ViewRect {
+            left: self.left.min(other.left),
+            top: self.top.min(other.top),
+            right: self.right.max(other.right),
+            bottom: self.bottom.max(other.bottom),
+        }
+    }
 }
 
 /// Measurement specification mode.
@@ -191,9 +217,23 @@ pub struct View {
     pub bounds: ViewRect,
     pub background_color: Option<u32>,
     pub is_clickable: bool,
+    pub alpha: u8,
+    pub scroll_x: i32,
+    pub scroll_y: i32,
+    pub is_dirty: bool,
+    pub dirty_rect: Option<ViewRect>,
     pub view_type: ViewType,
     pub on_click_callback: Option<u32>, // Listener or method handle
     pub clicked_count: u32,
+}
+
+#[inline]
+pub fn apply_view_alpha(color: u32, alpha: u8) -> u32 {
+    if alpha == 255 {
+        return color;
+    }
+    let a = (((color >> 24) & 0xFF) * (alpha as u32) + 127) / 255;
+    (a << 24) | (color & 0x00FF_FFFF)
 }
 
 impl View {
@@ -211,10 +251,30 @@ impl View {
             bounds: ViewRect::default(),
             background_color: None,
             is_clickable,
+            alpha: 255,
+            scroll_x: 0,
+            scroll_y: 0,
+            is_dirty: true,
+            dirty_rect: None,
             view_type,
             on_click_callback: None,
             clicked_count: 0,
         }
+    }
+
+    /// Marks the view and its bounds dirty for invalidation and redrawing.
+    pub fn invalidate(&mut self) {
+        self.is_dirty = true;
+        self.dirty_rect = Some(self.bounds);
+    }
+
+    /// Marks a specific bounded region dirty for repainting.
+    pub fn invalidate_rect(&mut self, rect: ViewRect) {
+        self.is_dirty = true;
+        self.dirty_rect = match self.dirty_rect {
+            Some(existing) => Some(existing.union(&rect)),
+            None => Some(rect),
+        };
     }
 
     pub fn text_view(id: i32, text: &str, text_size: u32, text_color: u32) -> Self {
@@ -266,6 +326,15 @@ impl View {
             self.measured_height = 0;
             return;
         }
+
+        let width_spec = match self.layout_width {
+            LayoutDimension::Exact(sz) => MeasureSpec::exactly(sz),
+            _ => width_spec,
+        };
+        let height_spec = match self.layout_height {
+            LayoutDimension::Exact(sz) => MeasureSpec::exactly(sz),
+            _ => height_spec,
+        };
 
         match &mut self.view_type {
             ViewType::Plain => {
@@ -455,12 +524,13 @@ impl View {
 
         // 1. Draw Background
         if let Some(bg_color) = self.background_color {
+            let color = apply_view_alpha(bg_color, self.alpha);
             let _ = draw_list.push(DrawOp::FillRect {
                 x: self.bounds.left,
                 y: self.bounds.top,
                 width: w,
                 height: h,
-                color: bg_color,
+                color,
             });
         }
 
@@ -642,6 +712,20 @@ mod tests {
         gone_view.measure(MeasureSpec::make(100, MeasureMode::Exactly), MeasureSpec::make(100, MeasureMode::Exactly));
         assert_eq!(gone_view.measured_width, 0);
         assert_eq!(gone_view.measured_height, 0);
+
+        // Rect intersection and union
+        let r1 = ViewRect { left: 0, top: 0, right: 100, bottom: 100 };
+        let r2 = ViewRect { left: 50, top: 50, right: 150, bottom: 150 };
+        assert!(r1.intersects(&r2));
+        assert_eq!(r1.intersect(&r2), Some(ViewRect { left: 50, top: 50, right: 100, bottom: 100 }));
+        assert_eq!(r1.union(&r2), ViewRect { left: 0, top: 0, right: 150, bottom: 150 });
+
+        // Invalidation
+        let mut view = View::button(11, "Btn", 14, 0);
+        view.bounds = r1;
+        view.invalidate();
+        assert!(view.is_dirty);
+        assert_eq!(view.dirty_rect, Some(r1));
     }
 }
 

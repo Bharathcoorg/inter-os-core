@@ -231,6 +231,36 @@ pub fn render_draw_list(surface_id: u32, owner: TaskId, list: &DrawList) -> Resu
     Ok(total_pixels_written)
 }
 
+/// Porter-Duff alpha blending (source-over): composites `src` (ARGB8888) over `dst` (ARGB8888).
+#[inline]
+pub fn blend_argb(src: u32, dst: u32) -> u32 {
+    let sa = (src >> 24) & 0xFF;
+    if sa == 255 {
+        return src;
+    }
+    if sa == 0 {
+        return dst;
+    }
+
+    let inv_sa = 255 - sa;
+
+    let sr = (src >> 16) & 0xFF;
+    let sg = (src >> 8) & 0xFF;
+    let sb = src & 0xFF;
+
+    let da = (dst >> 24) & 0xFF;
+    let dr = (dst >> 16) & 0xFF;
+    let dg = (dst >> 8) & 0xFF;
+    let db = dst & 0xFF;
+
+    let out_a = sa + ((da * inv_sa + 127) / 255);
+    let out_r = ((sr * sa + dr * inv_sa + 127) / 255).min(255);
+    let out_g = ((sg * sa + dg * inv_sa + 127) / 255).min(255);
+    let out_b = ((sb * sa + db * inv_sa + 127) / 255).min(255);
+
+    (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b
+}
+
 fn map_kms_error(err: &'static str) -> DrawError {
     match err {
         "surface not found" => DrawError::InvalidSurface,
@@ -248,6 +278,14 @@ mod tests {
     fn test_clip_rect_in_bounds() {
         let clipped = clip_rect(10, 20, 100, 50, 720, 1320);
         assert_eq!(clipped, Some((10, 20, 100, 50)));
+    }
+
+    #[test]
+    fn test_blend_argb_porter_duff() {
+        // Fully opaque src replaces dst
+        assert_eq!(blend_argb(0xFF112233, 0xFF445566), 0xFF112233);
+        // Fully transparent src leaves dst
+        assert_eq!(blend_argb(0x00112233, 0xFF445566), 0xFF445566);
     }
 
     #[test]

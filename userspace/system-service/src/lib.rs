@@ -965,6 +965,7 @@ pub fn run_acr_app_runtime() -> ! {
                 let now_nanos = now.saturating_mul(1_000_000);
                 let _ = inst.looper.loop_once(now);
                 let _ = inst.choreographer.do_frame(now_nanos);
+                let _ = inst.vm.step_scheduler_slice(4, now);
             }
 
             if let (Some(ref mut inst), Some(ref mut root)) = (&mut instance, &mut root_widget) {
@@ -983,7 +984,9 @@ pub fn run_acr_app_runtime() -> ! {
                             y: input_event.y as i32,
                             timestamp_ms: now + 50,
                         };
-                        let _hit = root.dispatch_touch_event(&me_down) || root.dispatch_touch_event(&me_up);
+                        let hit_down = root.dispatch_touch_event(&me_down);
+                        let hit_up = root.dispatch_touch_event(&me_up);
+                        let _hit = hit_down || hit_up;
                         let _ = std::log(&alloc::format!(
                             "[acr-app-runtime] MotionEvent dispatched: touch at ({}, {}) -> UI updated and frame presented",
                             input_event.x, input_event.y

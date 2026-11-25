@@ -29,6 +29,11 @@ pub enum AndroidFrameworkService {
     Network,
     Telephony,
     Location,
+    Package,
+    Power,
+    Camera,
+    Sensor,
+    TelephonyRegistry,
 }
 
 impl AndroidFrameworkService {
@@ -43,6 +48,11 @@ impl AndroidFrameworkService {
             Self::Network => 7,
             Self::Telephony => 8,
             Self::Location => 9,
+            Self::Package => 10,
+            Self::Power => 11,
+            Self::Camera => 12,
+            Self::Sensor => 13,
+            Self::TelephonyRegistry => 14,
         }
     }
 
@@ -57,6 +67,11 @@ impl AndroidFrameworkService {
             Self::Network => "connectivity",
             Self::Telephony => "phone",
             Self::Location => "location",
+            Self::Package => "package",
+            Self::Power => "power",
+            Self::Camera => "camera",
+            Self::Sensor => "sensor",
+            Self::TelephonyRegistry => "telephony.registry",
         }
     }
 
@@ -71,6 +86,11 @@ impl AndroidFrameworkService {
             "connectivity" => Some(Self::Network),
             "phone" => Some(Self::Telephony),
             "location" => Some(Self::Location),
+            "package" => Some(Self::Package),
+            "power" => Some(Self::Power),
+            "camera" => Some(Self::Camera),
+            "sensor" => Some(Self::Sensor),
+            "telephony.registry" => Some(Self::TelephonyRegistry),
             _ => None,
         }
     }
@@ -325,6 +345,37 @@ pub fn dispatch(
                     push_bounded_log(logs, "[ANDROID][AUDIO] setStreamVolume");
                     Ok(AndroidFrameworkResult::Return(target_vol))
                 }
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        // Service calls: AudioTrack
+        "android/media/AudioTrack" => {
+            match method_name {
+                "<init>" => Ok(AndroidFrameworkResult::Return(0x2001)),
+                "play" => Ok(AndroidFrameworkResult::Return(0)),
+                "pause" => Ok(AndroidFrameworkResult::Return(0)),
+                "stop" => Ok(AndroidFrameworkResult::Return(0)),
+                "write" => {
+                    let len = string_args.first().and_then(|v| *v).map(|s| s.len() as u32).unwrap_or(0);
+                    Ok(AndroidFrameworkResult::Return(len))
+                }
+                "setVolume" => Ok(AndroidFrameworkResult::Return(0)),
+                "getPlayState" => Ok(AndroidFrameworkResult::Return(3)), // PLAYSTATE_PLAYING
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        // Service calls: CameraManager
+        "android/hardware/camera2/CameraManager" => {
+            match method_name {
+                "getCameraIdList" => Ok(AndroidFrameworkResult::Return(0)), // 0 cameras (Platform truth)
+                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            }
+        }
+        // Service calls: SensorManager
+        "android/hardware/SensorManager" => {
+            match method_name {
+                "getDefaultSensor" => Ok(AndroidFrameworkResult::Return(0)), // null sensor
+                "getSensorList" => Ok(AndroidFrameworkResult::Return(0)),   // empty list
                 _ => Err(AndroidFrameworkError::UnsupportedApi),
             }
         }
@@ -626,6 +677,11 @@ mod tests {
             ("connectivity", AndroidFrameworkService::Network),
             ("phone", AndroidFrameworkService::Telephony),
             ("location", AndroidFrameworkService::Location),
+            ("package", AndroidFrameworkService::Package),
+            ("power", AndroidFrameworkService::Power),
+            ("camera", AndroidFrameworkService::Camera),
+            ("sensor", AndroidFrameworkService::Sensor),
+            ("telephony.registry", AndroidFrameworkService::TelephonyRegistry),
         ] {
             assert_eq!(
                 dispatch("Landroid/content/Context;", "getSystemService", &[Some(name)], &mut logs),
@@ -675,6 +731,26 @@ mod tests {
         assert_eq!(
             dispatch("Landroid/content/Context;", "getFilesDir", &[], &mut logs),
             Ok(AndroidFrameworkResult::ReturnString("/data/data/files"))
+        );
+
+        // 7. AudioTrack lifecycle
+        assert_eq!(
+            dispatch("Landroid/media/AudioTrack;", "play", &[], &mut logs),
+            Ok(AndroidFrameworkResult::Return(0))
+        );
+        assert_eq!(
+            dispatch("Landroid/media/AudioTrack;", "getPlayState", &[], &mut logs),
+            Ok(AndroidFrameworkResult::Return(3))
+        );
+
+        // 8. CameraManager & SensorManager platform truth
+        assert_eq!(
+            dispatch("Landroid/hardware/camera2/CameraManager;", "getCameraIdList", &[], &mut logs),
+            Ok(AndroidFrameworkResult::Return(0))
+        );
+        assert_eq!(
+            dispatch("Landroid/hardware/SensorManager;", "getSensorList", &[], &mut logs),
+            Ok(AndroidFrameworkResult::Return(0))
         );
     }
 

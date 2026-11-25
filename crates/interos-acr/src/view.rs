@@ -76,6 +76,31 @@ impl ViewRect {
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
+
+    pub fn intersects(&self, other: &ViewRect) -> bool {
+        self.left < other.right && self.right > other.left && self.top < other.bottom && self.bottom > other.top
+    }
+
+    pub fn intersect(&self, other: &ViewRect) -> Option<ViewRect> {
+        let left = self.left.max(other.left);
+        let top = self.top.max(other.top);
+        let right = self.right.min(other.right);
+        let bottom = self.bottom.min(other.bottom);
+        if left < right && top < bottom {
+            Some(ViewRect { left, top, right, bottom })
+        } else {
+            None
+        }
+    }
+
+    pub fn union(&self, other: &ViewRect) -> ViewRect {
+        ViewRect {
+            left: self.left.min(other.left),
+            top: self.top.min(other.top),
+            right: self.right.max(other.right),
+            bottom: self.bottom.max(other.bottom),
+        }
+    }
 }
 
 /// Measurement specification mode.
@@ -190,10 +215,25 @@ pub struct View {
     pub measured_height: u32,
     pub bounds: ViewRect,
     pub background_color: Option<u32>,
+    pub alpha: u8,
+    pub scroll_x: i32,
+    pub scroll_y: i32,
+    pub is_dirty: bool,
+    pub dirty_rect: Option<ViewRect>,
     pub is_clickable: bool,
     pub view_type: ViewType,
     pub on_click_callback: Option<u32>, // Listener or method handle
     pub clicked_count: u32,
+}
+
+#[inline(always)]
+fn apply_view_alpha(color: u32, view_alpha: u8) -> u32 {
+    if view_alpha == 255 {
+        return color;
+    }
+    let orig_alpha = (color >> 24) & 0xFF;
+    let new_alpha = (orig_alpha * (view_alpha as u32) + 127) / 255;
+    (new_alpha << 24) | (color & 0x00FF_FFFF)
 }
 
 impl View {
@@ -210,6 +250,11 @@ impl View {
             measured_height: 0,
             bounds: ViewRect::default(),
             background_color: None,
+            alpha: 255,
+            scroll_x: 0,
+            scroll_y: 0,
+            is_dirty: true,
+            dirty_rect: None,
             is_clickable,
             view_type,
             on_click_callback: None,
@@ -257,6 +302,12 @@ impl View {
         if let ViewType::ViewGroup { children, .. } = &mut self.view_type {
             children.push(child);
         }
+    }
+
+    /// Marks the view as dirty and records its bounds as needing redrawing.
+    pub fn invalidate(&mut self) {
+        self.is_dirty = true;
+        self.dirty_rect = Some(self.bounds);
     }
 
     /// Measures the view and all its children given parent MeasureSpecs.
@@ -338,10 +389,13 @@ impl View {
                     MeasureMode::AtMost => MeasureSpec::at_most(width_spec.size.saturating_sub(total_w)),
                     MeasureMode::Unspecified => MeasureSpec::unspecified(),
                 };
-                let child_h_spec = match height_spec.mode {
-                    MeasureMode::Exactly => MeasureSpec::at_most(height_spec.size.saturating_sub(total_h)),
-                    MeasureMode::AtMost => MeasureSpec::at_most(height_spec.size.saturating_sub(total_h)),
-                    MeasureMode::Unspecified => MeasureSpec::unspecified(),
+                let child_h_spec = match kind {
+                    ViewGroupKind::ScrollView => MeasureSpec::unspecified(),
+                    _ => match height_spec.mode {
+                        MeasureMode::Exactly => MeasureSpec::at_most(height_spec.size.saturating_sub(total_h)),
+                        MeasureMode::AtMost => MeasureSpec::at_most(height_spec.size.saturating_sub(total_h)),
+                        MeasureMode::Unspecified => MeasureSpec::unspecified(),
+                    },
                 };
 
                 for child in children.iter_mut() {
@@ -443,7 +497,7 @@ impl View {
 
     /// Traverses the view hierarchy and generates draw commands into the target DrawList.
     pub fn draw(&self, draw_list: &mut DrawList) {
-        if self.visibility != ViewVisibility::Visible {
+        if self.visibility != ViewVisibility::Visible || self.alpha == 0 {
             return;
         }
 
@@ -453,14 +507,32 @@ impl View {
             return;
         }
 
+        // Clip ScrollView children to inner bounds
+        if let ViewType::ViewGroup { kind: ViewGroupKind::ScrollView, children } = &self.view_type {
+            let inner_w = w.saturating_sub(self.padding.left + self.padding.right);
+            let inner_h = h.saturating_sub(self.padding.top + self.padding.bottom);
+            let _ = draw_list.push(DrawOp::PushClip {
+                x: self.bounds.left + self.padding.left as i32,
+                y: self.bounds.top + self.padding.top as i32,
+                width: inner_w,
+                height: inner_h,
+            });
+            for child in children {
+                child.draw(draw_list);
+            }
+            let _ = draw_list.push(DrawOp::PopClip);
+            return;
+        }
+
         // 1. Draw Background
         if let Some(bg_color) = self.background_color {
+            let effective_color = apply_view_alpha(bg_color, self.alpha);
             let _ = draw_list.push(DrawOp::FillRect {
                 x: self.bounds.left,
                 y: self.bounds.top,
                 width: w,
                 height: h,
-                color: bg_color,
+                color: effective_color,
             });
         }
 

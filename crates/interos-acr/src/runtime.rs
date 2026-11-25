@@ -8,7 +8,7 @@
 //! runtime. Unsupported opcodes and framework effects fail closed; callers must not
 //! treat this interpreter as general APK compatibility or a process-isolation boundary.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::binder::Parcel;
@@ -355,6 +355,10 @@ pub struct DalvikVmState {
     pub current_thread_id: u64,
     /// Thread execution contexts managed by this VM.
     pub threads: BTreeMap<u64, JavaThreadState>,
+    /// Cooperative green-thread execution run queue.
+    pub run_queue: VecDeque<u64>,
+    /// Current virtual machine monotonic tick count for timer and waiter expiration.
+    pub now_ticks: u64,
     /// Caller context providing security credentials for VFS operations.
     pub caller_context: Option<super::vfs::AndroidCaller>,
     /// Monitor lock table tracking object identities, thread ownership, and recursion depth.
@@ -622,6 +626,8 @@ impl DalvikVmState {
             interrupted: false,
             owned_monitors: Vec::new(),
         });
+        let mut run_queue = VecDeque::new();
+        run_queue.push_back(1);
 
         Self {
             registers: alloc::vec![0u32; 32],
@@ -636,6 +642,8 @@ impl DalvikVmState {
             current_task_id: 1,
             current_thread_id: 1,
             threads,
+            run_queue,
+            now_ticks: 0,
             caller_context: None,
             monitors: BTreeMap::new(),
             objects: Vec::new(),
@@ -645,6 +653,94 @@ impl DalvikVmState {
             gc_reclaimed_objects: 0,
             gc_total_pause_ticks: 0,
         }
+    }
+
+    /// Enqueues a thread into the cooperative run queue and marks it Runnable.
+    pub fn enqueue_runnable(&mut self, thread_id: u64) {
+        if let Some(t) = self.threads.get_mut(&thread_id) {
+            t.status = JavaThreadStatus::Runnable;
+        }
+        if !self.run_queue.contains(&thread_id) {
+            self.run_queue.push_back(thread_id);
+        }
+    }
+
+    /// Pops the next runnable thread ID from the cooperative run queue.
+    pub fn pop_next_runnable(&mut self) -> Option<u64> {
+        while let Some(tid) = self.run_queue.pop_front() {
+            if let Some(t) = self.threads.get(&tid) {
+                if t.status == JavaThreadStatus::Runnable {
+                    return Some(tid);
+                }
+            }
+        }
+        None
+    }
+
+    /// Wakes up threads waiting on timed monitor conditions or Thread.sleep whose timeout has elapsed.
+    pub fn wake_timed_waiters(&mut self, current_ticks: u64) {
+        self.now_ticks = current_ticks;
+        let mut woke = Vec::new();
+        for (&tid, t) in self.threads.iter() {
+            if let JavaThreadStatus::TimedWaiting(obj_id, until_ticks) = t.status {
+                if current_ticks >= until_ticks {
+                    woke.push((tid, obj_id));
+                }
+            }
+        }
+
+        for (tid, obj_id) in woke {
+            if obj_id == 0 {
+                // Pure Thread.sleep() elapsed -> make Runnable and enqueue
+                self.enqueue_runnable(tid);
+            } else if let Some(rec) = self.monitors.get_mut(&obj_id) {
+                rec.cond_waiters.retain(|&w| w != tid);
+                if rec.owner_thread == 0 {
+                    rec.owner_thread = tid;
+                    rec.recursion_count = 1;
+                    if let Some(t) = self.threads.get_mut(&tid) {
+                        t.status = JavaThreadStatus::Runnable;
+                        if !t.owned_monitors.contains(&obj_id) {
+                            t.owned_monitors.push(obj_id);
+                        }
+                    }
+                    self.enqueue_runnable(tid);
+                } else {
+                    if !rec.wait_queue.contains(&tid) {
+                        rec.wait_queue.push(tid);
+                    }
+                    if let Some(t) = self.threads.get_mut(&tid) {
+                        t.status = JavaThreadStatus::BlockedOnMonitor(obj_id);
+                    }
+                }
+            } else {
+                self.enqueue_runnable(tid);
+            }
+        }
+    }
+
+    /// Advances the cooperative green-thread scheduler by up to `max_quanta` slices at monotonic tick `current_ticks`.
+    pub fn step_scheduler_slice(&mut self, max_quanta: usize, current_ticks: u64) -> usize {
+        self.wake_timed_waiters(current_ticks);
+
+        let mut steps = 0;
+        while steps < max_quanta {
+            if let Some(next_tid) = self.pop_next_runnable() {
+                self.current_thread_id = next_tid;
+                self.current_task_id = next_tid;
+                steps = steps.saturating_add(1);
+
+                // If thread remains runnable, re-enqueue for round-robin fairness
+                if let Some(t) = self.threads.get(&next_tid) {
+                    if t.status == JavaThreadStatus::Runnable {
+                        self.run_queue.push_back(next_tid);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        steps
     }
 
     /// Sets the currently active thread identity for this VM.
@@ -658,6 +754,7 @@ impl DalvikVmState {
             interrupted: false,
             owned_monitors: Vec::new(),
         });
+        self.enqueue_runnable(thread_id);
     }
 
     /// Spawns a new managed thread in the VM.
@@ -669,10 +766,12 @@ impl DalvikVmState {
             interrupted: false,
             owned_monitors: Vec::new(),
         });
+        self.enqueue_runnable(thread_id);
     }
 
     /// Releases all monitors held by a terminating thread, waking up contending waiters.
     pub fn thread_exit(&mut self, thread_id: u64) {
+        self.run_queue.retain(|&tid| tid != thread_id);
         let owned = if let Some(t) = self.threads.get_mut(&thread_id) {
             t.status = JavaThreadStatus::Terminated;
             core::mem::take(&mut t.owned_monitors)
@@ -694,6 +793,7 @@ impl DalvikVmState {
                                 t.owned_monitors.push(obj_id);
                             }
                         }
+                        self.enqueue_runnable(next_owner);
                     } else if rec.cond_waiters.is_empty() {
                         self.monitors.remove(&obj_id);
                     } else {
@@ -1148,7 +1248,34 @@ impl DalvikVmState {
                         self.last_return_string = None;
                         Ok(0)
                     }
-                    "yield" | "sleep" => {
+                    "start" => {
+                        let new_tid = self.threads.keys().max().copied().unwrap_or(1) + 1;
+                        let name = alloc::format!("Thread-{}", new_tid);
+                        self.spawn_thread(new_tid, &name);
+                        self.last_return_value = new_tid as u32;
+                        self.last_return_string = None;
+                        Ok(new_tid as u32)
+                    }
+                    "yield" => {
+                        self.enqueue_runnable(self.current_thread_id);
+                        if let Some(next_tid) = self.pop_next_runnable() {
+                            self.current_thread_id = next_tid;
+                            self.current_task_id = next_tid;
+                        }
+                        self.last_return_value = 0;
+                        self.last_return_string = None;
+                        Ok(0)
+                    }
+                    "sleep" => {
+                        let millis = arg_values.first().copied().unwrap_or(1) as u64;
+                        let until_ticks = self.now_ticks.saturating_add(millis);
+                        if let Some(t) = self.threads.get_mut(&self.current_thread_id) {
+                            t.status = JavaThreadStatus::TimedWaiting(0, until_ticks);
+                        }
+                        if let Some(next_tid) = self.pop_next_runnable() {
+                            self.current_thread_id = next_tid;
+                            self.current_task_id = next_tid;
+                        }
                         self.last_return_value = 0;
                         self.last_return_string = None;
                         Ok(0)
@@ -6457,6 +6584,74 @@ mod tests {
         assert_eq!(mon.owner_thread, 200);
         let waiter = vm.threads.get(&200).unwrap();
         assert_eq!(waiter.status, JavaThreadStatus::Runnable);
+    }
+
+    #[test]
+    fn test_cooperative_scheduler_slices_and_round_robin() {
+        let mut vm = DalvikVmState::new();
+        // Initial thread is main (tid 1)
+        assert_eq!(vm.current_thread_id, 1);
+        assert_eq!(vm.run_queue.len(), 1);
+
+        // Spawn two additional worker threads
+        vm.spawn_thread(2, "Worker-1");
+        vm.spawn_thread(3, "Worker-2");
+        assert_eq!(vm.run_queue.len(), 3);
+
+        // Step 3 quanta: threads 1, 2, 3 take turns in round-robin order
+        let steps = vm.step_scheduler_slice(3, 100);
+        assert_eq!(steps, 3);
+        assert_eq!(vm.current_thread_id, 3);
+        assert_eq!(vm.now_ticks, 100);
+
+        // All 3 threads remain runnable and re-enqueued
+        assert_eq!(vm.run_queue.len(), 3);
+    }
+
+    #[test]
+    fn test_timed_waiting_and_scheduler_wakeup() {
+        let mut vm = DalvikVmState::new();
+        vm.spawn_thread(10, "SleepingThread");
+        vm.set_current_thread(10);
+
+        // Thread 10 sleeps until tick 500
+        vm.threads.get_mut(&10).unwrap().status = JavaThreadStatus::TimedWaiting(0, 500);
+        vm.run_queue.retain(|&tid| tid != 10);
+
+        // Tick 200: thread 10 should still be sleeping
+        vm.wake_timed_waiters(200);
+        assert_eq!(vm.threads.get(&10).unwrap().status, JavaThreadStatus::TimedWaiting(0, 500));
+        assert!(!vm.run_queue.contains(&10));
+
+        // Tick 500: thread 10 should wake up and become Runnable in run_queue
+        vm.wake_timed_waiters(500);
+        assert_eq!(vm.threads.get(&10).unwrap().status, JavaThreadStatus::Runnable);
+        assert!(vm.run_queue.contains(&10));
+    }
+
+    #[test]
+    fn test_thread_framework_dispatch_lifecycle() {
+        let mut vm = DalvikVmState::new();
+        let dex_bytes = create_test_dex("Lcom/example/ThreadTest;", "run", "()V");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+
+        // 1. Thread.start creates new thread and enqueues it
+        let start_res = vm.dispatch_framework_method(&dex, "java/lang/Thread", "start", &[], &[]);
+        assert!(start_res.is_ok());
+        let new_tid = start_res.unwrap() as u64;
+        assert!(new_tid > 1);
+        assert!(vm.threads.contains_key(&new_tid));
+        assert!(vm.run_queue.contains(&new_tid));
+
+        // 2. Thread.sleep puts current thread to TimedWaiting
+        let sleep_res = vm.dispatch_framework_method(&dex, "java/lang/Thread", "sleep", &[], &[50]);
+        assert_eq!(sleep_res, Ok(0));
+        assert!(matches!(vm.threads.get(&1).unwrap().status, JavaThreadStatus::TimedWaiting(0, _)));
+
+        // 3. Thread.yield re-enqueues runnable
+        vm.threads.get_mut(&1).unwrap().status = JavaThreadStatus::Runnable;
+        let yield_res = vm.dispatch_framework_method(&dex, "java/lang/Thread", "yield", &[], &[]);
+        assert_eq!(yield_res, Ok(0));
     }
 }
 
