@@ -1184,16 +1184,15 @@ fn is_authorized_agent_admin(sender_task_id: u64) -> bool {
     if sender_task_id == 0 {
         return false;
     }
-    if sender_task_id == std::ai::SERVICE_AGENT_TASK_ID
-        || std::service_peer_matches(10, sender_task_id) // ServiceId::Launcher
-        || std::service_peer_matches(14, sender_task_id) // ServiceId::Agent
-    {
+    // Prohibit model runtime / agent daemon from approving its own actions
+    if sender_task_id == std::ai::SERVICE_AGENT_TASK_ID || std::service_peer_matches(14, sender_task_id) {
+        return false;
+    }
+    // Only designated user-facing shells and Launcher service are authorized admins
+    if std::service_peer_matches(10, sender_task_id) {
         return true;
     }
     if let Ok(info) = std::task_identity_query(sender_task_id) {
-        if info.is_system != 0 {
-            return true;
-        }
         let pkg = info.package_name();
         if pkg == "org.interos.launcher"
             || pkg == "org.interos.settings"
@@ -1792,10 +1791,33 @@ fn handle_agent_ipc(
 
                         let mut all_succeeded = true;
                         while plan.current_step < plan.step_count {
+                            if state.is_locked {
+                                plan.cancel();
+                                all_succeeded = false;
+                                break;
+                            }
                             if plan.status == std::companion::PlanStatus::Cancelled {
                                 all_succeeded = false;
                                 break;
                             }
+
+                            // Check non-blocking IPC for screen lock or plan cancellation
+                            let mut peek_buf = [0u8; 64];
+                            if let Ok((sender, m_type, rlen)) = std::ipc::receive_any(&mut peek_buf) {
+                                if is_authorized_agent_admin(sender) {
+                                    if m_type == std::ai::MSG_TYPE_AGENT_PLAN && rlen >= 1 && peek_buf[0] == 3 {
+                                        plan.cancel();
+                                        all_succeeded = false;
+                                        break;
+                                    } else if m_type == std::ai::MSG_TYPE_COMPANION_QUERY && rlen >= 1 && peek_buf[0] == 1 {
+                                        state.set_locked(true);
+                                        plan.cancel();
+                                        all_succeeded = false;
+                                        break;
+                                    }
+                                }
+                            }
+
                             let step_idx = plan.current_step;
                             let tool_id = plan.steps[step_idx].tool_id;
                             let args_str = plan.steps[step_idx].args_str();
@@ -1835,7 +1857,12 @@ fn handle_agent_ipc(
                                     break;
                                 }
                             } else if desc.consent_class == std::appmcp::ToolConsentClass::AllowOnce {
-                                tool_registry.consume_consent(tool_id);
+                                if !tool_registry.consume_consent(tool_id) {
+                                    plan.steps[step_idx].status = std::companion::StepStatus::Failed;
+                                    plan.status = std::companion::PlanStatus::Failed;
+                                    all_succeeded = false;
+                                    break;
+                                }
                             }
 
                             let cap_type = if desc.required_cap_type != 0 { desc.required_cap_type } else { std::appmcp::TOOL_CAP_TYPE };
@@ -1884,6 +1911,17 @@ fn handle_agent_ipc(
                                                 break;
                                             }
                                         }
+                                    } else if is_authorized_agent_admin(sender) {
+                                        if msg_type == std::ai::MSG_TYPE_AGENT_PLAN && rlen >= 1 && wait_rx[0] == 3 {
+                                            plan.cancel();
+                                            all_succeeded = false;
+                                            break;
+                                        } else if msg_type == std::ai::MSG_TYPE_COMPANION_QUERY && rlen >= 1 && wait_rx[0] == 1 {
+                                            state.set_locked(true);
+                                            plan.cancel();
+                                            all_succeeded = false;
+                                            break;
+                                        }
                                     }
                                 }
                                 std::yield_now();
@@ -1915,26 +1953,45 @@ fn handle_agent_ipc(
                         emit_agent_ack(sender_task_id, msg_type, 0, &[status_byte], tx_buf);
                 }
                 3 => {
-                    if payload.len() >= 9 {
-                        let req_plan_id = u64::from_le_bytes([
-                            payload[1], payload[2], payload[3], payload[4],
-                            payload[5], payload[6], payload[7], payload[8],
-                        ]);
-                        if let Some(ref plan) = state.active_plan {
-                            if req_plan_id != plan.id {
-                                emit_agent_ack(sender_task_id, msg_type, 2, b"PLAN_ID_MISMATCH", tx_buf);
-                                return;
-                            }
-                        }
+                    if payload.len() < 9 {
+                        emit_agent_ack(sender_task_id, msg_type, 5, b"MISSING_PLAN_ID", tx_buf);
+                        return;
                     }
+                    if payload.len() < 17 {
+                        emit_agent_ack(sender_task_id, msg_type, 5, b"INCOMPLETE_CANCEL_PAYLOAD", tx_buf);
+                        return;
+                    }
+                    let req_plan_id = u64::from_le_bytes([
+                        payload[1], payload[2], payload[3], payload[4],
+                        payload[5], payload[6], payload[7], payload[8],
+                    ]);
+                    let req_plan_gen = u64::from_le_bytes([
+                        payload[9], payload[10], payload[11], payload[12],
+                        payload[13], payload[14], payload[15], payload[16],
+                    ]);
+
+                    let active_plan = match state.active_plan.as_mut() {
+                        Some(p) => p,
+                        None => {
+                            emit_agent_ack(sender_task_id, msg_type, 1, b"NO_PLAN", tx_buf);
+                            return;
+                        }
+                    };
+
+                    if req_plan_id != active_plan.id {
+                        emit_agent_ack(sender_task_id, msg_type, 2, b"PLAN_ID_MISMATCH", tx_buf);
+                        return;
+                    }
+
+                    if req_plan_gen != state.generation || req_plan_gen != active_plan.generation {
+                        emit_agent_ack(sender_task_id, msg_type, 7, b"STALE_PLAN_GENERATION", tx_buf);
+                        return;
+                    }
+
                     state.generation = state.generation.saturating_add(1);
                     tool_registry.clear_invocation_grants();
-                    if let Some(ref mut plan) = state.active_plan {
-                        plan.cancel();
-                        emit_agent_ack(sender_task_id, msg_type, 0, &[plan.status as u8], tx_buf);
-                    } else {
-                        emit_agent_ack(sender_task_id, msg_type, 1, b"NO_PLAN", tx_buf);
-                    }
+                    active_plan.cancel();
+                    emit_agent_ack(sender_task_id, msg_type, 0, &[active_plan.status as u8], tx_buf);
                 }
                 4 => {
                     if let Some(ref plan) = state.active_plan {
@@ -1997,7 +2054,11 @@ fn handle_agent_ipc(
                     return;
                 }
             } else if desc.consent_class == std::appmcp::ToolConsentClass::AllowOnce {
-                tool_registry.consume_consent(tool_id);
+                if !tool_registry.consume_consent(tool_id) {
+                    state.record_tool_result(tool_id, false, -6);
+                    emit_agent_ack(sender_task_id, msg_type, 6, b"CONSENT_REQUIRED", tx_buf);
+                    return;
+                }
             }
 
             let cap_type = if desc.required_cap_type != 0 { desc.required_cap_type } else { std::appmcp::TOOL_CAP_TYPE };

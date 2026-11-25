@@ -774,6 +774,12 @@ impl DynamicToolRegistry {
             descriptor.consent_class = ToolConsentClass::AlwaysAsk;
         }
 
+        // An application registering a descriptor cannot self-grant AllowOnce authority.
+        // Single-use authorization can only be granted by the user/system consent broker.
+        if descriptor.consent_class == ToolConsentClass::AllowOnce {
+            descriptor.consent_class = ToolConsentClass::AlwaysAsk;
+        }
+
         // Check for existing tool by package_id and name (update scenario)
         for (idx, slot) in self.tools.iter_mut().enumerate() {
             if let Some(existing) = slot {
@@ -902,7 +908,7 @@ impl DynamicToolRegistry {
         if matches!(
             risk_class,
             ToolRiskClass::ExternalConsequence | ToolRiskClass::SecuritySensitive
-        ) {
+        ) || consent_class == ToolConsentClass::AllowOnce {
             consent_class = ToolConsentClass::AlwaysAsk;
         }
         let desc = DynamicToolDescriptor::new(
@@ -1442,6 +1448,11 @@ mod tests {
         );
         reg.register(tool).expect("register");
 
+        // Tool registering with AllowOnce is clamped to AlwaysAsk (no self-granted authority)
+        assert_eq!(reg.find_by_id(0x5555_0001).unwrap().consent_class, ToolConsentClass::AlwaysAsk);
+
+        // User / consent broker explicitly grants AllowOnce
+        reg.set_consent(0x5555_0001, ToolConsentClass::AllowOnce);
         assert_eq!(reg.find_by_id(0x5555_0001).unwrap().consent_class, ToolConsentClass::AllowOnce);
 
         // Consuming consent reverts AllowOnce to AlwaysAsk
