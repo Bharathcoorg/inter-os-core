@@ -13,6 +13,8 @@ pub mod capability;
 pub mod ipc;
 pub mod entry;
 pub mod sbi;
+pub mod fdt;
+pub mod plic;
 pub mod mmu;
 pub mod trap;
 pub mod syscall;
@@ -71,6 +73,40 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
     // 2b. Initialize Dynamic Heap & Bochs Display Scanout
     allocator::init_heap();
     println!("[BOOT] RISC-V 32 MiB Dynamic Heap Allocator initialized.");
+
+    // 2b-1. Parse the bootloader-provided Flattened Device Tree (DTB) so board
+    // topology (memory / UART / PLIC / CLINT / timebase) comes from the DTB
+    // instead of a hardcoded QEMU `virt` map. The DTB pointer arrives in a1.
+    // If the DTB is absent or malformed we keep the documented QEMU `virt`
+    // defaults and report `from_fdt == false` (never fabricate discovery).
+    match unsafe { fdt::FdtParser::from_raw(dtb_addr, 0x20_0000) } {
+        Ok(parser) => {
+            let info = fdt::init_from_fdt(&parser);
+            println!(
+                "[BOOT] FDT: memory=0x{:08x}+0x{:x} uart=0x{:08x} plic=0x{:08x} clint=0x{:08x} timebase={} Hz",
+                info.memory_base, info.memory_size, info.uart_base,
+                info.plic_base, info.clint_base, info.timebase_freq
+            );
+        }
+        Err(e) => {
+            let info = fdt::board_info();
+            println!(
+                "[BOOT] FDT parse unavailable ({:?}); using QEMU virt defaults: uart=0x{:08x} plic=0x{:08x} clint=0x{:08x}.",
+                e, info.uart_base, info.plic_base, info.clint_base
+            );
+        }
+    }
+
+    // 2b-2. Bind the PLIC driver to the discovered (or default) base and arm
+    // the SBI supervisor timer. Interrupts stay masked during the boot
+    // self-tests (sie is cleared in `_start`), so this does not perturb the
+    // cooperative path; `trap::enable_timer_interrupts()` opts into preemption.
+    plic::init(fdt::board_info().plic_base as usize);
+    trap::arm_timer_from_now();
+    println!(
+        "[BOOT] PLIC bound at 0x{:08x}; SBI supervisor timer armed (interrupts masked, cooperative path).",
+        plic::base()
+    );
 
     // 2c. Persistent storage: the image extent for the boot guard (linker
     // bounds, because a -kernel-loaded image has no ELF header in RAM to

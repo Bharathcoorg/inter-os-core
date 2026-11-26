@@ -122,6 +122,24 @@ pub fn probe_extension(extension_id: usize) -> bool {
     err == 0 && val != 0
 }
 
+/// SBI TIME extension (EID `0x54494D45`, "TIME").
+pub const SBI_EXT_TIME: usize = 0x54494D45;
+/// `sbi_set_timer` function id: programs the next supervisor timer deadline.
+pub const SBI_EXT_TIME_SET_TIMER: usize = 0;
+
+/// Programs the next supervisor timer interrupt deadline via `SBI_SET_TIMER`.
+///
+/// `value` is an absolute `time` CSR count. A deadline in the past (or the
+/// current count) fires the supervisor timer interrupt immediately. Returns
+/// `Err(SbiError::NotSupported)` when firmware lacks the TIME extension.
+pub fn set_timer(value: u64) -> Result<(), SbiError> {
+    let (err, _) = sbi_call(SBI_EXT_TIME, SBI_EXT_TIME_SET_TIMER, value as usize, 0, 0, 0);
+    match SbiError::from_isize(err) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 /// Broadcasts an sfence.vma instruction to remote harts via SBI RFNC extension (EID 0x52464E43, FID 0x1).
 /// Returns Ok(()) on SBI_SUCCESS, or Err(SbiError) if firmware rejected or failed the request.
 pub fn remote_sfence_vma(hart_mask: usize, hart_mask_base: usize, start_addr: usize, size: usize) -> Result<(), SbiError> {

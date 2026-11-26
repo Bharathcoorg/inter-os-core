@@ -55,6 +55,76 @@ pub fn read_sstatus() -> usize {
     value
 }
 
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Number of supervisor timer ticks delivered since boot.
+static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+/// When true the supervisor-timer handler yields to the scheduler (preemptive
+/// mode). Off by default so the cooperative boot/scheduler path is preserved.
+static PREEMPTIVE: AtomicBool = AtomicBool::new(false);
+/// `rdtime` counts between supervisor timer interrupts.
+pub const TIMER_INTERVAL: u64 = 100_000;
+
+/// Reads the `time` CSR (`rdtime`). Requires `mcounteren.TM`, which firmware
+/// (OpenSBI) sets for S-mode.
+pub fn read_time() -> u64 {
+    let t: u64;
+    unsafe {
+        asm!("rdtime {0}", out(reg) t, options(nomem, nostack, preserves_flags));
+    }
+    t
+}
+
+/// Arms the supervisor timer to fire at the absolute `time` deadline.
+pub fn arm_timer_abs(deadline: u64) {
+    let _ = crate::sbi::set_timer(deadline);
+}
+
+/// Arms the supervisor timer to fire `TIMER_INTERVAL` rdtime counts from now.
+pub fn arm_timer_from_now() {
+    arm_timer_abs(read_time().saturating_add(TIMER_INTERVAL));
+}
+
+/// Enables the supervisor timer interrupt source (`sie.STIE`).
+///
+/// Not invoked during the boot self-tests, so the cooperative path and the
+/// deterministic trap sequence are preserved; preemptive scheduling is opt-in.
+///
+/// # Safety
+/// Caller must have a live PLIC/timer and a scheduler ready for reentrancy.
+pub unsafe fn enable_timer_interrupts() {
+    asm!("csrs sie, {0}", in(reg) (1usize << 5), options(nomem, nostack, preserves_flags));
+}
+
+/// Disables the supervisor timer interrupt source (`sie.STIE`).
+///
+/// # Safety
+/// Safe on any hart; masks further supervisor timer traps.
+pub unsafe fn disable_timer_interrupts() {
+    asm!("csrc sie, {0}", in(reg) (1usize << 5), options(nomem, nostack, preserves_flags));
+}
+
+/// Enables or disables preemptive scheduling from the timer handler.
+pub fn set_preemptive_scheduling(enabled: bool) {
+    PREEMPTIVE.store(enabled, Ordering::SeqCst);
+}
+
+/// Supervisor timer interrupt body: count the tick, re-arm the timer, and (only
+/// when preemption is enabled) yield to the scheduler. Keeping the yield gated
+/// preserves the cooperative scheduling path.
+fn timer_tick() {
+    TIMER_TICKS.fetch_add(1, Ordering::SeqCst);
+    arm_timer_from_now();
+    if PREEMPTIVE.load(Ordering::SeqCst) {
+        crate::task::yield_now();
+    }
+}
+
+/// Total supervisor timer ticks delivered since boot.
+pub fn timer_ticks() -> u64 {
+    TIMER_TICKS.load(Ordering::SeqCst)
+}
+
 #[unsafe(naked)]
 #[no_mangle]
 pub unsafe extern "C" fn trap_entry() -> ! {
@@ -186,7 +256,15 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
         // Supervisor Software Interrupt (1), Supervisor Timer (5), External (9)
         match code {
             5 => {
-                // Clear timer interrupt via SBI / reload timer
+                // Supervisor timer: count the tick, re-arm via SBI_SET_TIMER,
+                // and (only when preemption is enabled) yield to the scheduler.
+                timer_tick();
+            }
+            9 => {
+                // External interrupt: claim/complete the top source via the PLIC.
+                unsafe {
+                    crate::plic::dispatch_external(crate::mmu::current_hart_id());
+                }
             }
             _ => {
                 println!("[TRAP:IRQ] Unhandled interrupt code: {}", code);
