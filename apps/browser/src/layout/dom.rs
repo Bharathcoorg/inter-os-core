@@ -548,31 +548,47 @@ impl Dom {
     }
 
     /// Sets or replaces the text content of a node.
+    ///
+    /// WHY an element with no text child gets one: a script that builds a
+    /// node with `createElement` and then assigns `textContent` holds an
+    /// element with nothing inside it, and the only honest place for the
+    /// text is a fresh text child. Returning `false` there would drop the
+    /// assignment while the script believed it had run.
     pub fn set_text(&mut self, id: NodeId, new_text: &[u8]) -> bool {
         let idx = id as usize;
         if idx >= self.node_count { return false; }
-        if self.text_len + new_text.len() <= MAX_TEXT_BYTES {
-            let start = self.text_len as u32;
-            let len = new_text.len() as u16;
-            self.text[self.text_len..self.text_len + new_text.len()].copy_from_slice(new_text);
-            self.text_len += new_text.len();
-            if self.nodes[idx].is_text() {
-                self.nodes[idx].text = StrRef { start, len };
-                true
-            } else if let Some(child_id) = self.first_child(id) {
-                let child_idx = child_id as usize;
-                if self.nodes[child_idx].is_text() {
-                    self.nodes[child_idx].text = StrRef { start, len };
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        } else {
-            false
+        if self.text_len + new_text.len() > MAX_TEXT_BYTES {
+            self.note(OVERFLOW_TEXT);
+            return false;
         }
+        let start = self.text_len as u32;
+        let len = new_text.len() as u16;
+        self.text[self.text_len..self.text_len + new_text.len()].copy_from_slice(new_text);
+        self.text_len += new_text.len();
+        let text = StrRef { start, len };
+        if self.nodes[idx].is_text() {
+            self.nodes[idx].text = text;
+            return true;
+        }
+        if let Some(child_id) = self.first_child(id) {
+            let child_idx = child_id as usize;
+            if self.nodes[child_idx].is_text() {
+                self.nodes[child_idx].text = text;
+                return true;
+            }
+        }
+        // No text child to reuse: append a fresh one, bounded by MAX_NODES.
+        // An empty assignment on an empty element leaves it empty rather than
+        // spending a node on a zero-length text child.
+        if new_text.is_empty() {
+            return true;
+        }
+        let child = self.push_node(NodeKind::Text, StrRef::EMPTY, text);
+        if child == NO_NODE {
+            return false;
+        }
+        self.append_child(id, child);
+        true
     }
 
     /// The stored range of an attribute value, for a caller that keeps a
@@ -863,9 +879,19 @@ impl Dom {
         id
     }
 
-    fn append_child(&mut self, parent: NodeId, child: NodeId) {
-        if parent == NO_NODE || child == NO_NODE {
-            return;
+    /// Attaches `child` under `parent` as its last child, reusing the
+    /// existing sibling/child links. Returns whether the link was made.
+    ///
+    /// WHY a bool and not silence: the JS surface routes its mutations
+    /// through here, and a caller that asked to append a node which is not
+    /// in the document must be told the append did not happen rather than
+    /// shown a success that never took.
+    pub fn append_child(&mut self, parent: NodeId, child: NodeId) -> bool {
+        if parent == NO_NODE || child == NO_NODE || parent == child {
+            return false;
+        }
+        if parent as usize >= self.node_count || child as usize >= self.node_count {
+            return false;
         }
         self.nodes[child as usize].parent = parent;
         let last = self.nodes[parent as usize].last_child;
@@ -875,6 +901,62 @@ impl Dom {
             self.nodes[last as usize].next_sibling = child;
         }
         self.nodes[parent as usize].last_child = child;
+        true
+    }
+
+    /// Allocates a fresh element node tagged `tag`, with no children.
+    ///
+    /// The tag is interned into the text pool and the node into the node
+    /// arena, so both [`MAX_NODES`] and [`MAX_TEXT_BYTES`] bound it. A
+    /// document that cannot hold the element is told `None` and the
+    /// overflow is recorded; nothing is half-built.
+    pub fn create_element(&mut self, tag: &[u8]) -> Option<NodeId> {
+        if self.node_count >= MAX_NODES {
+            self.note(OVERFLOW_NODES);
+            return None;
+        }
+        if self.text_len + tag.len() > MAX_TEXT_BYTES {
+            self.note(OVERFLOW_TEXT);
+            return None;
+        }
+        let tag_ref = self.intern(tag);
+        let id = self.push_node(NodeKind::Element, tag_ref, StrRef::EMPTY);
+        if id == NO_NODE {
+            return None;
+        }
+        Some(id)
+    }
+
+    /// Detaches `child` from `parent`'s child list, reusing the sibling
+    /// links. Returns whether the child was found and removed.
+    pub fn remove_child(&mut self, parent: NodeId, child: NodeId) -> bool {
+        if parent == NO_NODE || child == NO_NODE || parent == child {
+            return false;
+        }
+        if parent as usize >= self.node_count || child as usize >= self.node_count {
+            return false;
+        }
+        let mut current = self.nodes[parent as usize].first_child;
+        let mut prev = NO_NODE;
+        while current != NO_NODE {
+            if current == child {
+                let next = self.nodes[current as usize].next_sibling;
+                if prev == NO_NODE {
+                    self.nodes[parent as usize].first_child = next;
+                } else {
+                    self.nodes[prev as usize].next_sibling = next;
+                }
+                if self.nodes[parent as usize].last_child == current {
+                    self.nodes[parent as usize].last_child = prev;
+                }
+                self.nodes[current as usize].parent = NO_NODE;
+                self.nodes[current as usize].next_sibling = NO_NODE;
+                return true;
+            }
+            prev = current;
+            current = self.nodes[current as usize].next_sibling;
+        }
+        false
     }
 
     fn intern(&mut self, bytes: &[u8]) -> StrRef {

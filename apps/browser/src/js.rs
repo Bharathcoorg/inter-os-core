@@ -1495,7 +1495,7 @@ impl<'a> JsRuntime<'a> {
                         prop,
                         prop_len,
                     }) => {
-                        let _obj = self.eval_expr(parser, *object)?;
+                        let obj = self.eval_expr(parser, *object)?;
                         let method = &prop[..*prop_len as usize];
 
                         // Method: document.getElementById(id_str)
@@ -1505,6 +1505,93 @@ impl<'a> JsRuntime<'a> {
                             let target_id = arg_val.as_str().as_bytes();
                             let found = self.find_element_by_id(target_id);
                             return Ok(found.map(JsValue::Element).unwrap_or(JsValue::Null));
+                        }
+
+                        // Method: document.getElementsByTagName(tag_str)
+                        // Returns an array of matching element nodes (empty
+                        // when none match), bounded by the array arena.
+                        if method == b"getElementsByTagName" && *args_count >= 1 {
+                            let arg_id = parser.args_pool[*args_start];
+                            let arg_val = self.eval_expr(parser, arg_id)?;
+                            let tag = arg_val.as_str().as_bytes();
+                            if self.array_count >= MAX_ARRAYS {
+                                return Err(JsError::CapacityExceeded);
+                            }
+                            let aid = self.array_count;
+                            let mut count = 0usize;
+                            let n = self.dom.node_count();
+                            for id in 0..n {
+                                let nid = id as NodeId;
+                                if self.dom.node(nid).is_element()
+                                    && self.dom.tag(nid).eq_ignore_ascii_case(tag)
+                                {
+                                    if count >= MAX_ARRAY_ELEMS {
+                                        break;
+                                    }
+                                    self.arrays[aid][count] = JsValue::Element(nid);
+                                    count += 1;
+                                }
+                            }
+                            self.array_lens[aid] = count as u8;
+                            self.array_count += 1;
+                            return Ok(JsValue::Array(aid as u8));
+                        }
+
+                        // Method: document.createElement(tag_str)
+                        if method == b"createElement" && *args_count >= 1 {
+                            if !matches!(obj, JsValue::Element(_)) {
+                                return Err(JsError::TypeError);
+                            }
+                            let arg_id = parser.args_pool[*args_start];
+                            let arg_val = self.eval_expr(parser, arg_id)?;
+                            let tag = arg_val.as_str().as_bytes();
+                            return match self.dom.create_element(tag) {
+                                Some(node) => {
+                                    self.mutated = true;
+                                    Ok(JsValue::Element(node))
+                                }
+                                None => Err(JsError::CapacityExceeded),
+                            };
+                        }
+
+                        // Method: element.appendChild(child_element)
+                        if method == b"appendChild" && *args_count >= 1 {
+                            let parent = match obj {
+                                JsValue::Element(n) => n,
+                                _ => return Err(JsError::TypeError),
+                            };
+                            let arg_id = parser.args_pool[*args_start];
+                            let arg_val = self.eval_expr(parser, arg_id)?;
+                            let child = match arg_val {
+                                JsValue::Element(n) => n,
+                                _ => return Err(JsError::TypeError),
+                            };
+                            if self.dom.append_child(parent, child) {
+                                self.mutated = true;
+                                return Ok(JsValue::Element(child));
+                            } else {
+                                return Err(JsError::TypeError);
+                            }
+                        }
+
+                        // Method: element.removeChild(child_element)
+                        if method == b"removeChild" && *args_count >= 1 {
+                            let parent = match obj {
+                                JsValue::Element(n) => n,
+                                _ => return Err(JsError::TypeError),
+                            };
+                            let arg_id = parser.args_pool[*args_start];
+                            let arg_val = self.eval_expr(parser, arg_id)?;
+                            let child = match arg_val {
+                                JsValue::Element(n) => n,
+                                _ => return Err(JsError::TypeError),
+                            };
+                            if self.dom.remove_child(parent, child) {
+                                self.mutated = true;
+                                return Ok(JsValue::Element(child));
+                            } else {
+                                return Err(JsError::TypeError);
+                            }
                         }
 
                         // Method: console.log(...)
@@ -1649,6 +1736,25 @@ impl<'a> JsRuntime<'a> {
             }
             b"checked" => Ok(JsValue::Boolean(self.dom.has_attr(node_id, b"checked"))),
             b"disabled" => Ok(JsValue::Boolean(self.dom.has_attr(node_id, b"disabled"))),
+            b"body" => {
+                // The first <body> element, or the document root's first
+                // element child when the page never named one, or Null when
+                // the tree holds no element at all.
+                let n = self.dom.node_count();
+                for i in 0..n {
+                    let nid = i as NodeId;
+                    if self.dom.node(nid).is_element()
+                        && self.dom.tag(nid).eq_ignore_ascii_case(b"body")
+                    {
+                        return Ok(JsValue::Element(nid));
+                    }
+                }
+                let root = self.dom.root();
+                match self.dom.first_child(root) {
+                    Some(child) => Ok(JsValue::Element(child)),
+                    None => Ok(JsValue::Null),
+                }
+            }
             _ => Err(JsError::UnsupportedSyntax(
                 "unsupported DOM property getter",
             )),
@@ -1870,5 +1976,52 @@ mod tests {
             execute_script_with_mutations(src, &mut dom, 1000).expect("script succeeds");
         let _ = res;
         assert!(mutated);
+    }
+
+    #[test]
+    fn test_create_element_and_append_child_grow_dom_with_text() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let before = dom.node_count();
+
+        let src = b"var d=document.createElement('p'); d.textContent='hi'; document.body.appendChild(d);";
+        let (_res, mutated) =
+            execute_script_with_mutations(src, &mut dom, 1000).expect("DOM construction succeeds");
+        assert!(mutated, "building nodes must report a DOM mutation");
+
+        // The element and its text child were really allocated.
+        assert!(
+            dom.node_count() > before,
+            "node_count must grow after createElement + textContent"
+        );
+
+        // The assigned text 'hi' is present in a text node in the tree.
+        let mut found_text = false;
+        for i in 0..dom.node_count() {
+            let nid = i as NodeId;
+            if dom.node(nid).is_text() && dom.text_of(nid) == b"hi" {
+                found_text = true;
+            }
+        }
+        assert!(found_text, "the assigned text 'hi' must be present in the DOM");
+
+        // The created <p> is a child of <body>.
+        let mut body = None;
+        for i in 0..dom.node_count() {
+            let nid = i as NodeId;
+            if dom.node(nid).is_element() && dom.tag(nid).eq_ignore_ascii_case(b"body") {
+                body = Some(nid);
+            }
+        }
+        let body = body.expect("skeleton DOM has a body");
+        let mut p_is_child = false;
+        let mut child = dom.first_child(body);
+        while let Some(c) = child {
+            if dom.node(c).is_element() && dom.tag(c).eq_ignore_ascii_case(b"p") {
+                p_is_child = true;
+            }
+            child = dom.next_sibling(c);
+        }
+        assert!(p_is_child, "the created <p> must be appended under <body>");
     }
 }
