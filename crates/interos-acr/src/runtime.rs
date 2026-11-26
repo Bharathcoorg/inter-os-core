@@ -1185,6 +1185,15 @@ impl DalvikVmState {
             }
         }
 
+        // Root from the Activity content view: without this the live UI subtree
+        // could be swept once the app allocates past the GC threshold, silently
+        // replacing the real view with the placeholder.
+        if let Some(cid) = self.content_view_id {
+            if cid > 0 && cid < self.next_object_id {
+                marked.insert(cid);
+            }
+        }
+
         // Traverse fields and stateful payloads of marked objects
         let mut queue: Vec<u32> = marked.iter().copied().collect();
         while let Some(obj_id) = queue.pop() {
@@ -1580,6 +1589,22 @@ impl DalvikVmState {
     /// Recursively builds a renderable [`crate::view::View`] tree from a VM
     /// view-model object graph rooted at `id`.
     fn build_view(&self, id: u32) -> Option<crate::view::View> {
+        let mut visited = alloc::collections::BTreeSet::new();
+        self.build_view_inner(id, 0, &mut visited)
+    }
+
+    /// Depth-bounded, cycle-safe view construction. A `visited` set prevents both
+    /// an addView cycle (stack overflow) and a diamond/shared-child graph from
+    /// being re-descended exponentially; a depth cap is defense in depth.
+    fn build_view_inner(
+        &self,
+        id: u32,
+        depth: usize,
+        visited: &mut alloc::collections::BTreeSet<u32>,
+    ) -> Option<crate::view::View> {
+        if depth > 64 || !visited.insert(id) {
+            return None;
+        }
         let obj = self.get_object(id).ok()?;
         let ObjectPayload::View { kind, text, children } = &obj.payload else {
             return None;
@@ -1599,7 +1624,7 @@ impl DalvikVmState {
             ),
         };
         for &child_id in children {
-            if let Some(child) = self.build_view(child_id) {
+            if let Some(child) = self.build_view_inner(child_id, depth + 1, visited) {
                 view.add_child(child);
             }
         }
