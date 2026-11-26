@@ -7335,6 +7335,30 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_bounds_cumulative_execution_as_fatal_not_yield() {
+        // WHAT THIS IS FOR: a per-slice budget exhaustion is a voluntary yield,
+        // but the cumulative instruction limit is a hard resource bound and must
+        // be Fatal (terminate), never an infinite re-enqueue loop.
+        let dex_bytes = create_test_dex("Lorg/interos/Bound;", "run", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let m = &dex.methods[0];
+        let mut vm = DalvikVmState::new();
+        vm.spawn_thread(1, "T1");
+        {
+            let t = vm.threads.get_mut(&1).unwrap();
+            t.code_offset = m.code_offset;
+            t.registers_size = m.registers_size;
+            t.pc = 0;
+        }
+        vm.set_current_thread(1);
+        vm.instructions_executed = 1_000_000;
+        assert_eq!(
+            vm.step_thread_slice(&dex, 1, SLICE_STEP_LIMIT),
+            ThreadSliceOutcome::Fatal(DalvikVmError::ExecutionStepLimit)
+        );
+    }
+
+    #[test]
     fn parsed_dex_is_owned_static_and_reparseable() {
         // WHAT THIS IS FOR: the parsed DEX owns its bytes (no lifetime, no leak),
         // so repeated application loads can parse, use and drop it without
