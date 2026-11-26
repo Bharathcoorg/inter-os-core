@@ -6213,6 +6213,44 @@ pub mod tests {
     }
 
     #[test]
+    fn q6_k_block_matches_independent_mixed_value_reference() {
+        // Independent oracle: a dev-time Python implementation of ggml's
+        // dequantize_row_q6_K over a fixed 210-byte block (seed 1234). Expected
+        // values are from that oracle, not from this code, so the test checks
+        // the ql/qh/sc/d layout and the -32 bias on mixed nonzero data.
+        let blk: [u8; 210] = [
+            247,199,112,29,1,23,233,241,240,206,149,8,171,177,21,25,196,90,60,4,7,252,201,4,88,
+            165,159,123,157,118,38,23,46,182,29,216,3,128,124,225,247,63,16,170,138,233,119,17,
+            153,172,22,131,148,11,69,211,142,16,165,77,123,217,90,68,63,167,238,51,116,224,135,
+            170,4,241,130,18,1,85,36,181,121,168,96,42,13,19,150,127,41,19,142,55,36,6,239,88,
+            197,28,244,135,36,171,78,116,10,106,70,169,206,10,45,69,39,76,244,216,39,199,213,
+            118,10,144,98,195,89,126,87,149,209,119,121,11,200,238,120,222,209,152,225,43,112,
+            187,199,132,208,112,75,70,31,199,47,106,111,196,30,240,135,26,212,215,124,96,209,
+            209,168,65,164,49,88,27,179,179,207,246,40,148,232,241,68,248,39,217,215,251,184,
+            82,203,201,114,184,18,20,101,54,12,229,73,205,9,56,129,212,22,202,238,240,179,255,
+            81,78,
+        ];
+        let expected: [f32; 8] = [
+            -22966.453125, 58692.046875, -40829.25, 74003.015625, -79106.671875, 17862.796875,
+            -58692.046875, 2551.828125,
+        ];
+        let mut out = alloc::vec![0f32; 256];
+        let produced = dequantize_q6_k(&blk, &mut out).expect("q6_k mixed block decodes");
+        assert_eq!(produced, 256);
+        for i in 0..8 {
+            let tol = 1e-3 * expected[i].abs().max(1.0);
+            assert!(
+                (out[i] - expected[i]).abs() <= tol,
+                "q6_k[{i}] = {} vs reference {}",
+                out[i],
+                expected[i]
+            );
+        }
+        assert!((out[100] - 3638.25).abs() <= 1e-3 * 3638.25f32.abs().max(1.0));
+        assert!((out[200] - 7276.5).abs() <= 1e-3 * 7276.5f32.abs().max(1.0));
+    }
+
+    #[test]
     fn new_quant_block_decoders_reject_partial_and_short_buffers() {
         let mut out = alloc::vec![0f32; 256];
         assert_eq!(
