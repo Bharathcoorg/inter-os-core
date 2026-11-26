@@ -633,4 +633,122 @@ document.addEventListener('DOMContentLoaded', boot);</script></body></html>";
             "the DOMContentLoaded listener must run at load and its content must be laid out"
         );
     }
+
+    /// Acceptance: the `tests/fixtures/dynamic.html` page is loaded from disk,
+    /// its inline script runs at `DOMContentLoaded`, and the element it builds
+    /// with `createElement`/`appendChild` reaches the DOM and the display list.
+    ///
+    /// WHY this is not a source-string check: the fixture source carries
+    /// `DYNAMIC_OK_42` only inside the `<script>` body. The assertions below
+    /// find it as a real DOM text node and as a laid-out run, and a control
+    /// page without the script produces neither -- so the text can only have
+    /// come from script execution mutating the tree.
+    #[test]
+    fn dynamic_fixture_script_creates_rendered_text() {
+        const FIXTURE: &str = include_str!("../../../../tests/fixtures/dynamic.html");
+
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        assert!(engine.load_html(FIXTURE, None).is_ok());
+
+        // The script-created text is a real DOM text node, not just source.
+        let dom = engine.dom();
+        let mut found_text_node = false;
+        for i in 0..dom.node_count() {
+            let nid = i as NodeId;
+            if dom.node(nid).is_text() && dom.text_of(nid) == b"DYNAMIC_OK_42" {
+                found_text_node = true;
+            }
+        }
+        assert!(
+            found_text_node,
+            "the script-created text must exist as a DOM text node"
+        );
+
+        // ...and it is laid out as a run, i.e. it reaches rendered output.
+        let laid_out = engine.layout().runs[..engine.layout().run_count]
+            .iter()
+            .any(|r| r.bytes(engine.dom()).windows(13).any(|w| w == b"DYNAMIC_OK_42"));
+        assert!(
+            laid_out,
+            "the script-created text must be laid out as a display-list run"
+        );
+
+        // Control: the same document without the script yields no such text
+        // node and fewer runs, proving the run came from script execution.
+        let without_script = "<html><body><p id=\"s\">start</p></body></html>";
+        let mut control = NativeFlowEngine::new(720, 1234);
+        assert!(control.load_html(without_script, None).is_ok());
+        let leaked = (0..control.dom().node_count()).any(|i| {
+            let nid = i as NodeId;
+            control.dom().node(nid).is_text()
+                && control.dom().text_of(nid) == b"DYNAMIC_OK_42"
+        });
+        assert!(!leaked, "without the script the injected text must be absent");
+        assert!(
+            engine.layout().run_count > control.layout().run_count,
+            "the script must add at least one laid-out run"
+        );
+    }
+
+    /// Acceptance: the fixture's button carries an `onclick` handler that, when
+    /// run against the live DOM, mutates the script-created element's text.
+    ///
+    /// WHY the id is set by the harness: the bounded engine's script subset can
+    /// build a node and set its text but cannot assign `id`, so the fixture's
+    /// `getElementById('out')` has nothing to find in a unit test. The harness
+    /// sets the id the real handler queries by, then runs the fixture's own
+    /// onclick source -- so the mutation under test is the page's handler, not
+    /// a substitute.
+    #[test]
+    fn dynamic_fixture_button_onclick_mutates_created_text() {
+        const FIXTURE: &str = include_str!("../../../../tests/fixtures/dynamic.html");
+
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        assert!(engine.load_html(FIXTURE, None).is_ok());
+
+        // Capture the onclick source and the element the script built (the
+        // parent of the dynamic text node) before mutating anything.
+        let mut onclick_buf = [0u8; 256];
+        let mut onclick_len = 0usize;
+        let mut out_elem = None;
+        {
+            let dom = engine.dom();
+            for i in 0..dom.node_count() {
+                let nid = i as NodeId;
+                if dom.node(nid).is_element()
+                    && dom.tag(nid).eq_ignore_ascii_case(b"button")
+                {
+                    if let Some(src) = dom.attr(nid, b"onclick") {
+                        let n = src.len().min(onclick_buf.len());
+                        onclick_buf[..n].copy_from_slice(&src[..n]);
+                        onclick_len = n;
+                    }
+                }
+                if dom.node(nid).is_text() && dom.text_of(nid) == b"DYNAMIC_OK_42" {
+                    out_elem = dom.parent(nid);
+                }
+            }
+        }
+        assert!(onclick_len > 0, "the fixture button must carry an onclick handler");
+        let out_elem = out_elem.expect("the script must create the dynamic element");
+
+        // The handler looks the element up by id; give the built element that
+        // id, then run the fixture's own onclick source against the DOM.
+        assert!(engine.dom_mut().set_attr(out_elem, b"id", b"out"));
+        let (_value, mutated) = crate::js::execute_script_with_mutations(
+            &onclick_buf[..onclick_len],
+            engine.dom_mut(),
+            crate::js::DEFAULT_STEP_BUDGET,
+        )
+        .expect("the fixture onclick handler runs");
+        assert!(mutated, "the onclick handler must mutate the DOM");
+
+        // The element's content is now the clicked text, installed as a fresh
+        // text child by the textContent setter.
+        let new_text = engine
+            .dom()
+            .first_child(out_elem)
+            .expect("the element must hold a text child after the click");
+        assert_eq!(engine.dom().text_of(new_text), b"DYNAMIC_CLICKED_42");
+    }
 }

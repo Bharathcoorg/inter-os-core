@@ -1891,6 +1891,14 @@ impl<'a> JsRuntime<'a> {
                 self.mutated = true;
                 Ok(())
             }
+            b"id" => {
+                // Assigning `id` must store the attribute so getElementById can
+                // resolve the node (used by script-built UI and event handlers).
+                let bytes = val.as_str().as_bytes();
+                self.dom.set_attr(node_id, b"id", bytes);
+                self.mutated = true;
+                Ok(())
+            }
             _ => Err(JsError::UnsupportedSyntax(
                 "unsupported DOM property setter",
             )),
