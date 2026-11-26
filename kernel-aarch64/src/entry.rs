@@ -17,8 +17,14 @@ global_asm!(
         mrs x1, CurrentEL
         lsr x1, x1, #2
         cmp x1, #2
-        b.ne .Lel1_entry
+        b.eq .Lel2_drop
+        cmp x1, #3
+        b.eq .Lel3_drop
+        // EL1 (and, defensively, EL0) continue at the current level. EL3 is
+        // never allowed to fall through here: it must drop to EL1 first.
+        b .Lel1_entry
 
+    .Lel2_drop:
         // 2. We are in EL2 (Hypervisor). Prepare clean transition to EL1 (OS).
         // Enable EL1 access to ARM generic timers
         mov x2, #3
@@ -51,6 +57,35 @@ global_asm!(
         // Set return address to EL1 entrypoint
         adr x2, .Lel1_entry
         msr elr_el2, x2
+        eret
+
+    .Lel3_drop:
+        // 2b. We are in EL3 (Secure Monitor / firmware). Drop to Non-secure EL1.
+        //
+        // SCR_EL3.RW (bit 10) = 1 selects AArch64 execution state for EL1, and
+        // SCR_EL3.NS (bit 0) = 1 selects Non-secure state so the OS runs
+        // outside the secure world. Every other SCR_EL3 bit stays 0, so IRQ,
+        // FIQ and external-abort traps are not routed to EL3 and EL1 handles
+        // its own exceptions.
+        mov x2, #0x401
+        msr scr_el3, x2
+
+        // SPSR_EL3: M[3:0] = 0b0101 (EL1h dedicated stack pointer),
+        // DAIF[9:6] = 0b1111 (Debug, SError, IRQ, FIQ masked during early boot).
+        mov x2, #0x3c5
+        msr spsr_el3, x2
+
+        // Install the EL1 exception vector table before the drop, so a fault in
+        // the MMU-off window between eret and exceptions::init_exceptions() is
+        // routed to a defined table rather than whatever firmware left behind.
+        adrp x2, exception_vector_table
+        add x2, x2, :lo12:exception_vector_table
+        msr vbar_el1, x2
+
+        // Set return address to the shared EL1 entrypoint and drop to EL1.
+        adr x2, .Lel1_entry
+        msr elr_el3, x2
+        isb
         eret
 
     .Lel1_entry:
@@ -117,8 +152,14 @@ global_asm!(
         mrs x1, CurrentEL
         lsr x1, x1, #2
         cmp x1, #2
-        b.ne .Lsecondary_el1_entry
+        b.eq .Lsecondary_el2_drop
+        cmp x1, #3
+        b.eq .Lsecondary_el3_drop
+        // EL1 (and, defensively, EL0) continue at the current level. EL3 is
+        // never allowed to fall through here: it must drop to EL1 first.
+        b .Lsecondary_el1_entry
 
+    .Lsecondary_el2_drop:
         // In EL2: Prepare clean transition to EL1
         mov x2, #3
         msr cnthctl_el2, x2
@@ -138,6 +179,22 @@ global_asm!(
         msr spsr_el2, x2
         adr x2, .Lsecondary_el1_entry
         msr elr_el2, x2
+        eret
+
+    .Lsecondary_el3_drop:
+        // In EL3: Drop to Non-secure EL1. SCR_EL3.RW (bit 10) selects AArch64
+        // for EL1 and SCR_EL3.NS (bit 0) selects Non-secure state; all other
+        // SCR_EL3 bits stay 0 so EL1 handles its own exceptions.
+        mov x2, #0x401
+        msr scr_el3, x2
+        mov x2, #0x3c5
+        msr spsr_el3, x2
+        adrp x2, exception_vector_table
+        add x2, x2, :lo12:exception_vector_table
+        msr vbar_el1, x2
+        adr x2, .Lsecondary_el1_entry
+        msr elr_el3, x2
+        isb
         eret
 
     .Lsecondary_el1_entry:

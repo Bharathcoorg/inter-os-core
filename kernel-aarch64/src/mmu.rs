@@ -316,6 +316,17 @@ impl ArmMmu {
                 | DESC_BLOCK
                 | DESC_VALID;
 
+            // Record the identity-mapped device windows so borrowed-MMIO
+            // validation accepts them on real boards, not only the QEMU `virt`
+            // apertures. These are the same 2 MiB blocks mapped above.
+            register_mmio_window(0x0100_0000, 0x20_0000); // Allwinner DE2 Display Engine & DSI
+            register_mmio_window(0x01c0_0000, 0x20_0000); // Allwinner UART0/TWI0/GIC-400
+            register_mmio_window(0x01e0_0000, 0x20_0000); // Allwinner Clock/Reset/SysCon
+            register_mmio_window(0x0800_0000, 0x20_0000); // GICv2 Distributor & CPU interface
+            register_mmio_window(0x0900_0000, 0x20_0000); // PrimeCell PL011 UART
+            register_mmio_window(0x00a0_0000, 0x20_0000); // Qualcomm GENI QUP UART
+            register_mmio_window(0x17a0_0000, 0x20_0000); // Qualcomm SM8250 GICv3
+
             // 5. Configure MAIR_EL1
             #[cfg(target_arch = "aarch64")]
             {
@@ -429,6 +440,7 @@ impl ArmMmu {
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             core::arch::asm!("isb", options(nostack, preserves_flags));
         }
+        register_mmio_window(start_paddr, size);
         true
     }
 
@@ -476,6 +488,7 @@ impl ArmMmu {
                 core::arch::asm!("dsb ish", options(nostack, preserves_flags));
                 core::arch::asm!("isb", options(nostack, preserves_flags));
             }
+            register_mmio_window(start_paddr, size);
             return true;
         }
 
@@ -505,6 +518,7 @@ impl ArmMmu {
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             core::arch::asm!("isb", options(nostack, preserves_flags));
         }
+        register_mmio_window(start_paddr, size);
         true
     }
 
@@ -559,6 +573,7 @@ impl ArmMmu {
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             core::arch::asm!("isb", options(nostack, preserves_flags));
         }
+        register_mmio_window(start_paddr, size);
         true
     }
 
@@ -632,6 +647,7 @@ impl ArmMmu {
             core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             core::arch::asm!("isb", options(nostack, preserves_flags));
         }
+        register_mmio_window(start_paddr, size);
         true
     }
 
@@ -864,6 +880,7 @@ impl ArmMmu {
             }
         }
         if all_mapped {
+            register_mmio_window(paddr, size);
             return true;
         }
         Self::map_device_blocks(paddr, size, 0, 0)
@@ -1300,7 +1317,54 @@ pub const LIFECYCLE_ACTIVE_CPUS_MASK: u32 = 0x0000_FFFF; // bits 0..15: bitmask 
 pub const LIFECYCLE_CLOSING_BIT: u32 = 1 << 31;
 pub const LIFECYCLE_DESTROYED_BIT: u32 = 1 << 30;
 
-/// Validates that a physical address belongs to a documented QEMU virt peripheral MMIO aperture.
+/// Maximum number of distinct MMIO windows the kernel records as mapped.
+const MAX_RECORDED_MMIO_WINDOWS: usize = 64;
+
+/// Physical MMIO windows the kernel has mapped into its translation tables (or
+/// that the platform device tree declares), stored as `(base, size)` pairs.
+///
+/// `is_valid_mmio_peripheral` accepts a borrowed frame that lies inside any of
+/// these windows in addition to the built-in QEMU `virt` apertures, so
+/// borrowed-MMIO validation also works on real boards whose peripherals sit at
+/// addresses the QEMU table does not list. A fixed-capacity array keeps the
+/// registry allocation-free and bounded.
+static RECORDED_MMIO_WINDOWS: crate::sync::IrqSpinLock<[(u64, u64); MAX_RECORDED_MMIO_WINDOWS]> =
+    crate::sync::IrqSpinLock::new([(0, 0); MAX_RECORDED_MMIO_WINDOWS]);
+static RECORDED_MMIO_WINDOW_COUNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Records a physical MMIO window `[base, base + size)` as mapped/declared so
+/// that `is_valid_mmio_peripheral` accepts borrowed frames inside it.
+///
+/// Idempotent: re-registering an identical window is a no-op. Returns false
+/// when the window is invalid (zero/overflowing size) or the fixed-size
+/// registry is already full, so a caller never believes a window was recorded
+/// when it was not.
+pub fn register_mmio_window(base: u64, size: u64) -> bool {
+    if size == 0 || base.checked_add(size).is_none() {
+        return false;
+    }
+    let count = RECORDED_MMIO_WINDOW_COUNT.load(core::sync::atomic::Ordering::Acquire);
+    let mut windows = RECORDED_MMIO_WINDOWS.lock();
+    for i in 0..count {
+        if windows[i] == (base, size) {
+            return true;
+        }
+    }
+    if count >= MAX_RECORDED_MMIO_WINDOWS {
+        return false;
+    }
+    windows[count] = (base, size);
+    RECORDED_MMIO_WINDOW_COUNT.store(count + 1, core::sync::atomic::Ordering::Release);
+    true
+}
+
+/// Validates that a physical address belongs to a peripheral MMIO aperture.
+///
+/// Accepts the documented QEMU `virt` apertures and any window the kernel has
+/// recorded via [`register_mmio_window`] (for example a window mapped by
+/// `map_device_blocks`/`ensure_mapped`, or one the platform device tree
+/// declares). The QEMU apertures are unchanged, so QEMU behaviour is identical.
 pub fn is_valid_mmio_peripheral(paddr: u64, len: usize) -> bool {
     if (paddr & 0xFFF) != 0 || len == 0 || (len & 0xFFF) != 0 {
         return false;
@@ -1309,10 +1373,29 @@ pub fn is_valid_mmio_peripheral(paddr: u64, len: usize) -> bool {
         Some(e) => e,
         None => return false,
     };
-    (paddr >= 0x0800_0000 && end <= 0x0802_0000) // GIC Distributor & CPU interface
+    // Documented QEMU virt peripheral MMIO apertures (unchanged).
+    if (paddr >= 0x0800_0000 && end <= 0x0802_0000) // GIC Distributor & CPU interface
         || (paddr >= 0x0900_0000 && end <= 0x0901_0000) // PL011 UART0
         || (paddr >= 0x0a00_0000 && end <= 0x0a01_0000) // VirtIO MMIO slots 0..31
         || (paddr >= 0x1000_0000 && end <= 0x1200_0000) // VirtIO GPU Display BAR aperture
+    {
+        return true;
+    }
+    // Any window the kernel has mapped or the platform declared.
+    let count = RECORDED_MMIO_WINDOW_COUNT.load(core::sync::atomic::Ordering::Acquire);
+    let windows = RECORDED_MMIO_WINDOWS.lock();
+    for i in 0..count {
+        let (base, size) = windows[i];
+        if size == 0 {
+            continue;
+        }
+        if let Some(window_end) = base.checked_add(size) {
+            if paddr >= base && end <= window_end {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 extern crate alloc;

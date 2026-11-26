@@ -61,6 +61,24 @@ impl PsciController {
                         inout("x1") arg0 => _,
                         inout("x2") arg1 => _,
                         inout("x3") arg2 => _,
+                        // PSCI/SMC may clobber the caller-saved argument/result
+                        // extension registers x4..x18; declare them so the
+                        // compiler never keeps a live value across the call.
+                        out("x4") _,
+                        out("x5") _,
+                        out("x6") _,
+                        out("x7") _,
+                        out("x8") _,
+                        out("x9") _,
+                        out("x10") _,
+                        out("x11") _,
+                        out("x12") _,
+                        out("x13") _,
+                        out("x14") _,
+                        out("x15") _,
+                        out("x16") _,
+                        out("x17") _,
+                        out("x18") _,
                         options(nostack)
                     );
                 }
@@ -76,6 +94,22 @@ impl PsciController {
                         inout("x1") arg0 => _,
                         inout("x2") arg1 => _,
                         inout("x3") arg2 => _,
+                        // HVC may clobber x4..x18 just like SMC.
+                        out("x4") _,
+                        out("x5") _,
+                        out("x6") _,
+                        out("x7") _,
+                        out("x8") _,
+                        out("x9") _,
+                        out("x10") _,
+                        out("x11") _,
+                        out("x12") _,
+                        out("x13") _,
+                        out("x14") _,
+                        out("x15") _,
+                        out("x16") _,
+                        out("x17") _,
+                        out("x18") _,
                         options(nostack)
                     );
                 }
