@@ -867,22 +867,27 @@ pub fn run_acr_app_runtime() -> ! {
                                 inst.activity_state = interos_acr::framework::ActivityLifecycleState::Resumed;
                                 let _ = std::log("[acr-app-runtime] STATE: ActivityResumed");
 
-                                // Build View hierarchy: render actual Activity component tree
-                                let mut root_view = interos_acr::view::View::linear_layout(1, true);
-                                root_view.padding = interos_acr::view::EdgeOffsets::all(20);
-                                root_view.background_color = Some(0xFF181818);
-                                root_view.is_clickable = true;
-
-                                let app_title = pkg_name.rsplit('.').next().unwrap_or(pkg_name);
-                                let title = interos_acr::view::View::text_view(2, app_title, 20, 0xFFFFFFFF);
-                                root_view.add_child(title);
-
-                                let sub = interos_acr::view::View::text_view(3, pkg_name, 13, 0xFF9E9E9E);
-                                root_view.add_child(sub);
-
-                                let mut btn = interos_acr::view::View::button(4, "Open", 16, 0xFFFFFFFF);
-                                btn.margins.top = 24;
-                                root_view.add_child(btn);
+                                // Prefer the Activity's OWN content view built by
+                                // DEX onCreate (TextView/Button/ViewGroup via the VM
+                                // view model). Only when the app set no content do we
+                                // show a truthful placeholder -- never presented as
+                                // app-generated UI.
+                                let mut root_view = match inst.vm.content_view() {
+                                    Some(view) => {
+                                        let _ = std::log("[acr-app-runtime] STATE: AppContentView(dex)");
+                                        view
+                                    }
+                                    None => {
+                                        let _ = std::log("[acr-app-runtime] STATE: NoContentView");
+                                        let mut v = interos_acr::view::View::linear_layout(1, true);
+                                        v.padding = interos_acr::view::EdgeOffsets::all(20);
+                                        v.background_color = Some(0xFF181818);
+                                        let app_title = pkg_name.rsplit('.').next().unwrap_or(pkg_name);
+                                        v.add_child(interos_acr::view::View::text_view(2, app_title, 20, 0xFFFFFFFF));
+                                        v.add_child(interos_acr::view::View::text_view(3, pkg_name, 13, 0xFF9E9E9E));
+                                        v
+                                    }
+                                };
 
                                 root_view.measure(
                                     interos_acr::view::MeasureSpec::exactly(720),
