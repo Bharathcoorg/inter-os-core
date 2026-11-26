@@ -244,6 +244,22 @@ pub fn soft_sqrt(val: f64) -> f64 {
     }
 }
 
+/// VM-managed view widget kinds backing an application-owned UI tree.
+///
+/// This is distinct from the fail-closed pure [`crate::framework::dispatch`]
+/// surface: a DEX `onCreate` that drives these through
+/// [`DalvikVmState::dispatch_framework_method`] records real view state that
+/// the system service renders via [`crate::view`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewKind {
+    View,
+    TextView,
+    Button,
+    LinearLayoutVertical,
+    LinearLayoutHorizontal,
+    FrameLayout,
+}
+
 /// VM-managed payload for stateful Java and Android objects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectPayload {
@@ -254,6 +270,12 @@ pub enum ObjectPayload {
     BoxedInteger(i32),
     BoxedLong(i64),
     Class { descriptor: String },
+    /// Application-owned view node recorded by the VM view model.
+    View {
+        kind: ViewKind,
+        text: String,
+        children: Vec<u32>,
+    },
     ArrayList(Vec<u32>),
     HashMap(BTreeMap<String, u32>),
     SharedPreferences {
@@ -367,6 +389,9 @@ impl DalvikObject {
             ObjectPayload::None => 0,
             ObjectPayload::String(s) | ObjectPayload::StringBuilder(s) => s.len(),
             ObjectPayload::Class { descriptor } => descriptor.len(),
+            ObjectPayload::View { text, children, .. } => {
+                text.len() + children.len() * core::mem::size_of::<u32>()
+            }
             ObjectPayload::ArrayList(list) => list.len() * core::mem::size_of::<u32>(),
             ObjectPayload::HashMap(map) => map.iter().map(|(k, _)| k.len() + 24).sum(),
             ObjectPayload::SharedPreferences { name, values } => {
@@ -433,9 +458,13 @@ pub struct DalvikVmState {
     /// Caller context providing security credentials for VFS operations.
     pub caller_context: Option<super::vfs::AndroidCaller>,
     /// Monitor lock table tracking object identities, thread ownership, and recursion depth.
-    pub monitors: BTreeMap<u32, MonitorRecord>,
+    pub     monitors: BTreeMap<u32, MonitorRecord>,
     objects: Vec<DalvikObject>,
     next_object_id: u32,
+    /// Object id of the Activity content-view root set via
+    /// `Activity.setContentView` at the VM level (distinct from the
+    /// fail-closed pure `framework::dispatch`). Rendered by the system service.
+    content_view_id: Option<u32>,
     static_fields: Vec<(u16, u32)>,
     pub heap_max_bytes: usize,
     pub heap_used_bytes: usize,
@@ -762,6 +791,7 @@ impl DalvikVmState {
             monitors: BTreeMap::new(),
             objects: Vec::new(),
             next_object_id: 1,
+            content_view_id: None,
             static_fields: Vec::new(),
             heap_max_bytes: DEFAULT_HEAP_MAX_BYTES,
             heap_used_bytes: 0,
@@ -1191,6 +1221,13 @@ impl DalvikVmState {
                             queue.push(*cause);
                         }
                     }
+                    ObjectPayload::View { children, .. } => {
+                        for child in children {
+                            if *child > 0 && *child < self.next_object_id && marked.insert(*child) {
+                                queue.push(*child);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1433,6 +1470,155 @@ impl DalvikVmState {
     }
 
     /// Dispatches Java standard library and Android framework methods with genuine VM-managed state.
+    /// Handles VM-managed, application-owned view construction and mutation.
+    ///
+    /// Returns `Ok(Some(v))` when the call was a real view-model operation
+    /// (recorded on the VM object heap / content-view slot), `Ok(None)` when the
+    /// class/method is not part of the view model (so the caller falls through
+    /// to the fail-closed `framework::dispatch`), and `Err(..)` on a fault.
+    fn try_dispatch_view_method(
+        &mut self,
+        dex: &DexPackage,
+        class: &str,
+        method_name: &str,
+        arg_registers: &[usize],
+        arg_values: &[u32],
+    ) -> Result<Option<u32>, DalvikVmError> {
+        let receiver = arg_values.first().copied().unwrap_or(0);
+        match class {
+            "android/view/View"
+            | "android/view/ViewGroup"
+            | "android/widget/TextView"
+            | "android/widget/Button"
+            | "android/widget/LinearLayout"
+            | "android/widget/FrameLayout" => match method_name {
+                "<init>" => {
+                    let kind = match class {
+                        "android/widget/TextView" => ViewKind::TextView,
+                        "android/widget/Button" => ViewKind::Button,
+                        "android/widget/FrameLayout" => ViewKind::FrameLayout,
+                        "android/widget/LinearLayout" => ViewKind::LinearLayoutVertical,
+                        "android/view/ViewGroup" => ViewKind::LinearLayoutVertical,
+                        _ => ViewKind::View,
+                    };
+                    if receiver == 0 {
+                        return Err(self.throw_npe(Some("Null receiver in View.<init>")));
+                    }
+                    if let Ok(obj) = self.get_object_mut(receiver) {
+                        obj.payload = ObjectPayload::View {
+                            kind,
+                            text: String::new(),
+                            children: Vec::new(),
+                        };
+                    }
+                    self.last_return_value = 0;
+                    self.last_return_string = None;
+                    Ok(Some(0))
+                }
+                "setText" => {
+                    if receiver == 0 {
+                        return Err(self.throw_npe(Some("Null receiver in TextView.setText")));
+                    }
+                    let shadow = if arg_registers.len() > 1 && arg_registers[1] < self.string_registers.len() {
+                        self.string_registers[arg_registers[1]].as_deref()
+                    } else {
+                        None
+                    };
+                    let text = self
+                        .resolve_string_arg(dex, arg_values.get(1).copied().unwrap_or(0), shadow)
+                        .unwrap_or_default();
+                    if let Ok(obj) = self.get_object_mut(receiver) {
+                        if let ObjectPayload::View { text: slot, .. } = &mut obj.payload {
+                            *slot = text;
+                        } else {
+                            obj.payload = ObjectPayload::View {
+                                kind: ViewKind::TextView,
+                                text,
+                                children: Vec::new(),
+                            };
+                        }
+                    }
+                    self.last_return_value = 0;
+                    self.last_return_string = None;
+                    Ok(Some(0))
+                }
+                "addView" => {
+                    if receiver == 0 {
+                        return Err(self.throw_npe(Some("Null receiver in ViewGroup.addView")));
+                    }
+                    let child = arg_values.get(1).copied().unwrap_or(0);
+                    if child == 0 {
+                        return Err(self.throw_npe(Some("Null child in ViewGroup.addView")));
+                    }
+                    if let Ok(obj) = self.get_object_mut(receiver) {
+                        if let ObjectPayload::View { children, .. } = &mut obj.payload {
+                            if children.len() < 256 {
+                                children.push(child);
+                            }
+                        }
+                    }
+                    self.last_return_value = 0;
+                    self.last_return_string = None;
+                    Ok(Some(0))
+                }
+                _ => Ok(None),
+            },
+            "android/app/Activity" if method_name == "setContentView" => {
+                let view_id = arg_values.get(1).copied().unwrap_or(0);
+                if view_id == 0 {
+                    return Err(self.throw_npe(Some("Null content view in Activity.setContentView")));
+                }
+                self.content_view_id = Some(view_id);
+                self.last_return_value = 0;
+                self.last_return_string = None;
+                Ok(Some(0))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Recursively builds a renderable [`crate::view::View`] tree from a VM
+    /// view-model object graph rooted at `id`.
+    fn build_view(&self, id: u32) -> Option<crate::view::View> {
+        let obj = self.get_object(id).ok()?;
+        let ObjectPayload::View { kind, text, children } = &obj.payload else {
+            return None;
+        };
+        let mut view = match kind {
+            ViewKind::TextView => crate::view::View::text_view(id as i32, text, 16, 0xFFFF_FFFF),
+            ViewKind::Button => crate::view::View::button(id as i32, text, 14, 0xFF00_FF00),
+            ViewKind::View => crate::view::View::new(id as i32, crate::view::ViewType::Plain),
+            ViewKind::LinearLayoutVertical => crate::view::View::linear_layout(id as i32, true),
+            ViewKind::LinearLayoutHorizontal => crate::view::View::linear_layout(id as i32, false),
+            ViewKind::FrameLayout => crate::view::View::new(
+                id as i32,
+                crate::view::ViewType::ViewGroup {
+                    kind: crate::view::ViewGroupKind::FrameLayout,
+                    children: Vec::new(),
+                },
+            ),
+        };
+        for &child_id in children {
+            if let Some(child) = self.build_view(child_id) {
+                view.add_child(child);
+            }
+        }
+        Some(view)
+    }
+
+    /// Object id of the Activity content-view root, if `setContentView` was
+    /// driven through the VM view model.
+    pub fn content_view_id(&self) -> Option<u32> {
+        self.content_view_id
+    }
+
+    /// Renders the Activity content view as a real [`crate::view::View`] tree
+    /// for the system service to measure, layout, and draw. Returns `None` when
+    /// no content view has been set through the VM view model.
+    pub fn content_view(&self) -> Option<crate::view::View> {
+        self.build_view(self.content_view_id?)
+    }
+
     pub fn dispatch_framework_method(
         &mut self,
         dex: &DexPackage,
@@ -1442,6 +1628,11 @@ impl DalvikVmState {
         arg_values: &[u32],
     ) -> Result<u32, DalvikVmError> {
         let class = class_name.strip_prefix('L').and_then(|s| s.strip_suffix(';')).unwrap_or(class_name);
+        // VM-managed, application-owned UI: real view state recorded by the VM,
+        // distinct from the fail-closed pure `framework::dispatch` surface.
+        if let Some(result) = self.try_dispatch_view_method(dex, class, method_name, arg_registers, arg_values)? {
+            return Ok(result);
+        }
         match class {
             "java/lang/Object" => {
                 match method_name {
@@ -7404,6 +7595,131 @@ mod tests {
         assert_eq!(
             vm.step_thread_slice(&dex, 1, 4096),
             ThreadSliceOutcome::Fatal(DalvikVmError::InvalidBytecode)
+        );
+    }
+
+    #[test]
+    fn vm_view_model_records_dex_created_textview_settext_and_contentview() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).expect("test DEX should parse");
+        let mut vm = DalvikVmState::new();
+        assert_eq!(vm.content_view_id(), None);
+        assert!(vm.content_view().is_none());
+
+        // DEX `new TextView(this)` + `<init>` records a real VM view object.
+        let tv_id = vm.allocate_object("Landroid/widget/TextView;").unwrap();
+        assert_eq!(
+            vm.dispatch_framework_method(&dex, "Landroid/widget/TextView;", "<init>", &[0], &[tv_id]),
+            Ok(0)
+        );
+        assert!(matches!(
+            vm.objects.iter().find(|o| o.id == tv_id).map(|o| &o.payload),
+            Some(ObjectPayload::View { kind: ViewKind::TextView, text, children }) if text.is_empty() && children.is_empty()
+        ));
+
+        // `textView.setText("Hello InterOS")` mutates the recorded view text.
+        let text_id = vm.allocate_string("Hello InterOS").unwrap();
+        assert_eq!(
+            vm.dispatch_framework_method(
+                &dex,
+                "Landroid/widget/TextView;",
+                "setText",
+                &[0, 1],
+                &[tv_id, text_id]
+            ),
+            Ok(0)
+        );
+        assert!(matches!(
+            vm.objects.iter().find(|o| o.id == tv_id).map(|o| &o.payload),
+            Some(ObjectPayload::View { kind: ViewKind::TextView, text, .. }) if text == "Hello InterOS"
+        ));
+
+        // `activity.setContentView(textView)` stores the content-view slot.
+        let activity_id = vm.allocate_object("Landroid/app/Activity;").unwrap();
+        assert_eq!(
+            vm.dispatch_framework_method(
+                &dex,
+                "Landroid/app/Activity;",
+                "setContentView",
+                &[0, 1],
+                &[activity_id, tv_id]
+            ),
+            Ok(0)
+        );
+        assert_eq!(vm.content_view_id(), Some(tv_id));
+
+        // The system service renders a real view tree from the VM state.
+        let rendered = vm.content_view().expect("content view should render");
+        assert_eq!(rendered.id, tv_id as i32);
+        match rendered.view_type {
+            crate::view::ViewType::TextView { text, .. } => assert_eq!(text, "Hello InterOS"),
+            other => panic!("expected TextView, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vm_view_model_records_viewgroup_children_tree() {
+        let dex_bytes = create_test_dex("Lorg/interos/Test;", "onCreate", "test");
+        let dex = DexPackage::parse(&dex_bytes).expect("test DEX should parse");
+        let mut vm = DalvikVmState::new();
+
+        // Build a vertical LinearLayout with two TextView children via the VM.
+        let root_id = vm.allocate_object("Landroid/widget/LinearLayout;").unwrap();
+        vm.dispatch_framework_method(&dex, "Landroid/widget/LinearLayout;", "<init>", &[0], &[root_id])
+            .unwrap();
+
+        let child_a = vm.allocate_object("Landroid/widget/TextView;").unwrap();
+        vm.dispatch_framework_method(&dex, "Landroid/widget/TextView;", "<init>", &[0], &[child_a])
+            .unwrap();
+        let a_text = vm.allocate_string("Row A").unwrap();
+        vm.dispatch_framework_method(&dex, "Landroid/widget/TextView;", "setText", &[0, 1], &[child_a, a_text])
+            .unwrap();
+
+        let child_b = vm.allocate_object("Landroid/widget/TextView;").unwrap();
+        vm.dispatch_framework_method(&dex, "Landroid/widget/TextView;", "<init>", &[0], &[child_b])
+            .unwrap();
+        let b_text = vm.allocate_string("Row B").unwrap();
+        vm.dispatch_framework_method(&dex, "Landroid/widget/TextView;", "setText", &[0, 1], &[child_b, b_text])
+            .unwrap();
+
+        vm.dispatch_framework_method(&dex, "Landroid/widget/LinearLayout;", "addView", &[0, 1], &[root_id, child_a])
+            .unwrap();
+        vm.dispatch_framework_method(&dex, "Landroid/widget/LinearLayout;", "addView", &[0, 1], &[root_id, child_b])
+            .unwrap();
+
+        assert!(matches!(
+            vm.objects.iter().find(|o| o.id == root_id).map(|o| &o.payload),
+            Some(ObjectPayload::View { kind: ViewKind::LinearLayoutVertical, children, .. })
+                if children.as_slice() == [child_a, child_b]
+        ));
+
+        let activity_id = vm.allocate_object("Landroid/app/Activity;").unwrap();
+        vm.dispatch_framework_method(&dex, "Landroid/app/Activity;", "setContentView", &[0, 1], &[activity_id, root_id])
+            .unwrap();
+
+        let rendered = vm.content_view().expect("content view should render");
+        match rendered.view_type {
+            crate::view::ViewType::ViewGroup { children, .. } => {
+                assert_eq!(children.len(), 2);
+                assert!(matches!(&children[0].view_type, crate::view::ViewType::TextView { text, .. } if text == "Row A"));
+                assert!(matches!(&children[1].view_type, crate::view::ViewType::TextView { text, .. } if text == "Row B"));
+            }
+            other => panic!("expected ViewGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn framework_dispatch_stays_fail_closed_for_view_and_content_apis() {
+        // The pure framework surface must NOT fabricate view success; the VM view
+        // model above is the only genuine path.
+        let mut logs = Vec::new();
+        assert_eq!(
+            super::super::framework::dispatch("Landroid/widget/TextView;", "setText", &[], &mut logs),
+            Err(super::super::framework::AndroidFrameworkError::UnsupportedApi)
+        );
+        assert_eq!(
+            super::super::framework::dispatch("Landroid/app/Activity;", "setContentView", &[], &mut logs),
+            Err(super::super::framework::AndroidFrameworkError::UnsupportedApi)
         );
     }
 }
