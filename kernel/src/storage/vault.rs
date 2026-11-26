@@ -37,7 +37,17 @@ pub const VAULT_TOTAL_SECTORS: u32 = VAULT_TOTAL_BLOCKS * VAULT_SECTORS_PER_BLOC
 /// base would collide with InterFS on any disk large enough to hold a model.
 pub fn vault_base_lba(total: u32) -> Option<u32> {
     let journal = super::persistent::SLOT_SECTORS * super::persistent::TOTAL_SLOT_COUNT;
-    total.checked_sub(journal + VAULT_TOTAL_SECTORS)
+    let base = total.checked_sub(journal + VAULT_TOTAL_SECTORS)?;
+    // The vault must begin AFTER the boot reservation and the minimum InterFS
+    // region; a base below that would place the vault inside boot/filesystem
+    // sectors. A disk too small for all four regions has no vault (fail closed).
+    let min_fs_end =
+        super::filesystem::BLOCK_FS_BASE_LBA + super::filesystem::MIN_INTERFS_REGION_SECTORS;
+    if base < min_fs_end {
+        None
+    } else {
+        Some(base)
+    }
 }
 pub const VAULT_MAGIC: [u8; 4] = *b"IVLT";
 /// On-disk envelope format. Version 1 was a single header+ciphertext slot per
@@ -172,8 +182,11 @@ impl StorageVault {
         let block = self.encrypt_sector(block_index, plaintext, &iv)?;
         let mut guard = crate::drivers::ATA_PRIMARY.lock();
         let drive = guard.as_mut().ok_or(VaultError::HardwareFailure)?;
-        Self::write_envelope(drive, &self.vault_key, block_index, &block)?;
-        Ok(block)
+        let (generation, tag) = Self::write_envelope(drive, &self.vault_key, block_index, &block)?;
+        // Return the block as actually persisted: the generation and tag that
+        // were written to the header, not the pre-write placeholder.
+        let persisted = VaultBlock { generation, hmac_tag: tag, ..block };
+        Ok(persisted)
     }
 
     /// Reads a previously sealed envelope back and decrypts it.
@@ -232,8 +245,21 @@ impl StorageVault {
     /// Reads the generation of one slot for the write path's alternation. Any
     /// unreadable, foreign or old-format header reads as generation 0, so a
     /// fresh seal simply claims the slot.
-    fn slot_generation(drive: &mut impl BlockDevice, block_index: u64, slot: u32, total: u32) -> u64 {
-        let Some((header_lba, _)) = Self::slot_lbas(block_index, slot, total) else {
+    /// Authenticated generation of one slot for the write path's alternation.
+    ///
+    /// The header generation is NOT trusted on its own: an attacker could bump
+    /// it to steer which slot is overwritten. The slot's generation is returned
+    /// only if the header's HMAC (iv + index + generation + ciphertext)
+    /// authenticates under the vault key; an unreadable, foreign, old-format or
+    /// tampered slot reads as generation 0 so it is the one a fresh seal claims.
+    fn slot_generation(
+        drive: &mut impl BlockDevice,
+        key: &[u8; 32],
+        block_index: u64,
+        slot: u32,
+        total: u32,
+    ) -> u64 {
+        let Some((header_lba, data_lba)) = Self::slot_lbas(block_index, slot, total) else {
             return 0;
         };
         let mut header = [0u8; SECTOR_SIZE];
@@ -247,17 +273,34 @@ impl StorageVault {
         if version != VAULT_FORMAT_VERSION {
             return 0;
         }
-        if u64::from_le_bytes([
+        let index = u64::from_le_bytes([
             header[8], header[9], header[10], header[11],
             header[12], header[13], header[14], header[15],
-        ]) != block_index
-        {
+        ]);
+        if index != block_index {
             return 0;
         }
-        u64::from_le_bytes([
+        let generation = u64::from_le_bytes([
             header[72], header[73], header[74], header[75],
             header[76], header[77], header[78], header[79],
-        ])
+        ]);
+        // Authenticate before trusting the generation: read the ciphertext and
+        // verify the tag, so a tampered generation (or ciphertext) reads as 0.
+        let mut ciphertext = [0u8; VAULT_SECTOR_SIZE];
+        if drive.read_sector(data_lba, &mut ciphertext).is_err() {
+            return 0;
+        }
+        let mut iv = [0u8; 16];
+        iv.copy_from_slice(&header[16..32]);
+        let mut tag = [0u8; SHA256_DIGEST_LENGTH];
+        tag.copy_from_slice(&header[32..64]);
+        let block = VaultBlock { iv, block_index, ciphertext, hmac_tag: tag, generation };
+        let expected = VaultBlock::generation_tag(key, &block, generation);
+        if crate::crypto::constant_time_eq_32(&expected, &block.hmac_tag) {
+            generation
+        } else {
+            0
+        }
     }
 
     /// Writes one envelope into the older of the block's two slots, stamping a
@@ -268,10 +311,10 @@ impl StorageVault {
         key: &[u8; 32],
         block_index: u64,
         block: &VaultBlock,
-    ) -> Result<(), VaultError> {
+    ) -> Result<(u64, [u8; SHA256_DIGEST_LENGTH]), VaultError> {
         let total = drive.sector_count();
-        let gen_a = Self::slot_generation(&mut *drive, block_index, 0, total);
-        let gen_b = Self::slot_generation(&mut *drive, block_index, 1, total);
+        let gen_a = Self::slot_generation(&mut *drive, key, block_index, 0, total);
+        let gen_b = Self::slot_generation(&mut *drive, key, block_index, 1, total);
         // Alternate: target the slot with the older generation, so the newest
         // valid generation is never the one being overwritten.
         let target = if gen_a <= gen_b { 0u32 } else { 1u32 };
@@ -295,7 +338,7 @@ impl StorageVault {
             .write_sector(header_lba, &header)
             .map_err(|_| VaultError::HardwareFailure)?;
         drive.flush().map_err(|_| VaultError::HardwareFailure)?;
-        Ok(())
+        Ok((next_generation, tag))
     }
 
     /// Reads one slot, authenticating it against the vault key.
@@ -858,6 +901,57 @@ fn mock_base() -> u32 {
             vault.read_envelope(&mut dev, BLOCK).err(),
             Some(VaultError::UnsupportedFormat),
             "the old single-slot format must be refused explicitly, not misread",
+        );
+    }
+
+    #[test]
+    fn undersized_disk_has_no_vault_and_fails_closed() {
+        // A disk too small for boot + min FS + vault + journal has no vault; a
+        // write must fail closed without touching any sector.
+        assert!(vault_base_lba(12_000).is_none());
+        assert!(vault_base_lba(14_882).is_none());
+        assert_eq!(vault_base_lba(14_883), Some(4_131));
+        let mut vault = seeded_vault();
+        let block = vault.encrypt_sector(BLOCK, &[0x55u8; VAULT_SECTOR_SIZE], &[0x11u8; 16]).unwrap();
+        let mut dev = MockDevice::new(12_000);
+        assert_eq!(
+            StorageVault::write_envelope(&mut dev, &vault.vault_key, BLOCK, &block).err(),
+            Some(VaultError::InvalidBlockIndex),
+            "an undersized disk must refuse the vault write"
+        );
+    }
+
+    #[test]
+    fn tampered_generation_does_not_steal_the_write_target() {
+        // A gen1 (slot0), B gen2 (slot1). Corrupt only A's generation to MAX.
+        // A new write must authenticate generations (A reads as 0) and target A,
+        // leaving B intact; a power cut before A's header commit must still
+        // recover B.
+        let mut vault = seeded_vault();
+        let first = [0x10u8; VAULT_SECTOR_SIZE];
+        let second = [0x20u8; VAULT_SECTOR_SIZE];
+        let third = [0x30u8; VAULT_SECTOR_SIZE];
+        let a = vault.encrypt_sector(BLOCK, &first, &[0x11u8; 16]).unwrap();
+        let b = vault.encrypt_sector(BLOCK, &second, &[0x22u8; 16]).unwrap();
+        let c = vault.encrypt_sector(BLOCK, &third, &[0x33u8; 16]).unwrap();
+        let mut dev = MockDevice::new(MOCK_SECTORS);
+        StorageVault::write_envelope(&mut dev, &vault.vault_key, BLOCK, &a).unwrap(); // slot0 gen1
+        StorageVault::write_envelope(&mut dev, &vault.vault_key, BLOCK, &b).unwrap(); // slot1 gen2
+        // Tamper slot0's generation header to MAX (unauthenticated on the old path).
+        let mut hdr = [0u8; SECTOR_SIZE];
+        dev.read_sector(mock_base(), &mut hdr).unwrap();
+        hdr[72..80].copy_from_slice(&u64::MAX.to_le_bytes());
+        dev.write_header(mock_base(), &hdr);
+        // New write: authenticated gen_a = 0 (tampered), gen_b = 2 -> target slot0.
+        StorageVault::write_envelope(&mut dev, &vault.vault_key, BLOCK, &c).unwrap();
+        // Slot1 (B) must be untouched; corrupt slot0's header to simulate the
+        // interrupted commit and confirm B is still recoverable.
+        dev.scribble(mock_base(), 0x00);
+        let recovered = vault.read_envelope(&mut dev, BLOCK).expect("B must survive");
+        assert_eq!(
+            vault.decrypt_sector(&recovered).unwrap(),
+            second,
+            "the older valid slot must remain recoverable; the tampered generation must not steal the write"
         );
     }
 }

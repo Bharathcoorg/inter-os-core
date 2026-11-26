@@ -249,7 +249,7 @@ def region_for_device(total_sectors):
             "the device is {} sectors, which does not clear the {}-sector journal tail".format(
                 total_sectors, BLOCK_FS_TAIL_RESERVED))
     vault_base = journal_end - VAULT_TOTAL_SECTORS
-    end = vault_base if vault_base > BLOCK_FS_BASE_LBA + MIN_REGION_SECTORS else journal_end
+    end = vault_base if vault_base >= BLOCK_FS_BASE_LBA + MIN_REGION_SECTORS else journal_end
     available = end - BLOCK_FS_BASE_LBA
     if available < MIN_REGION_SECTORS:
         raise ProvisioningError(
