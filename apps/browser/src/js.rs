@@ -8,7 +8,7 @@
 //! step, memory, and nesting budgets. Unsupported syntax and budget
 //! overruns report truthful typed errors.
 
-use crate::layout::dom::{Dom, NodeId};
+use crate::layout::dom::{Dom, NodeId, NO_NODE};
 
 /// Maximum variables tracked in the local script execution scope.
 pub const MAX_VARS: usize = 64;
@@ -26,6 +26,13 @@ pub const MAX_ARRAY_ELEMS: usize = 16;
 pub const MAX_FUNCTIONS: usize = 16;
 /// Default execution step budget before halting with StepBudgetExhausted.
 pub const DEFAULT_STEP_BUDGET: usize = 2000;
+
+/// Maximum event listeners registered through `addEventListener` in one run.
+///
+/// WHY bounded: the runtime is a fixed arena with no heap, so the listener
+/// table is a fixed array. A page that registers more than this keeps the
+/// first `MAX_LISTENERS` and the rest are refused with `CapacityExceeded`.
+pub const MAX_LISTENERS: usize = 16;
 
 /// Bounded JavaScript value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1152,6 +1159,22 @@ pub struct JsFunctionDef {
     pub body: usize,
 }
 
+/// One `addEventListener` registration made during a script run.
+///
+/// WHY the handler is a function id and not source: the interpreter keeps
+/// function bodies in the per-run arena, so a listener is a reference into
+/// that arena. Listeners live for the run in which they were registered and
+/// are dispatched by [`JsRuntime::dispatch_event`] before that run ends; they
+/// are not persisted to a later user gesture (inline `on*` attributes cover
+/// that path).
+#[derive(Debug, Clone, Copy)]
+struct JsListener {
+    node: NodeId,
+    event: [u8; 16],
+    event_len: u8,
+    fn_id: u8,
+}
+
 /// Runtime Execution Environment.
 pub struct JsRuntime<'a> {
     vars: [JsVar; MAX_VARS],
@@ -1161,6 +1184,8 @@ pub struct JsRuntime<'a> {
     array_count: usize,
     functions: [JsFunctionDef; MAX_FUNCTIONS],
     function_count: usize,
+    listeners: [JsListener; MAX_LISTENERS],
+    listener_count: usize,
     call_depth: usize,
     dom: &'a mut Dom,
     remaining_steps: usize,
@@ -1187,6 +1212,13 @@ impl<'a> JsRuntime<'a> {
                 body: 0,
             }; MAX_FUNCTIONS],
             function_count: 0,
+            listeners: [JsListener {
+                node: NO_NODE,
+                event: [0; 16],
+                event_len: 0,
+                fn_id: 0,
+            }; MAX_LISTENERS],
+            listener_count: 0,
             call_depth: 0,
             dom,
             remaining_steps: step_budget,
@@ -1594,6 +1626,40 @@ impl<'a> JsRuntime<'a> {
                             }
                         }
 
+                        // Method: element.addEventListener(event, handler)
+                        // Registers a function-valued handler for a named event
+                        // on this element. The handler runs when the runtime
+                        // dispatches that event (see `dispatch_event`).
+                        if method == b"addEventListener" && *args_count >= 2 {
+                            let node = match obj {
+                                JsValue::Element(n) => n,
+                                _ => return Err(JsError::TypeError),
+                            };
+                            let ev_id = parser.args_pool[*args_start];
+                            let ev_val = self.eval_expr(parser, ev_id)?;
+                            let ev_bytes = ev_val.as_str().as_bytes();
+                            let fn_id = parser.args_pool[*args_start + 1];
+                            let fn_val = self.eval_expr(parser, fn_id)?;
+                            let handler = match fn_val {
+                                JsValue::Function(f) => f,
+                                _ => return Err(JsError::TypeError),
+                            };
+                            if self.listener_count >= MAX_LISTENERS {
+                                return Err(JsError::CapacityExceeded);
+                            }
+                            let mut event = [0u8; 16];
+                            let elen = ev_bytes.len().min(event.len());
+                            event[..elen].copy_from_slice(&ev_bytes[..elen]);
+                            self.listeners[self.listener_count] = JsListener {
+                                node,
+                                event,
+                                event_len: elen as u8,
+                                fn_id: handler,
+                            };
+                            self.listener_count += 1;
+                            return Ok(JsValue::Undefined);
+                        }
+
                         // Method: console.log(...)
                         if method == b"log" {
                             return Ok(JsValue::Undefined);
@@ -1604,44 +1670,13 @@ impl<'a> JsRuntime<'a> {
                     _ => {
                         let callee_val = self.eval_expr(parser, *callee)?;
                         if let JsValue::Function(fn_id) = callee_val {
-                            let fn_idx = fn_id as usize;
-                            if fn_idx >= self.function_count {
-                                return Err(JsError::ReferenceError);
-                            }
-                            if self.call_depth >= 8 {
-                                return Err(JsError::CapacityExceeded);
-                            }
-                            self.call_depth += 1;
-                            let fndef = self.functions[fn_idx];
-
                             let mut evaled_args = [JsValue::Undefined; MAX_ARGS];
                             let arg_take = (*args_count as usize).min(MAX_ARGS);
                             for i in 0..arg_take {
                                 let arg_expr = parser.args_pool[*args_start + i];
                                 evaled_args[i] = self.eval_expr(parser, arg_expr)?;
                             }
-
-                            let saved_var_count = self.var_count;
-
-                            for i in 0..fndef.params_count as usize {
-                                let pidx = fndef.params_start + i;
-                                let pname =
-                                    &parser.params_pool[pidx][..parser.params_lens[pidx] as usize];
-                                let pval = if i < arg_take {
-                                    evaled_args[i]
-                                } else {
-                                    JsValue::Undefined
-                                };
-                                self.set_var(pname, pval)?;
-                            }
-
-                            let res = self.eval_stmt(parser, fndef.body);
-                            self.var_count = saved_var_count;
-                            self.call_depth -= 1;
-
-                            match res? {
-                                StmtResult::Return(v) | StmtResult::Normal(v) => Ok(v),
-                            }
+                            self.invoke_function(parser, fn_id, &evaled_args[..arg_take])
                         } else {
                             Err(JsError::UnsupportedSyntax("unsupported function call"))
                         }
@@ -1694,6 +1729,75 @@ impl<'a> JsRuntime<'a> {
                 Ok(JsValue::Array(aid as u8))
             }
         }
+    }
+
+    /// Invokes a user function by id with already-evaluated arguments.
+    ///
+    /// WHY a helper: both a call expression and an event dispatch need to
+    /// enter a function body, and the body sets and restores the variable
+    /// scope and the call-depth guard. Keeping one copy means a listener
+    /// runs under exactly the same budgets as an ordinary call.
+    fn invoke_function(
+        &mut self,
+        parser: &Parser,
+        fn_id: u8,
+        evaled_args: &[JsValue],
+    ) -> Result<JsValue, JsError> {
+        let fn_idx = fn_id as usize;
+        if fn_idx >= self.function_count {
+            return Err(JsError::ReferenceError);
+        }
+        if self.call_depth >= 8 {
+            return Err(JsError::CapacityExceeded);
+        }
+        self.call_depth += 1;
+        let fndef = self.functions[fn_idx];
+        let saved_var_count = self.var_count;
+        let arg_take = evaled_args.len().min(MAX_ARGS);
+
+        for i in 0..fndef.params_count as usize {
+            let pidx = fndef.params_start + i;
+            let pname = &parser.params_pool[pidx][..parser.params_lens[pidx] as usize];
+            let pval = if i < arg_take {
+                evaled_args[i]
+            } else {
+                JsValue::Undefined
+            };
+            self.set_var(pname, pval)?;
+        }
+
+        let res = self.eval_stmt(parser, fndef.body);
+        self.var_count = saved_var_count;
+        self.call_depth -= 1;
+
+        match res? {
+            StmtResult::Return(v) | StmtResult::Normal(v) => Ok(v),
+        }
+    }
+
+    /// Dispatches `event` to every listener registered for that name.
+    ///
+    /// The matching function ids are gathered first so the mutable borrow
+    /// taken by [`JsRuntime::invoke_function`] does not overlap the listener
+    /// table read. A handler that overruns its budget aborts the dispatch
+    /// with the same error an ordinary call would report.
+    fn dispatch_event(&mut self, parser: &Parser, event: &[u8]) -> Result<(), JsError> {
+        let mut ids = [0u8; MAX_LISTENERS];
+        let mut count = 0usize;
+        for i in 0..self.listener_count {
+            let listener = self.listeners[i];
+            let len = listener.event_len as usize;
+            if len == event.len() && &listener.event[..len] == event {
+                if count < ids.len() {
+                    ids[count] = listener.fn_id;
+                    count += 1;
+                }
+            }
+        }
+        for i in 0..count {
+            self.invoke_function(parser, ids[i], &[])?;
+        }
+        Ok(())
     }
 
     fn eval_expr_bin_eq(&self, l: JsValue, r: JsValue) -> bool {
@@ -1815,6 +1919,29 @@ pub fn execute_script(
     step_budget: usize,
 ) -> Result<JsValue, JsError> {
     execute_script_with_mutations(script, dom, step_budget).map(|(v, _)| v)
+}
+
+/// Executes a script, then dispatches `event` to listeners it registered.
+///
+/// WHY this exists beside `execute_script_with_mutations`: a page that wires
+/// itself up with `addEventListener('DOMContentLoaded', ...)` does nothing
+/// until that event is delivered. Running the program and then dispatching
+/// the named event inside the same runtime is what makes such a page build
+/// its content during load. Returns the program value and whether the DOM
+/// was mutated (by the program or by a listener).
+pub fn execute_script_with_events(
+    script: &[u8],
+    dom: &mut Dom,
+    step_budget: usize,
+    event: &[u8],
+) -> Result<(JsValue, bool), JsError> {
+    let lexer = Lexer::new(script);
+    let mut parser = Parser::new(lexer)?;
+    let root = parser.parse_program()?;
+    let mut runtime = JsRuntime::new(dom, step_budget);
+    let val = runtime.eval_program(&parser, root)?;
+    runtime.dispatch_event(&parser, event)?;
+    Ok((val, runtime.dom_mutated()))
 }
 
 #[cfg(test)]
@@ -2023,5 +2150,53 @@ mod tests {
             child = dom.next_sibling(c);
         }
         assert!(p_is_child, "the created <p> must be appended under <body>");
+    }
+
+    #[test]
+    fn test_add_event_listener_runs_on_dispatch_and_mutates() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let before = dom.node_count();
+
+        // A function is registered for DOMContentLoaded; the dispatch at the
+        // end of the run must call it, and the handler builds a node.
+        let src = b"function boot() { var s = document.createElement('p'); s.textContent = 'BOOTED'; document.body.appendChild(s); } document.addEventListener('DOMContentLoaded', boot);";
+        let (_res, mutated) =
+            execute_script_with_events(src, &mut dom, 1000, b"DOMContentLoaded")
+                .expect("listener dispatch succeeds");
+        assert!(mutated, "a listener that builds a node must report a mutation");
+        assert!(
+            dom.node_count() > before,
+            "the dispatched listener must allocate the element and its text"
+        );
+
+        let mut found = false;
+        for i in 0..dom.node_count() {
+            let nid = i as NodeId;
+            if dom.node(nid).is_text() && dom.text_of(nid) == b"BOOTED" {
+                found = true;
+            }
+        }
+        assert!(found, "the listener's text 'BOOTED' must be in the DOM");
+    }
+
+    #[test]
+    fn test_event_dispatch_only_fires_matching_listeners() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let before = dom.node_count();
+
+        // Registered for 'click', but the dispatched event is 'load': the
+        // handler must NOT run, so the DOM is unchanged.
+        let src = b"function onClick() { var s = document.createElement('p'); s.textContent = 'CLICKED'; document.body.appendChild(s); } document.addEventListener('click', onClick);";
+        let (_res, mutated) =
+            execute_script_with_events(src, &mut dom, 1000, b"load")
+                .expect("non-matching dispatch succeeds");
+        assert!(!mutated, "a non-matching event must not run the handler");
+        assert_eq!(
+            dom.node_count(),
+            before,
+            "no node may be added when the event name does not match"
+        );
     }
 }

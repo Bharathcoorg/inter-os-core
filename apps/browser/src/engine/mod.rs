@@ -6,8 +6,82 @@
 //! Provides the `NativeFlowEngine` backend implementing `interos_std::engine::BrowserEngine`.
 
 pub use interos_std::engine::{BrowserEngine, EngineAction, EngineCapabilities, EngineStatus};
-use crate::layout::dom::Dom;
+use crate::layout::dom::{Dom, NodeId, NO_NODE};
 use crate::layout::flow::{self, TextLayout};
+
+/// The room one page's inline scripts may occupy when run at load.
+///
+/// WHY a fixed buffer: the engine is `#![no_std]` and never allocates, so the
+/// concatenated program text lives in a bounded buffer. A page whose scripts
+/// exceed this is run up to the cap; the remainder is not executed rather than
+/// silently truncated mid-statement.
+const SCRIPT_BUF_BYTES: usize = 4096;
+
+/// The most `<script>` elements one page may run at load.
+const MAX_PAGE_SCRIPTS: usize = 16;
+
+/// Runs a page's inline scripts, then dispatches `DOMContentLoaded` to any
+/// listener they registered.
+///
+/// WHY the scripts share one runtime: a browser runs all of a page's scripts
+/// in one global scope, so a function declared in one script is visible to the
+/// next and a listener registered by any of them fires on the load event. The
+/// bodies are joined with a newline into one program and executed once, which
+/// is what makes `addEventListener('DOMContentLoaded', ...)` build content
+/// during load. A script that overruns its budget or capacity is skipped and
+/// the rest still run, so one hostile script cannot blank the page.
+fn run_page_scripts(dom: &mut Dom) {
+    let node_count = dom.node_count();
+    let mut scripts: [NodeId; MAX_PAGE_SCRIPTS] = [NO_NODE; MAX_PAGE_SCRIPTS];
+    let mut script_count = 0usize;
+    for id in 0..node_count as NodeId {
+        if dom.node(id).is_element() && dom.tag(id).eq_ignore_ascii_case(b"script") {
+            if let Some(t) = dom.attr(id, b"type") {
+                let is_js = t.eq_ignore_ascii_case(b"text/javascript")
+                    || t.eq_ignore_ascii_case(b"application/javascript")
+                    || t.eq_ignore_ascii_case(b"text/ecmascript")
+                    || t.eq_ignore_ascii_case(b"application/ecmascript")
+                    || t.eq_ignore_ascii_case(b"module");
+                if !is_js {
+                    continue;
+                }
+            }
+            if script_count < scripts.len() {
+                scripts[script_count] = id;
+                script_count += 1;
+            }
+        }
+    }
+    if script_count == 0 {
+        return;
+    }
+
+    let mut buf = [0u8; SCRIPT_BUF_BYTES];
+    let mut len = 0usize;
+    for i in 0..script_count {
+        let body = dom.script_body(scripts[i]);
+        if body.is_empty() {
+            continue;
+        }
+        let room = buf.len().saturating_sub(len);
+        let take = body.len().min(room);
+        if take == 0 {
+            break;
+        }
+        buf[len..len + take].copy_from_slice(&body[..take]);
+        len += take;
+        // A newline separates one script's statements from the next so a
+        // trailing token cannot merge with the following script's first.
+        if len < buf.len() {
+            buf[len] = b'\n';
+            len += 1;
+        }
+    }
+    if len == 0 {
+        return;
+    }
+    let _ = crate::js::execute_script_with_events(&buf[..len], dom, crate::js::DEFAULT_STEP_BUDGET, b"DOMContentLoaded");
+}
 
 /// Sovereign `#![no_std]` native flow layout browser engine.
 pub struct NativeFlowEngine {
@@ -136,6 +210,9 @@ impl BrowserEngine for NativeFlowEngine {
 
         self.dom = Dom::new();
         self.dom.parse(html.as_bytes());
+        // Scripts run before layout so a page that builds its own content is
+        // laid out as it will be seen, not as the bare markup arrived.
+        run_page_scripts(&mut self.dom);
 
         self.layout = TextLayout::new();
         self.dom.collect_names();
@@ -487,5 +564,73 @@ mod tests {
         engine.layout.rect_count = 2;
 
         assert_eq!(engine.render_pixel(25, 25), 0xFFFF0000);
+    }
+
+    /// Acceptance: a `<script>` that creates an element and sets its text is
+    /// executed at load, and the new content reaches the display list and the
+    /// rasterized pixels -- not merely the DOM or the source string.
+    #[test]
+    fn dynamic_script_mutation_reaches_rendered_pixels() {
+        let with_script = "<html><body><p id=\"s\">start</p>\
+<script>var d = document.createElement('p'); d.textContent = 'DYNAMIC'; \
+document.body.appendChild(d);</script></body></html>";
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        assert!(engine.load_html(with_script, None).is_ok());
+
+        // A laid-out text run carries the injected word.
+        let run = engine.layout().runs[..engine.layout().run_count]
+            .iter()
+            .find(|r| r.bytes(engine.dom()).windows(7).any(|w| w == b"DYNAMIC"))
+            .expect("the script-injected text must be laid out as a run");
+
+        // The run's box rasterizes to glyph ink, not a blank background.
+        let mut ink = false;
+        for y in run.y as usize..run.y as usize + run.h as usize {
+            for x in run.x as usize..run.x as usize + run.w as usize {
+                let px = engine.render_pixel(x, y);
+                if px != 0xFFFFFFFF && px != 0xFF121212 {
+                    ink = true;
+                    break;
+                }
+            }
+            if ink {
+                break;
+            }
+        }
+        assert!(ink, "the script-injected text must rasterize to pixels");
+
+        // Control: the same page without the script has no such run, proving
+        // the pixels came from script execution and not the source markup.
+        let without_script = "<html><body><p id=\"s\">start</p></body></html>";
+        let mut control = NativeFlowEngine::new(720, 1234);
+        assert!(control.load_html(without_script, None).is_ok());
+        let leaked = control.layout().runs[..control.layout().run_count]
+            .iter()
+            .any(|r| r.bytes(control.dom()).windows(7).any(|w| w == b"DYNAMIC"));
+        assert!(!leaked, "without the script the injected text must be absent");
+        assert!(
+            engine.layout().run_count > control.layout().run_count,
+            "the script must add at least one laid-out run"
+        );
+    }
+
+    /// Acceptance: a listener registered with `addEventListener` for
+    /// `DOMContentLoaded` runs during load and its DOM mutation is laid out.
+    #[test]
+    fn dom_content_loaded_listener_builds_content_at_load() {
+        let html = "<html><body>\
+<script>function boot() { var s = document.createElement('p'); \
+s.textContent = 'BOOTED'; document.body.appendChild(s); } \
+document.addEventListener('DOMContentLoaded', boot);</script></body></html>";
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        assert!(engine.load_html(html, None).is_ok());
+
+        let laid_out = engine.layout().runs[..engine.layout().run_count]
+            .iter()
+            .any(|r| r.bytes(engine.dom()).windows(6).any(|w| w == b"BOOTED"));
+        assert!(
+            laid_out,
+            "the DOMContentLoaded listener must run at load and its content must be laid out"
+        );
     }
 }
