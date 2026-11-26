@@ -17,6 +17,3 @@ pub mod vfs;
 pub mod bridge;
 pub mod draw;
 pub mod manager;
-
-#[cfg(test)]
-mod gen_ui_apk;
