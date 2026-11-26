@@ -7909,10 +7909,18 @@ pub fn sys_mem_transfer(
         for i in 0..page_count {
             let page = Page::<Size4KiB>::containing_address(VirtAddr::new(receiver_vaddr + (i as u64 * 4096)));
             if let Err(_) = receiver_pt.map_user_page(page, frames[i], flags) {
-                // Rollback mapped receiver pages
+                // Rollback mapped receiver pages. The frames are still owned by
+                // the sender (its PTEs are torn down only after this loop fully
+                // succeeds), so the receiver must unlink its PTEs WITHOUT
+                // recycling the frames -- recycling here would hand frames the
+                // sender still maps to another address space (use-after-free).
                 for r in 0..mapped {
                     let rb_page = Page::<Size4KiB>::containing_address(VirtAddr::new(receiver_vaddr + (r as u64 * 4096)));
-                    let _ = receiver_pt.unmap_user_page(rb_page);
+                    if let Ok(frame) = receiver_pt.clear_leaf_pte(rb_page) {
+                        if let Some(pos) = receiver_pt.allocated_frames.iter().position(|f| *f == frame) {
+                            receiver_pt.allocated_frames.swap_remove(pos);
+                        }
+                    }
                 }
                 if let Some(pid) = receiver_pid {
                     crate::task::process::release_address_space(pid, len as usize);

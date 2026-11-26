@@ -461,7 +461,7 @@ pub fn read_user_value<T: Copy>(addr: u64) -> Result<T, UserAccessError> {
     let size = core::mem::size_of::<T>();
     let align = core::mem::align_of::<T>();
     if addr % (align as u64) != 0 {
-        return Err(UserAccessError::OutOfBounds);
+        return Err(UserAccessError::Misaligned);
     }
     let ptr = addr as *const T;
     with_pinned_user_buffer(addr, size, false, || unsafe {
@@ -475,7 +475,7 @@ pub fn write_user_value<T: Copy>(dst_addr: u64, val: &T) -> Result<(), UserAcces
     let size = core::mem::size_of::<T>();
     let align = core::mem::align_of::<T>();
     if dst_addr % (align as u64) != 0 {
-        return Err(UserAccessError::OutOfBounds);
+        return Err(UserAccessError::Misaligned);
     }
     let ptr = dst_addr as *mut T;
     let value = *val;

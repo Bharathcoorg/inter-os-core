@@ -1921,7 +1921,9 @@ impl DrmKmsController {
                     self.back_buffer[start..end].copy_from_slice(&surface.pixels[start..end]);
                     union_rows(&mut present_band, y0, y1);
                 } else {
-                    self.back_buffer.copy_from_slice(&surface.pixels);
+                    if surface.pixels.len() == self.back_buffer.len() {
+                        self.back_buffer.copy_from_slice(&surface.pixels);
+                    }
                     if surface.dirty_rows.1 > surface.dirty_rows.0 {
                         let y0 = surface.dirty_rows.0.min(sh as usize);
                         let y1 = surface.dirty_rows.1.min(sh as usize);
