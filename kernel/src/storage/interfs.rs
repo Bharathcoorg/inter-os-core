@@ -933,6 +933,8 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
             let _ = self.clear_transaction();
             return Err(e);
         }
+        // Flush the copied bytes before publishing the inode that names them.
+        self.device.flush()?;
         if let Err(e) = self.write_inode(index, new) {
             let _ = self.free_extent(new.start_sector, new.sector_count);
             let _ = self.clear_transaction();
@@ -1002,6 +1004,9 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
                 return Err(e.into());
             }
         }
+        // Flush the data before publishing the inode, so a power cut cannot
+        // leave a durable inode pointing at non-durable data.
+        self.device.flush()?;
         if let Err(e)=self.write_inode(index,&inode) {
             let _=self.free_extent(start,sectors);
             return Err(e);
@@ -1179,6 +1184,9 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
                 return Err(e.into());
             }
         }
+        // Flush the data before publishing the inode, so a power cut cannot
+        // leave a durable inode pointing at non-durable data.
+        self.device.flush()?;
         if let Err(e)=self.write_inode(index,&inode) {
             let _=self.free_extent(start,sectors);
             return Err(e);

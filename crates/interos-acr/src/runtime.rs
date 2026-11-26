@@ -1169,6 +1169,13 @@ impl DalvikVmState {
                     marked.insert(target);
                 }
             }
+            // A pending exception holds a live object id across the throw→catch
+            // boundary; without this root it can be swept while the thread waits.
+            if let Some(pe) = thread.pending_exception {
+                if pe > 0 && pe < self.next_object_id {
+                    marked.insert(pe);
+                }
+            }
             for frame in &thread.call_stack {
                 for reg in &frame.saved_registers {
                     if *reg > 0 && *reg < self.next_object_id {
@@ -1191,6 +1198,13 @@ impl DalvikVmState {
         if let Some(cid) = self.content_view_id {
             if cid > 0 && cid < self.next_object_id {
                 marked.insert(cid);
+            }
+        }
+
+        // The VM-level pending exception is likewise a live root.
+        if let Some(pe) = self.pending_exception {
+            if pe > 0 && pe < self.next_object_id {
+                marked.insert(pe);
             }
         }
 
