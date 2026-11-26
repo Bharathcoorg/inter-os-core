@@ -146,6 +146,12 @@ JOURNAL_EXTENSION_SLOTS = 4                          # storage/persistent.rs:38
 BLOCK_FS_TAIL_RESERVED = JOURNAL_SLOT_SECTORS * (
     JOURNAL_PRIMARY_SLOTS + JOURNAL_EXTENSION_SLOTS
 )                                                     # storage/filesystem.rs:23 -> 2560
+# The vault sits after the filesystem and below the journal (vault.rs
+# vault_base_lba); the filesystem region ends where the vault begins, so the
+# two never share a sector.
+VAULT_TOTAL_BLOCKS = 2048                             # storage/vault.rs:29
+VAULT_SECTORS_PER_BLOCK = 4                           # storage/vault.rs:36
+VAULT_TOTAL_SECTORS = VAULT_TOTAL_BLOCKS * VAULT_SECTORS_PER_BLOCK  # 8192
 
 PROVISION_MANIFEST_PATH = "/provision/models.list"   # storage/filesystem.rs:491
 PROVISION_MANIFEST_WINDOW = 1024                     # storage/filesystem.rs:501
@@ -234,11 +240,16 @@ def layout_for_region(region_sectors):
 
 def region_for_device(total_sectors):
     """Sectors of `total_sectors` the filesystem region may use (filesystem.rs:50)."""
-    end = total_sectors - BLOCK_FS_TAIL_RESERVED
-    if end <= 0:
+    # The vault lives between the filesystem and the journal; the filesystem ends
+    # where the vault begins. On a disk too small to hold the vault after the
+    # filesystem, there is no vault and the filesystem uses the full tail.
+    journal_end = total_sectors - BLOCK_FS_TAIL_RESERVED
+    if journal_end <= 0:
         raise ProvisioningError(
             "the device is {} sectors, which does not clear the {}-sector journal tail".format(
                 total_sectors, BLOCK_FS_TAIL_RESERVED))
+    vault_base = journal_end - VAULT_TOTAL_SECTORS
+    end = vault_base if vault_base > BLOCK_FS_BASE_LBA + MIN_REGION_SECTORS else journal_end
     available = end - BLOCK_FS_BASE_LBA
     if available < MIN_REGION_SECTORS:
         raise ProvisioningError(

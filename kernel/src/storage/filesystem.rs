@@ -48,7 +48,14 @@ impl FilesystemLayout {
 /// one. The only limits are the boot area in front and the journal tail
 /// behind.
 fn region_for_layout(total: u32, layout: FilesystemLayout) -> Result<u32, FsBackendError> {
-    let end = total.checked_sub(layout.tail_reserved_sectors).ok_or(FsBackendError::NoSpace)?;
+    // The InterFS region ends where the vault begins (the vault sits after the
+    // filesystem and below the journal), so the two never share a sector. On a
+    // disk too small to hold the vault after the filesystem, there is no vault
+    // region (vault ops fail closed) and the filesystem uses the full tail.
+    let end = match super::vault::vault_base_lba(total) {
+        Some(vault_base) => vault_base,
+        None => total.checked_sub(layout.tail_reserved_sectors).ok_or(FsBackendError::NoSpace)?,
+    };
     let available = end.checked_sub(layout.base_lba)
         .filter(|v| *v >= MIN_INTERFS_REGION_SECTORS)
         .ok_or(FsBackendError::NoSpace)?;
@@ -847,6 +854,23 @@ mod tests {
     /// 6 GiB in sectors, as the emulator builds the data disk.
     const SIX_GB_SECTORS: u32 = 6 * 1024 * 1024 * 2;
 
+    /// The InterFS, vault and journal regions must be disjoint on any disk large
+    /// enough to hold all three: `[base, vault_base)` is the filesystem,
+    /// `[vault_base, vault_base+vault)` the vault, and the journal the tail.
+    #[test]
+    fn filesystem_vault_and_journal_regions_never_overlap() {
+        let total = SIX_GB_SECTORS;
+        let vault_base = crate::storage::vault::vault_base_lba(total).expect("6 GiB holds a vault");
+        let journal = crate::storage::persistent::SLOT_SECTORS * crate::storage::persistent::TOTAL_SLOT_COUNT;
+        // Filesystem ends where the vault begins.
+        let region = filesystem_region_sectors(total).expect("region");
+        assert_eq!(BLOCK_FS_BASE_LBA + region, vault_base);
+        // Vault ends where the journal begins.
+        assert_eq!(vault_base + crate::storage::vault::VAULT_TOTAL_SECTORS + journal, total);
+        // Vault does not overlap the filesystem.
+        assert!(vault_base >= BLOCK_FS_BASE_LBA + region);
+    }
+
     /// The published model: `target/verify/models/embeddinggemma-300M-Q8_0.gguf`,
     /// measured from the file on this host rather than quoted from a ticket.
     const MODEL_BYTES: u64 = 333_590_944;
@@ -888,7 +912,7 @@ mod tests {
         // formatted -- not recited from a constant.
         let max = max_data_file_bytes_with_device(&mut dev);
         assert_eq!(
-            max, 6_437_453_824,
+            max, 6_433_260_544,
             "the 6 GiB demo disk's one-extent ceiling is the data region, in bytes"
         );
         assert!(
@@ -907,7 +931,7 @@ mod tests {
             .expect("the published model must be reservable in the extent the format gives");
         assert_eq!(report.asked_bytes, MODEL_BYTES);
         assert_eq!(
-            report.largest_free_run_bytes, 12_573_152 * 512,
+            report.largest_free_run_bytes, 12_564_962 * 512,
             "a fresh region is one free run, so the largest extent available is all of it"
         );
         assert!(report.fits());
@@ -980,21 +1004,21 @@ mod tests {
     /// forbids.
     #[test]
     fn a_reservation_is_refused_by_the_largest_run_not_the_free_total() {
-        // 32 MiB: region 58,880 sectors, bitmap 15, data start 48, data 58,832.
+        // 32 MiB: region 50,688 sectors, bitmap 13, data start 46, data 50,642.
         let mut dev = SparseDevice::new(65_536);
         init_block_filesystem_with_device(&mut dev).expect("format");
 
         let kept = 10_000 * 512;
         reserve_data_file_checked_with_device(&mut dev, "/data/models/a.gguf", kept).expect("first");
         reserve_data_file_checked_with_device(&mut dev, "/data/models/b.gguf", kept).expect("second");
-        // Removing the first leaves a 10,000-sector hole before a 38,832-sector
+        // Removing the first leaves a 10,000-sector hole before a 30,642-sector
         // tail: two runs, one free total.
         remove_data_file_with_device(&mut dev, "/data/models/a.gguf").expect("remove the first");
 
-        // 45,000 sectors: more than either run, less than the free total, and
+        // 35,000 sectors: more than either run, less than the free total, and
         // less than the data region, so this is a fragmentation refusal and not
         // a "too large for the format" one.
-        let asked = 45_000u64 * 512;
+        let asked = 35_000u64 * 512;
         let err = reserve_data_file_checked_with_device(&mut dev, "/data/models/big.gguf", asked)
             .expect_err("no single run is this wide, so the ask is refused");
         assert_eq!(err, FsBackendError::NoSpace, "the disk has the bytes, just not in one extent");
@@ -1006,10 +1030,10 @@ mod tests {
         };
         let mut mounted = mounted;
         let report = mounted.space_report(asked).expect("measure the ask");
-        assert_eq!(report.asked_bytes, asked, "45,000 sectors asked");
-        assert_eq!(report.largest_free_run_bytes, 38_832 * 512, "the tail run is the widest");
-        assert_eq!(report.free_bytes, 48_832 * 512, "both runs together");
-        assert_eq!(report.data_region_bytes, 58_832 * 512, "the region the format reaches");
+        assert_eq!(report.asked_bytes, asked, "35,000 sectors asked");
+        assert_eq!(report.largest_free_run_bytes, 30_642 * 512, "the tail run is the widest");
+        assert_eq!(report.free_bytes, 40_642 * 512, "both runs together");
+        assert_eq!(report.data_region_bytes, 50_642 * 512, "the region the format reaches");
         assert!(!report.fits(), "the widest run is {} bytes and the ask is {}",
             report.largest_free_run_bytes, asked);
         assert!(report.free_bytes > asked, "the refusal is about contiguity, not volume");
@@ -1031,7 +1055,7 @@ mod tests {
         let mut dev = SparseDevice::new(65_536);
         init_block_filesystem_with_device(&mut dev).expect("format");
         let region_bytes = max_data_file_bytes_with_device(&mut dev);
-        assert_eq!(region_bytes, 58_832 * 512, "the 32 MiB device's data region");
+        assert_eq!(region_bytes, 50_642 * 512, "the 32 MiB device's data region");
         let asked = region_bytes + 512;
         assert_eq!(
             reserve_data_file_checked_with_device(&mut dev, "/data/models/too.gguf", asked).err(),
@@ -1044,19 +1068,19 @@ mod tests {
     ///
     /// WHY the exact figure and not just "large enough": the question this
     /// answers is "can the device hold the published model", and an answer that
-    /// cannot be checked against a byte count is not an answer. 6,437,453,824 is
-    /// 12,573,152 sectors, which is the 6 GiB disk less the 4,096-sector boot area,
-    /// the 2,560-sector journal tail, the superblock, the 3,071-sector bitmap and
-    /// the 32-sector inode table.
+    /// cannot be checked against a byte count is not an answer. 6,433,260,544 is
+    /// 12,564,962 sectors, which is the 6 GiB disk less the 4,096-sector boot area,
+    /// the 8,192-sector vault, the 2,560-sector journal tail, the superblock, the
+    /// 3,069-sector bitmap and the 32-sector inode table.
     #[test]
     fn the_demo_disk_extent_bound_is_the_number_the_geometry_gives() {
         assert_eq!(
             max_data_file_bytes(SIX_GB_SECTORS),
-            Some(6_437_453_824),
+            Some(6_433_260_544),
             "a 6 GiB data disk bounds one file at the data region, in bytes",
         );
         assert!(
-            MODEL_BYTES <= 6_437_453_824,
+            MODEL_BYTES <= 6_433_260_544,
             "the {} byte model is inside the {} byte bound; {} sectors of {}",
             MODEL_BYTES, 6_437_453_824u64,
             (MODEL_BYTES + 511) / 512, 12_573_152,

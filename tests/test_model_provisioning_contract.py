@@ -151,12 +151,12 @@ class TestInterFsGeometry(_ProvisioningCase):
         self.assertEqual(summary["base_lba"], 4096, "filesystem.rs:14")
         self.assertEqual(summary["journal_tail_sectors"], 2560,
                          "filesystem.rs:23 -- 128 slot sectors x 20 slots")
-        self.assertEqual(summary["region_sectors"], 12_576_256)
-        self.assertEqual(summary["bitmap_sectors"], 3071)
-        self.assertEqual(summary["inode_lba"], 3072)
-        self.assertEqual(summary["data_start"], 3104)
-        self.assertEqual(summary["data_sectors"], 12_573_152)
-        self.assertEqual(summary["one_extent_max_bytes"], 6_437_453_824,
+        self.assertEqual(summary["region_sectors"], 12_568_064)
+        self.assertEqual(summary["bitmap_sectors"], 3069)
+        self.assertEqual(summary["inode_lba"], 3070)
+        self.assertEqual(summary["data_start"], 3102)
+        self.assertEqual(summary["data_sectors"], 12_564_962)
+        self.assertEqual(summary["one_extent_max_bytes"], 6_433_260_544,
                          "the same figure kernel/src/fs/vfs.rs asserts for the staging disk")
 
     def test_the_bitmap_grows_with_the_region_and_never_stays_at_eight_sectors(self):
@@ -166,7 +166,7 @@ class TestInterFsGeometry(_ProvisioningCase):
         small = mp.layout_for_region(mp.region_for_device(12_800))
         large = mp.layout_for_region(mp.region_for_device(12_582_912))
         self.assertEqual(small["bitmap_sectors"], 2)
-        self.assertEqual(large["bitmap_sectors"], 3071)
+        self.assertEqual(large["bitmap_sectors"], 3069)
         self.assertGreater(large["data_sectors"],
                            mp.sectors_for_bytes(REAL_MODEL_BYTES),
                            "the published model must fit one extent on the demo disk")
