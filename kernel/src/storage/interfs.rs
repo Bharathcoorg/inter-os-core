@@ -533,6 +533,7 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
         txn.encode(&mut encoded);
         sector[TXN_OFFSET..TXN_OFFSET + TXN_SIZE].copy_from_slice(&encoded);
         self.device.write_sector(self.base_lba + FS_SUPERBLOCK_LBA, &sector)?;
+        self.device.flush()?;
         Ok(())
     }
 
@@ -541,6 +542,7 @@ impl<'a, D: BlockDevice + ?Sized> InterFs<'a, D> {
         self.device.read_sector(self.base_lba + FS_SUPERBLOCK_LBA, &mut sector)?;
         sector[TXN_OFFSET..TXN_OFFSET + TXN_SIZE].fill(0);
         self.device.write_sector(self.base_lba + FS_SUPERBLOCK_LBA, &sector)?;
+        self.device.flush()?;
         Ok(())
     }
 

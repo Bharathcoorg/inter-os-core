@@ -178,9 +178,11 @@ impl StorageVault {
         drive
             .write_sector(data_lba, &block.ciphertext)
             .map_err(|_| VaultError::HardwareFailure)?;
+        drive.flush().map_err(|_| VaultError::HardwareFailure)?;
         drive
             .write_sector(header_lba, &header)
             .map_err(|_| VaultError::HardwareFailure)?;
+        drive.flush().map_err(|_| VaultError::HardwareFailure)?;
         Ok(())
     }
 

@@ -420,6 +420,11 @@ fn commit_to(
         }
         drive.write_sector(base + sector, &buf).map_err(|_| PersistentError::Io)?;
     }
+    // Persist the payload before the header is written, so a power cut on a
+    // write-back device cannot leave the header durable while the payload is
+    // still in a volatile cache (which would make the tag reject the slot and
+    // silently fall back to the previous generation).
+    drive.flush().map_err(|_| PersistentError::Io)?;
 
     // WHY the header is written last and is the only thing that publishes the
     // record: a crash anywhere in the payload loop above leaves the previous
@@ -437,6 +442,9 @@ fn commit_to(
     header[24..56].copy_from_slice(&tag);
     header[56..60].copy_from_slice(&0x494F_534Au32.to_le_bytes());
     drive.write_sector(base, &header).map_err(|_| PersistentError::Io)?;
+    // Persist the header last: once it is durable the record is published, and a
+    // crash before this flush leaves the previous generation authoritative.
+    drive.flush().map_err(|_| PersistentError::Io)?;
 
     Ok(next_generation)
 }
