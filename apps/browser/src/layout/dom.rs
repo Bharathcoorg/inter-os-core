@@ -557,9 +557,23 @@ impl Dom {
     pub fn set_text(&mut self, id: NodeId, new_text: &[u8]) -> bool {
         let idx = id as usize;
         if idx >= self.node_count { return false; }
+        // A StrRef length is a u16; a value that cannot be represented is
+        // rejected rather than silently truncated.
+        if new_text.len() > u16::MAX as usize {
+            self.note(OVERFLOW_TEXT);
+            return false;
+        }
         if self.text_len + new_text.len() > MAX_TEXT_BYTES {
             self.note(OVERFLOW_TEXT);
             return false;
+        }
+        // textContent replaces existing child content: detach all children
+        // before installing the new text, so an element never keeps stale
+        // children beside the new value.
+        self.detach_all_children(id);
+        // An empty assignment leaves the element empty (no text child).
+        if new_text.is_empty() {
+            return true;
         }
         let start = self.text_len as u32;
         let len = new_text.len() as u16;
@@ -570,25 +584,30 @@ impl Dom {
             self.nodes[idx].text = text;
             return true;
         }
-        if let Some(child_id) = self.first_child(id) {
-            let child_idx = child_id as usize;
-            if self.nodes[child_idx].is_text() {
-                self.nodes[child_idx].text = text;
-                return true;
-            }
-        }
-        // No text child to reuse: append a fresh one, bounded by MAX_NODES.
-        // An empty assignment on an empty element leaves it empty rather than
-        // spending a node on a zero-length text child.
-        if new_text.is_empty() {
-            return true;
-        }
         let child = self.push_node(NodeKind::Text, StrRef::EMPTY, text);
         if child == NO_NODE {
             return false;
         }
         self.append_child(id, child);
         true
+    }
+
+    /// Detaches every child of `id`, clearing `first_child`/`last_child` and
+    /// each child's `parent`/`next_sibling`. Bounded by the node count so a
+    /// corrupted list cannot loop forever.
+    fn detach_all_children(&mut self, id: NodeId) {
+        if id as usize >= self.node_count { return; }
+        let mut child = self.nodes[id as usize].first_child;
+        self.nodes[id as usize].first_child = NO_NODE;
+        self.nodes[id as usize].last_child = NO_NODE;
+        let mut guard = 0;
+        while child != NO_NODE && guard <= self.node_count {
+            let next = self.nodes[child as usize].next_sibling;
+            self.nodes[child as usize].parent = NO_NODE;
+            self.nodes[child as usize].next_sibling = NO_NODE;
+            child = next;
+            guard += 1;
+        }
     }
 
     /// The stored range of an attribute value, for a caller that keeps a
@@ -893,12 +912,39 @@ impl Dom {
         if parent as usize >= self.node_count || child as usize >= self.node_count {
             return false;
         }
+        // Reject ancestor/descendant cycles: if `child` is an ancestor of
+        // `parent` (including parent == child, handled above), appending would
+        // create a cycle. Walk up from `parent`, bounded by the node count.
+        let mut cur = parent;
+        let mut guard = 0;
+        while cur != NO_NODE && guard <= self.node_count {
+            if cur == child {
+                return false;
+            }
+            cur = self.nodes[cur as usize].parent;
+            guard += 1;
+        }
+        // Idempotent: already a child of `parent` is a no-op success, never a
+        // duplicate attachment.
+        if self.nodes[child as usize].parent == parent {
+            return true;
+        }
+        // Detach from the previous parent (fixing its sibling links) before
+        // attaching, so a node has exactly one parent.
+        let old = self.nodes[child as usize].parent;
+        if old != NO_NODE && (old as usize) < self.node_count {
+            let _ = self.remove_child(old, child);
+        }
         self.nodes[child as usize].parent = parent;
+        self.nodes[child as usize].next_sibling = NO_NODE;
         let last = self.nodes[parent as usize].last_child;
         if last == NO_NODE {
             self.nodes[parent as usize].first_child = child;
-        } else {
+        } else if (last as usize) < self.node_count {
             self.nodes[last as usize].next_sibling = child;
+        } else {
+            // Corrupt last_child: repair by treating child as the only child.
+            self.nodes[parent as usize].first_child = child;
         }
         self.nodes[parent as usize].last_child = child;
         true
@@ -2334,5 +2380,57 @@ mod tests {
         assert!(!dom.name_set().known);
         dom.collect_names();
         assert!(!dom.name_set().holds(crate::css::NameKind::Class, b"from-the-first"));
+    }
+
+    #[test]
+    fn append_child_reparents_without_corrupting_links() {
+        let mut dom = Dom::new();
+        let a = dom.create_element(b"a").unwrap();
+        let b = dom.create_element(b"b").unwrap();
+        let c = dom.create_element(b"c").unwrap();
+        assert!(dom.append_child(a, b));
+        assert!(dom.append_child(a, c));
+        assert_eq!(dom.node(a).last_child, c);
+        // Reparent b under c: b leaves a, a.last_child stays c, c.last_child == b.
+        assert!(dom.append_child(c, b));
+        assert_eq!(dom.node(b).parent, c);
+        assert_eq!(dom.node(c).last_child, b);
+        assert_eq!(dom.node(a).last_child, c);
+        // b is now an ancestor of a? No: a is ancestor of c is ancestor of b.
+        // Appending a under b would create a cycle and must be rejected.
+        assert!(!dom.append_child(b, a));
+        assert_eq!(dom.node(a).parent, NO_NODE);
+        // Idempotent re-append is a no-op success, not a duplicate.
+        assert!(dom.append_child(c, b));
+        assert_eq!(dom.node(c).last_child, b);
+    }
+
+    #[test]
+    fn set_text_replaces_children_and_empty_clears() {
+        let mut dom = Dom::new();
+        let e = dom.create_element(b"e").unwrap();
+        assert!(dom.set_text(e, b"hello"));
+        let mut buf = std::vec::Vec::new();
+        collect_text(&dom, e, &mut buf);
+        assert_eq!(buf, b"hello");
+        // Replacement: old text is gone, only the new value remains.
+        assert!(dom.set_text(e, b"bye"));
+        buf.clear();
+        collect_text(&dom, e, &mut buf);
+        assert_eq!(buf, b"bye");
+        // Empty assignment clears all child content.
+        assert!(dom.set_text(e, b""));
+        buf.clear();
+        collect_text(&dom, e, &mut buf);
+        assert!(buf.is_empty());
+        assert_eq!(dom.node(e).first_child, NO_NODE);
+    }
+
+    #[test]
+    fn set_text_rejects_unrepresentable_length() {
+        let mut dom = Dom::new();
+        let e = dom.create_element(b"e").unwrap();
+        let big = std::vec![b'x'; (u16::MAX as usize) + 1];
+        assert!(!dom.set_text(e, &big));
     }
 }
