@@ -277,12 +277,16 @@ def fit_total_sectors(payload_bytes, headroom_bytes):
     """
     needed = sectors_for_bytes(payload_bytes)
     headroom = sectors_for_bytes(headroom_bytes)
-    total = BLOCK_FS_BASE_LBA + BLOCK_FS_TAIL_RESERVED + needed + headroom + 1
+    # The vault sits between the filesystem and the journal, so a disk large
+    # enough to hold the payload also reserves VAULT_TOTAL_SECTORS for it; the
+    # fixed point must include that term or the sized disk is 4 MiB short.
+    total = (BLOCK_FS_BASE_LBA + BLOCK_FS_TAIL_RESERVED + VAULT_TOTAL_SECTORS
+             + needed + headroom + 1)
     while True:
         layout = layout_for_region(region_for_device(total))
         if layout is None:
             raise ProvisioningError("no geometry holds this payload")
-        proposed = (BLOCK_FS_BASE_LBA + BLOCK_FS_TAIL_RESERVED
+        proposed = (BLOCK_FS_BASE_LBA + BLOCK_FS_TAIL_RESERVED + VAULT_TOTAL_SECTORS
                     + layout["data_start"] + needed + headroom)
         if proposed <= total:
             return total

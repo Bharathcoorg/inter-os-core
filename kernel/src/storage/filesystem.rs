@@ -52,7 +52,7 @@ fn region_for_layout(total: u32, layout: FilesystemLayout) -> Result<u32, FsBack
     // filesystem and below the journal), so the two never share a sector. On a
     // disk too small to hold the vault after the filesystem, there is no vault
     // region (vault ops fail closed) and the filesystem uses the full tail.
-    let end = match super::vault::vault_base_lba(total) {
+    let end = match crate::storage::vault::vault_base_lba(total) {
         Some(vault_base) => vault_base,
         None => total.checked_sub(layout.tail_reserved_sectors).ok_or(FsBackendError::NoSpace)?,
     };
@@ -869,6 +869,14 @@ mod tests {
         assert_eq!(vault_base + crate::storage::vault::VAULT_TOTAL_SECTORS + journal, total);
         // Vault does not overlap the filesystem.
         assert!(vault_base >= BLOCK_FS_BASE_LBA + region);
+        // Minimum vault disk: region is exactly MIN_INTERFS_REGION_SECTORS.
+        let min_total = 14_883;
+        assert_eq!(crate::storage::vault::vault_base_lba(min_total), Some(4_131));
+        assert_eq!(filesystem_region_sectors(min_total), Ok(MIN_INTERFS_REGION_SECTORS));
+        // No-vault small disk: the filesystem uses the full tail.
+        let small = 8_192;
+        assert!(crate::storage::vault::vault_base_lba(small).is_none());
+        assert_eq!(filesystem_region_sectors(small), Ok(small - BLOCK_FS_TAIL_RESERVED - BLOCK_FS_BASE_LBA));
     }
 
     /// The published model: `target/verify/models/embeddinggemma-300M-Q8_0.gguf`,
