@@ -3338,7 +3338,7 @@ def _real_file_cases(source: str) -> list:
 
 BUDGET_DOC_SHAPE = re.compile(
     r"(\d+) bytes held: byte map (\d+) \+ piece bytes (\d+) \+ start entries (\d+) \+ "
-    r"matchable flags (\d+) \+ pool (\d+), over (\d+) declared entries"
+    r"matchable flags (\d+) \+ pool (\d+) \+ scores (\d+), over (\d+) declared entries"
 )
 
 
@@ -3437,11 +3437,13 @@ def _budget_defects(tokenizer: str, inference: str) -> list:
         if not matches:
             defects.append("the budget doc quotes no breakdown of the bytes the build held")
         else:
-            total, byte_map, pieces, starts, flags, pool, _entries = (int(g) for g in matches[0])
-            if byte_map + pieces + starts + flags + pool != total:
+            total, byte_map, pieces, starts, flags, pool, scores, _entries = (
+                int(g) for g in matches[0]
+            )
+            if byte_map + pieces + starts + flags + pool + scores != total:
                 defects.append(
                     f"the budget doc's breakdown sums to "
-                    f"{byte_map + pieces + starts + flags + pool}, not the {total} it names"
+                    f"{byte_map + pieces + starts + flags + pool + scores}, not the {total} it names"
                 )
 
     try:
@@ -3524,8 +3526,8 @@ def test_the_derived_budget_contract_can_fail():
     )
 
     invented_breakdown = tokenizer.replace(
-        "4649658 bytes held: byte map 1024 + piece bytes 2315366 + start entries 1048576 +",
-        "5672210 bytes held: byte map 1024 + piece bytes 2315366 + start entries 1048576 +",
+        "5698234 bytes held: byte map 1024 + piece bytes 2315366 + start entries 1048576 +",
+        "6726810 bytes held: byte map 1024 + piece bytes 2315366 + start entries 1048576 +",
     )
     assert invented_breakdown != tokenizer, "the invented-total fixture no longer matches the file"
     assert _budget_defects(invented_breakdown, inference), (

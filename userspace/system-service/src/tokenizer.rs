@@ -177,10 +177,10 @@ pub const MAX_MODEL_BYTES: usize = 32;
 /// memory to derive one from.
 ///
 /// WHY this number: sized against the installed file, whose table the build ends at
-/// 4649658 bytes held: byte map 1024 + piece bytes 2315366 + start entries 1048576 +
-/// matchable flags 262144 + pool 1022548, over 262144 declared entries -- the five
-/// `VocabularyRead::finish` charges, each measured out of the table this file builds
-/// for that file rather than typed in, which is what
+/// 5698234 bytes held: byte map 1024 + piece bytes 2315366 + start entries 1048576 +
+/// matchable flags 262144 + pool 1022548 + scores 1048576, over 262144 declared
+/// entries -- the six `VocabularyRead::finish` charges, each measured out of the
+/// table this file builds for that file rather than typed in, which is what
 /// `test_the_budget_doc_quotes_the_held_bytes_the_installed_file_yields` compares this
 /// sentence against. Sixteen mebibytes
 /// leaves that file room for the vectors' own growth and still refuses a
@@ -285,6 +285,12 @@ const KIND_USER_DEFINED: i32 = 4;
 /// The value in `byte_ids` for "this file declares no token for this byte".
 const NO_BYTE_ID: u32 = u32::MAX;
 
+/// The value in the unigram lattice's `from_id` for a step that emits no id at all --
+/// a byte the file has neither a `<0xNN>` token nor an `unknown_token_id` for. It is
+/// the same sentinel value as `NO_BYTE_ID` and distinct from every real id, which is
+/// always below the vocabulary's declared length.
+const NO_ID: u32 = u32::MAX;
+
 /// Why a vocabulary could not be turned into a table.
 ///
 /// WHY the numbers are carried rather than formatted: the service is
@@ -368,6 +374,14 @@ pub struct FileTokenizer {
     /// bucket collapses to one bucket holding half the vocabulary. A sort costs
     /// once per build; every probe is then `log n`.
     pool: Vec<u32>,
+    /// `tokenizer.ggml.scores[id]` is the file's own unigram log-probability for
+    /// `id`, kept beside the piece table because `encode_unigram` runs a Viterbi
+    /// lattice over these scores rather than only taking the longest match `encode`
+    /// takes. A file that declared no scores holds an empty vector, and
+    /// `encode_unigram` then ranks a tie by id exactly as `encode` does. Charged as
+    /// the sixth vocabulary part (`scores.len() * 4`), so it is never a fact paid
+    /// for after the table that needs it shipped.
+    scores: Vec<f32>,
     /// `byte_ids[byte]` is the id of the `<0xNN>` token this file declared, or
     /// `NO_BYTE_ID`. Derived from the file's own names, never from an offset.
     byte_ids: [u32; 256],
@@ -409,7 +423,7 @@ pub struct FileTokenizer {
     merge_index: Vec<u32>,
     /// What `tokenizer.ggml.merges` declared, counted from its own header.
     declared_merges: u32,
-    /// What the held merge tables charge, kept beside `heap_bytes` so the five-part
+    /// What the held merge tables charge, kept beside `heap_bytes` so the six-part
     /// vocabulary breakdown the budget doc quotes stays the vocabulary's own.
     merge_bytes: usize,
     /// `tokenizer.chat_template`'s declared byte length; `0` when absent. The bytes
@@ -832,7 +846,7 @@ impl FileTokenizer {
         self.merges.len() as u32 == self.declared_merges
     }
 
-    /// What the held merge tables charge, beside `heap_bytes`'s vocabulary five parts.
+    /// What the held merge tables charge, beside `heap_bytes`'s vocabulary six parts.
     pub fn merge_bytes(&self) -> usize {
         self.merge_bytes
     }
@@ -923,6 +937,167 @@ impl FileTokenizer {
 
         out[..ids.len()].copy_from_slice(&ids);
         Ok(ids.len())
+    }
+
+    /// Segments `text` into this file's own ids by a Viterbi lattice over the piece
+    /// scores, the way a SentencePiece unigram model is defined to.
+    ///
+    /// WHAT THIS IS: a highest-total-score segmentation of the raw bytes. Every byte
+    /// position `i` is a lattice node; an edge `i -> j` is a declared piece whose
+    /// bytes are exactly `text[i..j]`, scored by that piece's `tokenizer.ggml.scores`
+    /// entry, and the best path from `0` to `text.len()` is the segmentation with the
+    /// highest summed score. Where a position has no outgoing piece edge -- a byte no
+    /// piece can carry -- a single-byte fallback edge is added, to the file's `<0xNN>`
+    /// token for that byte or, failing that, its `unknown_token_id`. The fallback is a
+    /// last resort and never competes with a piece: it is added only where no piece
+    /// covers the position, so a real piece always outscores a run of bytes.
+    ///
+    /// WHY this differs from `encode`: `encode` takes the longest piece at each
+    /// position and stops; this takes the segmentation with the best total score,
+    /// which on a unigram vocabulary can be a shorter piece followed by another rather
+    /// than one long one. The two agree often and provably disagree some of the time.
+    ///
+    /// WHAT THIS DOES NOT CLAIM -- READ THIS BEFORE CALLING IT REFERENCE-PARITY: no
+    /// `tokenizer.ggml.pre` pre-tokenizer and no `normalize` stage runs (this file
+    /// declares no merges for a pre-tokenizer to drive and no `normalize` rule), so
+    /// the lattice is over the raw request bytes. A runtime that normalises case or
+    /// width, or that prepends a word-boundary marker to a space the caller did not
+    /// send, would segment differently. No sentencepiece, llama.cpp or torch tokenizer
+    /// is installed on this host to compare against, so this module makes no parity
+    /// claim and the suite asserts none -- a claim it could not check would be the
+    /// same fabrication the invented table was. What IS guaranteed is the round trip:
+    /// every edge consumes exactly the bytes its piece decodes to, so
+    /// `decode_sequence(encode_unigram(t)) == t` for every input the file can name.
+    ///
+    /// TIES: when two segmentations reach a node with the same total score, the one
+    /// whose last edge was generated first is kept, and edges are generated longest
+    /// piece first, so a tie prefers the longer final piece. The order is fixed, so
+    /// the result is deterministic.
+    ///
+    /// The two-pass bound is `encode`'s: the segmentation is counted before a byte is
+    /// written, and a text that will not fit `out` is refused with both numbers and
+    /// leaves `out` untouched.
+    pub fn encode_unigram(&self, text: &[u8], out: &mut [u32]) -> Result<usize, EncodeError> {
+        let n = text.len();
+
+        // The lattice: `best[i]` is the highest total score of a segmentation of
+        // `text[..i]`, and `from_id[i]`/`from_pos[i]` are the edge that reached `i`.
+        // A node no edge has reached yet holds `NEG_INFINITY`.
+        let mut best = alloc::vec![f32::NEG_INFINITY; n + 1];
+        let mut from_id = alloc::vec![NO_ID; n + 1];
+        let mut from_pos = alloc::vec![0u32; n + 1];
+        best[0] = 0.0;
+
+        for start in 0..n {
+            let base = best[start];
+            if base == f32::NEG_INFINITY {
+                continue;
+            }
+            let mut piece_edge = false;
+
+            // The word-boundary branch: where a real space stands at the front of a
+            // word, a piece that begins with the file's marker matches the space and
+            // the marker's remainder together. Every matching length is an edge, not
+            // only the longest, because a shorter marker piece can win on score.
+            if (start == 0 || text[start - 1] != b' ')
+                && text[start] == b' '
+                && self.marker_pieces
+                && self.max_piece_len > WORD_MARKER.len()
+            {
+                let take = (n - start - 1).min(self.max_piece_len - WORD_MARKER.len());
+                let mut needle = [0u8; MAX_PIECE_BYTES];
+                needle[..WORD_MARKER.len()].copy_from_slice(WORD_MARKER);
+                needle[WORD_MARKER.len()..WORD_MARKER.len() + take]
+                    .copy_from_slice(&text[start + 1..start + 1 + take]);
+                let full = WORD_MARKER.len() + take;
+                for probe in (WORD_MARKER.len()..=full).rev() {
+                    if let Some(id) = self.find_best(&needle[..probe]) {
+                        let consumed = 1 + self.bytes_of(id).len() - WORD_MARKER.len();
+                        self.relax(&mut best, &mut from_id, &mut from_pos, start, consumed, id, base);
+                        piece_edge = true;
+                    }
+                }
+            }
+
+            // The plain-prefix branch: every declared piece that is a prefix of the
+            // input at this position is an edge. A position holding a space the marker
+            // branch did not take has no piece beginning with a literal space, so this
+            // naturally finds nothing there and the fallback below runs.
+            let limit = (n - start).min(self.max_piece_len);
+            for length in (1..=limit).rev() {
+                if let Some(id) = self.find_best(&text[start..start + length]) {
+                    self.relax(&mut best, &mut from_id, &mut from_pos, start, length, id, base);
+                    piece_edge = true;
+                }
+            }
+
+            // The fallback: only where no piece covers this position, so a run of
+            // bytes can never out-score a real piece. A byte with neither a `<0xNN>`
+            // token nor an `unknown_token_id` is stepped over emitting nothing, which
+            // is the same honest answer `encode` gives and keeps the lattice total.
+            if !piece_edge {
+                let id = self.byte_id_of(text[start]).or(self.unk_id);
+                self.relax(&mut best, &mut from_id, &mut from_pos, start, 1, id.unwrap_or(NO_ID), base);
+            }
+        }
+
+        // Reconstruct the path from the end back to the start, then reverse it. A
+        // `NO_ID` step emitted nothing and is dropped, exactly as `encode` drops a
+        // byte the file cannot name.
+        let mut ids: Vec<u32> = Vec::new();
+        let mut position = n;
+        while position > 0 {
+            let id = from_id[position];
+            if id != NO_ID {
+                ids.push(id);
+            }
+            position = from_pos[position] as usize;
+        }
+        ids.reverse();
+
+        // The file's own `add_bos_token`, applied exactly as `encode` applies it.
+        let needed = usize::from(self.writes_bos()) + ids.len();
+        if needed > out.len() {
+            return Err(EncodeError::BeyondBuffer {
+                needed,
+                bound: out.len(),
+            });
+        }
+        let mut written = 0usize;
+        if self.writes_bos() {
+            out[written] = self.bos_id.expect("writes_bos checked the id");
+            written += 1;
+        }
+        out[written..written + ids.len()].copy_from_slice(&ids);
+        written += ids.len();
+        Ok(written)
+    }
+
+    /// Relaxes the lattice edge `start -> start + consumed` carrying `id`, scored by
+    /// the file's own score for `id`, when it improves the best total at the far node.
+    ///
+    /// WHY `base` is passed rather than read from `best[start]`: the caller holds a
+    /// copy of it across the branch that mutates `best`, and re-reading it here would
+    /// be a second borrow of the array being written. A strict `>` keeps the first
+    /// edge generated for a node on a tie, which is what makes the tie-break
+    /// deterministic.
+    fn relax(
+        &self,
+        best: &mut [f32],
+        from_id: &mut [u32],
+        from_pos: &mut [u32],
+        start: usize,
+        consumed: usize,
+        id: u32,
+        base: f32,
+    ) {
+        let next = start + consumed;
+        let candidate = base + score_of(&self.scores, id);
+        if candidate > best[next] {
+            best[next] = candidate;
+            from_id[next] = id;
+            from_pos[next] = start as u32;
+        }
     }
 
     /// The rank and result id of the merge joining `left` then `right`, or `None`
@@ -1622,20 +1797,20 @@ impl VocabularyRead {
             });
         }
 
-        // The scores and the types have now been spent: on the tie-break above and
-        // on the matchable flags. Hand their charge back before the ceiling is
-        // measured, so what is refused is the table that ships and not the
-        // scaffolding that built it. The spare capacity each vector grew into was
-        // never charged, so it is never released either.
-        let transient =
-            scores.len() * core::mem::size_of::<f32>() + kinds.len() * core::mem::size_of::<i32>();
+        // The types have now been spent: on the matchable flags above. Hand their
+        // charge back before the ceiling is measured, so what is refused is the
+        // table that ships and not the scaffolding that built it. The scores are
+        // NOT handed back: `encode_unigram` reads them on the request path, so they
+        // ship in the table and their charge stays in `held` as the sixth part the
+        // budget doc quotes. The spare capacity each vector grew into was never
+        // charged, so it is never released either.
+        let transient = kinds.len() * core::mem::size_of::<i32>();
         held = held.saturating_sub(transient);
-        drop(scores);
         drop(kinds);
 
         // The merges were charged into the running total as they were resolved, so
         // the walk's ceiling already covered the peak that held them. They ship in
-        // their own accounting beside the vocabulary's five parts, so hand their
+        // their own accounting beside the vocabulary's six parts, so hand their
         // charge back out of `held` here: `heap_bytes()` stays the vocabulary
         // breakdown the budget doc quotes, and `merge_bytes()` is the merge table's
         // own. A file with no merges (the predecessor) subtracts nothing.
@@ -1669,6 +1844,7 @@ impl VocabularyRead {
             starts,
             matchable,
             pool,
+            scores,
             byte_ids,
             byte_width,
             byte_first_id,
@@ -1996,6 +2172,30 @@ mod tests {
         back[..written].to_vec()
     }
 
+    /// The ids `encode_unigram` produces, panicking with the refusal if the table
+    /// said no -- every case below fits the buffer it is given.
+    fn unigram_of(text: &[u8]) -> Vec<u32> {
+        let table = installed();
+        let mut out = [0u32; 32];
+        let taken = table
+            .encode_unigram(text, &mut out)
+            .unwrap_or_else(|error| panic!("{text:?} refused: {error:?}"));
+        out[..taken].to_vec()
+    }
+
+    /// `encode_unigram` then decode, so a claim about the lattice is a claim about
+    /// bytes.
+    fn unigram_round_trip(text: &[u8]) -> Vec<u8> {
+        let table = installed();
+        let mut out = [0u32; 32];
+        let taken = table
+            .encode_unigram(text, &mut out)
+            .unwrap_or_else(|error| panic!("{text:?} refused: {error:?}"));
+        let mut back = [0u8; 256];
+        let written = table.decode_sequence(&out[..taken], &mut back);
+        back[..written].to_vec()
+    }
+
     #[test]
     fn test_the_table_is_built_from_the_file_s_own_arrays() {
         let table = installed();
@@ -2201,6 +2401,76 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_unigram_takes_the_best_scoring_segmentation_not_the_longest() {
+        // `abc` is one piece (id 2, score -10), but `ab` (id 1, -1) then `c`
+        // (id 5, -1) scores -2. Longest match would take `abc`; the Viterbi lattice
+        // takes the higher-total path, which is the whole difference from `encode`.
+        let mut file = Fixture::new();
+        file.flag(b"tokenizer.ggml.add_bos_token", false)
+            .id(b"tokenizer.ggml.unknown_token_id", 0)
+            .tokens(&[b"<unk>", b"ab", b"abc", b"a", b"b", b"c"])
+            .ints(b"tokenizer.ggml.token_type", &[3, 1, 1, 1, 1, 1])
+            .floats(
+                b"tokenizer.ggml.scores",
+                &[-100.0, -1.0, -10.0, -1.0, -1.0, -1.0],
+            );
+        let bytes = file.build();
+        let table = table_from(&bytes).expect("a unigram fixture builds");
+        let mut out = [0u32; 8];
+        let taken = table
+            .encode_unigram(b"abc", &mut out)
+            .expect("three positions fit eight");
+        assert_eq!(&out[..taken], &[1, 5], "the best total is ab + c, not abc");
+        let mut back = [0u8; 8];
+        let written = table.decode_sequence(&out[..taken], &mut back);
+        assert_eq!(&back[..written], b"abc");
+    }
+
+    #[test]
+    fn test_encode_unigram_round_trips_every_input_the_file_can_name() {
+        for text in [
+            "battery",
+            "battery status",
+            " battery",
+            "  double  space",
+            "a a a",
+            "ate a status",
+            "\u{0}",
+            "\u{ff}\u{01}",
+            "battery is ok",
+            "naïve café — ünïcøde",
+            " ",
+            "",
+        ] {
+            assert_eq!(
+                unigram_round_trip(text.as_bytes()),
+                text.as_bytes(),
+                "{text:?} did not survive its own unigram id stream"
+            );
+        }
+        // The lattice opens with the file's own bos, exactly as `encode` does.
+        assert_eq!(unigram_of(b"battery"), vec![2, 9]);
+    }
+
+    #[test]
+    fn test_encode_unigram_refuses_a_text_wider_than_the_buffer() {
+        let table = installed();
+        let mut out = [0u32; 1];
+        let error = table
+            .encode_unigram(b"battery status", &mut out)
+            .expect_err("three positions cannot go in one");
+        assert_eq!(
+            error,
+            EncodeError::BeyondBuffer {
+                needed: 3,
+                bound: 1
+            }
+        );
+        // The refusal left the buffer exactly as it found it.
+        assert_eq!(out[0], 0);
+    }
+
+    #[test]
     fn test_a_text_longer_than_the_buffer_is_refused_with_both_numbers() {
         let table = installed();
         let mut out = [0u32; 1];
@@ -2386,22 +2656,27 @@ mod tests {
         let arch = architecture_of(&buffer);
         match arch.as_str() {
             "gemma-embedding" | "declared_fixture" => {
-                // What the charge counts for the table that ships: the four vectors
-                // that survive `finish`, plus the byte map that exists before any key
-                // is read. The predecessor declares no merges, so the five parts are
-                // the whole charge.
+                // What the charge counts for the table that ships: the five vectors
+                // that survive `finish` (bytes, starts, matchable, pool and the scores
+                // `encode_unigram` reads), plus the byte map that exists before any key
+                // is read. The predecessor declares no merges, so the six parts are the
+                // whole charge.
                 let counted = table.heap_bytes();
                 let mapped = table.bytes.capacity() * core::mem::size_of::<u8>()
                     + table.starts.capacity() * core::mem::size_of::<u32>()
                     + table.matchable.capacity() * core::mem::size_of::<bool>()
-                    + table.pool.capacity() * core::mem::size_of::<u32>();
+                    + table.pool.capacity() * core::mem::size_of::<u32>()
+                    + table.scores.capacity() * core::mem::size_of::<f32>();
                 assert!(
                     table.declares_scores() && table.declares_token_types(),
                     "the installed file changed shape and this case's peak arithmetic with it"
                 );
                 assert_eq!(table.merge_count(), 0, "the predecessor declares no merges");
+                // Only the types are transient now: the scores ship in the table, so
+                // the walk's peak held the types (four bytes an entry) above the
+                // shipped charge and dropped them after `finish`.
                 let transient_counted =
-                    table.declared_vocab() as usize * core::mem::size_of::<f32>() * 2;
+                    table.declared_vocab() as usize * core::mem::size_of::<i32>();
                 let peak_mapped = mapped + transient_counted * VOCAB_GROWTH_FACTOR;
                 let peak_counted = counted + transient_counted;
                 assert!(
@@ -2420,8 +2695,8 @@ mod tests {
             }
             "gemma-embedding2" | "gemma4" => {
                 // These files carry a merge table, so the shipped charge is the
-                // vocabulary's five parts PLUS the merge tables, and the walk's peak
-                // also held the scores, the types and the transient resolution lookup.
+                // vocabulary's six parts PLUS the merge tables, and the walk's peak
+                // also held the types and the transient resolution lookup.
                 assert!(table.declares_scores() && table.declares_token_types());
                 assert!(table.merges_complete(), "a prefix of the merges is not a full table");
                 assert_eq!(table.merge_count(), 514_906);
@@ -2430,12 +2705,13 @@ mod tests {
                     + table.starts.capacity() * core::mem::size_of::<u32>()
                     + table.matchable.capacity() * core::mem::size_of::<bool>()
                     + table.pool.capacity() * core::mem::size_of::<u32>()
+                    + table.scores.capacity() * core::mem::size_of::<f32>()
                     + table.merges.capacity() * 3 * core::mem::size_of::<u32>()
                     + table.merge_index.capacity() * core::mem::size_of::<u32>();
-                // scores + types (four bytes an entry each) and the resolution lookup
-                // (four bytes an entry) are alive at the peak and dropped after it.
+                // types (four bytes an entry) and the resolution lookup (four bytes an
+                // entry) are alive at the peak and dropped after it; the scores ship.
                 let transient_counted =
-                    table.declared_vocab() as usize * core::mem::size_of::<f32>() * 3;
+                    table.declared_vocab() as usize * core::mem::size_of::<f32>() * 2;
                 let peak_mapped = mapped + transient_counted * VOCAB_GROWTH_FACTOR;
                 let peak_counted = counted + transient_counted;
                 assert!(
@@ -2517,28 +2793,31 @@ mod tests {
         let table = table_from(&buffer)
             .unwrap_or_else(|error| panic!("the real file at {path} gave no table: {error:?}"));
 
-        // The five the running charge ends on, each from the table that shipped:
+        // The six the running charge ends on, each from the table that shipped:
         // `VocabularyRead::finish` holds the byte map from the first step, charges
         // every piece's bytes as it reads it, bills a start entry and a matchable
-        // flag per declared id, and adds the pool's four bytes an emitted piece.
+        // flag per declared id, adds the pool's four bytes an emitted piece, and
+        // keeps the scores `encode_unigram` reads at four bytes an entry.
         let vocab = table.declared_vocab() as usize;
         let byte_map = core::mem::size_of::<[u32; 256]>();
         let pieces = table.bytes.len();
         let starts = vocab * core::mem::size_of::<u32>();
         let flags = vocab * core::mem::size_of::<bool>();
         let pool = table.pool.len() * core::mem::size_of::<u32>();
+        let scores = table.scores.len() * core::mem::size_of::<f32>();
         let held = table.heap_bytes();
 
         assert_eq!(
-            byte_map + pieces + starts + flags + pool,
+            byte_map + pieces + starts + flags + pool + scores,
             held,
-            "the five parts this case prices no longer sum to what the build charges, so \
+            "the six parts this case prices no longer sum to what the build charges, so \
              `finish` changed what it bills and the doc's breakdown is the next thing to move"
         );
 
         let quoted = format!(
             "{held} bytes held: byte map {byte_map} + piece bytes {pieces} + start entries \
-             {starts} + matchable flags {flags} + pool {pool}, over {vocab} declared entries"
+             {starts} + matchable flags {flags} + pool {pool} + scores {scores}, over {vocab} \
+             declared entries"
         );
         let doc = budget_doc();
         assert!(
