@@ -11,6 +11,7 @@ pub mod platform;
 pub mod fdt;
 pub mod rtc;
 pub mod camera;
+pub mod mmio;
 
 pub use traits::{
     PlatformArch, PlatformInfo, PlatformTimer, SerialConsole, PowerController,
