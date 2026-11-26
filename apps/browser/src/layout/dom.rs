@@ -511,7 +511,7 @@ impl Dom {
             if self.attrs[i].name.get(self).eq_ignore_ascii_case(name) {
                 if self.text_len + value.len() <= MAX_TEXT_BYTES {
                     let v_start = self.text_len as u32;
-                    let v_len = value.len() as u16;
+                    let v_len = value.len().min(u16::MAX as usize) as u16;
                     self.text[self.text_len..self.text_len + value.len()].copy_from_slice(value);
                     self.text_len += value.len();
                     self.attrs[i].value = StrRef { start: v_start, len: v_len };
@@ -565,6 +565,13 @@ impl Dom {
         }
         if self.text_len + new_text.len() > MAX_TEXT_BYTES {
             self.note(OVERFLOW_TEXT);
+            return false;
+        }
+        // A non-text element needs a fresh text child; if the node arena is
+        // full, fail BEFORE detaching anything so the assignment never destroys
+        // existing children and then reports failure.
+        if !self.nodes[idx].is_text() && self.node_count >= MAX_NODES {
+            self.note(OVERFLOW_NODES);
             return false;
         }
         // textContent replaces existing child content: detach all children
@@ -984,12 +991,16 @@ impl Dom {
         }
         let mut current = self.nodes[parent as usize].first_child;
         let mut prev = NO_NODE;
-        while current != NO_NODE {
+        let mut guard = 0;
+        while current != NO_NODE && guard <= self.node_count {
+            if (current as usize) >= self.node_count {
+                return false;
+            }
             if current == child {
                 let next = self.nodes[current as usize].next_sibling;
                 if prev == NO_NODE {
                     self.nodes[parent as usize].first_child = next;
-                } else {
+                } else if (prev as usize) < self.node_count {
                     self.nodes[prev as usize].next_sibling = next;
                 }
                 if self.nodes[parent as usize].last_child == current {
@@ -1001,6 +1012,7 @@ impl Dom {
             }
             prev = current;
             current = self.nodes[current as usize].next_sibling;
+            guard += 1;
         }
         false
     }
@@ -2432,5 +2444,25 @@ mod tests {
         let e = dom.create_element(b"e").unwrap();
         let big = std::vec![b'x'; (u16::MAX as usize) + 1];
         assert!(!dom.set_text(e, &big));
+    }
+
+    #[test]
+    fn set_text_on_full_node_arena_fails_without_destroying_children() {
+        // Regression: a full node arena must make set_text fail BEFORE it
+        // detaches existing children, so the assignment never silently drops
+        // content while reporting success to the page.
+        let mut dom = Dom::new();
+        let e = dom.create_element(b"e").unwrap();
+        assert!(dom.set_text(e, b"keep"));
+        while dom.node_count() < MAX_NODES {
+            if dom.create_element(b"x").is_none() {
+                break;
+            }
+        }
+        assert!(dom.node_count() >= MAX_NODES, "arena should be full");
+        assert!(!dom.set_text(e, b"new"));
+        let mut buf = std::vec::Vec::new();
+        collect_text(&dom, e, &mut buf);
+        assert_eq!(buf, b"keep");
     }
 }
