@@ -719,12 +719,6 @@ pub fn run_acr_app_runtime() -> ! {
     let mut instance: Option<interos_acr::manager::AcrAppInstance> = None;
     let mut root_widget: Option<interos_acr::view::View> = None;
     let mut shared_render_buf: Option<alloc::vec::Vec<u32>> = None;
-    // Parsed and validated once at application load and retained for the
-    // lifetime of the app runtime, so the ~16ms frame loop never re-parses or
-    // re-validates the DEX. The backing bytes are intentionally leaked for the
-    // process lifetime (a single bounded allocation per launch) so the cached
-    // metadata's borrow cannot dangle or reference freed storage.
-    let mut loaded_dex: Option<&'static interos_android_format::dex::DexPackage> = None;
     let mut rx_buf = [0u8; 1024];
 
     loop {
@@ -916,21 +910,13 @@ pub fn run_acr_app_runtime() -> ! {
                                 }
 
                                 root_widget = Some(root_view);
-                                // Parse, validate and cache the DEX once at
-                                // load. A failure here is a verified
-                                // application-load failure, not a silent
-                                // fallback to a scheduler that cannot execute.
-                                let dex_bytes_leaked: &'static [u8] =
-                                    alloc::boxed::Box::leak(inst.classes_dex.clone().into_boxed_slice());
-                                match interos_android_format::dex::DexPackage::parse(dex_bytes_leaked) {
-                                    Ok(dex) => {
-                                        loaded_dex = Some(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(dex)));
-                                        let _ = std::log("[acr-app-runtime] STATE: DexCached");
-                                    }
-                                    Err(_) => {
-                                        let _ = std::log("[acr-app-runtime] STATE: Failed(DexCache) - validated DEX could not be cached for execution");
-                                    }
-                                }
+                                // Retain the validated, owned DEX on the
+                                // instance. It is dropped when the instance is
+                                // replaced or torn down -- no leak, no per-frame
+                                // re-parse, and no silent fallback to a scheduler
+                                // that cannot execute bytecode.
+                                inst.parsed_dex = Some(parsed_dex);
+                                let _ = std::log("[acr-app-runtime] STATE: DexCached");
                                 instance = Some(inst);
                             }
                         }
@@ -1003,19 +989,17 @@ pub fn run_acr_app_runtime() -> ! {
                 let _ = inst.looper.loop_once(now);
                 let _ = inst.choreographer.do_frame(now_nanos);
                 // WHY the DEX-executing scheduler: `step_scheduler_slice` only
-                // swaps thread contexts and never advances the program counter,
-                // so a service that called it left every managed thread frozen
-                // at the bytecode it had already run. The runnable threads must
-                // actually interpret their DEX instructions, block on monitors
-                // and resume; that is `step_scheduler_slice_with_dex`, driven
-                // with the DEX parsed and validated once at load (`loaded_dex`)
-                // rather than re-parsed every frame. Only a missing cache falls
-                // back to context-only scheduling.
-                let scheduled = match loaded_dex {
-                    Some(dex) => inst.vm.step_scheduler_slice_with_dex(dex, 4, now),
-                    None => inst.vm.step_scheduler_slice(4, now),
-                };
-                let _ = scheduled;
+                // swaps thread contexts and never advances the program counter.
+                // The runnable threads must interpret their DEX instructions,
+                // block on monitors and resume; that is
+                // `step_scheduler_slice_with_dex`, driven with the owned DEX
+                // parsed and validated once at load (`inst.parsed_dex`). An
+                // executable instance without a validated DEX must NOT fall back
+                // to a context-only loop that cannot advance bytecode -- it does
+                // not run.
+                if let Some(dex) = inst.parsed_dex.as_ref() {
+                    let _ = inst.vm.step_scheduler_slice_with_dex(dex, 4, now);
+                }
             }
 
             if let (Some(ref mut inst), Some(ref mut root)) = (&mut instance, &mut root_widget) {

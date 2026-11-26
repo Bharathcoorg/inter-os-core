@@ -149,7 +149,7 @@ fn find_catch_handler(
             if cur >= dex.raw.len() {
                 return None;
             }
-            let handler_size = read_sleb128(dex.raw, &mut cur).ok()?;
+            let handler_size = read_sleb128(&dex.raw, &mut cur).ok()?;
             if handler_size == i32::MIN {
                 return None;
             }
@@ -159,8 +159,8 @@ fn find_catch_handler(
             }
 
             for _ in 0..abs_size {
-                let type_idx = read_uleb128(dex.raw, &mut cur).ok()?;
-                let target_addr = read_uleb128(dex.raw, &mut cur).ok()?;
+                let type_idx = read_uleb128(&dex.raw, &mut cur).ok()?;
+                let target_addr = read_uleb128(&dex.raw, &mut cur).ok()?;
 
                 let matches = if let Some(ex_desc) = ex_class_desc {
                     is_exception_compatible(dex, ex_desc, type_idx)
@@ -177,7 +177,7 @@ fn find_catch_handler(
             }
 
             if handler_size <= 0 {
-                let catch_all_addr = read_uleb128(dex.raw, &mut cur).ok()?;
+                let catch_all_addr = read_uleb128(&dex.raw, &mut cur).ok()?;
                 let target_byte_pc = (catch_all_addr as usize).checked_mul(2)?;
                 if target_byte_pc < insns_bytes_len && (target_byte_pc % 2 == 0) {
                     return Some(target_byte_pc);
@@ -551,7 +551,7 @@ pub fn is_type_compatible(dex: &DexPackage, source_desc: &str, target_desc: &str
 }
 
 /// Zero-copy resolution of a class's declared superclass from DEX class_defs.
-pub fn find_dex_superclass<'a>(dex: &'a DexPackage<'a>, class_desc: &str) -> Option<&'a str> {
+pub fn find_dex_superclass<'a>(dex: &'a DexPackage, class_desc: &str) -> Option<&'a str> {
     let class_defs_size = u32::from_le(dex.header.class_defs_size) as usize;
     let class_defs_off = u32::from_le(dex.header.class_defs_off) as usize;
     for i in 0..class_defs_size {
@@ -3656,7 +3656,7 @@ impl DalvikVmState {
     /// Resolves virtual method implementation by traversing runtime receiver class inheritance hierarchy.
     pub fn resolve_virtual_method<'a>(
         &self,
-        dex: &'a DexPackage<'a>,
+        dex: &'a DexPackage,
         receiver_class: &str,
         method_name: &str,
         proto_shorty: &str,
@@ -7332,6 +7332,22 @@ mod tests {
         }
         assert!(slices >= 2, "a >1-instruction method must require multiple slices");
         assert_eq!(outcome, ThreadSliceOutcome::Returned);
+    }
+
+    #[test]
+    fn parsed_dex_is_owned_static_and_reparseable() {
+        // WHAT THIS IS FOR: the parsed DEX owns its bytes (no lifetime, no leak),
+        // so repeated application loads can parse, use and drop it without
+        // retaining allocations. A compile-time 'static assertion plus a
+        // repeated parse/drop loop model the app lifecycle.
+        fn assert_static<T: 'static>(_: &T) {}
+        let bytes = create_test_dex("Lorg/interos/Own;", "run", "test");
+        for _ in 0..500 {
+            let dex = DexPackage::parse(&bytes).unwrap();
+            assert_static(&dex);
+            assert!(!dex.methods.is_empty());
+            drop(dex);
+        }
     }
 
     #[test]

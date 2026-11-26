@@ -46,6 +46,9 @@ pub struct AcrAppInstance {
     pub memory_quota_bytes: usize,
     pub surface_id: u32,
     pub classes_dex: Vec<u8>,
+    /// The parsed, validated DEX, owned by the instance and dropped when the
+    /// instance is replaced or torn down. `None` until a successful load.
+    pub parsed_dex: Option<DexPackage>,
     pub data_dir: String,
 }
 
@@ -76,6 +79,7 @@ impl AcrAppInstance {
             memory_quota_bytes,
             surface_id,
             classes_dex,
+            parsed_dex: None,
             data_dir,
         }
     }
@@ -106,6 +110,7 @@ impl AcrAppInstance {
             memory_quota_bytes,
             surface_id,
             classes_dex,
+            parsed_dex: None,
             data_dir,
         }
     }

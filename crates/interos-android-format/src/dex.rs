@@ -353,17 +353,26 @@ pub struct DexMethod {
 }
 
 /// Parsed DEX binary package structure.
-pub struct DexPackage<'a> {
-    pub raw: &'a [u8],
+///
+/// Owns its backing bytes (`raw`) so a parsed package is `'static`: it can be
+/// stored, cached and dropped like any other value without borrowing a caller's
+/// buffer and without unsafe self-referential storage. `parse` copies the input
+/// once; callers that need zero-copy parsing can keep using the borrowed
+/// `parse_borrowed` entry where a borrow is provably long enough.
+pub struct DexPackage {
+    pub raw: Vec<u8>,
     pub header: DexHeader,
     pub strings: Vec<String>,
     pub types: Vec<String>,
     pub methods: Vec<DexMethod>,
 }
 
-impl<'a> DexPackage<'a> {
+impl DexPackage {
     /// Parses a DEX binary file from a byte slice and validates its structure.
-    pub fn parse(raw: &'a [u8]) -> Result<Self, DexError> {
+    ///
+    /// The validated package takes ownership of a copy of `raw`, so the result
+    /// has no lifetime dependency on the input buffer.
+    pub fn parse(raw: &[u8]) -> Result<Self, DexError> {
         if raw.len() < DEX_HEADER_SIZE {
             return Err(DexError::BufferTooShort);
         }
@@ -611,7 +620,7 @@ impl<'a> DexPackage<'a> {
         }
 
         Ok(Self {
-            raw,
+            raw: raw.to_vec(),
             header,
             strings,
             types,
@@ -620,7 +629,7 @@ impl<'a> DexPackage<'a> {
     }
 
     /// Zero-allocation string lookup directly over raw byte slice.
-    pub fn get_string_slice(&self, idx: u32) -> Result<&'a str, DexError> {
+    pub fn get_string_slice(&self, idx: u32) -> Result<&str, DexError> {
         let string_ids_size = u32::from_le(self.header.string_ids_size);
         if idx >= string_ids_size {
             return Err(DexError::StringIndexOutOfBounds);
@@ -640,7 +649,7 @@ impl<'a> DexPackage<'a> {
         }
 
         let mut cur = str_data_off;
-        let _utf16_size = read_uleb128(self.raw, &mut cur)?;
+        let _utf16_size = read_uleb128(&self.raw, &mut cur)?;
         let str_start = cur;
         while cur < self.raw.len() && self.raw[cur] != 0 {
             cur += 1;
@@ -649,7 +658,7 @@ impl<'a> DexPackage<'a> {
     }
 
     /// Zero-allocation type descriptor lookup directly over raw byte slice.
-    pub fn get_type_slice(&self, idx: u32) -> Result<&'a str, DexError> {
+    pub fn get_type_slice(&self, idx: u32) -> Result<&str, DexError> {
         let type_ids_size = u32::from_le(self.header.type_ids_size);
         if idx >= type_ids_size {
             return Err(DexError::TypeIndexOutOfBounds);
