@@ -899,4 +899,69 @@ mod tests {
         );
         assert_eq!(load(&mut dev), None, "a refused commit must leave the slot empty");
     }
+
+    /// Device whose writes land in a volatile cache and only reach persistent
+    /// storage on `flush()`, modelling a write-back cache across power loss.
+    struct FlushMockDevice {
+        cache: Vec<u8>,
+        persistent: Vec<u8>,
+        total: u32,
+    }
+
+    impl FlushMockDevice {
+        fn new(total: u32) -> Self {
+            let n = total as usize * SECTOR_SIZE;
+            Self { cache: alloc::vec![0u8; n], persistent: alloc::vec![0u8; n], total }
+        }
+    }
+
+    impl BlockDevice for FlushMockDevice {
+        fn read_sector(&mut self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+            if lba >= self.total {
+                return Err(BlockDeviceError::LbaOutOfRange);
+            }
+            let start = lba as usize * SECTOR_SIZE;
+            buf.copy_from_slice(&self.persistent[start..start + SECTOR_SIZE]);
+            Ok(())
+        }
+        fn write_sector(&mut self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+            if lba >= self.total {
+                return Err(BlockDeviceError::LbaOutOfRange);
+            }
+            let start = lba as usize * SECTOR_SIZE;
+            self.cache[start..start + SECTOR_SIZE].copy_from_slice(buf);
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), BlockDeviceError> {
+            self.persistent.copy_from_slice(&self.cache);
+            Ok(())
+        }
+        fn sector_count(&self) -> u32 {
+            self.total
+        }
+        fn model(&self) -> &str {
+            "flushmock"
+        }
+    }
+
+    #[test]
+    fn commit_survives_power_loss_only_because_it_flushes() {
+        // WHAT THIS IS FOR: on a write-back device the header must not reach
+        // persistent storage before the payload. commit_to flushes both, so a
+        // power cut (dropping the volatile cache) leaves a complete record.
+        let total = MOCK_SECTORS;
+        let mut dev = FlushMockDevice::new(total);
+        let gen = commit_to(&mut dev, b"hello", 7).expect("commit must succeed");
+        // Simulate power loss: a fresh reader sees only the flushed persistent
+        // storage; the volatile cache is gone.
+        let mut reader = FlushMockDevice {
+            cache: alloc::vec![0u8; dev.persistent.len()],
+            persistent: dev.persistent.clone(),
+            total,
+        };
+        let mut out = [0u8; 64];
+        let got = load_latest_from(&mut reader, &mut out, 7).expect("load after power loss");
+        assert_eq!(got, Some((gen, 5)), "the committed record must survive the power cut");
+        assert_eq!(&out[..5], b"hello");
+    }
 }
