@@ -32,6 +32,27 @@ pub enum DalvikVmError {
     MonitorBlocked(u32),
 }
 
+/// Per-slice instruction budget for cooperative scheduling. A thread that
+/// exhausts this budget without returning yields to the scheduler and resumes
+/// at its saved pc on the next slice; it is not a fault.
+pub const SLICE_STEP_LIMIT: usize = 4096;
+
+/// The result of running one cooperative slice for a managed thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadSliceOutcome {
+    /// The thread executed a return and is now finished.
+    Returned,
+    /// The thread exhausted its slice budget and must be re-enqueued; its pc
+    /// has been advanced and persisted so it resumes at the next instruction.
+    Yielded,
+    /// The thread blocked on a monitor and must not be re-enqueued until the
+    /// monitor is released.
+    Blocked,
+    /// The thread hit a malformed instruction, illegal operation, or the
+    /// cumulative execution limit and must be terminated.
+    Fatal(DalvikVmError),
+}
+
 const MAX_TRIES_COUNT: usize = 256;
 const MAX_CATCH_HANDLERS_PER_TRY: usize = 256;
 
@@ -862,7 +883,59 @@ impl DalvikVmState {
         steps
     }
 
-    /// Advances thread execution by slicing bytecode execution across runnable threads using DEX.
+    /// Runs one resumable bytecode slice for `thread_id` from its saved pc.
+    ///
+    /// The thread's own `code_offset`, `registers_size` and `pc` are used, and
+    /// the advanced pc is persisted back onto the thread, so a method that
+    /// exceeds the slice budget resumes at the next instruction rather than
+    /// restarting. Distinguishes a voluntary yield (re-enqueue), a monitor
+    /// block (wait), a return (finish) and a fatal error (terminate).
+    pub fn step_thread_slice(
+        &mut self,
+        dex: &DexPackage,
+        thread_id: u64,
+        step_budget: usize,
+    ) -> ThreadSliceOutcome {
+        let (code_off, reg_sz, start_pc) = match self.threads.get(&thread_id) {
+            Some(t) => (t.code_offset, t.registers_size, t.pc),
+            None => return ThreadSliceOutcome::Fatal(DalvikVmError::InvalidBytecode),
+        };
+        if code_off == 0 || code_off.checked_add(16).map_or(true, |e| e > dex.raw.len()) {
+            return ThreadSliceOutcome::Fatal(DalvikVmError::InvalidBytecode);
+        }
+        let insns_size = u32::from_le_bytes([
+            dex.raw[code_off + 12],
+            dex.raw[code_off + 13],
+            dex.raw[code_off + 14],
+            dex.raw[code_off + 15],
+        ]) as usize;
+        let insns_bytes = insns_size.saturating_mul(2);
+        let insns_start = code_off + 16;
+        let insns_end = match insns_start.checked_add(insns_bytes) {
+            Some(e) if e <= dex.raw.len() => e,
+            _ => return ThreadSliceOutcome::Fatal(DalvikVmError::InvalidBytecode),
+        };
+        if start_pc > insns_bytes {
+            return ThreadSliceOutcome::Fatal(DalvikVmError::InvalidBytecode);
+        }
+        let insns = &dex.raw[insns_start..insns_end];
+        let (_end_pc, result, yielded) =
+            self.interpret_slice(dex, reg_sz, code_off, insns, start_pc, step_budget);
+        match result {
+            Ok(_) => ThreadSliceOutcome::Returned,
+            Err(DalvikVmError::MonitorBlocked(_)) => ThreadSliceOutcome::Blocked,
+            Err(e) if yielded => {
+                let _ = e;
+                ThreadSliceOutcome::Yielded
+            }
+            Err(e) => ThreadSliceOutcome::Fatal(e),
+        }
+    }
+
+    /// Advances thread execution by slicing resumable bytecode execution across
+    /// runnable threads using DEX. Each thread runs at most [`SLICE_STEP_LIMIT`]
+    /// instructions per quantum, resumes from its saved pc, and is re-enqueued
+    /// only while it remains runnable.
     pub fn step_scheduler_slice_with_dex(
         &mut self,
         dex: &DexPackage,
@@ -878,34 +951,21 @@ impl DalvikVmState {
                 self.load_current_thread_context(next_tid);
                 steps = steps.saturating_add(1);
 
-                let code_off = self.threads.get(&next_tid).map(|t| t.code_offset).unwrap_or(0);
-                let reg_sz = self.threads.get(&next_tid).map(|t| t.registers_size).unwrap_or(0);
-                if code_off > 0 && code_off + 16 <= dex.raw.len() {
-                    let insns_size = u32::from_le_bytes([
-                        dex.raw[code_off + 12],
-                        dex.raw[code_off + 13],
-                        dex.raw[code_off + 14],
-                        dex.raw[code_off + 15],
-                    ]) as usize;
-                    let insns_bytes = insns_size.saturating_mul(2);
-                    let insns_start = code_off + 16;
-                    if insns_start + insns_bytes <= dex.raw.len() {
-                        let insns = &dex.raw[insns_start..insns_start + insns_bytes];
-                        let res = self.interpret_insns_with_code_offset(dex, reg_sz, code_off, insns);
-                        match res {
-                            Ok(_) => {
-                                self.thread_exit(next_tid);
-                            }
-                            Err(DalvikVmError::MonitorBlocked(_)) => {
-                                // Thread is blocked on monitor, do not re-enqueue
-                            }
-                            Err(_) => {
-                                if let Some(t) = self.threads.get_mut(&next_tid) {
-                                    t.status = JavaThreadStatus::Terminated;
-                                }
-                                self.thread_exit(next_tid);
-                            }
+                match self.step_thread_slice(dex, next_tid, SLICE_STEP_LIMIT) {
+                    ThreadSliceOutcome::Returned => {
+                        self.thread_exit(next_tid);
+                    }
+                    ThreadSliceOutcome::Blocked => {
+                        // Blocked on a monitor; do not re-enqueue.
+                    }
+                    ThreadSliceOutcome::Yielded => {
+                        // Voluntary yield; re-enqueue below for round-robin.
+                    }
+                    ThreadSliceOutcome::Fatal(_) => {
+                        if let Some(t) = self.threads.get_mut(&next_tid) {
+                            t.status = JavaThreadStatus::Terminated;
                         }
+                        self.thread_exit(next_tid);
                     }
                 }
 
@@ -3641,6 +3701,11 @@ impl DalvikVmState {
     }
 
     /// Interprets a sequence of Dalvik bytecode instructions with method code_offset for try-catch table resolution.
+    ///
+    /// This is the legacy, run-to-completion entry: it resumes from pc 0 and
+    /// returns `Err(ExecutionStepLimit)` when the per-slice budget is exhausted
+    /// before the method returns. New callers that need resumable, per-thread
+    /// execution use [`DalvikVmState::step_thread_slice`].
     pub fn interpret_insns_with_code_offset(
         &mut self,
         dex: &DexPackage,
@@ -3648,17 +3713,42 @@ impl DalvikVmState {
         code_offset: usize,
         insns: &[u8],
     ) -> Result<u32, DalvikVmError> {
+        let (_end_pc, result, _yielded) =
+            self.interpret_slice(dex, registers_size, code_offset, insns, 0, SLICE_STEP_LIMIT);
+        result
+    }
+
+    /// Resumable slice interpreter.
+    ///
+    /// Executes at most `step_budget` instructions starting at `start_pc` and
+    /// returns `(end_pc, result, yielded)`. `yielded` is true only when the
+    /// slice stopped because it exhausted `step_budget` with instructions
+    /// remaining -- a voluntary scheduling yield, not a fault. The end pc is
+    /// persisted onto the current thread so the next slice resumes at the
+    /// correct instruction instead of restarting the method. Cumulative
+    /// execution past [`TOTAL_INSTRUCTION_LIMIT`] is a fatal resource-exhaustion
+    /// error, distinct from a per-slice yield.
+    fn interpret_slice(
+        &mut self,
+        dex: &DexPackage,
+        registers_size: u16,
+        code_offset: usize,
+        insns: &[u8],
+        start_pc: usize,
+        step_budget: usize,
+    ) -> (usize, Result<u32, DalvikVmError>, bool) {
         struct MethodFrame {
             registers_size: u16,
         }
         let method = MethodFrame { registers_size };
-        let mut pc: usize = 0;
+        let mut pc: usize = start_pc;
         let mut steps = 0;
-        const STEP_LIMIT: usize = 4096;
+        let mut yielded = false;
         let reg_cap = self.registers.len();
 
         const TOTAL_INSTRUCTION_LIMIT: u64 = 1_000_000;
-        while pc < insns.len() && steps < STEP_LIMIT {
+        let result: Result<u32, DalvikVmError> = (|| {
+        while pc < insns.len() && steps < step_budget {
             if self.instructions_executed >= TOTAL_INSTRUCTION_LIMIT {
                 return Err(DalvikVmError::ExecutionStepLimit);
             }
@@ -5681,11 +5771,17 @@ impl DalvikVmState {
             }
         }
 
-        if steps >= STEP_LIMIT || pc < insns.len() {
+        if steps >= step_budget && pc < insns.len() {
+            yielded = true;
             Err(DalvikVmError::ExecutionStepLimit)
         } else {
             Ok(self.last_return_value)
         }
+        })();
+        if let Some(t) = self.threads.get_mut(&self.current_thread_id) {
+            t.pc = pc;
+        }
+        (pc, result, yielded)
     }
 }
 
@@ -7191,6 +7287,83 @@ mod tests {
                 JavaThreadStatus::Terminated
             ),
             "the DEX scheduler must execute the thread's return-void and terminate it"
+        );
+    }
+
+    #[test]
+    fn scheduler_resumes_long_method_at_advanced_pc_without_restarting() {
+        // WHAT THIS IS FOR: a method longer than one slice must yield and then
+        // resume at the next instruction, not restart from pc 0. A monotonically
+        // increasing pc across slices and a final Returned prove resumption.
+        let dex_bytes = create_test_dex("Lorg/interos/Res;", "run", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let m = &dex.methods[0];
+        let code_off = m.code_offset;
+        let reg_sz = m.registers_size;
+        assert!(m.instruction_count >= 2, "fixture method must have >1 instruction");
+
+        let mut vm = DalvikVmState::new();
+        vm.spawn_thread(1, "T1");
+        {
+            let t = vm.threads.get_mut(&1).unwrap();
+            t.code_offset = code_off;
+            t.registers_size = reg_sz;
+            t.pc = 0;
+        }
+        vm.set_current_thread(1);
+
+        let mut slices = 0;
+        let mut last_pc = 0usize;
+        let mut outcome;
+        loop {
+            outcome = vm.step_thread_slice(&dex, 1, 1);
+            slices += 1;
+            let pc = vm.threads.get(&1).map(|t| t.pc).unwrap_or(0);
+            match outcome {
+                ThreadSliceOutcome::Yielded => {
+                    assert!(pc > last_pc, "pc must advance on a yield, never restart");
+                    last_pc = pc;
+                }
+                ThreadSliceOutcome::Returned => break,
+                ThreadSliceOutcome::Blocked => panic!("fixture must not block"),
+                ThreadSliceOutcome::Fatal(e) => panic!("unexpected fatal: {:?}", e),
+            }
+            assert!(slices < 10_000, "method must terminate");
+        }
+        assert!(slices >= 2, "a >1-instruction method must require multiple slices");
+        assert_eq!(outcome, ThreadSliceOutcome::Returned);
+    }
+
+    #[test]
+    fn step_thread_slice_fails_closed_on_forged_offsets() {
+        // WHAT THIS IS FOR: a forged code offset or an instruction length that
+        // runs past the DEX must be a fatal error, never a silent restart.
+        let dex_bytes = create_test_dex("Lorg/interos/Forged;", "run", "test");
+        let dex = DexPackage::parse(&dex_bytes).unwrap();
+        let mut vm = DalvikVmState::new();
+        vm.spawn_thread(1, "T1");
+        vm.set_current_thread(1);
+
+        // code_offset == 0 (no code item) is fatal.
+        vm.threads.get_mut(&1).unwrap().code_offset = 0;
+        assert_eq!(
+            vm.step_thread_slice(&dex, 1, 4096),
+            ThreadSliceOutcome::Fatal(DalvikVmError::InvalidBytecode)
+        );
+
+        // code_offset past the end of the DEX is fatal.
+        vm.threads.get_mut(&1).unwrap().code_offset = dex.raw.len() + 4096;
+        assert_eq!(
+            vm.step_thread_slice(&dex, 1, 4096),
+            ThreadSliceOutcome::Fatal(DalvikVmError::InvalidBytecode)
+        );
+
+        // A pc beyond the method's instruction bytes is fatal.
+        vm.threads.get_mut(&1).unwrap().code_offset = dex.methods[0].code_offset;
+        vm.threads.get_mut(&1).unwrap().pc = dex.methods[0].instruction_count * 2 + 64;
+        assert_eq!(
+            vm.step_thread_slice(&dex, 1, 4096),
+            ThreadSliceOutcome::Fatal(DalvikVmError::InvalidBytecode)
         );
     }
 }
