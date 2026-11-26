@@ -179,7 +179,8 @@ pub enum InferenceError {
     /// The GGML type id the tensor declares. Only the ids `gemv` dequantizes reach
     /// the arithmetic, so a type whose layout the engine has not been given
     /// authoritatively is refused by number instead of read with a guess.
-    /// Q4_K is the fifth id it knows; Q4_1, Q5_K and Q6_K are not among them.
+    /// Q4_K, Q5_K, Q6_K and TQ2_0 are the K-quant ids it knows; Q4_1, Q5_0, Q5_1,
+    /// Q8_1, Q2_K, Q3_K, Q8_K and BF16 are not among them.
     UnsupportedQuantization(u32),
     CorruptedWeights,
     BufferTooSmall,
@@ -702,6 +703,11 @@ const _: () = assert!(Q5_K_BLOCK_BYTES == 2 * 2 + 12 + 32 + Q5_K_WEIGHTS / 2);
 /// vectors and the published file's own bytes, not a claim that the gate reads
 /// it today.
 pub fn dequantize_q5_k(raw: &[u8], out: &mut [f32]) -> Result<usize, InferenceError> {
+    // A partial trailing super-block is not a block: integer division would
+    // silently drop its bytes and decode a row the file does not hold.
+    if raw.len() % Q5_K_BLOCK_BYTES != 0 {
+        return Err(InferenceError::CorruptedWeights);
+    }
     let num_blocks = raw.len() / Q5_K_BLOCK_BYTES;
     let num_elements = num_blocks
         .checked_mul(Q5_K_WEIGHTS)
@@ -1033,6 +1039,50 @@ pub fn gemv(
                         }
                         sum += d * (scale as f32) * products - dmin * (min as f32) * activations;
                     }
+                }
+                out[i] = sum;
+            }
+            Ok(())
+        }
+        // GGML_TYPE_Q5_K / Q6_K / TQ2_0: dequantise each row through the
+        // canonical block decoders, then take the dot product. A scratch row is
+        // reused across rows so the allocation is per call, not per row.
+        13 | 14 | 35 => {
+            if cols % 256 != 0 {
+                return Err(InferenceError::CorruptedWeights);
+            }
+            let blocks_per_row = cols / 256;
+            let row_stride_bytes = match w_type {
+                13 => blocks_per_row
+                    .checked_mul(Q5_K_BLOCK_BYTES)
+                    .ok_or(InferenceError::CorruptedWeights)?,
+                14 => blocks_per_row
+                    .checked_mul(Q6_K_BLOCK_BYTES)
+                    .ok_or(InferenceError::CorruptedWeights)?,
+                _ => blocks_per_row
+                    .checked_mul(TQ2_0_BLOCK_BYTES)
+                    .ok_or(InferenceError::CorruptedWeights)?,
+            };
+            let needed = rows
+                .checked_mul(row_stride_bytes)
+                .ok_or(InferenceError::CorruptedWeights)?;
+            if w_bytes.len() < needed {
+                return Err(InferenceError::CorruptedWeights);
+            }
+            let mut row = alloc::vec![0f32; cols];
+            for i in 0..rows {
+                let row_slice = &w_bytes[i * row_stride_bytes..(i + 1) * row_stride_bytes];
+                let produced = match w_type {
+                    13 => dequantize_q5_k(row_slice, &mut row)?,
+                    14 => dequantize_q6_k(row_slice, &mut row)?,
+                    _ => dequantize_tq2_0(row_slice, &mut row)?,
+                };
+                if produced != cols {
+                    return Err(InferenceError::CorruptedWeights);
+                }
+                let mut sum = 0.0f32;
+                for j in 0..cols {
+                    sum += row[j] * x[j];
                 }
                 out[i] = sum;
             }
@@ -3174,6 +3224,9 @@ pub fn quantised_row_bytes(dtype: u32, width: usize) -> Option<usize> {
         2 => blocks(32, 18),
         8 => blocks(32, 34),
         12 => blocks(Q4_K_WEIGHTS, Q4_K_BLOCK_BYTES),
+        13 => blocks(Q5_K_WEIGHTS, Q5_K_BLOCK_BYTES),
+        14 => blocks(Q6_K_WEIGHTS, Q6_K_BLOCK_BYTES),
+        35 => blocks(TQ2_0_WEIGHTS, TQ2_0_BLOCK_BYTES),
         _ => None,
     }
 }
@@ -3218,14 +3271,18 @@ pub fn embedding_row_into(
             }
             Ok(())
         }
-        // GGML_TYPE_Q4_0 / Q8_0 / Q4_K: dequantise the whole row, then scale it. The
-        // three helpers write exactly `raw.len() / block_bytes * block_weights`
-        // floats, which is the row's declared width when the loader sized the buffer.
-        2 | 8 | 12 => {
+        // GGML_TYPE_Q4_0 / Q8_0 / Q4_K / Q5_K / Q6_K / TQ2_0: dequantise the whole
+        // row, then scale it. The helpers write exactly
+        // `raw.len() / block_bytes * block_weights` floats, which is the row's
+        // declared width when the loader sized the buffer.
+        2 | 8 | 12 | 13 | 14 | 35 => {
             let produced = match dtype {
                 2 => dequantize_q4_0(raw, out)?,
                 8 => dequantize_q8_0(raw, out)?,
-                _ => dequantize_q4_k(raw, out)?,
+                12 => dequantize_q4_k(raw, out)?,
+                13 => dequantize_q5_k(raw, out)?,
+                14 => dequantize_q6_k(raw, out)?,
+                _ => dequantize_tq2_0(raw, out)?,
             };
             if produced != out.len() {
                 return Err(InferenceError::CorruptedWeights);
@@ -4784,20 +4841,21 @@ pub mod tests {
     /// The dtype ids this build has a byte layout for, collected from the engine
     /// rather than read out of a comment.
     ///
-    /// WHY the whole range and not the five: `quantised_row_bytes` is the function
+    /// WHY the whole range and not a fixed list: `quantised_row_bytes` is the function
     /// the loader calls to size every tensor row it reads, and `gemv` and
     /// `embedding_row_into` are the two places the bytes are then interpreted. A
-    /// case that only checks the ids it expects to work cannot see a sixth arm
-    /// appear or a fourth disappear; a case that walks the id space and collects
+    /// case that only checks the ids it expects to work cannot see a new arm
+    /// appear or one disappear; a case that walks the id space and collects
     /// what answers can see both, and it also sees the shape of the answer for
     /// everything outside the set -- refused by number, never read with a
     /// neighbour's block width.
     #[test]
-    fn the_engine_maps_exactly_five_dtype_ids_and_refuses_the_rest_by_number() {
-        // 0 F32, 1 F16, 2 Q4_0, 8 Q8_0, 12 Q4_K. Q4_1 (3), Q5_K (13) and Q6_K (14)
-        // are the ids the GGML format names that no arithmetic in this service
-        // reads, and the published file uses only 0 and 8.
-        let mapped = [0u32, 1, 2, 8, 12];
+    fn the_engine_maps_exactly_eight_dtype_ids_and_refuses_the_rest_by_number() {
+        // 0 F32, 1 F16, 2 Q4_0, 8 Q8_0, 12 Q4_K, 13 Q5_K, 14 Q6_K, 35 TQ2_0.
+        // Q4_1 (3), Q5_0 (6), Q5_1 (7), Q8_1 (9), Q2_K (10), Q3_K (11), Q8_K (15)
+        // and BF16 (30) are ids the GGML format names that no arithmetic in this
+        // service reads.
+        let mapped = [0u32, 1, 2, 8, 12, 13, 14, 35];
         let mut answered: Vec<u32> = Vec::new();
         for dtype in 0..=64u32 {
             if quantised_row_bytes(dtype, 768).is_some() {
@@ -6135,5 +6193,63 @@ pub mod tests {
         assert_eq!(vec, [1.0, 2.0, 3.0, 4.0], "Negative base must leave vector unmodified");
         apply_rope(&mut vec, 1, 0, 10000.0);
         assert_eq!(vec, [1.0, 2.0, 3.0, 4.0], "Zero head_dim must leave vector unmodified");
+    }
+
+    #[test]
+    fn q6_k_block_decodes_to_reference_minus_32() {
+        // Independent reference: with all quant nibbles zero, every Q6_K weight
+        // is (0 - 32); with scale int8 = 1 and FP16 d = 1.0 every decoded value
+        // is exactly -32.0. This pins the ql/qh/sc/d layout and the -32 bias.
+        let mut blk = alloc::vec![0u8; Q6_K_BLOCK_BYTES];
+        for s in blk.iter_mut().take(208).skip(192) {
+            *s = 1;
+        }
+        blk[208] = 0x00;
+        blk[209] = 0x3C; // f16 1.0
+        let mut out = alloc::vec![0f32; Q6_K_WEIGHTS];
+        let produced = dequantize_q6_k(&blk, &mut out).expect("q6_k block decodes");
+        assert_eq!(produced, 256);
+        assert!(out.iter().all(|&v| v == -32.0), "q6_k reference mismatch: {:?}", &out[..4]);
+    }
+
+    #[test]
+    fn new_quant_block_decoders_reject_partial_and_short_buffers() {
+        let mut out = alloc::vec![0f32; 256];
+        assert_eq!(
+            dequantize_q5_k(&alloc::vec![0u8; Q5_K_BLOCK_BYTES - 1], &mut out),
+            Err(InferenceError::CorruptedWeights)
+        );
+        assert_eq!(
+            dequantize_q6_k(&alloc::vec![0u8; Q6_K_BLOCK_BYTES - 1], &mut out),
+            Err(InferenceError::CorruptedWeights)
+        );
+        assert_eq!(
+            dequantize_tq2_0(&alloc::vec![0u8; TQ2_0_BLOCK_BYTES - 1], &mut out),
+            Err(InferenceError::CorruptedWeights)
+        );
+        let short = &mut out[..255];
+        assert_eq!(
+            dequantize_q6_k(&alloc::vec![0u8; Q6_K_BLOCK_BYTES], short),
+            Err(InferenceError::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn new_dtype_rows_size_and_decode_as_zero_for_zero_weights() {
+        assert_eq!(quantised_row_bytes(13, 256), Some(Q5_K_BLOCK_BYTES));
+        assert_eq!(quantised_row_bytes(14, 256), Some(Q6_K_BLOCK_BYTES));
+        assert_eq!(quantised_row_bytes(35, 256), Some(TQ2_0_BLOCK_BYTES));
+        assert_eq!(quantised_row_bytes(13, 255), None);
+        assert_eq!(quantised_row_bytes(999, 256), None);
+
+        let zero = alloc::vec![0u8; Q6_K_BLOCK_BYTES];
+        let mut row = alloc::vec![0f32; 256];
+        embedding_row_into(&zero, 14, 1.0, &mut row).expect("q6_k embedding row");
+        assert!(row.iter().all(|&v| v == 0.0));
+
+        let x = alloc::vec![0f32; 256];
+        let mut out = alloc::vec![0f32; 1];
+        gemv(&zero, 14, &x, &mut out, 1, 256).expect("q6_k gemv");
+        assert_eq!(out[0], 0.0);
     }
 }

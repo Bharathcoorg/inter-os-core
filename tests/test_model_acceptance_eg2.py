@@ -67,7 +67,7 @@ LEAD_SECTION = 159_907_491
 
 CEILING = 134_213_632                 # per-mapping ceiling, never weakened
 READ_WINDOW = 65_536                  # positioned-read bound, both sides
-MAPPED_DTYPES = [0, 1, 2, 8, 12]      # the engine's DECODE set (inference.rs)
+MAPPED_DTYPES = [0, 1, 2, 8, 12, 13, 14, 35]  # the engine's DECODE set (inference.rs)
 
 # GGML block geometry for PLACEMENT arithmetic: (elements per block, bytes per
 # block). Legacy quants are 32-element blocks; K-quants and TQ are 256-element
@@ -81,7 +81,7 @@ GEOM = {
 }
 
 EXPECTED_CENSUS = {0: 194, 8: 48, 12: 169, 13: 1, 14: 1}
-EXPECTED_UNMAPPED = {"output.weight": 14, "per_layer_model_proj.weight": 13}
+EXPECTED_UNMAPPED = {}
 EXPECTED_OVER = {}                    # every EG2 tensor fits the mapping ceiling
 LARGEST = ("token_embd.weight", 75_497_472, 12, [512, 262144])
 
@@ -883,7 +883,7 @@ def test_meta_refusal_gate_can_fail():
     assert refusal_defects(inference, weights) == []
     grown = inference.replace(
         "        8 => blocks(32, 34),",
-        "        8 => blocks(32, 34),\n        14 => blocks(256, 210),",
+        "        8 => blocks(32, 34),\n        3 => blocks(32, 20),",
         1,
     )
     assert grown != inference, "the Q8_0 arm moved; this fixture is stale"

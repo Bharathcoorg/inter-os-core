@@ -75,18 +75,20 @@ use core::mem::size_of;
 /// the descriptors: a name wider than the reader's own window is not comparable.
 pub const MAX_NAME_BYTES: usize = crate::gguf::MAX_TENSOR_NAME_LEN;
 
-/// The five quantisations `gemv` and `embedding_row_into` know the byte layout of:
-/// dtype ids 0 (F32), 1 (F16), 2 (Q4_0), 8 (Q8_0) and 12 (Q4_K).
+/// The eight quantisations `gemv` and `embedding_row_into` know the byte layout of:
+/// dtype ids 0 (F32), 1 (F16), 2 (Q4_0), 8 (Q8_0), 12 (Q4_K), 13 (Q5_K), 14 (Q6_K)
+/// and 35 (TQ2_0).
 ///
 /// WHY the decode layouts are a list and not a table: the engine's arithmetic is
 /// the authority for reading a row, and a loader that carried its own decode table
 /// could disagree with it about a block's width without either one saying so. The
 /// row sizes are asked for through `quantised_row_bytes`, which returns `None` for
 /// anything else, and `None` becomes `LoadError::UnsupportedDtype` naming the tensor
-/// and the number. A dtype outside those five -- Q4_1, Q5_K and Q6_K are the ones
-/// the GGML format names and this engine has no row layout for -- is refused outright
-/// rather than read with a neighbour's scale bytes, so the count above is what this
-/// build can decode and not what the format has room for.
+/// and the number. A dtype outside those eight -- Q4_1, Q5_0, Q5_1, Q8_1, Q2_K,
+/// Q3_K, Q8_K and BF16 are the ones the GGML format names and this engine has no row
+/// layout for -- is refused outright rather than read with a neighbour's scale bytes,
+/// so the count above is what this build can decode and not what the format has room
+/// for.
 ///
 /// Placing a tensor is a different question from decoding one. The descriptor walk
 /// needs each payload's byte length to round the data section and bound the read,
@@ -2877,7 +2879,7 @@ pub mod tests {
         // bytes -- the installed file is checked by the case above.
         let entry = TensorEntry {
             name: b"blk.0.attn_q.weight".to_vec(),
-            dtype: 13, // Q5_K: no layout in this engine
+            dtype: 3, // Q4_1: no layout in this engine (Q5_K/Q6_K/TQ2_0 now decode)
             cols: 768,
             rows: 768,
             n_dims: 2,
@@ -2888,7 +2890,7 @@ pub mod tests {
         assert_eq!(
             quantised_row_bytes(entry.dtype, entry.cols as usize),
             None,
-            "Q5_K must not resolve to a row width, or the loader will read it as Q4_K"
+            "Q4_1 must not resolve to a row width, or the loader will read it as Q4_0"
         );
     }
 

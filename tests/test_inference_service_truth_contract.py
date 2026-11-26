@@ -2768,8 +2768,8 @@ def test_the_quantisation_claim_gate_can_fail():
     weights = read("weights.rs")
     ids = mapped_dtype_ids(inference)
 
-    # 1. The claim as it shipped: eight named over a five-id engine.
-    inflated = weights.replace("The five quantisations", "The eight quantisations", 1)
+    # 1. The claim as it shipped: nine named over an eight-id engine.
+    inflated = weights.replace("The eight quantisations", "The nine quantisations", 1)
     assert inflated != weights, "the reader's count sentence moved; this fixture is stale"
     claimed, _ = quantisation_claim(inflated)
     assert claimed != len(ids), (
@@ -2795,7 +2795,7 @@ def test_the_quantisation_claim_gate_can_fail():
     # 3. The count stays right while the enumeration goes: the reader would be
     # back to asserting a number a reader cannot check.
     unlisted = weights.replace(
-        "dtype ids 0 (F32), 1 (F16), 2 (Q4_0), 8 (Q8_0) and 12 (Q4_K)",
+        "dtype ids 0 (F32), 1 (F16), 2 (Q4_0), 8 (Q8_0), 12 (Q4_K), 13 (Q5_K), 14 (Q6_K)\n/// and 35 (TQ2_0).",
         "the dtype ids the engine names",
         1,
     )
@@ -2817,7 +2817,7 @@ def test_the_quantisation_claim_gate_can_fail():
 
     # None of those faults are in the service as it stands.
     claimed, paragraph = quantisation_claim(weights)
-    assert claimed == len(ids) == 5 and ids == [0, 1, 2, 8, 12]
+    assert claimed == len(ids) == 8 and ids == [0, 1, 2, 8, 12, 13, 14, 35]
     assert ids_named(paragraph, ids) == ids
     assert DECODE_REFUSAL.search(paragraph)
 

@@ -68,7 +68,7 @@ LEAD_SECTION = 2_170_403_348
 
 CEILING = 134_213_632                 # per-mapping ceiling, never weakened
 READ_WINDOW = 65_536                  # positioned-read bound, both sides
-MAPPED_DTYPES = [0, 1, 2, 8, 12]      # the engine's DECODE set (inference.rs)
+MAPPED_DTYPES = [0, 1, 2, 8, 12, 13, 14, 35]  # the engine's DECODE set (inference.rs)
 
 # GGML block geometry for PLACEMENT arithmetic: (elements per block, bytes per
 # block). Legacy quants are 32-element blocks; K-quants and TQ are 256-element
@@ -86,12 +86,9 @@ EXPECTED_OVER = {"per_layer_token_embd.weight": 1_321_205_760}
 LARGEST = ("per_layer_token_embd.weight", 1_321_205_760, 2, [8960, 262144])
 SECOND = ("token_embd.weight", 103_809_024, 35, [1536, 262144])
 
-# The 61 TQ2_0 tensors the decode set does not map: the token embedding itself
-# and the three FFN matrices of every shared-KV layer (15..34).
-EXPECTED_UNMAPPED = {"token_embd.weight": 35}
-for _layer in range(15, 35):
-    for _suffix in ("gate", "up", "down"):
-        EXPECTED_UNMAPPED[f"blk.{_layer}.ffn_{_suffix}.weight"] = 35
+# Every tensor this file declares (0/1/2/8/35) is now in the decode set, so the
+# loader maps all of them; the TQ2_0 token embedding and FFN matrices decode.
+EXPECTED_UNMAPPED = {}
 
 VOCAB = 262_144
 TOKEN_PAYLOAD = 2_316_295
@@ -1055,7 +1052,7 @@ def test_meta_refusal_gate_can_fail():
     assert refusal_defects(inference, weights) == []
     grown = inference.replace(
         "        8 => blocks(32, 34),",
-        "        8 => blocks(32, 34),\n        35 => blocks(256, 66),",
+        "        8 => blocks(32, 34),\n        3 => blocks(32, 20),",
         1,
     )
     assert grown != inference, "the Q8_0 arm moved; this fixture is stale"

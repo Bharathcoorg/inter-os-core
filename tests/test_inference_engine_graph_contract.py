@@ -31,7 +31,7 @@ SERVICE = ROOT / "userspace" / "system-service" / "src"
 # The five GGML dtype ids `quantised_row_bytes` gives a row layout to. 0 and 8 are
 # the two the published file actually uses; 1, 2 and 12 are read because the same
 # code paths answer other files the platform has been handed.
-MAPPED_DTYPES = [0, 1, 2, 8, 12]
+MAPPED_DTYPES = [0, 1, 2, 8, 12, 13, 14, 35]
 
 # The thirteen tensors the published file declares inside every one of its 24 blocks.
 DECLARED_BLOCK_QUANTISED = [
@@ -159,7 +159,7 @@ def test_the_engine_sizes_a_row_for_exactly_five_dtype_ids():
     """
     sized = dtype_ids_sized(read("inference.rs"))
     assert sized == MAPPED_DTYPES, (
-        f"the engine sizes a row for {sized}, not the five {MAPPED_DTYPES}"
+        f"the engine sizes a row for {sized}, not {MAPPED_DTYPES}"
     )
 
     # `gemv` and `embedding_row_into` have to fall through to the same refusal, by
@@ -507,7 +507,7 @@ def test_no_comment_claims_a_dtype_the_arithmetic_does_not_have():
     )
     for dtype in MAPPED_DTYPES:
         assert re.search(rf"\b{dtype}\b", doc), f"the claim counts {dtype} without naming it"
-    for absent in ("Q4_1", "Q5_K", "Q6_K"):
+    for absent in ("Q4_1", "Q5_0", "Q5_1", "Q8_1", "Q2_K", "Q3_K", "Q8_K", "BF16"):
         assert absent in doc, f"the claim stopped saying {absent} is not among them"
 
 
