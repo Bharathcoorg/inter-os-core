@@ -6503,4 +6503,190 @@ pub mod tests {
         }
         assert!(max_abs <= 1.0, "tq2_0 max_abs {max_abs} max_rel {max_rel}");
     }
+
+    /// Real published-model embedding on the HOST engine -- deterministic, no
+    /// network, no fabricated numbers.
+    ///
+    /// WHAT THIS IS: the development host running the shipping engine over the
+    /// published `embeddinggemma-300M-Q8_0.gguf` bytes through the same
+    /// `weights::run_streamed_embedding` the service calls, reading the file's own
+    /// descriptor table and tensors. It is NOT the guest: nothing here is a device
+    /// execution, and the run is labelled host-backed wherever it is reported.
+    ///
+    /// WHAT IT PROVES: the file loads through the gguf reader, the 24-block graph
+    /// runs over its real Q8_0 bytes, the file's dense_2/dense_3 pooling head is
+    /// applied, and the 768-wide result is finite, L2-normalised and identical on a
+    /// second run of the same prompt (the accumulator reset holds). The first values
+    /// and an FNV checksum over the raw f32 bits are recorded so the run is
+    /// reproducible, not compared against a stand-in.
+    ///
+    /// REFERENCE: no full-trunk runtime (llama.cpp / torch / sentence-transformers)
+    /// is installed on this host, so there is no independent full-embedding
+    /// reference to take a max-abs-error against; that number is reported as N/A.
+    /// The pooling head's own arithmetic IS proved against a host reference in
+    /// `weights::tests::test_the_installed_file_is_read_block_by_block_and_run`.
+    ///
+    /// GATING: absent file -> print "NOT VERIFIED" and skip (return), never panic,
+    /// so the suite stays green on a machine without the 333 MB weights.
+    #[test]
+    fn test_real_published_embedding_gguf_runs_and_is_deterministic() {
+        extern crate std as rust_std;
+
+        // Resolve the installed file: explicit variable first, then the staged
+        // copy, then the preserved copy. The path is the only thing that decides
+        // what is loaded; the numbers all come from the file's own bytes.
+        let path = rust_std::env::var("INTEROS_REAL_GGUF_PATH").ok().or_else(|| {
+            for candidate in [
+                "../../target/verify/models/embeddinggemma-300M-Q8_0.gguf",
+                "target/verify/models/embeddinggemma-300M-Q8_0.gguf",
+                "../../models/embeddinggemma-300M-Q8_0.gguf",
+                "models/embeddinggemma-300M-Q8_0.gguf",
+            ] {
+                if rust_std::path::Path::new(candidate).exists() {
+                    return Some(alloc::string::String::from(candidate));
+                }
+            }
+            None
+        });
+        let Some(path) = path else {
+            rust_std::println!(
+                "NOT VERIFIED: no published embedding model file found (set \
+                 INTEROS_REAL_GGUF_PATH or place embeddinggemma-300M-Q8_0.gguf under \
+                 target/verify/models or models). Skipping the real-model embedding run."
+            );
+            return;
+        };
+
+        // 1. The file's own descriptor table and self-description, read by the
+        // reader that ships. `prefix` is the metadata + descriptors, not weights.
+        let (table, prefix, prefix_bytes) = crate::weights::tests::walk_the_installed_table(&path)
+            .unwrap_or_else(|why| panic!("the descriptor table of {path} never walked: {why}"));
+        let mut info_stream = crate::gguf::GgufStream::from_slice(&prefix);
+        let info = crate::gguf::read_model_info_stream(&mut info_stream)
+            .unwrap_or_else(|error| panic!("{path} did not configure the engine: {error:?}"));
+        let config = ModelConfig::from_gguf(&info)
+            .unwrap_or_else(|error| panic!("{path} was refused by the engine config: {error:?}"));
+        assert_eq!(config.hidden_dim, 768, "the published file is 768-wide");
+        assert_eq!(config.num_layers, 24, "the published file states 24 blocks");
+        let file_len = rust_std::fs::metadata(&path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        rust_std::println!(
+            "REAL FILE {path}: {} bytes, descriptor table walked over {} prefix bytes",
+            file_len, prefix_bytes
+        );
+
+        // 2. Open the file behind the same `PositionRead` the device descriptor
+        // uses, so the loader's shipping code path runs and not a test-only reader.
+        let source = crate::weights::tests::HostFileSource {
+            file: rust_std::fs::File::open(&path)
+                .unwrap_or_else(|error| panic!("{path} could not be opened: {error}")),
+        };
+        let mut reader = crate::weights::WeightReader::new(table, source);
+        assert!(
+            reader.has_pooling_head(),
+            "the published file's dense_2/dense_3 pooling head must be present"
+        );
+
+        let final_norm = reader
+            .load_final_norm(config.hidden_dim)
+            .unwrap_or_else(|error| panic!("output_norm reads: {error:?}"));
+        let mut scratch = Scratch::new(&config).expect("the run's scratch is under budget");
+        let mut kv_cache = KvCache::new(&config).expect("the run's cache is under budget");
+
+        // 3. A fixed short prompt. Each block is read once and released; the head
+        // runs last. A loader rejection names the exact tensor and dtype id.
+        let prompt = [1701u32, 4423, 88];
+        let mut out: Vec<f32> = alloc::vec![0.0f32; config.hidden_dim];
+        let mut row: Vec<u8> = Vec::new();
+        let started = rust_std::time::Instant::now();
+        let (report, head_applied) = crate::weights::run_streamed_embedding(
+            &mut reader,
+            &config,
+            &prompt,
+            &mut scratch,
+            &mut kv_cache,
+            &final_norm,
+            &mut row,
+            &mut out,
+        )
+        .unwrap_or_else(|error| match error {
+            crate::weights::LoadError::UnsupportedDtype(name, dtype) => {
+                panic!("the loader rejected tensor `{name}` (dtype id {dtype}); this build has no row layout for it")
+            }
+            crate::weights::LoadError::Graph(InferenceError::UnsupportedQuantization(dtype)) => {
+                panic!("the graph rejected a tensor quantisation by dtype id {dtype}")
+            }
+            other => panic!("the installed file failed to run the graph: {other:?}"),
+        });
+        assert!(head_applied, "the file's pooling head was not applied");
+        assert_eq!(report.positions, prompt.len());
+        assert_eq!(report.blocks_run, prompt.len() * config.num_layers);
+
+        // 4. 768 finite, L2-normalised numbers.
+        assert_eq!(out.len(), 768, "the embedding is not 768-wide");
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "the embedding holds a non-finite value"
+        );
+        let mut sq = 0.0f64;
+        for &v in out.iter() {
+            sq += v as f64 * v as f64;
+        }
+        assert!(
+            (sq - 1.0).abs() < 0.01,
+            "the embedding is not L2-normalised (squared length {sq})"
+        );
+
+        // 5. Record the run: first values and an FNV-1a checksum over the raw f32
+        // bits, so the exact vector is reproducible from this transcript.
+        let mut fnv = 0xcbf29ce484222325u64;
+        for &v in out.iter() {
+            for byte in v.to_bits().to_le_bytes() {
+                fnv ^= byte as u64;
+                fnv = fnv.wrapping_mul(0x100000001b3);
+            }
+        }
+        rust_std::println!(
+            "REAL EMBEDDING (host-backed, NOT guest): prompt {prompt:?}, {} positions x {} \
+             blocks, {} tensors, {} bytes read, head applied, in {:?}",
+            report.positions,
+            config.num_layers,
+            report.tensors_read,
+            report.bytes_read,
+            started.elapsed()
+        );
+        rust_std::println!(
+            "EMBEDDING[0..4] = [{:.6}, {:.6}, {:.6}, {:.6}], squared length {:.7}, FNV checksum {:#018x}",
+            out[0], out[1], out[2], out[3], sq, fnv
+        );
+
+        // 6. Determinism: the same prompt over the reused scratch and cache returns
+        // the identical vector -- the pooling accumulator was reset and no
+        // token-independent path leaked in.
+        let mut out_again: Vec<f32> = alloc::vec![0.0f32; config.hidden_dim];
+        let mut row_again: Vec<u8> = Vec::new();
+        let (_again, head_again) = crate::weights::run_streamed_embedding(
+            &mut reader,
+            &config,
+            &prompt,
+            &mut scratch,
+            &mut kv_cache,
+            &final_norm,
+            &mut row_again,
+            &mut out_again,
+        )
+        .expect("the installed file runs the graph a second time");
+        assert!(head_again, "the second run did not apply the head");
+        assert_eq!(
+            out_again, out,
+            "the same prompt answered differently the second time it was asked"
+        );
+
+        rust_std::println!(
+            "REFERENCE: no full-embedding reference available on this host; max abs error \
+             vs reference = N/A (the pooling head's arithmetic is proved against a host \
+             reference in weights::tests::test_the_installed_file_is_read_block_by_block_and_run)"
+        );
+    }
 }
