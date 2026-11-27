@@ -92,6 +92,8 @@ pub enum SeedRecovery {
 #[derive(Clone, Debug)]
 pub struct KeystoreEntry {
     pub slot: usize,
+    /// Authenticated principal this entry belongs to (0 = kernel/legacy).
+    pub principal_id: u64,
     pub alias: [u8; 32],
     pub alias_len: usize,
     pub nonce: [u8; 16],
@@ -303,9 +305,33 @@ impl SecureKeystore {
             .expect("SecureKeystore::derive_key slot out of bounds")
     }
 
-    /// Encrypts plaintext under slot key using HMAC-CTR keystream and generates HMAC-SHA256 auth tag.
+    /// Derives the per-principal slot key for credential storage. The principal
+    /// is folded into the KDF label, so two principals that name the same slot
+    /// and alias derive different keys and cannot read or forge each other's
+    /// entry even if they reach the table.
+    fn slot_key_for(&self, slot: KeySlot, principal_id: u64) -> [u8; 32] {
+        let mut label = Vec::with_capacity(16 + 8);
+        label.extend_from_slice(b"cred_storage");
+        label.extend_from_slice(&principal_id.to_le_bytes());
+        let key = self.derive_key(slot, &label);
+        crate::crypto::zeroize_slice(&mut label);
+        key
+    }
+
+    /// Encrypts plaintext under the legacy (kernel) principal.
     pub fn store_credential(
         &mut self,
+        slot: KeySlot,
+        alias_str: &str,
+        plaintext: &[u8],
+    ) -> Result<(), KeystoreError> {
+        self.store_credential_as(0, slot, alias_str, plaintext)
+    }
+
+    /// Stores a credential bound to an authenticated principal.
+    pub fn store_credential_as(
+        &mut self,
+        principal_id: u64,
         slot: KeySlot,
         alias_str: &str,
         plaintext: &[u8],
@@ -314,22 +340,15 @@ impl SecureKeystore {
         if slot_idx >= MAX_KEY_SLOTS {
             return Err(KeystoreError::SlotOutOfBounds);
         }
-        // WHY refuse rather than derive from an absent root: with no storage root
-        // the slot key would be a fixed function of published constants, so the
-        // credential would be stored under, and readable with, material anyone can
-        // compute. Reporting success there would be inventing security.
         if !self.seed_established {
             return Err(KeystoreError::SeedUnavailable);
         }
 
-        // Generate 16-byte cryptographic random nonce from hardware TRNG
         let mut nonce = [0u8; 16];
         crate::crypto::try_get_random_bytes(&mut nonce).map_err(|_| KeystoreError::SeedUnavailable)?;
 
-        // Derive slot encryption key
-        let mut slot_key = self.derive_key(slot, b"cred_storage");
+        let mut slot_key = self.slot_key_for(slot, principal_id);
 
-        // Generate keystream and encrypt via XOR
         let mut ciphertext = Vec::with_capacity(plaintext.len());
         let mut block_idx: u32 = 0;
         let mut block_keystream = [0u8; 32];
@@ -345,15 +364,15 @@ impl SecureKeystore {
             ciphertext.push(byte ^ block_keystream[i % 32]);
         }
 
-        // Compute HMAC-SHA256 authentication tag over alias, nonce, and ciphertext
+        // Auth tag binds the principal, alias, nonce and ciphertext.
         let mut auth_input = Vec::new();
         auth_input.extend_from_slice(b"AUTH_TAG_V1:");
+        auth_input.extend_from_slice(&principal_id.to_le_bytes());
         auth_input.extend_from_slice(alias_str.as_bytes());
         auth_input.extend_from_slice(&nonce);
         auth_input.extend_from_slice(&ciphertext);
         let auth_tag = HmacSha256::compute(&slot_key, &auth_input);
 
-        // Wipe temporary slot key and keystream from stack
         crate::crypto::zeroize_slice(&mut slot_key);
         crate::crypto::zeroize_slice(&mut block_keystream);
 
@@ -361,11 +380,16 @@ impl SecureKeystore {
         let copy_len = alias_str.len().min(32);
         alias[..copy_len].copy_from_slice(&alias_str.as_bytes()[..copy_len]);
 
-        // Remove any prior entry with the same slot and alias
-        self.entries.retain(|e| !(e.slot == slot_idx && &e.alias[..e.alias_len] == &alias[..copy_len]));
+        // Remove any prior entry with the same principal, slot and alias.
+        self.entries.retain(|e| {
+            !(e.slot == slot_idx
+                && e.principal_id == principal_id
+                && &e.alias[..e.alias_len] == &alias[..copy_len])
+        });
 
         self.entries.push(KeystoreEntry {
             slot: slot_idx,
+            principal_id,
             alias,
             alias_len: copy_len,
             nonce,
@@ -376,17 +400,27 @@ impl SecureKeystore {
         Ok(())
     }
 
-    /// Verifies authenticity tag and decrypts stored credential.
+    /// Verifies authenticity tag and decrypts a legacy (kernel) credential.
     pub fn retrieve_credential(
         &self,
+        slot: KeySlot,
+        alias_str: &str,
+    ) -> Result<Vec<u8>, KeystoreError> {
+        self.retrieve_credential_as(0, slot, alias_str)
+    }
+
+    /// Reads a credential belonging to `principal_id`. A mismatch is reported as
+    /// `EntryNotFound`, never a distinct error, so a caller cannot probe which
+    /// aliases another principal stored.
+    pub fn retrieve_credential_as(
+        &self,
+        principal_id: u64,
         slot: KeySlot,
         alias_str: &str,
     ) -> Result<Vec<u8>, KeystoreError> {
         let slot_idx = slot.slot_index();
         let alias_bytes = alias_str.as_bytes();
 
-        // Same refusal as on the write path: an absent root must not answer a
-        // read with attacker-derivable plaintext.
         if !self.seed_established {
             return Err(KeystoreError::SeedUnavailable);
         }
@@ -394,14 +428,18 @@ impl SecureKeystore {
         let entry = self
             .entries
             .iter()
-            .find(|e| e.slot == slot_idx && &e.alias[..e.alias_len] == alias_bytes)
+            .find(|e| {
+                e.slot == slot_idx
+                    && e.principal_id == principal_id
+                    && &e.alias[..e.alias_len] == alias_bytes
+            })
             .ok_or(KeystoreError::EntryNotFound)?;
 
-        let mut slot_key = self.derive_key(slot, b"cred_storage");
+        let mut slot_key = self.slot_key_for(slot, principal_id);
 
-        // 1. Verify authentication tag in constant time
         let mut auth_input = Vec::new();
         auth_input.extend_from_slice(b"AUTH_TAG_V1:");
+        auth_input.extend_from_slice(&principal_id.to_le_bytes());
         auth_input.extend_from_slice(alias_str.as_bytes());
         auth_input.extend_from_slice(&entry.nonce);
         auth_input.extend_from_slice(&entry.ciphertext);
@@ -870,5 +908,28 @@ mod tests {
         assert_eq!(ks.master_seed, [0u8; 32]);
         assert!(!ks.seed_established);
         core::mem::forget(ks);
+    }
+
+    /// A credential stored by one principal is unreadable by another, even when
+    /// both name the same slot and alias.
+    #[test]
+    fn cross_principal_credentials_are_isolated() {
+        let mut ks = SecureKeystore::new();
+        ks.adopt_device_seed(nonzero_seed(0xE1));
+        ks.store_credential_as(1000, KeySlot::AppSlot(5), "tok", b"alice-secret").unwrap();
+        ks.store_credential_as(2000, KeySlot::AppSlot(5), "tok", b"bob-secret").unwrap();
+        // A different principal cannot read it, and cannot even tell it exists.
+        assert_eq!(
+            ks.retrieve_credential_as(2001, KeySlot::AppSlot(5), "tok"),
+            Err(KeystoreError::EntryNotFound),
+        );
+        // The legacy principal-0 namespace is not a master key.
+        assert_eq!(
+            ks.retrieve_credential(KeySlot::AppSlot(5), "tok"),
+            Err(KeystoreError::EntryNotFound),
+        );
+        // Each principal round-trips only its own material.
+        assert_eq!(ks.retrieve_credential_as(1000, KeySlot::AppSlot(5), "tok").unwrap(), b"alice-secret");
+        assert_eq!(ks.retrieve_credential_as(2000, KeySlot::AppSlot(5), "tok").unwrap(), b"bob-secret");
     }
 }
