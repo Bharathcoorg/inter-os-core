@@ -140,12 +140,58 @@ def ensure_test_apk_generator():
     return bin_path
 
 
-def generate_apk(gen_bin: Path, package_name: str, out_path: Path, cert: str | None = None) -> bytes:
+def generate_apk(
+    gen_bin: Path,
+    package_name: str,
+    out_path: Path,
+    cert: str | None = None,
+    ui_text: str | None = None,
+) -> bytes:
     cmd = [str(gen_bin), package_name, str(out_path)]
-    if cert:
+    if ui_text is not None:
+        cmd.extend(["--ui-text", ui_text])
+    elif cert:
         cmd.append(cert)
     subprocess.run(cmd, cwd=ROOT, check=True, capture_output=True)
     return out_path.read_bytes()
+
+
+def capture_monitor_screendump(mon_port: int, out_ppm: Path):
+    """Requests an HMP screendump over QEMU's readline monitor socket and parses the PPM."""
+    from verify_x86_boot import read_ppm
+
+    if out_ppm.exists():
+        out_ppm.unlink()
+    ppm_arg = str(out_ppm.resolve()).replace("\\", "/")
+    with socket.create_connection(("127.0.0.1", mon_port), timeout=10.0) as mon:
+        mon.settimeout(1.5)
+        try:
+            _ = mon.recv(4096)
+        except OSError:
+            pass
+        mon.sendall(f"screendump {ppm_arg}\n".encode("ascii"))
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            if out_ppm.exists() and out_ppm.stat().st_size > 720 * 1440 * 3:
+                break
+            time.sleep(0.1)
+            try:
+                _ = mon.recv(4096)
+            except OSError:
+                pass
+    return read_ppm(out_ppm)
+
+
+def count_bright_pixels(pixels: bytes, width: int, x0: int, y0: int, x1: int, y1: int) -> tuple[int, list[tuple[int, int]]]:
+    bright = []
+    for y in range(y0, y1):
+        row = y * width * 3
+        for x in range(x0, x1):
+            idx = row + x * 3
+            r, g, b = pixels[idx], pixels[idx + 1], pixels[idx + 2]
+            if r >= 200 and g >= 200 and b >= 200:
+                bright.append((x, y))
+    return len(bright), bright
 
 
 def stage_apk_to_qemu(reader, package_name: str, apk_bytes: bytes) -> int:
@@ -227,6 +273,8 @@ def verify_acr_qemu():
     apk_b_bytes = generate_apk(gen_bin, "com.example.counter", apk_b_path)
     apk_a_v2_bytes = generate_apk(gen_bin, "com.example.hello", apk_a_v2_path)
     apk_a_bad_bytes = generate_apk(gen_bin, "com.example.hello", apk_a_bad_path, cert="MALICIOUS_UNTRUSTED_KEY_CERT")
+    apk_ui1_bytes = generate_apk(gen_bin, "org.interos.genui", tmp_dir / "app_ui1.apk", ui_text="Hello from app code")
+    apk_ui2_bytes = generate_apk(gen_bin, "org.interos.genui2", tmp_dir / "app_ui2.apk", ui_text="SECOND APP TEXT")
 
     ser_port = get_free_port()
     mon_port = get_free_port()
@@ -360,6 +408,34 @@ def verify_acr_qemu():
         assert reader.wait_for("[acrd] REJECT package registration failed", timeout=15.0, print_keywords=kw), \
             "Timeout waiting for package update rejection with conflicting signer"
         print("  [OK] Package update with conflicting signer strictly rejected")
+
+        # 7. Real DEX-created Activity content-view execution & QEMU scanout proof
+        print("  Staging DEX UI APK 1 (org.interos.genui)...")
+        stage_apk_to_qemu(reader, "org.interos.genui", apk_ui1_bytes)
+        assert reader.wait_for("[acr-app-runtime] STATE: AppContentView(dex)", timeout=15.0, print_keywords=kw), \
+            "Timeout waiting for AppContentView(dex) on UI APK 1"
+        assert reader.wait_for("[acr-app-runtime] rendered View hierarchy and presented pixels to compositor", timeout=15.0, print_keywords=kw), \
+            "Timeout waiting for pixel presentation on UI APK 1"
+        time.sleep(0.4)
+        w1, h1, px1 = capture_monitor_screendump(mon_port, tmp_dir / "acr_ui_1.ppm")
+        assert (w1, h1) == (720, 1440), f"Unexpected scanout geometry {w1}x{h1}"
+        lit1_count, lit1_coords = count_bright_pixels(px1, w1, 4, 0, 240, 32)
+        assert lit1_count > 10, f"Expected lit TextView glyph pixels in scanout for UI APK 1, found {lit1_count}"
+        print(f"  [OK] UI APK 1 scanout verified: {w1}x{h1}, {lit1_count} bright glyph pixels")
+
+        print("  Staging DEX UI APK 2 (org.interos.genui2) with distinct bytecode text...")
+        stage_apk_to_qemu(reader, "org.interos.genui2", apk_ui2_bytes)
+        assert reader.wait_for("[acr-app-runtime] STATE: AppContentView(dex)", timeout=15.0, print_keywords=kw), \
+            "Timeout waiting for AppContentView(dex) on UI APK 2"
+        assert reader.wait_for("[acr-app-runtime] rendered View hierarchy and presented pixels to compositor", timeout=15.0, print_keywords=kw), \
+            "Timeout waiting for pixel presentation on UI APK 2"
+        time.sleep(0.4)
+        w2, h2, px2 = capture_monitor_screendump(mon_port, tmp_dir / "acr_ui_2.ppm")
+        assert (w2, h2) == (720, 1440), f"Unexpected scanout geometry {w2}x{h2}"
+        lit2_count, lit2_coords = count_bright_pixels(px2, w2, 4, 0, 240, 32)
+        assert lit2_count > 10, f"Expected lit TextView glyph pixels in scanout for UI APK 2, found {lit2_count}"
+        assert lit1_coords != lit2_coords, "Distinct DEX bytecode strings must produce distinct scanout glyph pixels"
+        print(f"  [OK] UI APK 2 scanout verified: {w2}x{h2}, {lit2_count} bright glyph pixels (differs from APK 1)")
 
         serial_sock.close()
     except Exception as exc:

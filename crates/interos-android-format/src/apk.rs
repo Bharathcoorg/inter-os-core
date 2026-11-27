@@ -746,6 +746,18 @@ pub struct AcrContainerProfile {
 /// Creates a deterministic, valid test APK containing binary `AndroidManifest.xml`
 /// and bytecode markers for self-tests and Ring 3 verification.
 pub fn create_test_apk(package: &str, permissions: &[&str]) -> Vec<u8> {
+    let main_class = alloc::format!("L{}/MainActivity;", package.replace('.', "/"));
+    let test_dex = super::dex::create_test_dex(
+        &main_class,
+        "onCreate",
+        "Hello from Inter OS ACR!",
+    );
+    create_test_apk_with_dex(package, permissions, &test_dex)
+}
+
+/// Creates a deterministic, unsigned test APK containing binary `AndroidManifest.xml`
+/// and the caller-supplied `classes.dex` payload.
+pub fn create_test_apk_with_dex(package: &str, permissions: &[&str], dex_bytes: &[u8]) -> Vec<u8> {
     let mut apk = Vec::new();
 
     // 1. Build Binary Android XML (AXML) for AndroidManifest.xml
@@ -847,19 +859,11 @@ pub fn create_test_apk(package: &str, permissions: &[&str]) -> Vec<u8> {
     let total_axml_size = axml.len() as u32;
     axml[4..8].copy_from_slice(&total_axml_size.to_le_bytes());
 
-    // 2. Synthesize real, binary classes.dex Dalvik Executable
-    let main_class = alloc::format!("L{}/MainActivity;", package.replace('.', "/"));
-    let test_dex = super::dex::create_test_dex(
-        &main_class,
-        "onCreate",
-        "Hello from Inter OS ACR!",
-    );
-
     // This fixture deliberately has no signature material. Tests must not confuse
     // a filename or synthetic certificate-shaped bytes with cryptographic proof.
     let files: [(&str, &[u8]); 2] = [
         ("AndroidManifest.xml", &axml),
-        ("classes.dex", &test_dex),
+        ("classes.dex", dex_bytes),
     ];
 
     let mut cd_entries = Vec::new();
@@ -925,17 +929,13 @@ pub fn create_test_apk(package: &str, permissions: &[&str]) -> Vec<u8> {
     apk
 }
 
-/// Creates a deterministically signed test APK containing a valid APK Signing Block v2
-/// and matching Merkle-tree content digest.
-pub fn create_signed_test_apk(package: &str, permissions: &[&str]) -> Vec<u8> {
-    let unsigned_apk = create_test_apk(package, permissions);
+fn sign_test_apk_with_cert(unsigned_apk: &[u8], cert: &[u8]) -> Vec<u8> {
     let eocd_pos = unsigned_apk.len() - 22;
     let cd_offset = u32::from_le_bytes(unsigned_apk[eocd_pos + 16..eocd_pos + 20].try_into().unwrap()) as usize;
     let pre_block = &unsigned_apk[..cd_offset];
     let cd_bytes = &unsigned_apk[cd_offset..eocd_pos];
     let eocd_template = &unsigned_apk[eocd_pos..];
 
-    let cert = b"INTEROS_ACR_DETERMINISTIC_TEST_SIGNER_CERTIFICATE_V2";
     let signing_block = super::signing::create_test_v2_signing_block(pre_block, cd_bytes, eocd_template, cert);
 
     let mut signed_apk = Vec::new();
@@ -951,28 +951,26 @@ pub fn create_signed_test_apk(package: &str, permissions: &[&str]) -> Vec<u8> {
     signed_apk
 }
 
+/// Creates a deterministically signed test APK containing a valid APK Signing Block v2
+/// and matching Merkle-tree content digest.
+pub fn create_signed_test_apk(package: &str, permissions: &[&str]) -> Vec<u8> {
+    let unsigned_apk = create_test_apk(package, permissions);
+    sign_test_apk_with_cert(&unsigned_apk, b"INTEROS_ACR_DETERMINISTIC_TEST_SIGNER_CERTIFICATE_V2")
+}
+
 /// Creates a deterministically signed test APK with a specific signer certificate bytes.
 pub fn create_signed_test_apk_with_cert(package: &str, permissions: &[&str], cert: &[u8]) -> Vec<u8> {
     let unsigned_apk = create_test_apk(package, permissions);
-    let eocd_pos = unsigned_apk.len() - 22;
-    let cd_offset = u32::from_le_bytes(unsigned_apk[eocd_pos + 16..eocd_pos + 20].try_into().unwrap()) as usize;
-    let pre_block = &unsigned_apk[..cd_offset];
-    let cd_bytes = &unsigned_apk[cd_offset..eocd_pos];
-    let eocd_template = &unsigned_apk[eocd_pos..];
+    sign_test_apk_with_cert(&unsigned_apk, cert)
+}
 
-    let signing_block = super::signing::create_test_v2_signing_block(pre_block, cd_bytes, eocd_template, cert);
-
-    let mut signed_apk = Vec::new();
-    signed_apk.extend_from_slice(pre_block);
-    signed_apk.extend_from_slice(&signing_block);
-    let new_cd_offset = signed_apk.len() as u32;
-    signed_apk.extend_from_slice(cd_bytes);
-
-    signed_apk.extend_from_slice(&eocd_template[..16]);
-    signed_apk.extend_from_slice(&new_cd_offset.to_le_bytes());
-    signed_apk.extend_from_slice(&eocd_template[20..]);
-
-    signed_apk
+/// Creates a deterministically signed test APK whose `MainActivity.onCreate` bytecode
+/// allocates a `TextView`, sets its text to `ui_text`, and calls `setContentView`.
+pub fn create_signed_ui_test_apk(package: &str, permissions: &[&str], ui_text: &str) -> Vec<u8> {
+    let main_class = alloc::format!("L{}/MainActivity;", package.replace('.', "/"));
+    let dex_bytes = super::dex::create_ui_test_dex(&main_class, ui_text);
+    let unsigned_apk = create_test_apk_with_dex(package, permissions, &dex_bytes);
+    sign_test_apk_with_cert(&unsigned_apk, b"INTEROS_ACR_DETERMINISTIC_TEST_SIGNER_CERTIFICATE_V2")
 }
 
 #[cfg(test)]

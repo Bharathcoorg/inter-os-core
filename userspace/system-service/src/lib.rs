@@ -895,23 +895,51 @@ pub fn run_acr_app_runtime() -> ! {
                                 );
                                 root_view.layout(0, 0, 720, 1440);
 
-                                // Scoped graphics: create app-owned surface via SurfaceCreate capability
+                                // Scoped graphics: release any prior live surface on re-launch, then
+                                // create app-owned surface and check every write + flip result.
+                                if let Some(prev) = instance.as_mut() {
+                                    if prev.surface_id > 0 {
+                                        let _ = std::surface_destroy(prev.surface_id);
+                                        prev.surface_id = 0;
+                                    }
+                                }
                                 let create_surface_fn = interos_std::surface_create;
                                 let write_surface_fn = interos_std::surface_write;
-                                if let Ok(app_surface_id) = create_surface_fn(720, 1440, 200) {
-                                    inst.surface_id = app_surface_id;
-                                    let _ = std::log("[acr-app-runtime] created app-owned surface via SurfaceCreate capability");
+                                match create_surface_fn(720, 1440, 200) {
+                                    Ok(app_surface_id) => {
+                                        inst.surface_id = app_surface_id;
+                                        let _ = std::log("[acr-app-runtime] created app-owned surface via SurfaceCreate capability");
 
-                                    let buf = shared_render_buf.get_or_insert_with(|| alloc::vec![0u32; 720 * 1440]);
-                                    buf.fill(0);
-                                    let mut dl = interos_acr::draw::DrawList::new();
-                                    root_view.draw(&mut dl);
-                                    interos_acr::draw::render_draw_list_to_buffer(&dl, buf, 720, 1440);
-                                    for (chunk_idx, chunk) in buf.chunks(4096).enumerate() {
-                                        let _ = write_surface_fn(app_surface_id, (chunk_idx * 4096) as usize, chunk);
+                                        let buf = shared_render_buf.get_or_insert_with(|| alloc::vec![0u32; 720 * 1440]);
+                                        buf.fill(0xFF12_1212);
+                                        let mut dl = interos_acr::draw::DrawList::new();
+                                        root_view.draw(&mut dl);
+                                        interos_acr::draw::render_draw_list_to_buffer(&dl, buf, 720, 1440);
+                                        let mut write_ok = true;
+                                        for (chunk_idx, chunk) in buf.chunks(4096).enumerate() {
+                                            match write_surface_fn(app_surface_id, chunk_idx * 4096, chunk) {
+                                                Ok(n) if n == chunk.len() => {}
+                                                _ => {
+                                                    write_ok = false;
+                                                    let _ = std::log("[acr-app-runtime] surface_write failed; frame not presented");
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if write_ok {
+                                            match std::surface_flip() {
+                                                Ok(_) => {
+                                                    let _ = std::log("[acr-app-runtime] rendered View hierarchy and presented pixels to compositor");
+                                                }
+                                                Err(_) => {
+                                                    let _ = std::log("[acr-app-runtime] surface_flip failed; frame not presented");
+                                                }
+                                            }
+                                        }
                                     }
-                                    let _ = std::surface_flip();
-                                    let _ = std::log("[acr-app-runtime] rendered View hierarchy and presented pixels to compositor");
+                                    Err(_) => {
+                                        let _ = std::log("[acr-app-runtime] surface_create failed; frame not presented");
+                                    }
                                 }
 
                                 root_widget = Some(root_view);
@@ -1026,21 +1054,39 @@ pub fn run_acr_app_runtime() -> ! {
                         let hit_down = root.dispatch_touch_event(&me_down);
                         let hit_up = root.dispatch_touch_event(&me_up);
                         let _hit = hit_down || hit_up;
-                        let _ = std::log(&alloc::format!(
-                            "[acr-app-runtime] MotionEvent dispatched: touch at ({}, {}) -> UI updated and frame presented",
-                            input_event.x, input_event.y
-                        ));
                         if inst.surface_id > 0 {
                             let write_surface_fn = interos_std::surface_write;
                             let buf = shared_render_buf.get_or_insert_with(|| alloc::vec![0u32; 720 * 1440]);
-                            buf.fill(0);
+                            buf.fill(0xFF12_1212);
                             let mut dl = interos_acr::draw::DrawList::new();
                             root.draw(&mut dl);
                             interos_acr::draw::render_draw_list_to_buffer(&dl, buf, 720, 1440);
+                            let mut write_ok = true;
                             for (chunk_idx, chunk) in buf.chunks(4096).enumerate() {
-                                let _ = write_surface_fn(inst.surface_id, (chunk_idx * 4096) as usize, chunk);
+                                match write_surface_fn(inst.surface_id, chunk_idx * 4096, chunk) {
+                                    Ok(n) if n == chunk.len() => {}
+                                    _ => {
+                                        write_ok = false;
+                                        let _ = std::log("[acr-app-runtime] touch repaint surface_write failed; frame not presented");
+                                        break;
+                                    }
+                                }
                             }
-                            let _ = std::surface_flip();
+                            if write_ok {
+                                match std::surface_flip() {
+                                    Ok(_) => {
+                                        let _ = std::log(&alloc::format!(
+                                            "[acr-app-runtime] MotionEvent dispatched: touch at ({}, {}) -> UI updated and frame presented",
+                                            input_event.x, input_event.y
+                                        ));
+                                    }
+                                    Err(_) => {
+                                        let _ = std::log("[acr-app-runtime] touch repaint surface_flip failed; frame not presented");
+                                    }
+                                }
+                            }
+                        } else {
+                            let _ = std::log("[acr-app-runtime] touch received without an active surface; frame not presented");
                         }
                         }
                     }

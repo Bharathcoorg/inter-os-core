@@ -742,21 +742,34 @@ impl DexPackage {
                             }
                             pc += 6;
                         }
-                        0x24 | 0x25 => { // OP_FILLED_NEW_ARRAY, OP_FILLED_NEW_ARRAY_RANGE
+                        0x2B | 0x2C | 0x26 | 0x24 | 0x25 | 0x03 | 0x06 | 0x09 | 0x14 | 0x17 | 0x1B
+                        | OP_INVOKE_VIRTUAL..=0x72 | 0x74..=0x78 => {
+                            // format 30t/31t/31i/31c/32x/35c/3rc (6 bytes)
+                            if opcode == 0x24 || opcode == 0x25 {
+                                let size = insns.get(pc + 1).copied().unwrap_or(0) as usize;
+                                if size > 262_144 {
+                                    return Err(DexError::ExcessiveArrayAllocation);
+                                }
+                            }
                             if pc + 6 > insns.len() {
                                 return Err(DexError::UnexpectedEof);
-                            }
-                            let size = insns[pc + 1] as usize;
-                            if size > 262_144 { // > 1MB of 4-byte elements
-                                return Err(DexError::ExcessiveArrayAllocation);
                             }
                             pc += 6;
                         }
-                        OP_INVOKE_VIRTUAL | OP_INVOKE_DIRECT | OP_INVOKE_STATIC => {
-                            if pc + 6 > insns.len() {
+                        OP_CONST_WIDE_FULL => {
+                            // format 51l (10 bytes)
+                            if pc + 10 > insns.len() {
                                 return Err(DexError::UnexpectedEof);
                             }
-                            pc += 6;
+                            pc += 10;
+                        }
+                        0x02 | 0x05 | 0x08 | 0x13 | 0x15 | 0x16 | 0x19 | 0x1A | 0x1C | 0x1F | 0x20
+                        | 0x23 | 0x2D..=0x3D | 0x44..=0x6D | 0xD0..=0xE2 => {
+                            // format 21s/21h/21c/21t/22x/22c/22t/22s/22b/23x (4 bytes)
+                            if pc + 4 > insns.len() {
+                                return Err(DexError::UnexpectedEof);
+                            }
+                            pc += 4;
                         }
                         _ => {
                             pc += 2;
@@ -1035,6 +1048,199 @@ pub fn create_test_dex(class_name: &str, method_name: &str, log_message: &str) -
     dex[..DEX_HEADER_SIZE].copy_from_slice(hdr_bytes);
 
     // Compute and store Adler-32 Checksum
+    let checksum = compute_adler32(&dex[12..]);
+    dex[8..12].copy_from_slice(&checksum.to_le_bytes());
+
+    dex
+}
+
+fn push_uleb128(out: &mut Vec<u8>, mut value: u32) {
+    while value >= 0x80 {
+        out.push(((value & 0x7F) | 0x80) as u8);
+        value >>= 7;
+    }
+    out.push((value & 0x7F) as u8);
+}
+
+/// Synthesizes a valid Dalvik Executable (`classes.dex`) whose `onCreate` bytecode
+/// allocates a `android.widget.TextView`, calls `setText(text)`, and calls
+/// `Activity.setContentView(view)`.
+pub fn create_ui_test_dex(class_name: &str, text: &str) -> Vec<u8> {
+    let mut dex = Vec::new();
+
+    // Keep string index 0 as "V" because DexPackage::parse indexes `strings[proto_idx]`.
+    let strings: [&str; 14] = [
+        "V",                         // 0
+        "Ljava/lang/Object;",        // 1
+        class_name,                  // 2
+        "onCreate",                  // 3
+        "Landroid/widget/TextView;", // 4
+        "<init>",                    // 5
+        "Landroid/content/Context;", // 6
+        "setText",                   // 7
+        "Ljava/lang/CharSequence;",  // 8
+        "Landroid/app/Activity;",    // 9
+        "setContentView",            // 10
+        "Landroid/view/View;",       // 11
+        "Landroid/os/Bundle;",       // 12
+        text,                        // 13
+    ];
+
+    let string_ids_off = DEX_HEADER_SIZE;
+    let string_ids_size = strings.len();
+
+    let type_str_indices: [u32; 9] = [0, 1, 2, 4, 6, 8, 9, 11, 12];
+    let type_ids_off = string_ids_off + string_ids_size * 4;
+    let type_ids_size = type_str_indices.len();
+
+    let proto_ids_off = type_ids_off + type_ids_size * 4;
+    let proto_ids_size = 1usize;
+
+    // Methods: (class_type_idx, proto_idx=0 ("V"), name_string_idx)
+    let methods: [(u16, u16, u32); 4] = [
+        (2, 0, 3),  // 0: MainActivity.onCreate
+        (3, 0, 5),  // 1: TextView.<init>
+        (3, 0, 7),  // 2: TextView.setText
+        (6, 0, 10), // 3: Activity.setContentView
+    ];
+    let method_ids_off = proto_ids_off + proto_ids_size * 12;
+    let method_ids_size = methods.len();
+
+    let class_defs_off = method_ids_off + method_ids_size * 8;
+    let class_defs_size = 1usize;
+
+    let data_off = class_defs_off + class_defs_size * 32;
+    dex.resize(data_off, 0);
+
+    // 1. Strings data
+    let mut string_offsets = Vec::with_capacity(string_ids_size);
+    for s in &strings {
+        string_offsets.push(dex.len() as u32);
+        let s_bytes = s.as_bytes();
+        push_uleb128(&mut dex, s_bytes.len() as u32);
+        dex.extend_from_slice(s_bytes);
+        dex.push(0);
+    }
+    while dex.len() % 4 != 0 {
+        dex.push(0);
+    }
+
+    // 2. MainActivity.onCreate code item (14 x 16-bit code units = 28 bytes):
+    // registers_size = 3 (v0, v1, p0=v2), ins_size = 1, outs_size = 2
+    //   0: new-instance v0, type@3 (TextView)              [0x22, 0x00, 0x03, 0x00]
+    //   2: invoke-direct {v0}, method@1 (<init>)             [0x70, 0x10, 0x01, 0x00, 0x00, 0x00]
+    //   5: const-string v1, string@13 (text)                 [0x1A, 0x01, 0x0D, 0x00]
+    //   7: invoke-virtual {v0, v1}, method@2 (setText)       [0x6E, 0x20, 0x02, 0x00, 0x10, 0x00]
+    //  10: invoke-virtual {p0, v0}, method@3 (setContentView)[0x6E, 0x20, 0x03, 0x00, 0x02, 0x00]
+    //  13: return-void                                       [0x0E, 0x00]
+    let oncreate_code_off = dex.len() as u32;
+    dex.extend_from_slice(&3u16.to_le_bytes()); // registers_size = 3
+    dex.extend_from_slice(&1u16.to_le_bytes()); // ins_size = 1
+    dex.extend_from_slice(&2u16.to_le_bytes()); // outs_size = 2
+    dex.extend_from_slice(&0u16.to_le_bytes()); // tries_size = 0
+    dex.extend_from_slice(&0u32.to_le_bytes()); // debug_info_off = 0
+    dex.extend_from_slice(&14u32.to_le_bytes()); // insns_size = 14 u16 units (28 bytes)
+    dex.extend_from_slice(&[
+        OP_NEW_INSTANCE, 0x00, 0x03, 0x00,
+        OP_INVOKE_DIRECT, 0x10, 0x01, 0x00, 0x00, 0x00,
+        OP_CONST_STRING, 0x01, 0x0D, 0x00,
+        OP_INVOKE_VIRTUAL, 0x20, 0x02, 0x00, 0x10, 0x00,
+        OP_INVOKE_VIRTUAL, 0x20, 0x03, 0x00, 0x02, 0x00,
+        OP_RETURN_VOID, 0x00,
+    ]);
+
+    while dex.len() % 4 != 0 {
+        dex.push(0);
+    }
+
+    // 3. Stub code item (`return-void`) for framework method_ids listed in class_data
+    let stub_code_off = dex.len() as u32;
+    dex.extend_from_slice(&2u16.to_le_bytes());
+    dex.extend_from_slice(&1u16.to_le_bytes());
+    dex.extend_from_slice(&0u16.to_le_bytes());
+    dex.extend_from_slice(&0u16.to_le_bytes());
+    dex.extend_from_slice(&0u32.to_le_bytes());
+    dex.extend_from_slice(&1u32.to_le_bytes());
+    dex.extend_from_slice(&[OP_RETURN_VOID, 0x00]);
+    while dex.len() % 4 != 0 {
+        dex.push(0);
+    }
+
+    // 4. Class Data Item (register methods 0..=3 so DexPackage::parse exposes them in dex.methods)
+    let class_data_off = dex.len() as u32;
+    push_uleb128(&mut dex, 0); // static_fields_size
+    push_uleb128(&mut dex, 0); // instance_fields_size
+    push_uleb128(&mut dex, 4); // direct_methods_size
+    push_uleb128(&mut dex, 0); // virtual_methods_size
+    // method 0: onCreate (diff=0)
+    push_uleb128(&mut dex, 0);
+    push_uleb128(&mut dex, 1);
+    push_uleb128(&mut dex, oncreate_code_off);
+    // methods 1..=3 (diff=1 each)
+    for _ in 1..4 {
+        push_uleb128(&mut dex, 1);
+        push_uleb128(&mut dex, 1);
+        push_uleb128(&mut dex, stub_code_off);
+    }
+
+    let file_size = dex.len() as u32;
+    let data_size = file_size - data_off as u32;
+
+    let hdr = DexHeader {
+        magic: *DEX_MAGIC,
+        checksum: 0,
+        signature: [0u8; 20],
+        file_size: file_size.to_le(),
+        header_size: (DEX_HEADER_SIZE as u32).to_le(),
+        endian_tag: ENDIAN_CONSTANT.to_le(),
+        link_size: 0,
+        link_off: 0,
+        map_off: 0,
+        string_ids_size: (string_ids_size as u32).to_le(),
+        string_ids_off: (string_ids_off as u32).to_le(),
+        type_ids_size: (type_ids_size as u32).to_le(),
+        type_ids_off: (type_ids_off as u32).to_le(),
+        proto_ids_size: (proto_ids_size as u32).to_le(),
+        proto_ids_off: (proto_ids_off as u32).to_le(),
+        field_ids_size: 0,
+        field_ids_off: 0,
+        method_ids_size: (method_ids_size as u32).to_le(),
+        method_ids_off: (method_ids_off as u32).to_le(),
+        class_defs_size: (class_defs_size as u32).to_le(),
+        class_defs_off: (class_defs_off as u32).to_le(),
+        data_size: data_size.to_le(),
+        data_off: (data_off as u32).to_le(),
+    };
+
+    for (i, off) in string_offsets.iter().enumerate() {
+        let pos = string_ids_off + i * 4;
+        dex[pos..pos + 4].copy_from_slice(&off.to_le_bytes());
+    }
+    for (i, &s_idx) in type_str_indices.iter().enumerate() {
+        let pos = type_ids_off + i * 4;
+        dex[pos..pos + 4].copy_from_slice(&s_idx.to_le_bytes());
+    }
+    dex[proto_ids_off..proto_ids_off + 4].copy_from_slice(&0u32.to_le_bytes());
+    dex[proto_ids_off + 4..proto_ids_off + 8].copy_from_slice(&0u32.to_le_bytes());
+    dex[proto_ids_off + 8..proto_ids_off + 12].copy_from_slice(&0u32.to_le_bytes());
+
+    for (i, &(c_idx, p_idx, n_idx)) in methods.iter().enumerate() {
+        let pos = method_ids_off + i * 8;
+        dex[pos..pos + 2].copy_from_slice(&c_idx.to_le_bytes());
+        dex[pos + 2..pos + 4].copy_from_slice(&p_idx.to_le_bytes());
+        dex[pos + 4..pos + 8].copy_from_slice(&n_idx.to_le_bytes());
+    }
+
+    dex[class_defs_off..class_defs_off + 4].copy_from_slice(&2u32.to_le_bytes());
+    dex[class_defs_off + 4..class_defs_off + 8].copy_from_slice(&1u32.to_le_bytes());
+    dex[class_defs_off + 8..class_defs_off + 12].copy_from_slice(&1u32.to_le_bytes());
+    dex[class_defs_off + 24..class_defs_off + 28].copy_from_slice(&class_data_off.to_le_bytes());
+
+    let hdr_bytes = unsafe {
+        core::slice::from_raw_parts(&hdr as *const DexHeader as *const u8, DEX_HEADER_SIZE)
+    };
+    dex[..DEX_HEADER_SIZE].copy_from_slice(hdr_bytes);
+
     let checksum = compute_adler32(&dex[12..]);
     dex[8..12].copy_from_slice(&checksum.to_le_bytes());
 

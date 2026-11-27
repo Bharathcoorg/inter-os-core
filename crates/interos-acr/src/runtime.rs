@@ -7761,6 +7761,67 @@ mod tests {
             Err(super::super::framework::AndroidFrameworkError::UnsupportedApi)
         );
     }
+
+    #[test]
+    fn in_memory_ui_apk_oncreate_bytecode_builds_and_renders_textview() {
+        const APP_PKG: &str = "org.interos.genui";
+        const APP_CLASS: &str = "Lorg/interos/genui/MainActivity;";
+        const APP_TEXT: &str = "Hello from app code";
+
+        let apk_bytes = interos_android_format::create_signed_ui_test_apk(
+            APP_PKG,
+            &["android.permission.INTERNET"],
+            APP_TEXT,
+        );
+        let apk = interos_android_format::ApkPackage::parse(&apk_bytes)
+            .expect("in-memory UI APK must parse cleanly");
+        assert!(apk.is_signed, "in-memory UI APK must verify its v2 signature");
+        assert_eq!(apk.manifest.package_name, APP_PKG);
+
+        let dex = DexPackage::parse(&apk.classes_dex).expect("in-memory UI DEX must parse");
+        dex.audit_bytecode().expect("in-memory UI DEX must pass bytecode audit");
+
+        let mut vm = DalvikVmState::new();
+        assert_eq!(vm.content_view_id(), None);
+        assert!(vm.content_view().is_none());
+
+        let ret = vm.invoke_method(&dex, APP_CLASS, "onCreate");
+        assert_eq!(ret, Ok(0), "MainActivity.onCreate must complete cleanly");
+
+        let mut view = vm
+            .content_view()
+            .expect("app onCreate must publish its content view through the VM");
+        match view.view_type {
+            crate::view::ViewType::TextView { ref text, .. } => {
+                assert_eq!(text, APP_TEXT, "content view must hold the app bytecode string");
+            }
+            ref other => panic!("expected TextView root from app bytecode, got {other:?}"),
+        }
+
+        // Measure, layout, draw, and rasterize to a portrait 720x1440 buffer,
+        // proving visible glyph pixels differ from the opaque background fill.
+        view.measure(
+            crate::view::MeasureSpec::exactly(720),
+            crate::view::MeasureSpec::exactly(1440),
+        );
+        view.layout(0, 0, 720, 1440);
+        let mut dl = crate::draw::DrawList::new();
+        view.draw(&mut dl);
+
+        let bg: u32 = 0xFF12_1212;
+        let mut buf = alloc::vec![bg; 720 * 1440];
+        crate::draw::render_draw_list_to_buffer(&dl, &mut buf, 720, 1440);
+
+        let mut glyph_pixels = 0usize;
+        for y in 0..32 {
+            for x in 0..240 {
+                if buf[y * 720 + x] != bg {
+                    glyph_pixels += 1;
+                }
+            }
+        }
+        assert!(glyph_pixels > 0, "rendered TextView must draw visible glyph pixels");
+    }
 }
 
 
