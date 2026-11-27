@@ -3303,25 +3303,33 @@ document.addEventListener('DOMContentLoaded', () => {
             name: appName || undefined,
             id: appId || undefined,
             permissions: permissions.length > 0 ? permissions : undefined,
-            hmr: enableHmr
+            hmr: enableHmr,
+            sign: true
           })
         });
 
         const data = await resp.json();
         if (resp.ok && data.success) {
           if (importStatusTag) {
-            importStatusTag.textContent = 'INSTALLED';
+            importStatusTag.textContent = data.guest_installed ? 'INSTALLED' : 'BUILT';
             importStatusTag.style.background = 'rgba(16, 185, 129, 0.2)';
             importStatusTag.style.color = '#34D399';
           }
           appendImportLog(`[OK] Package ID: ${data.package_id}`, '#34D399');
-          appendImportLog(`[OK] Arch: ${data.arch} (RAPP v2 signed with Ed25519)`, '#34D399');
+          if (data.signed) {
+            appendImportLog(`[OK] Arch: ${data.arch} (RAPP v2 signed with Ed25519)`, '#34D399');
+          } else {
+            appendImportLog(`[NOTICE] Package generated unsigned (developer signing not requested)`, '#FBBF24');
+          }
+          appendImportLog(`[OK] Package built: ${data.package_built ? 'Yes' : 'No'}`, '#34D399');
           appendImportLog(`[OK] Sideload status: ${data.sideload_status}`, '#34D399');
           if (data.guest_installed || data.guest_install) {
             appendImportLog(`[OK] Guest installation: Succeeded (${data.package_id} active in QEMU guest)`, '#34D399');
+          } else if (data.guest_message) {
+            appendImportLog(`[INFO] Guest status: ${data.guest_message}`, '#93C5FD');
           }
           appendImportLog('[OK] Sideload complete. Untrusted bytecode isolated in Ring 3 wasmd sandbox.', '#10B981');
-          showToast(`WebApp Ported: ${data.package_id} installed successfully!`);
+          showToast(`WebApp Ported: ${data.package_id} ${data.guest_installed ? 'installed' : 'built'} successfully!`);
 
           if (typeof loadInstalledPackages === 'function') {
             loadInstalledPackages();

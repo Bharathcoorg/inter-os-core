@@ -6351,8 +6351,10 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', app_name or os.path.basename(src) or 'webapp')
                 out_rapp = os.path.join(dist_dir, f"{clean_name}.rapp")
 
+                sign_requested = bool(data.get('sign', False))
+
                 cmd = [sys.executable, port_script, src, '--output', out_rapp]
-                if data.get('sign', True):
+                if sign_requested:
                     cmd.append('--sign')
                 if app_name:
                     cmd.extend(['--name', app_name])
@@ -6369,15 +6371,29 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 with open(out_rapp, 'rb') as f:
                     rapp_bytes = f.read()
 
-                ok, msg, app_entry = verify_and_install_rapp(rapp_bytes, os.path.basename(out_rapp))
-                if not ok:
-                    raise RuntimeError(f"Verification of generated .rapp failed: {msg}")
-
                 guest_ok = False
-                if latest_telemetry.get("qemu_alive") or tracked_qemu_process_alive():
-                    guest_ok, guest_msg = transfer_rapp_to_guest(rapp_bytes, app_entry["id"])
-                    if guest_ok:
-                        serial_lines.append(f"[WEB_IMPORT] Installed '{app_entry['name']}' ({app_entry['id']}) into guest.")
+                guest_msg = ""
+                sideload_status = "unsigned"
+                app_entry = None
+
+                if sign_requested:
+                    ok, msg, app_entry = verify_and_install_rapp(rapp_bytes, os.path.basename(out_rapp))
+                    if not ok:
+                        raise RuntimeError(f"Verification of generated .rapp failed: {msg}")
+                    sideload_status = "verified"
+                    if latest_telemetry.get("qemu_alive") or tracked_qemu_process_alive():
+                        guest_ok, guest_msg = transfer_rapp_to_guest(rapp_bytes, app_entry["id"])
+                        if guest_ok:
+                            serial_lines.append(f"[WEB_IMPORT] Installed '{app_entry['name']}' ({app_entry['id']}) into guest.")
+                else:
+                    sideload_status = "unsigned"
+                    guest_msg = "Package generated unsigned (signing authority not requested; guest installation requires explicit signed package)."
+                    app_entry = {
+                        "id": pkg_id or clean_name,
+                        "name": app_name or clean_name,
+                        "arch": "web",
+                        "size": len(rapp_bytes),
+                    }
 
                 if is_hmr:
                     with web_hmr_cond:
@@ -6398,10 +6414,13 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     'success': True,
                     'package_id': app_entry['id'],
                     'arch': app_entry.get('arch', 'web'),
-                    'sideload_status': 'verified',
+                    'signed': sign_requested,
+                    'package_built': True,
+                    'guest_installed': guest_ok,
+                    'sideload_status': sideload_status,
+                    'guest_message': guest_msg,
                     'package': app_entry,
                     'rapp_path': out_rapp,
-                    'guest_installed': guest_ok,
                     'hmr_enabled': is_hmr,
                     'output': res.stdout
                 }).encode())
