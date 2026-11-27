@@ -734,8 +734,17 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertNotEqual(start, -1, "the seeded policy.json must still exist")
         policy = vfs[start:vfs.find("}\"#;", start)]
         self.assertIn('"integrity_protection"', policy)
-        self.assertIn("NOT IMPLEMENTED", policy)
+        # WHY the wording moved on from "NOT IMPLEMENTED": the guest now does
+        # attest the read-only system objects -- every protected read is
+        # checked against a kernel-anchored manifest -- and saying "NOT
+        # IMPLEMENTED" about the whole file would understate what is
+        # enforced. What the file must not do is claim hardware secure boot
+        # or a measured partition, because no secure element, no ROM and no
+        # measured-boot register is bound to this device.
+        self.assertIn("SOFTWARE-TRUSTED", policy)
+        self.assertIn("NOT hardware secure boot", policy)
         self.assertNotIn("dm-verity Merkle Tree", policy)
+        self.assertNotIn("hardware secure boot: VERIFIED", policy)
 
         # An unreferenced static artifact is still a claim a reader can find.
         info = self.read("emulator/data/vfs/sys/kernel_info.txt")
