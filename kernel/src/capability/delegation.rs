@@ -89,8 +89,13 @@ impl DelegatedLease {
             return Err(CapError::InsufficientRights);
         }
 
-        // Derived lease cannot hold GRANT rights itself (single-level attenuation)
-        let safe_rights = Rights(requested_rights.0 & !Rights::GRANT.0);
+        // Derived lease can never carry authority-management rights. Attenuation
+        // is single-level and must not forward the power to grant, revoke, or
+        // administer: a grantee holding these could re-delegate or tear down
+        // capabilities it was only lent -- the ambient authority the capability
+        // system exists to prevent. GRANT, REVOKE and ADMIN are all stripped.
+        let management = Rights::GRANT.0 | Rights::REVOKE.0 | Rights::ADMIN.0;
+        let safe_rights = Rights(requested_rights.0 & !management);
 
         Ok(Self {
             lease_id,
