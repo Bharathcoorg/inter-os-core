@@ -10,6 +10,9 @@ use spin::Mutex;
 const MAX_BLOBS:usize=32;
 pub const MAX_BLOB_SIZE:usize=60000;
 pub const MAX_RUNTIME_ARTIFACT_SIZE:usize = 16 * 1024 * 1024;
+/// Bounded total byte quota across all entries in `PackageBlobStore` (leaves safe
+/// headroom inside the 64 MiB kernel heap against cumulative allocation DoS).
+pub const MAX_TOTAL_STORE_BYTES:usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct PackageBlob { pub package_id:String, pub version:(u16,u16,u16), pub code_digest:[u8; 32], pub bytes:Vec<u8> }
@@ -17,6 +20,9 @@ pub struct PackageBlob { pub package_id:String, pub version:(u16,u16,u16), pub c
 pub struct PackageBlobStore { blobs:Vec<PackageBlob> }
 impl PackageBlobStore {
  pub const fn new()->Self{Self{blobs:Vec::new()}}
+ fn total_bytes(&self)->usize{
+  self.blobs.iter().fold(0usize,|acc,b|acc.saturating_add(b.bytes.len()))
+ }
  pub fn put(&mut self,package_id:&str,version:(u16,u16,u16),bytes:&[u8])->Result<(),()>{
   if bytes.is_empty()||bytes.len()>MAX_BLOB_SIZE{return Err(());}
   let code_digest = crate::crypto::Sha256::digest(bytes);
@@ -31,27 +37,36 @@ impl PackageBlobStore {
  }
  pub fn put_verified(&mut self,package_id:&str,version:(u16,u16,u16),code_digest:[u8;32],bytes:&[u8])->Result<(),()>{
   if bytes.is_empty()||bytes.len()>MAX_RUNTIME_ARTIFACT_SIZE{return Err(());}
+  let existing_len=self.blobs.iter().find(|b|b.package_id==package_id).map(|b|b.bytes.len()).unwrap_or(0);
+  if existing_len==0 && self.blobs.len()>=MAX_BLOBS{return Err(());}
+  let new_total=self.total_bytes().saturating_sub(existing_len).checked_add(bytes.len()).ok_or(())?;
+  if new_total>MAX_TOTAL_STORE_BYTES{return Err(());}
   let previous=self.blobs.clone();
   if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){b.version=version;b.code_digest=code_digest;b.bytes.clear();b.bytes.extend_from_slice(bytes);}
-  else {if self.blobs.len()>=MAX_BLOBS{return Err(());}self.blobs.push(PackageBlob{package_id:package_id.to_string(),version,code_digest,bytes:bytes.to_vec()});}
-  if bytes.len()<=MAX_BLOB_SIZE {
-   if self.persist().is_err() {
-    self.blobs=previous;
-    return Err(());
-   }
+  else {self.blobs.push(PackageBlob{package_id:package_id.to_string(),version,code_digest,bytes:bytes.to_vec()});}
+  // Fail closed if persistence fails (including payloads exceeding the journal
+  // record capacity) rather than silently drifting between registry and blob store.
+  if self.persist().is_err() {
+   self.blobs=previous;
+   return Err(());
   }
   Ok(())
  }
  pub fn put_runtime(&mut self,package_id:&str,version:(u16,u16,u16),bytes:&[u8])->Result<(),()>{
-  if bytes.is_empty(){return Err(());}
+  if bytes.is_empty()||bytes.len()>MAX_RUNTIME_ARTIFACT_SIZE{return Err(());}
+  let existing_idx=self.blobs.iter().position(|b|b.package_id==package_id);
+  let existing_len=existing_idx.map(|i|self.blobs[i].bytes.len()).unwrap_or(0);
+  if existing_idx.is_none() && self.blobs.len()>=MAX_BLOBS{return Err(());}
+  let new_total=self.total_bytes().saturating_sub(existing_len).checked_add(bytes.len()).ok_or(())?;
+  if new_total>MAX_TOTAL_STORE_BYTES{return Err(());}
   let code_digest = crate::crypto::Sha256::digest(bytes);
-  if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){
+  if let Some(idx)=existing_idx{
+   let b=&mut self.blobs[idx];
    b.version=version;
    b.code_digest=code_digest;
    b.bytes.clear();
    b.bytes.extend_from_slice(bytes);
   } else {
-   if self.blobs.len()>=MAX_BLOBS{return Err(());}
    self.blobs.push(PackageBlob{package_id:package_id.to_string(),version,code_digest,bytes:bytes.to_vec()});
   }
   if bytes.len()<=MAX_BLOB_SIZE {
@@ -61,16 +76,18 @@ impl PackageBlobStore {
  }
  pub fn append_runtime(&mut self,package_id:&str,chunk:&[u8])->Result<(),()>{
   if chunk.is_empty(){return Err(());}
-  if let Some(b)=self.blobs.iter_mut().find(|b|b.package_id==package_id){
-   b.bytes.extend_from_slice(chunk);
-   b.code_digest = crate::crypto::Sha256::digest(&b.bytes);
-   if b.bytes.len()<=MAX_BLOB_SIZE {
-    let _ = self.persist();
-   }
-   Ok(())
-  } else {
-   Err(())
+  let idx=self.blobs.iter().position(|b|b.package_id==package_id).ok_or(())?;
+  let new_blob_len=self.blobs[idx].bytes.len().checked_add(chunk.len()).ok_or(())?;
+  if new_blob_len>MAX_RUNTIME_ARTIFACT_SIZE{return Err(());}
+  let new_total=self.total_bytes().checked_add(chunk.len()).ok_or(())?;
+  if new_total>MAX_TOTAL_STORE_BYTES{return Err(());}
+  let b=&mut self.blobs[idx];
+  b.bytes.extend_from_slice(chunk);
+  b.code_digest = crate::crypto::Sha256::digest(&b.bytes);
+  if b.bytes.len()<=MAX_BLOB_SIZE {
+   let _ = self.persist();
   }
+  Ok(())
  }
  pub fn get(&self,id:&str)->Option<&PackageBlob>{self.blobs.iter().find(|b|b.package_id==id)} pub fn remove(&mut self,id:&str)->Result<bool,()>{
   let Some(pos)=self.blobs.iter().position(|b|b.package_id==id) else {return Ok(false);};
@@ -287,3 +304,80 @@ impl CandidateArtifactStore {
 
 pub static CANDIDATE_ARTIFACT_STORE: Mutex<CandidateArtifactStore> =
     Mutex::new(CandidateArtifactStore::new());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn put_runtime_enforces_max_artifact_size_and_total_quota() {
+        let mut store = PackageBlobStore::new();
+
+        // Exceeding MAX_RUNTIME_ARTIFACT_SIZE in a single put_runtime must fail before storing.
+        let oversized = alloc::vec![0xAAu8; MAX_RUNTIME_ARTIFACT_SIZE + 1];
+        assert!(store.put_runtime("pkg.oversized", (1, 0, 0), &oversized).is_err());
+        assert!(store.get("pkg.oversized").is_none());
+
+        // Two max-sized artifacts fit within MAX_TOTAL_STORE_BYTES (32 MiB).
+        let half = alloc::vec![0x11u8; MAX_RUNTIME_ARTIFACT_SIZE];
+        assert!(store.put_runtime("pkg.one", (1, 0, 0), &half).is_ok());
+        assert!(store.put_runtime("pkg.two", (1, 0, 0), &half).is_ok());
+
+        // Adding 1 more byte exceeds total store quota.
+        assert!(store.put_runtime("pkg.three", (1, 0, 0), &[0x22]).is_err());
+        assert!(store.get("pkg.three").is_none());
+
+        // Replacing an existing entry within total quota succeeds.
+        assert!(store.put_runtime("pkg.one", (1, 0, 1), &[0x33u8; 64]).is_ok());
+        assert_eq!(store.get("pkg.one").unwrap().bytes.len(), 64);
+    }
+
+    #[test]
+    fn append_runtime_enforces_max_artifact_size_and_total_quota_without_growing() {
+        let mut store = PackageBlobStore::new();
+        let initial = alloc::vec![0x44u8; MAX_RUNTIME_ARTIFACT_SIZE - 4];
+        assert!(store.put_runtime("pkg.stream", (1, 0, 0), &initial).is_ok());
+
+        // Appending 5 bytes exceeds MAX_RUNTIME_ARTIFACT_SIZE and must not grow the vec.
+        assert!(store.append_runtime("pkg.stream", &[1, 2, 3, 4, 5]).is_err());
+        assert_eq!(
+            store.get("pkg.stream").unwrap().bytes.len(),
+            MAX_RUNTIME_ARTIFACT_SIZE - 4
+        );
+
+        // Appending 4 bytes succeeds cleanly up to MAX_RUNTIME_ARTIFACT_SIZE.
+        assert!(store.append_runtime("pkg.stream", &[1, 2, 3, 4]).is_ok());
+        assert_eq!(
+            store.get("pkg.stream").unwrap().bytes.len(),
+            MAX_RUNTIME_ARTIFACT_SIZE
+        );
+
+        // Fill remaining quota with second artifact, then verify append respects total quota.
+        let other = alloc::vec![0x55u8; MAX_RUNTIME_ARTIFACT_SIZE - 2];
+        assert!(store.put_runtime("pkg.other", (1, 0, 0), &other).is_ok());
+        assert!(store.append_runtime("pkg.other", &[9, 9, 9]).is_err());
+        assert_eq!(
+            store.get("pkg.other").unwrap().bytes.len(),
+            MAX_RUNTIME_ARTIFACT_SIZE - 2
+        );
+    }
+
+    #[test]
+    fn put_verified_fails_closed_when_persist_cannot_succeed() {
+        let mut store = PackageBlobStore::new();
+        let bytes = alloc::vec![0x77u8; MAX_BLOB_SIZE + 1];
+        let digest = crate::crypto::Sha256::digest(&bytes);
+
+        // A payload larger than MAX_BLOB_SIZE cannot fit in the PKG1 journal record,
+        // so put_verified must fail closed and leave the store untouched.
+        assert!(store.put_verified("pkg.unpersistable", (1, 0, 0), digest, &bytes).is_err());
+        assert!(store.get("pkg.unpersistable").is_none());
+
+        // Even for a small payload, without an active persistent block device in unit tests,
+        // persist() fails and put_verified must roll back and fail closed.
+        let small = b"small-verified-blob";
+        let small_digest = crate::crypto::Sha256::digest(small);
+        assert!(store.put_verified("pkg.nodisk", (1, 0, 0), small_digest, small).is_err());
+        assert!(store.get("pkg.nodisk").is_none());
+    }
+}

@@ -161,9 +161,18 @@ pub fn switch_to_kernel_page_table() {
 
 /// Returns the physical memory offset mapped by the bootloader.
 pub fn phys_mem_offset() -> VirtAddr {
-    PHYSICAL_MEMORY_OFFSET
-        .lock()
-        .expect("Physical memory offset not initialized")
+    #[cfg(test)]
+    {
+        PHYSICAL_MEMORY_OFFSET
+            .lock()
+            .unwrap_or(VirtAddr::new(0))
+    }
+    #[cfg(not(test))]
+    {
+        PHYSICAL_MEMORY_OFFSET
+            .lock()
+            .expect("Physical memory offset not initialized")
+    }
 }
 
 /// Physical RAM telemetry structure backing sys_memory_telemetry.
@@ -822,7 +831,11 @@ impl MemoryLoanManager {
     pub fn is_frame_lent(&self, frame: PhysFrame<Size4KiB>) -> bool {
         for rec_opt in &self.records {
             if let Some(rec) = rec_opt {
-                if rec.state == LoanState::Active && rec.frames.iter().any(|f| *f == frame) {
+                if matches!(
+                    rec.state,
+                    LoanState::Active | LoanState::Returning | LoanState::Revoking
+                ) && rec.frames.iter().any(|f| *f == frame)
+                {
                     return true;
                 }
             }
@@ -1202,13 +1215,19 @@ impl TaskPageTable {
         let Some(pos) = self.allocated_frames.iter().position(|candidate| *candidate == frame) else {
             return Err("userspace frame ownership missing");
         };
+        if MEMORY_LOANS.lock().is_frame_lent(frame) {
+            return Err("cannot unmap a physical frame with an active memory loan");
+        }
         p1[p1_idx].set_unused();
         self.allocated_frames.swap_remove(pos);
         self.user_mapped_bytes = self.user_mapped_bytes.saturating_sub(4096);
 
-        let (active_cr3, _) = Cr3::read();
-        if active_cr3 == self.pml4_frame {
-            x86_64::instructions::tlb::flush(VirtAddr::new(vaddr));
+        #[cfg(not(test))]
+        {
+            let (active_cr3, _) = Cr3::read();
+            if active_cr3 == self.pml4_frame {
+                x86_64::instructions::tlb::flush(VirtAddr::new(vaddr));
+            }
         }
         recycle_frame(frame);
         Ok(())
@@ -2167,6 +2186,91 @@ mod tests {
         // 1 more exceeds limit
         assert!(pt.borrowed_pages_count + 1 > MAX_BORROWED_PAGES_PER_TASK);
         core::mem::forget(pt);
+    }
+
+    #[test]
+    fn test_unmap_user_page_rejects_readonly_lent_frame_until_loan_ends() {
+        #[repr(align(4096))]
+        struct AlignedTable(PageTable);
+
+        let mut pml4 = alloc::boxed::Box::new(AlignedTable(PageTable::new()));
+        let mut pdpt = alloc::boxed::Box::new(AlignedTable(PageTable::new()));
+        let mut pd = alloc::boxed::Box::new(AlignedTable(PageTable::new()));
+        let mut pt_l1 = alloc::boxed::Box::new(AlignedTable(PageTable::new()));
+        let data_page = alloc::boxed::Box::new(AlignedTable(PageTable::new()));
+
+        let pml4_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(
+            (&raw mut pml4.0) as u64,
+        ));
+        let pdpt_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(
+            (&raw mut pdpt.0) as u64,
+        ));
+        let pd_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(
+            (&raw mut pd.0) as u64,
+        ));
+        let pt_l1_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(
+            (&raw mut pt_l1.0) as u64,
+        ));
+        let leaf_frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(
+            (&raw const data_page.0) as u64,
+        ));
+
+        let vaddr = 0x0000_0000_2000_0000u64;
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(vaddr));
+        let p4_idx = ((vaddr >> 39) & 0x1FF) as usize;
+        let p3_idx = ((vaddr >> 30) & 0x1FF) as usize;
+        let p2_idx = ((vaddr >> 21) & 0x1FF) as usize;
+        let p1_idx = ((vaddr >> 12) & 0x1FF) as usize;
+
+        let table_flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        let ro_leaf_flags =
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE;
+
+        pml4.0[p4_idx].set_frame(pdpt_frame, table_flags);
+        pdpt.0[p3_idx].set_frame(pd_frame, table_flags);
+        pd.0[p2_idx].set_frame(pt_l1_frame, table_flags);
+        pt_l1.0[p1_idx].set_frame(leaf_frame, ro_leaf_flags);
+
+        let mut task_pt = TaskPageTable {
+            pml4_frame,
+            allocated_frames: alloc::vec![pml4_frame, pdpt_frame, pd_frame, pt_l1_frame, leaf_frame],
+            shared_mappings: alloc::vec::Vec::new(),
+            borrowed_mappings: alloc::vec::Vec::new(),
+            borrowed_pages_count: 0,
+            user_mapped_bytes: 4096,
+        };
+
+        let handle = MEMORY_LOANS
+            .lock()
+            .allocate_loan(
+                101,
+                102,
+                vaddr,
+                0x0000_0000_3000_0000,
+                1,
+                alloc::vec![leaf_frame],
+                MemoryLoanRights::ReadOnly,
+                alloc::vec![ro_leaf_flags | PageTableFlags::WRITABLE],
+            )
+            .expect("allocate ReadOnly loan");
+
+        // While the ReadOnly loan is active, unmap_user_page MUST fail closed and
+        // preserve both the leaf PTE and ownership in allocated_frames (no UAF/recycle).
+        let res = task_pt.unmap_user_page(page);
+        assert!(res.is_err(), "ReadOnly-lent frame must not be unmapped while loan is active");
+        assert!(pt_l1.0[p1_idx].flags().contains(PageTableFlags::PRESENT));
+        assert!(task_pt.allocated_frames.contains(&leaf_frame));
+        assert_eq!(task_pt.user_mapped_bytes, 4096);
+
+        // Once the loan is returned/released, unmap_user_page succeeds cleanly.
+        MEMORY_LOANS.lock().release_slot(handle.slot());
+        assert!(task_pt.unmap_user_page(page).is_ok());
+        assert!(!pt_l1.0[p1_idx].flags().contains(PageTableFlags::PRESENT));
+        assert!(!task_pt.allocated_frames.contains(&leaf_frame));
+        assert_eq!(task_pt.user_mapped_bytes, 0);
+
+        core::mem::forget(task_pt);
     }
 }
 

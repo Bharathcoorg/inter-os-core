@@ -102,6 +102,10 @@ pub struct KeystoreEntry {
 /// Secure Keystore. The current generic target uses encrypted persistent
 /// software state; a physical device backend must explicitly provide hardware
 /// isolation before the platform reports hardware-backed key storage.
+///
+/// On QEMU and generic x86_64 targets, persistence record kind 6 stores the
+/// root seed under software key custody (`hardware_backed = false`) rather than
+/// a hardware security module, TPM, or secure enclave.
 pub struct SecureKeystore {
     master_seed: [u8; 32],
     hardware_backed: bool,
@@ -113,6 +117,20 @@ pub struct SecureKeystore {
     /// that anyone can compute, so credential operations must refuse rather than
     /// answer with attacker-derivable material.
     seed_established: bool,
+}
+
+impl Drop for SecureKeystore {
+    fn drop(&mut self) {
+        crate::crypto::zeroize_slice(&mut self.master_seed);
+        self.seed_established = false;
+        for entry in &mut self.entries {
+            crate::crypto::zeroize_slice(&mut entry.alias);
+            crate::crypto::zeroize_slice(&mut entry.nonce);
+            crate::crypto::zeroize_slice(&mut entry.ciphertext);
+            crate::crypto::zeroize_slice(&mut entry.auth_tag);
+        }
+        self.entries.clear();
+    }
 }
 
 /// Interprets a recovered storage-root record.
@@ -175,6 +193,10 @@ impl SecureKeystore {
     /// Boot recovery of the persistent storage root, using the journal's own
     /// recovery routine (`load_latest_kind`) rather than a second reader.
     ///
+    /// Note on custody: on QEMU/generic x86_64 builds, record kind 6 uses
+    /// software key custody (`hardware_backed = false`) persisted in the
+    /// virtual journal rather than hardware-backed key storage.
+    ///
     /// WHY the root is read from record kind 6 on its own: it is the only record
     /// ever written before `persistent::set_journal_auth_key` publishes a key, so
     /// it is read and written under the zero key while every other kind is
@@ -192,9 +214,13 @@ impl SecureKeystore {
             // boot from a lost root, so we do not mint one: an ephemeral root
             // would look identical to a durable one and silently orphan every
             // stored credential on the next boot.
-            Err(_) => SeedRecovery::Refused,
+            Err(_) => {
+                crate::crypto::zeroize_slice(&mut seed_record);
+                SeedRecovery::Refused
+            }
             // No record at all: this is a first boot and a new root is correct.
             Ok(None) => {
+                crate::crypto::zeroize_slice(&mut seed_record);
                 if crate::crypto::try_get_random_bytes(&mut self.master_seed).is_err() {
                     self.master_seed = [0u8; 32];
                     return SeedRecovery::Refused;
@@ -215,7 +241,9 @@ impl SecureKeystore {
                 // the recovery path does not use.
                 record[4..8].copy_from_slice(&1u32.to_le_bytes());
                 record[8..40].copy_from_slice(&self.master_seed);
-                match crate::storage::persistent::commit_kind(&record, 6) {
+                let commit_res = crate::storage::persistent::commit_kind(&record, 6);
+                crate::crypto::zeroize_slice(&mut record);
+                match commit_res {
                     Ok(generation) => SeedRecovery::Generated { generation },
                     // Reported rather than folded into Generated: without a record
                     // this root lives only in RAM, so every credential stored under
@@ -227,28 +255,52 @@ impl SecureKeystore {
             }
             // A record exists. It is either the committed root or an
             // uninterpretable one; never both.
-            Ok(Some((generation, len))) => match self.apply_seed_record(&seed_record[..len]) {
-                Ok(()) => SeedRecovery::Restored { generation },
-                // Fail closed: leave the keystore without a root instead of
-                // quietly generating a replacement that orphans the old data.
-                Err(_) => SeedRecovery::Refused,
-            },
+            Ok(Some((generation, len))) => {
+                let apply_res = self.apply_seed_record(&seed_record[..len]);
+                crate::crypto::zeroize_slice(&mut seed_record);
+                match apply_res {
+                    Ok(()) => SeedRecovery::Restored { generation },
+                    // Fail closed: leave the keystore without a root instead of
+                    // quietly generating a replacement that orphans the old data.
+                    Err(_) => SeedRecovery::Refused,
+                }
+            }
         }
     }
 
     /// Derives a 32-byte cryptographic key for a specific slot using domain-separated HMAC-SHA256.
     ///
-    /// WHY this cannot fail closed on its own: the signature returns a key, not a
-    /// result, and it is called from storage and vault paths outside this module.
-    /// Callers that require a real root must check `is_seeded()` first.
-    pub fn derive_key(&self, slot: KeySlot, label: &[u8]) -> [u8; 32] {
-        let slot_idx = slot.slot_index() as u8;
+    /// Fails closed with `KeystoreError::SeedUnavailable` if no storage root has
+    /// been established, or `KeystoreError::SlotOutOfBounds` for invalid slots.
+    pub fn try_derive_key(&self, slot: KeySlot, label: &[u8]) -> Result<[u8; 32], KeystoreError> {
+        let slot_idx = slot.slot_index();
+        if slot_idx >= MAX_KEY_SLOTS {
+            return Err(KeystoreError::SlotOutOfBounds);
+        }
+        if !self.seed_established {
+            return Err(KeystoreError::SeedUnavailable);
+        }
         let mut info = Vec::with_capacity(32 + label.len());
         info.extend_from_slice(b"InterOS-Keystore-v1.0-Slot:");
-        info.push(slot_idx);
+        info.push(slot_idx as u8);
         info.extend_from_slice(label);
 
-        HmacSha256::compute(&self.master_seed, &info)
+        let key = HmacSha256::compute(&self.master_seed, &info);
+        crate::crypto::zeroize_slice(&mut info);
+        Ok(key)
+    }
+
+    /// Derives a 32-byte cryptographic key for a specific slot using domain-separated HMAC-SHA256.
+    ///
+    /// Panics if called before a storage root is established (`!self.seed_established`);
+    /// callers without prior `is_seeded()` gating should use `try_derive_key`.
+    pub fn derive_key(&self, slot: KeySlot, label: &[u8]) -> [u8; 32] {
+        assert!(
+            self.seed_established,
+            "SecureKeystore::derive_key called before storage root was established"
+        );
+        self.try_derive_key(slot, label)
+            .expect("SecureKeystore::derive_key slot out of bounds")
     }
 
     /// Encrypts plaintext under slot key using HMAC-CTR keystream and generates HMAC-SHA256 auth tag.
@@ -456,10 +508,11 @@ pub fn init() {
     // Release the global lock before the checks below: they take the seed once
     // and then assert against the live keystore, and re-locking the same
     // spinlock while its guard is alive would deadlock the boot.
-    let device_seed = ks.master_seed;
+    let mut device_seed = ks.master_seed;
     drop(ks);
 
     if !seeded {
+        crate::crypto::zeroize_slice(&mut device_seed);
         crate::serial_println!(
             "[KEYSTORE] Skipping derivation checks: there is no storage root to derive from.",
         );
@@ -476,12 +529,13 @@ pub fn init() {
     // credentials are not.
     let mut ks = SecureKeystore::new();
     ks.adopt_device_seed(device_seed);
+    crate::crypto::zeroize_slice(&mut device_seed);
 
     // 1. Derive keys across pre-defined slots and verify uniqueness
-    let k0 = ks.derive_key(KeySlot::SovereignMasterKey, b"master");
-    let k1 = ks.derive_key(KeySlot::TelephonyAuthKey, b"esim");
-    let k2 = ks.derive_key(KeySlot::PaymentCredentialKey, b"pay");
-    let k3 = ks.derive_key(KeySlot::NetworkP2PKey, b"net");
+    let mut k0 = ks.derive_key(KeySlot::SovereignMasterKey, b"master");
+    let mut k1 = ks.derive_key(KeySlot::TelephonyAuthKey, b"esim");
+    let mut k2 = ks.derive_key(KeySlot::PaymentCredentialKey, b"pay");
+    let mut k3 = ks.derive_key(KeySlot::NetworkP2PKey, b"net");
 
     assert_ne!(k0, [0u8; 32]);
     assert_ne!(k1, [0u8; 32]);
@@ -490,6 +544,10 @@ pub fn init() {
     assert_ne!(k0, k1);
     assert_ne!(k1, k2);
     assert_ne!(k2, k3);
+    crate::crypto::zeroize_slice(&mut k0);
+    crate::crypto::zeroize_slice(&mut k1);
+    crate::crypto::zeroize_slice(&mut k2);
+    crate::crypto::zeroize_slice(&mut k3);
 
     // 2. Authenticated encryption round trip
     let secret_payload = b"selftest-only-material";
@@ -497,10 +555,11 @@ pub fn init() {
         .expect("Failed to store test credential");
 
     // 3. Retrieve and verify plaintext equality
-    let retrieved = ks
+    let mut retrieved = ks
         .retrieve_credential(KeySlot::PaymentCredentialKey, "selftest.aead")
         .expect("Failed to retrieve test credential");
     assert_eq!(retrieved.as_slice(), secret_payload);
+    crate::crypto::zeroize_slice(&mut retrieved);
 
     // 4. Tamper detection: flip one bit of stored ciphertext
     if let Some(entry) = ks.entries.iter_mut().find(|e| &e.alias[..e.alias_len] == b"selftest.aead") {
@@ -776,5 +835,40 @@ mod tests {
             },
         );
         let _ = TaskId(1);
+    }
+
+    #[test]
+    fn try_derive_key_refuses_unseeded_and_invalid_slot() {
+        let mut ks = SecureKeystore::new();
+        assert_eq!(
+            ks.try_derive_key(KeySlot::SovereignMasterKey, b"probe"),
+            Err(KeystoreError::SeedUnavailable)
+        );
+        ks.adopt_device_seed(nonzero_seed(0xA1));
+        assert!(ks.try_derive_key(KeySlot::SovereignMasterKey, b"probe").is_ok());
+        assert_eq!(
+            ks.try_derive_key(KeySlot::AppSlot(16), b"probe"),
+            Err(KeystoreError::SlotOutOfBounds)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "SecureKeystore::derive_key called before storage root was established")]
+    fn derive_key_panics_when_unseeded() {
+        let ks = SecureKeystore::new();
+        let _ = ks.derive_key(KeySlot::SovereignMasterKey, b"probe");
+    }
+
+    #[test]
+    fn drop_zeroizes_master_seed() {
+        let mut ks = SecureKeystore::new();
+        ks.adopt_device_seed(nonzero_seed(0x7F));
+        assert_ne!(ks.master_seed, [0u8; 32]);
+        unsafe {
+            core::ptr::drop_in_place(&mut ks);
+        }
+        assert_eq!(ks.master_seed, [0u8; 32]);
+        assert!(!ks.seed_established);
+        core::mem::forget(ks);
     }
 }

@@ -66,6 +66,14 @@ pub struct SecureSession {
     pub seq_in: u64,
 }
 
+impl Drop for SecureSession {
+    fn drop(&mut self) {
+        crate::crypto::zeroize_slice(&mut self.session_key);
+        self.seq_out = 0;
+        self.seq_in = 0;
+    }
+}
+
 impl SecureSession {
     /// Creates a signed frame for transmission, incrementing the outgoing sequence number.
     pub fn sign_message(&mut self, payload: &[u8]) -> Result<SignedIpcFrame, SecureIpcError> {
@@ -149,9 +157,25 @@ impl SecureChannelManager {
         self.sessions.iter_mut().find(|s| s.session_id == session_id)
     }
 
-    /// Releases secure sessions owned by a task that is terminating.
+    /// Removes and zeroizes an active session by ID.
+    pub fn remove_session(&mut self, session_id: u64) -> bool {
+        if let Some(pos) = self.sessions.iter().position(|s| s.session_id == session_id) {
+            let mut removed = self.sessions.swap_remove(pos);
+            crate::crypto::zeroize_slice(&mut removed.session_key);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Releases secure sessions owned by a task that is terminating, zeroizing key material.
     pub fn cleanup_task(&mut self, task_id: TaskId) -> usize {
         let before = self.sessions.len();
+        for session in &mut self.sessions {
+            if session.client_task == task_id || session.server_task == task_id {
+                crate::crypto::zeroize_slice(&mut session.session_key);
+            }
+        }
         self.sessions.retain(|session| {
             session.client_task != task_id && session.server_task != task_id
         });
@@ -166,7 +190,7 @@ pub fn init() {
     let mut mgr = SECURE_IPC.lock();
 
     // 1. Establish session with pre-shared key
-    let test_key: [u8; 32] = [0x42; 32];
+    let mut test_key: [u8; 32] = [0x42; 32];
     let sid = mgr
         .create_session(TaskId(9), TaskId(2), test_key)
         .expect("Failed to create secure session");
@@ -207,7 +231,68 @@ pub fn init() {
         "Tampered payload must fail cryptographic HMAC validation"
     );
 
+    // Revoke and zeroize the boot self-test session so no predictable [0x42; 32]
+    // session remains live after init() completes.
+    assert!(
+        mgr.remove_session(sid),
+        "boot self-test session must be removed after verification"
+    );
+    assert!(mgr.get_session_mut(sid).is_none());
+    crate::crypto::zeroize_slice(&mut test_key);
+
     crate::serial_println!(
         "[TEST] Cryptographic Secure IPC: HMAC-SHA256 authentication, replay rejection, and tamper detection VERIFIED."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_revokes_self_test_session() {
+        init();
+        let mgr = SECURE_IPC.lock();
+        assert!(
+            mgr.sessions.is_empty(),
+            "init() must not leave the [0x42; 32] self-test session active"
+        );
+    }
+
+    #[test]
+    fn cleanup_task_and_remove_session_drop_sessions_and_zeroize() {
+        let mut mgr = SecureChannelManager::new();
+        let key_a = [0xA5u8; 32];
+        let key_b = [0x5Au8; 32];
+        let sid_a = mgr.create_session(TaskId(10), TaskId(20), key_a).unwrap();
+        let sid_b = mgr.create_session(TaskId(30), TaskId(40), key_b).unwrap();
+
+        assert_eq!(mgr.cleanup_task(TaskId(10)), 1);
+        assert!(mgr.get_session_mut(sid_a).is_none());
+        assert!(mgr.get_session_mut(sid_b).is_some());
+
+        assert!(mgr.remove_session(sid_b));
+        assert!(mgr.get_session_mut(sid_b).is_none());
+    }
+
+    #[test]
+    fn secure_session_drop_zeroizes_session_key() {
+        let mut session = SecureSession {
+            session_id: 42,
+            client_task: TaskId(1),
+            server_task: TaskId(2),
+            session_key: [0x99u8; 32],
+            seq_out: 3,
+            seq_in: 4,
+        };
+        // Safety: inspect the buffer immediately after running Drop in place
+        // (before deallocation) to verify Drop scrubs session_key.
+        unsafe {
+            core::ptr::drop_in_place(&mut session);
+        }
+        assert_eq!(session.session_key, [0u8; 32]);
+        assert_eq!(session.seq_out, 0);
+        assert_eq!(session.seq_in, 0);
+        core::mem::forget(session);
+    }
 }

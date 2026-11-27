@@ -386,6 +386,7 @@ impl Scheduler {
         tcb.parent_id = parent_id;
         let id = tcb.id;
         let Some(process_id) = crate::task::process::register_leader(id, parent_id) else {
+            release_cleanup_slot();
             return TaskId(0);
         };
         tcb.process_id = Some(process_id);
@@ -419,7 +420,10 @@ impl Scheduler {
             Some(pid) => pid,
             None => match crate::task::process::register_leader(id, parent_id) {
                 Some(pid) => pid,
-                None => return TaskId(0),
+                None => {
+                    release_cleanup_slot();
+                    return TaskId(0);
+                }
             },
         };
         tcb.process_id = Some(process_id);
@@ -451,7 +455,10 @@ impl Scheduler {
         if !reserve_cleanup_slot() {
             return Err("cleanup capacity unavailable");
         }
-        crate::task::process::reserve_thread(process_id)?;
+        if let Err(e) = crate::task::process::reserve_thread(process_id) {
+            release_cleanup_slot();
+            return Err(e);
+        }
         let shared_space = match self.tasks.iter()
             .find(|t| t.process_id == Some(process_id))
             .and_then(|t| t.page_table.clone()) {
@@ -2676,6 +2683,77 @@ mod tests {
         nm.cancel_all_for_package_all_users(PKG);
         drop(nm);
         let _ = sched.reap_child(TaskId(0), tid);
+    }
+
+    #[test]
+    fn failed_spawn_paths_release_cleanup_slot_reservation() {
+        let _process = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sched = Scheduler::new();
+        sched.init(CapabilityTable::new_for_task(TaskId(0), 16));
+        run_deferred_cleanup();
+
+        let baseline = CLEANUP_RESERVATIONS.load(Ordering::Relaxed);
+
+        // 1. spawn_user_thread_with_tls failing at reserve_thread must release cleanup slot.
+        let res = sched.spawn_user_thread_with_tls(
+            crate::task::ProcessId(u64::MAX),
+            0x1000,
+            0x2000,
+            0,
+            0,
+            CapabilityTable::new_for_task(TaskId::new(), 16),
+            1,
+        );
+        assert!(res.is_err());
+        assert_eq!(
+            CLEANUP_RESERVATIONS.load(Ordering::Relaxed),
+            baseline,
+            "spawn_user_thread_with_tls error must release cleanup reservation"
+        );
+
+        // 2. Fill PROCESS_TABLE so register_leader returns None, then verify
+        // spawn_with_parent and spawn_task both release their cleanup slots.
+        let mut dummy_ids = alloc::vec::Vec::new();
+        while let Some(_) = {
+            let tid = TaskId::new();
+            let pid = crate::task::process::register_leader(tid, TaskId(0));
+            if pid.is_some() {
+                dummy_ids.push(tid);
+            }
+            pid
+        } {}
+
+        let spawned_parent = sched.spawn_with_parent(
+            "fail_parent",
+            dummy_test_entry,
+            CapabilityTable::new_for_task(TaskId::new(), 16),
+            1,
+            TaskId(0),
+        );
+        assert_eq!(spawned_parent, TaskId(0));
+        assert_eq!(
+            CLEANUP_RESERVATIONS.load(Ordering::Relaxed),
+            baseline,
+            "spawn_with_parent register_leader failure must release cleanup reservation"
+        );
+
+        let tcb = TaskControlBlock::new(
+            "fail_task",
+            dummy_test_entry,
+            CapabilityTable::new_for_task(TaskId::new(), 16),
+            1,
+        );
+        let spawned_task = sched.spawn_task(tcb);
+        assert_eq!(spawned_task, TaskId(0));
+        assert_eq!(
+            CLEANUP_RESERVATIONS.load(Ordering::Relaxed),
+            baseline,
+            "spawn_task register_leader failure must release cleanup reservation"
+        );
+
+        for tid in dummy_ids {
+            let _ = crate::task::process::reap(tid);
+        }
     }
 }
 

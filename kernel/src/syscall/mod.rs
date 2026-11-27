@@ -7425,32 +7425,30 @@ pub fn sys_mem_map(addr: u64, len: u64, prot: u64, _flags: u64) -> Result<u64, S
         return Err(SyscallResult::PermissionDenied);
     }
 
-    // 4. Reserve address space accounting (strictly enforces process address-space limits)
+    // 4. Validate target virtual address bounds and guard-page arithmetic BEFORE reserving quota
+    let alloc_size = if addr == 0 {
+        len_aligned.checked_add(8192).ok_or(SyscallResult::InvalidArguments)?
+    } else {
+        if addr % 4096 != 0 || addr < 0x1000 {
+            return Err(SyscallResult::InvalidArguments);
+        }
+        let end = addr.checked_add(len_aligned).ok_or(SyscallResult::InvalidArguments)?;
+        if end >= 0x0000_8000_0000_0000 {
+            return Err(SyscallResult::InvalidArguments);
+        }
+        0
+    };
+
+    // 5. Reserve address space accounting (strictly enforces process address-space limits)
     if let Some(pid) = pid_opt {
         crate::task::process::reserve_address_space(pid, len_aligned as usize)
             .map_err(|_| SyscallResult::OutOfMemory)?;
     }
 
-    // 5. Determine target virtual address with guard pages
     let vaddr_start = if addr == 0 {
-        // Dynamic anonymous mapping: leave 4096 guard page before and after
-        let alloc_size = len_aligned.checked_add(8192).ok_or(SyscallResult::InvalidArguments)?;
         let base = NEXT_ANONYMOUS_MMAP_ADDR.fetch_add(alloc_size, core::sync::atomic::Ordering::Relaxed);
         base + 4096
     } else {
-        if addr % 4096 != 0 || addr < 0x1000 {
-            if let Some(pid) = pid_opt {
-                crate::task::process::release_address_space(pid, len_aligned as usize);
-            }
-            return Err(SyscallResult::InvalidArguments);
-        }
-        let end = addr.checked_add(len_aligned).ok_or(SyscallResult::InvalidArguments)?;
-        if end >= 0x0000_8000_0000_0000 {
-            if let Some(pid) = pid_opt {
-                crate::task::process::release_address_space(pid, len_aligned as usize);
-            }
-            return Err(SyscallResult::InvalidArguments);
-        }
         addr
     };
 
@@ -7538,14 +7536,21 @@ pub fn sys_mem_unmap(addr: u64, len: u64) -> Result<(), SyscallResult> {
     let page_count = len_aligned / 4096;
 
     let mut unmapped_pages = 0usize;
+    let mut lent_conflict = false;
     let mut pt = page_table_arc.lock();
     for i in 0..page_count {
         let curr_vaddr = addr + i * 4096;
         let page = x86_64::structures::paging::Page::<x86_64::structures::paging::Size4KiB>::containing_address(
             x86_64::VirtAddr::new(curr_vaddr)
         );
-        if pt.unmap_user_page(page).is_ok() {
-            unmapped_pages += 1;
+        match pt.unmap_user_page(page) {
+            Ok(()) => {
+                unmapped_pages += 1;
+            }
+            Err("cannot unmap a physical frame with an active memory loan") => {
+                lent_conflict = true;
+            }
+            Err(_) => {}
         }
     }
     drop(pt);
@@ -7555,7 +7560,140 @@ pub fn sys_mem_unmap(addr: u64, len: u64) -> Result<(), SyscallResult> {
             crate::task::process::release_address_space(pid, unmapped_pages.saturating_mul(4096));
         }
     }
+    if lent_conflict {
+        return Err(SyscallResult::PermissionDenied);
+    }
     Ok(())
+}
+
+/// Deadlock-free dual-table lock guard ordered by `Arc::as_ptr`.
+///
+/// Handles aliased address spaces (`Arc::ptr_eq`) with a single mutex lock and
+/// acquires distinct `TaskPageTable` mutexes in ascending pointer order to prevent
+/// ABBA deadlocks across concurrent `sys_mem_lend` / `sys_mem_transfer` calls.
+enum PageTablePair<'a> {
+    Same(spin::MutexGuard<'a, crate::memory::TaskPageTable>),
+    Distinct {
+        first: spin::MutexGuard<'a, crate::memory::TaskPageTable>,
+        second: spin::MutexGuard<'a, crate::memory::TaskPageTable>,
+        src_is_first: bool,
+    },
+}
+
+impl<'a> PageTablePair<'a> {
+    fn lock(
+        src: &'a alloc::sync::Arc<spin::Mutex<crate::memory::TaskPageTable>>,
+        dst: &'a alloc::sync::Arc<spin::Mutex<crate::memory::TaskPageTable>>,
+    ) -> Self {
+        let src_ptr = alloc::sync::Arc::as_ptr(src) as usize;
+        let dst_ptr = alloc::sync::Arc::as_ptr(dst) as usize;
+        if src_ptr == dst_ptr {
+            Self::Same(src.lock())
+        } else if src_ptr < dst_ptr {
+            let first = src.lock();
+            let second = dst.lock();
+            Self::Distinct {
+                first,
+                second,
+                src_is_first: true,
+            }
+        } else {
+            let first = dst.lock();
+            let second = src.lock();
+            Self::Distinct {
+                first,
+                second,
+                src_is_first: false,
+            }
+        }
+    }
+
+    fn src(&self) -> &crate::memory::TaskPageTable {
+        match self {
+            Self::Same(g) => g,
+            Self::Distinct { first, second, src_is_first } => {
+                if *src_is_first { first } else { second }
+            }
+        }
+    }
+
+    fn src_mut(&mut self) -> &mut crate::memory::TaskPageTable {
+        match self {
+            Self::Same(g) => g,
+            Self::Distinct { first, second, src_is_first } => {
+                if *src_is_first { first } else { second }
+            }
+        }
+    }
+
+    fn dst(&self) -> &crate::memory::TaskPageTable {
+        match self {
+            Self::Same(g) => g,
+            Self::Distinct { first, second, src_is_first } => {
+                if *src_is_first { second } else { first }
+            }
+        }
+    }
+
+    fn dst_mut(&mut self) -> &mut crate::memory::TaskPageTable {
+        match self {
+            Self::Same(g) => g,
+            Self::Distinct { first, second, src_is_first } => {
+                if *src_is_first { second } else { first }
+            }
+        }
+    }
+}
+
+fn rollback_borrower_lend(
+    borrower_pt: &mut crate::memory::TaskPageTable,
+    borrower_vaddr: u64,
+    count: usize,
+) {
+    for r in 0..count {
+        let rb_page = Page::<Size4KiB>::containing_address(VirtAddr::new(borrower_vaddr + (r as u64 * 4096)));
+        let _ = borrower_pt.clear_leaf_pte(rb_page);
+    }
+}
+
+fn rollback_lender_lend(
+    lender_pt: &mut crate::memory::TaskPageTable,
+    rights: crate::memory::MemoryLoanRights,
+    lender_vaddr: u64,
+    count: usize,
+    frames: &[PhysFrame<Size4KiB>],
+    orig_flags: &[PageTableFlags],
+) {
+    match rights {
+        crate::memory::MemoryLoanRights::ReadOnly => {
+            for r in 0..count {
+                let rb_page = Page::<Size4KiB>::containing_address(VirtAddr::new(lender_vaddr + (r as u64 * 4096)));
+                let _ = lender_pt.update_leaf_flags(rb_page, orig_flags[r]);
+            }
+        }
+        crate::memory::MemoryLoanRights::ReadWrite => {
+            for r in 0..count {
+                let rb_page = Page::<Size4KiB>::containing_address(VirtAddr::new(lender_vaddr + (r as u64 * 4096)));
+                let _ = lender_pt.map_leaf_raw(rb_page, frames[r], orig_flags[r]);
+            }
+        }
+    }
+}
+
+fn rollback_receiver_transfer(
+    receiver_pt: &mut crate::memory::TaskPageTable,
+    receiver_vaddr: u64,
+    count: usize,
+) {
+    for r in 0..count {
+        let rb_page = Page::<Size4KiB>::containing_address(VirtAddr::new(receiver_vaddr + (r as u64 * 4096)));
+        if let Ok(frame) = receiver_pt.clear_leaf_pte(rb_page) {
+            if let Some(pos) = receiver_pt.allocated_frames.iter().position(|f| *f == frame) {
+                receiver_pt.allocated_frames.swap_remove(pos);
+            }
+            receiver_pt.user_mapped_bytes = receiver_pt.user_mapped_bytes.saturating_sub(4096);
+        }
+    }
 }
 
 /// Lends an exclusive mutable or shared read-only memory region to a target task.
@@ -7596,13 +7734,6 @@ pub fn sys_mem_lend(
         return Err(SyscallResult::InvalidArguments);
     }
 
-    // Upfront validation of out pointer before committing any mutations
-    if out_borrower_vaddr_ptr != 0 {
-        let lender_pt = lender_pt_arc.lock();
-        lender_pt.validate_user_range(out_borrower_vaddr_ptr, 8, true)
-            .map_err(|_| SyscallResult::InvalidArguments)?;
-    }
-
     let page_count = (len / 4096) as usize;
     let rights = match rights_num {
         0 => crate::memory::MemoryLoanRights::ReadOnly,
@@ -7610,26 +7741,31 @@ pub fn sys_mem_lend(
         _ => return Err(SyscallResult::InvalidArguments),
     };
 
-    // Verify borrower quota limit
-    {
-        let borrower_pt = borrower_pt_arc.lock();
-        if borrower_pt.borrowed_pages_count.saturating_add(page_count) > crate::memory::MAX_BORROWED_PAGES_PER_TASK {
+    // Lock both page tables in canonical pointer order across the entire
+    // validate -> map -> update -> activate transaction to prevent TOCTOU races
+    // and ABBA deadlocks.
+    let (borrower_vaddr, handle) = {
+        let mut pts = PageTablePair::lock(&lender_pt_arc, &borrower_pt_arc);
+
+        if out_borrower_vaddr_ptr != 0 {
+            pts.src().validate_user_range(out_borrower_vaddr_ptr, 8, true)
+                .map_err(|_| SyscallResult::InvalidArguments)?;
+        }
+
+        if pts.dst().borrowed_pages_count.saturating_add(page_count) > crate::memory::MAX_BORROWED_PAGES_PER_TASK {
             return Err(SyscallResult::OutOfMemory);
         }
-    }
 
-    // Reserve loan table slot upfront
-    let (loan_slot, loan_gen) = crate::memory::MEMORY_LOANS.lock().reserve_slot()
-        .map_err(|_| SyscallResult::OutOfMemory)?;
+        // Reserve loan table slot upfront
+        let (loan_slot, loan_gen) = crate::memory::MEMORY_LOANS.lock().reserve_slot()
+            .map_err(|_| SyscallResult::OutOfMemory)?;
 
-    // Collect frames and exact per-page original flags from lender
-    let mut frames = alloc::vec::Vec::with_capacity(page_count);
-    let mut orig_flags = alloc::vec::Vec::with_capacity(page_count);
-    {
-        let lender_pt = lender_pt_arc.lock();
+        // Collect frames and exact per-page original flags from lender
+        let mut frames = alloc::vec::Vec::with_capacity(page_count);
+        let mut orig_flags = alloc::vec::Vec::with_capacity(page_count);
         for i in 0..page_count {
             let vaddr = lender_vaddr + (i as u64 * 4096);
-            let (phys, flags) = match lender_pt.translate(VirtAddr::new(vaddr)) {
+            let (phys, flags) = match pts.src().translate(VirtAddr::new(vaddr)) {
                 Some(pair) => pair,
                 None => {
                     crate::memory::MEMORY_LOANS.lock().release_slot(loan_slot);
@@ -7645,7 +7781,7 @@ pub fn sys_mem_lend(
                 return Err(SyscallResult::PermissionDenied);
             }
             let frame = PhysFrame::containing_address(phys);
-            if !lender_pt.allocated_frames.iter().any(|f| *f == frame) {
+            if !pts.src().allocated_frames.iter().any(|f| *f == frame) {
                 crate::memory::MEMORY_LOANS.lock().release_slot(loan_slot);
                 return Err(SyscallResult::PermissionDenied);
             }
@@ -7656,95 +7792,104 @@ pub fn sys_mem_lend(
             orig_flags.push(flags);
             frames.push(frame);
         }
-    }
 
-    // Reserve borrower address span
-    let borrower_start_page = match borrower_pt_arc.lock().find_free_user_span(page_count) {
-        Ok(sp) => sp,
-        Err(_) => {
-            crate::memory::MEMORY_LOANS.lock().release_slot(loan_slot);
-            return Err(SyscallResult::OutOfMemory);
-        }
-    };
-    let borrower_vaddr = borrower_start_page.start_address().as_u64();
-
-    let b_flags = match rights {
-        crate::memory::MemoryLoanRights::ReadOnly => PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE,
-        crate::memory::MemoryLoanRights::ReadWrite => PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
-    };
-
-    // Prepare borrower mappings with complete rollback on partial failure
-    {
-        let mut borrower_pt = borrower_pt_arc.lock();
-        let mut mapped = 0;
-        for i in 0..page_count {
-            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(borrower_vaddr + (i as u64 * 4096)));
-            if let Err(_) = borrower_pt.map_leaf_raw(page, frames[i], b_flags) {
-                for r in 0..mapped {
-                    let rb_page = Page::<Size4KiB>::containing_address(VirtAddr::new(borrower_vaddr + (r as u64 * 4096)));
-                    let _ = borrower_pt.clear_leaf_pte(rb_page);
-                }
+        // Reserve borrower address span
+        let borrower_start_page = match pts.dst().find_free_user_span(page_count) {
+            Ok(sp) => sp,
+            Err(_) => {
                 crate::memory::MEMORY_LOANS.lock().release_slot(loan_slot);
                 return Err(SyscallResult::OutOfMemory);
             }
-            mapped += 1;
-        }
-    }
+        };
+        let borrower_vaddr = borrower_start_page.start_address().as_u64();
 
-    // Mutate lender mappings
-    {
-        let mut lender_pt = lender_pt_arc.lock();
-        match rights {
-            crate::memory::MemoryLoanRights::ReadOnly => {
+        let b_flags = match rights {
+            crate::memory::MemoryLoanRights::ReadOnly => PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::NO_EXECUTE,
+            crate::memory::MemoryLoanRights::ReadWrite => PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
+        };
+
+        // Prepare borrower mappings with complete rollback on partial failure
+        {
+            let borrower_pt = pts.dst_mut();
+            let mut mapped = 0;
+            for i in 0..page_count {
+                let page = Page::<Size4KiB>::containing_address(VirtAddr::new(borrower_vaddr + (i as u64 * 4096)));
+                if borrower_pt.map_leaf_raw(page, frames[i], b_flags).is_err() {
+                    rollback_borrower_lend(borrower_pt, borrower_vaddr, mapped);
+                    crate::memory::MEMORY_LOANS.lock().release_slot(loan_slot);
+                    return Err(SyscallResult::OutOfMemory);
+                }
+                mapped += 1;
+            }
+        }
+
+        // Mutate lender mappings with complete rollback across both tables on error
+        {
+            let mut lender_mutated = 0;
+            let lender_res = {
+                let lender_pt = pts.src_mut();
+                let mut err = None;
                 for i in 0..page_count {
                     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(lender_vaddr + (i as u64 * 4096)));
-                    let _ = lender_pt.update_leaf_flags(page, orig_flags[i] & !PageTableFlags::WRITABLE);
+                    let step_res = match rights {
+                        crate::memory::MemoryLoanRights::ReadOnly => {
+                            lender_pt.update_leaf_flags(page, orig_flags[i] & !PageTableFlags::WRITABLE).map(|_| ())
+                        }
+                        crate::memory::MemoryLoanRights::ReadWrite => {
+                            lender_pt.clear_leaf_pte(page).map(|_| ())
+                        }
+                    };
+                    if step_res.is_err() {
+                        err = Some(SyscallResult::DeviceError);
+                        break;
+                    }
+                    lender_mutated += 1;
                 }
-            }
-            crate::memory::MemoryLoanRights::ReadWrite => {
-                for i in 0..page_count {
-                    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(lender_vaddr + (i as u64 * 4096)));
-                    let _ = lender_pt.clear_leaf_pte(page);
-                }
+                err
+            };
+            if let Some(err) = lender_res {
+                rollback_lender_lend(pts.src_mut(), rights, lender_vaddr, lender_mutated, &frames, &orig_flags);
+                rollback_borrower_lend(pts.dst_mut(), borrower_vaddr, page_count);
+                crate::memory::MEMORY_LOANS.lock().release_slot(loan_slot);
+                return Err(err);
             }
         }
-    }
 
-    // Activate the reserved loan slot
-    let handle = match crate::memory::MEMORY_LOANS.lock().activate_loan(
-        loan_slot,
-        loan_gen,
-        caller_id.0,
-        borrower_task_id,
-        lender_vaddr,
-        borrower_vaddr,
-        page_count,
-        frames,
-        rights,
-        orig_flags,
-    ) {
-        Ok(h) => h,
-        Err(_) => {
-            // Rollback borrower mappings and lender state
-            let mut borrower_pt = borrower_pt_arc.lock();
-            for r in 0..page_count {
-                let rb_page = Page::<Size4KiB>::containing_address(VirtAddr::new(borrower_vaddr + (r as u64 * 4096)));
-                let _ = borrower_pt.clear_leaf_pte(rb_page);
-            }
-            return Err(SyscallResult::DeviceError);
-        }
-    };
-
-    // Commit borrower bookkeeping and resource accounting
-    {
-        let mut borrower_pt = borrower_pt_arc.lock();
-        borrower_pt.borrowed_mappings.push(crate::memory::BorrowedMapping {
-            start_page: borrower_start_page,
+        // Activate the reserved loan slot
+        let handle = match crate::memory::MEMORY_LOANS.lock().activate_loan(
+            loan_slot,
+            loan_gen,
+            caller_id.0,
+            borrower_task_id,
+            lender_vaddr,
+            borrower_vaddr,
             page_count,
-            lend_handle: handle,
-        });
-        borrower_pt.borrowed_pages_count = borrower_pt.borrowed_pages_count.saturating_add(page_count);
-    }
+            frames.clone(),
+            rights,
+            orig_flags.clone(),
+        ) {
+            Ok(h) => h,
+            Err(_) => {
+                rollback_lender_lend(pts.src_mut(), rights, lender_vaddr, page_count, &frames, &orig_flags);
+                rollback_borrower_lend(pts.dst_mut(), borrower_vaddr, page_count);
+                crate::memory::MEMORY_LOANS.lock().release_slot(loan_slot);
+                return Err(SyscallResult::DeviceError);
+            }
+        };
+
+        // Commit borrower bookkeeping and resource accounting
+        {
+            let borrower_pt = pts.dst_mut();
+            borrower_pt.borrowed_mappings.push(crate::memory::BorrowedMapping {
+                start_page: borrower_start_page,
+                page_count,
+                lend_handle: handle,
+            });
+            borrower_pt.borrowed_pages_count = borrower_pt.borrowed_pages_count.saturating_add(page_count);
+        }
+
+        (borrower_vaddr, handle)
+    };
 
     if out_borrower_vaddr_ptr != 0 {
         let _ = copy_to_user(out_borrower_vaddr_ptr, &borrower_vaddr.to_le_bytes());
@@ -7853,101 +7998,122 @@ pub fn sys_mem_transfer(
         return Err(SyscallResult::InvalidArguments);
     }
 
-    // Upfront validation of out pointer before committing any mutations
-    if out_receiver_vaddr_ptr != 0 {
-        let sender_pt = sender_pt_arc.lock();
-        sender_pt.validate_user_range(out_receiver_vaddr_ptr, 8, true)
-            .map_err(|_| SyscallResult::InvalidArguments)?;
-    }
-
     let page_count = (len / 4096) as usize;
 
-    // Verify sender pages without modifying sender page table yet
-    let mut frames = alloc::vec::Vec::with_capacity(page_count);
-    {
-        let sender_pt = sender_pt_arc.lock();
+    // Lock both page tables in canonical pointer order across validation,
+    // receiver mapping, and sender unmapping to prevent TOCTOU races and ABBA deadlocks.
+    let receiver_vaddr = {
+        let mut pts = PageTablePair::lock(&sender_pt_arc, &receiver_pt_arc);
+
+        if out_receiver_vaddr_ptr != 0 {
+            pts.src().validate_user_range(out_receiver_vaddr_ptr, 8, true)
+                .map_err(|_| SyscallResult::InvalidArguments)?;
+        }
+
+        // Verify sender pages without modifying sender page table yet
+        let mut frames = alloc::vec::Vec::with_capacity(page_count);
+        let mut orig_flags = alloc::vec::Vec::with_capacity(page_count);
         for i in 0..page_count {
             let vaddr = sender_vaddr + (i as u64 * 4096);
-            let (phys, flags) = sender_pt.translate(VirtAddr::new(vaddr)).ok_or(SyscallResult::InvalidArguments)?;
+            let (phys, flags) = pts.src().translate(VirtAddr::new(vaddr)).ok_or(SyscallResult::InvalidArguments)?;
             if !flags.contains(PageTableFlags::USER_ACCESSIBLE) || !flags.contains(PageTableFlags::WRITABLE) {
                 return Err(SyscallResult::PermissionDenied);
             }
             let frame = PhysFrame::containing_address(phys);
-            if !sender_pt.allocated_frames.iter().any(|f| *f == frame) {
+            if !pts.src().allocated_frames.iter().any(|f| *f == frame) {
                 return Err(SyscallResult::PermissionDenied);
             }
             if crate::memory::MEMORY_LOANS.lock().is_frame_lent(frame) {
                 return Err(SyscallResult::PermissionDenied);
             }
+            orig_flags.push(flags);
             frames.push(frame);
         }
-    }
 
-    // Reserve receiver address space quota upfront
-    if let Some(pid) = receiver_pid {
-        crate::task::process::reserve_address_space(pid, len as usize)
-            .map_err(|_| SyscallResult::OutOfMemory)?;
-    }
-
-    // Reserve receiver virtual span
-    let receiver_start_page = match receiver_pt_arc.lock().find_free_user_span(page_count) {
-        Ok(sp) => sp,
-        Err(_) => {
-            if let Some(pid) = receiver_pid {
-                crate::task::process::release_address_space(pid, len as usize);
-            }
-            return Err(SyscallResult::OutOfMemory);
+        // Reserve receiver address space quota upfront
+        if let Some(pid) = receiver_pid {
+            crate::task::process::reserve_address_space(pid, len as usize)
+                .map_err(|_| SyscallResult::OutOfMemory)?;
         }
-    };
-    let receiver_vaddr = receiver_start_page.start_address().as_u64();
 
-    // Prepare receiver mappings with rollback on partial failure
-    let flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
-    {
-        let mut receiver_pt = receiver_pt_arc.lock();
-        let mut mapped = 0;
-        for i in 0..page_count {
-            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(receiver_vaddr + (i as u64 * 4096)));
-            if let Err(_) = receiver_pt.map_user_page(page, frames[i], flags) {
-                // Rollback mapped receiver pages. The frames are still owned by
-                // the sender (its PTEs are torn down only after this loop fully
-                // succeeds), so the receiver must unlink its PTEs WITHOUT
-                // recycling the frames -- recycling here would hand frames the
-                // sender still maps to another address space (use-after-free).
-                for r in 0..mapped {
-                    let rb_page = Page::<Size4KiB>::containing_address(VirtAddr::new(receiver_vaddr + (r as u64 * 4096)));
-                    if let Ok(frame) = receiver_pt.clear_leaf_pte(rb_page) {
-                        if let Some(pos) = receiver_pt.allocated_frames.iter().position(|f| *f == frame) {
-                            receiver_pt.allocated_frames.swap_remove(pos);
-                        }
-                    }
-                }
+        // Reserve receiver virtual span
+        let receiver_start_page = match pts.dst().find_free_user_span(page_count) {
+            Ok(sp) => sp,
+            Err(_) => {
                 if let Some(pid) = receiver_pid {
                     crate::task::process::release_address_space(pid, len as usize);
                 }
                 return Err(SyscallResult::OutOfMemory);
             }
-            mapped += 1;
-        }
-    }
+        };
+        let receiver_vaddr = receiver_start_page.start_address().as_u64();
 
-    // Commit sender unmapping only AFTER receiver mapping succeeded
-    {
-        let mut sender_pt = sender_pt_arc.lock();
-        for i in 0..page_count {
-            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(sender_vaddr + (i as u64 * 4096)));
-            let frame = sender_pt.clear_leaf_pte(page).map_err(|_| SyscallResult::DeviceError)?;
-            if let Some(pos) = sender_pt.allocated_frames.iter().position(|f| *f == frame) {
-                sender_pt.allocated_frames.swap_remove(pos);
+        // Prepare receiver mappings with complete rollback on partial failure
+        let flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+        {
+            let receiver_pt = pts.dst_mut();
+            let mut mapped = 0;
+            for i in 0..page_count {
+                let page = Page::<Size4KiB>::containing_address(VirtAddr::new(receiver_vaddr + (i as u64 * 4096)));
+                if receiver_pt.map_user_page(page, frames[i], flags).is_err() {
+                    rollback_receiver_transfer(receiver_pt, receiver_vaddr, mapped);
+                    if let Some(pid) = receiver_pid {
+                        crate::task::process::release_address_space(pid, len as usize);
+                    }
+                    return Err(SyscallResult::OutOfMemory);
+                }
+                mapped += 1;
             }
         }
-        sender_pt.user_mapped_bytes = sender_pt.user_mapped_bytes.saturating_sub(len as usize);
-    }
 
-    // Release sender quota
-    if let Some(pid) = sender_pid {
-        crate::task::process::release_address_space(pid, len as usize);
-    }
+        // Commit sender unmapping only AFTER receiver mapping succeeded,
+        // rolling back both tables and receiver quota if any step fails.
+        {
+            let mut cleared = 0usize;
+            let mut clear_err = false;
+            {
+                let sender_pt = pts.src_mut();
+                for i in 0..page_count {
+                    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(sender_vaddr + (i as u64 * 4096)));
+                    match sender_pt.clear_leaf_pte(page) {
+                        Ok(frame) => {
+                            if let Some(pos) = sender_pt.allocated_frames.iter().position(|f| *f == frame) {
+                                sender_pt.allocated_frames.swap_remove(pos);
+                            }
+                            cleared += 1;
+                        }
+                        Err(_) => {
+                            clear_err = true;
+                            break;
+                        }
+                    }
+                }
+                if !clear_err {
+                    sender_pt.user_mapped_bytes = sender_pt.user_mapped_bytes.saturating_sub(len as usize);
+                }
+            }
+            if clear_err {
+                // Restore any sender PTEs cleared before the failure, then tear down receiver.
+                let sender_pt = pts.src_mut();
+                for r in 0..cleared {
+                    let rb_page = Page::<Size4KiB>::containing_address(VirtAddr::new(sender_vaddr + (r as u64 * 4096)));
+                    let _ = sender_pt.map_user_page(rb_page, frames[r], orig_flags[r]);
+                }
+                rollback_receiver_transfer(pts.dst_mut(), receiver_vaddr, page_count);
+                if let Some(pid) = receiver_pid {
+                    crate::task::process::release_address_space(pid, len as usize);
+                }
+                return Err(SyscallResult::DeviceError);
+            }
+        }
+
+        // Release sender quota
+        if let Some(pid) = sender_pid {
+            crate::task::process::release_address_space(pid, len as usize);
+        }
+
+        receiver_vaddr
+    };
 
     if out_receiver_vaddr_ptr != 0 {
         let _ = copy_to_user(out_receiver_vaddr_ptr, &receiver_vaddr.to_le_bytes());
@@ -8008,7 +8174,13 @@ pub fn sys_thread_spawn(
 
 /// Terminates the calling execution thread and releases thread-local resources.
 pub fn sys_thread_exit(code: i32) -> ! {
-    let exiting = { SCHEDULER.lock().current_task_id() };
+    let exiting = {
+        let mut sched = SCHEDULER.lock();
+        if let Some(current) = sched.current_task_mut() {
+            current.exit_code = code;
+        }
+        sched.current_task_id()
+    };
     if let Some(id) = exiting {
         serial_println!("[THREAD] Task {} sys_thread_exit({}) called.", id.0, code);
         crate::task::futex::FUTEX_MANAGER.lock().cleanup_task(id);
@@ -10871,4 +11043,55 @@ fn first_party_launches_resolve_to_the_running_task_name() {
     assert_eq!(first_party_process_name("org.interos.file_manager"), Some("app_file_manager"));
     assert_eq!(first_party_process_name("files"), Some("app_file_manager"));
     assert_eq!(first_party_process_name("org.example.external"), None);
+}
+
+#[test]
+fn page_table_pair_orders_locks_by_arc_ptr_and_handles_aliasing() {
+    let pt_a = alloc::sync::Arc::new(spin::Mutex::new(crate::memory::TaskPageTable {
+        pml4_frame: PhysFrame::containing_address(x86_64::PhysAddr::new(0x1000)),
+        allocated_frames: alloc::vec::Vec::new(),
+        shared_mappings: alloc::vec::Vec::new(),
+        borrowed_mappings: alloc::vec::Vec::new(),
+        borrowed_pages_count: 0,
+        user_mapped_bytes: 111,
+    }));
+    let pt_b = alloc::sync::Arc::new(spin::Mutex::new(crate::memory::TaskPageTable {
+        pml4_frame: PhysFrame::containing_address(x86_64::PhysAddr::new(0x2000)),
+        allocated_frames: alloc::vec::Vec::new(),
+        shared_mappings: alloc::vec::Vec::new(),
+        borrowed_mappings: alloc::vec::Vec::new(),
+        borrowed_pages_count: 0,
+        user_mapped_bytes: 222,
+    }));
+
+    // Both orderings (A, B) and (B, A) must resolve without deadlock and address
+    // the exact expected src/dst tables.
+    {
+        let mut pair_ab = PageTablePair::lock(&pt_a, &pt_b);
+        assert_eq!(pair_ab.src().user_mapped_bytes, 111);
+        assert_eq!(pair_ab.dst().user_mapped_bytes, 222);
+        pair_ab.src_mut().borrowed_pages_count = 3;
+        pair_ab.dst_mut().borrowed_pages_count = 7;
+    }
+    {
+        let pair_ba = PageTablePair::lock(&pt_b, &pt_a);
+        assert_eq!(pair_ba.src().user_mapped_bytes, 222);
+        assert_eq!(pair_ba.dst().user_mapped_bytes, 111);
+        assert_eq!(pair_ba.src().borrowed_pages_count, 7);
+        assert_eq!(pair_ba.dst().borrowed_pages_count, 3);
+    }
+    // Aliased Arc (same address space) must acquire a single lock without self-deadlock.
+    {
+        let mut pair_same = PageTablePair::lock(&pt_a, &pt_a);
+        assert_eq!(pair_same.src().user_mapped_bytes, 111);
+        pair_same.dst_mut().borrowed_pages_count = 9;
+        assert_eq!(pair_same.src().borrowed_pages_count, 9);
+    }
+
+    // Leak TaskPageTable inner values before dropping Arc so TaskPageTable::drop
+    // does not invoke Cr3::read() on host tests.
+    let a = alloc::sync::Arc::try_unwrap(pt_a).unwrap().into_inner();
+    let b = alloc::sync::Arc::try_unwrap(pt_b).unwrap().into_inner();
+    core::mem::forget(a);
+    core::mem::forget(b);
 }
