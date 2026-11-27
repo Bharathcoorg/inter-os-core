@@ -66,6 +66,10 @@ pub enum OtaError {
     InvalidSignature,
     PayloadLengthMismatch,
     WatchdogExpired,
+    /// On-media slot content did not match the digest recorded at staging.
+    AttestationFailed,
+    /// The backend holds no slot content, so re-attestation is impossible.
+    AttestationUnavailable,
 }
 
 /// OTA update package header.
@@ -123,6 +127,16 @@ pub trait OtaStore {
     /// Commits a snapshot to durable media. Implementations must `flush`
     /// volatile caches before returning `Ok`.
     fn save(&mut self, state: &PersistedOtaState) -> Result<(), OtaError>;
+
+    /// Whether this backend holds slot image bytes (enables mandatory kernel-side
+    /// re-attestation). Metadata-only / RAM-only backends return `false`.
+    fn holds_slot_content(&self) -> bool { false }
+
+    /// Writes a slot image to durable media. Default: no content backend.
+    fn write_slot(&mut self, _slot: PartitionSlot, _image: &[u8]) -> Result<(), OtaError> { Ok(()) }
+
+    /// Reads a slot image back for re-attestation. `Ok(None)` = no content.
+    fn read_slot(&mut self, _slot: PartitionSlot) -> Result<Option<Vec<u8>>, OtaError> { Ok(None) }
 }
 
 /// Default store used by [`OtaManager::new`]: performs no persistence, keeping
@@ -202,8 +216,32 @@ impl<S: OtaStore> OtaManager<S> {
             mgr.active_slot = state.active_slot;
             mgr.slot_a = state.slot_a;
             mgr.slot_b = state.slot_b;
+            mgr.reattest_active_slot_on_load()?;
         }
         Ok(mgr)
+    }
+
+    /// Re-attests a restored Testing slot against its on-media content. Fails
+    /// closed: a content-backed store that cannot produce the staged bytes, or
+    /// whose bytes no longer match the recorded digest, marks the slot Corrupted
+    /// and refuses the load. Metadata-only stores are unaffected.
+    fn reattest_active_slot_on_load(&mut self) -> Result<(), OtaError> {
+        if self.active_slot_meta().status != SlotStatus::Testing || !self.store.holds_slot_content() {
+            return Ok(());
+        }
+        let (slot, expected) = {
+            let meta = self.active_slot_meta();
+            (meta.slot, meta.digest)
+        };
+        match self.store.read_slot(slot)? {
+            Some(image) if constant_time_eq_32(&sha256(&image), &expected) => Ok(()),
+            Some(_) => {
+                self.active_slot_meta_mut().status = SlotStatus::Corrupted;
+                let _ = self.persist();
+                Err(OtaError::AttestationFailed)
+            }
+            None => Err(OtaError::AttestationUnavailable),
+        }
     }
 
     /// Writes the current slot table + boot-tries to the persistent backend.
@@ -307,6 +345,10 @@ impl<S: OtaStore> OtaManager<S> {
         // Set staged slot as active for subsequent test boot
         self.active_slot = target_slot;
 
+        // Persist the image bytes into the inactive slot so the commit path can
+        // re-attest the on-media content against the recorded digest.
+        self.store.write_slot(target_slot, payload)?;
+
         // Durable commit: persist slot metadata + boot-tries before returning so
         // the staged image survives a reboot into the new slot.
         self.persist()?;
@@ -319,6 +361,29 @@ impl<S: OtaStore> OtaManager<S> {
         cap_table
             .check(CapabilityType::OtaUpdateManagement, Rights::WRITE)
             .map_err(|_| OtaError::CapabilityDenied)?;
+
+        // Kernel-side slot re-attestation: never promote a Testing slot to Valid
+        // without re-verifying its content against the digest recorded at staging.
+        let (slot, expected) = {
+            let meta = self.active_slot_meta();
+            (meta.slot, meta.digest)
+        };
+        if self.store.holds_slot_content() {
+            match self.store.read_slot(slot)? {
+                Some(image) => {
+                    if !constant_time_eq_32(&sha256(&image), &expected) {
+                        self.active_slot_meta_mut().status = SlotStatus::Corrupted;
+                        let _ = self.persist();
+                        return Err(OtaError::AttestationFailed);
+                    }
+                }
+                None => return Err(OtaError::AttestationUnavailable),
+            }
+        } else if expected == [0u8; 32] {
+            // Metadata-only backend: the only possible re-attestation is that the
+            // staged slot carries a non-zero attested digest.
+            return Err(OtaError::AttestationFailed);
+        }
 
         let meta = self.active_slot_meta_mut();
         if meta.status == SlotStatus::Testing {
