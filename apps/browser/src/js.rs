@@ -1669,6 +1669,55 @@ impl<'a> JsRuntime<'a> {
                             return Ok(JsValue::Undefined);
                         }
 
+                        // Method: element.removeEventListener(event, handler)
+                        // Removes the first listener matching this node, event
+                        // name, and function id (the identity addEventListener
+                        // keys on). A no-op when none is registered.
+                        if method == b"removeEventListener" && *args_count >= 2 {
+                            let node = match obj {
+                                JsValue::Element(n) => n,
+                                _ => return Err(JsError::TypeError),
+                            };
+                            let ev_id = parser.args_pool[*args_start];
+                            let ev_val = self.eval_expr(parser, ev_id)?;
+                            let ev_bytes = ev_val.as_str().as_bytes();
+                            let fn_id = parser.args_pool[*args_start + 1];
+                            let fn_val = self.eval_expr(parser, fn_id)?;
+                            let handler = match fn_val {
+                                JsValue::Function(f) => f,
+                                _ => return Err(JsError::TypeError),
+                            };
+                            let mut event = [0u8; 16];
+                            let elen = ev_bytes.len().min(event.len());
+                            event[..elen].copy_from_slice(&ev_bytes[..elen]);
+                            let elen = elen as u8;
+                            let mut i = 0;
+                            while i < self.listener_count {
+                                let l = self.listeners[i];
+                                if l.node == node
+                                    && l.event_len == elen
+                                    && &l.event[..elen as usize] == &event[..elen as usize]
+                                    && l.fn_id == handler
+                                {
+                                    let mut j = i;
+                                    while j + 1 < self.listener_count {
+                                        self.listeners[j] = self.listeners[j + 1];
+                                        j += 1;
+                                    }
+                                    self.listener_count -= 1;
+                                    self.listeners[self.listener_count] = JsListener {
+                                        node: NO_NODE,
+                                        event: [0; 16],
+                                        event_len: 0,
+                                        fn_id: 0,
+                                    };
+                                    break;
+                                }
+                                i += 1;
+                            }
+                            return Ok(JsValue::Undefined);
+                        }
+
                         // Method: console.log(...)
                         if method == b"log" {
                             return Ok(JsValue::Undefined);
@@ -2442,5 +2491,20 @@ mod tests {
                 .expect("dispatch succeeds");
         assert!(!mutated, "element listener must not fire on document DOMContentLoaded");
         assert_eq!(dom.node_count(), before);
+    }
+
+    #[test]
+    fn test_remove_event_listener_prevents_dispatch() {
+        // Without removeEventListener the script errors with UnsupportedSyntax
+        // and the .expect panics; with it, the removed handler must not run.
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let before = dom.node_count();
+        let src = b"function boot() { var s = document.createElement('p'); s.textContent = 'BOOTED'; document.body.appendChild(s); } document.addEventListener('DOMContentLoaded', boot); document.removeEventListener('DOMContentLoaded', boot);";
+        let (_res, mutated) =
+            execute_script_with_events(src, &mut dom, 1000, b"DOMContentLoaded")
+                .expect("removeEventListener dispatch succeeds");
+        assert!(!mutated, "a removed listener must not run on dispatch");
+        assert_eq!(dom.node_count(), before, "a removed listener must not mutate the DOM");
     }
 }
