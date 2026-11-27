@@ -1851,20 +1851,49 @@ impl<'a> JsRuntime<'a> {
         target: NodeId,
         event: &[u8],
     ) -> Result<(), JsError> {
-        let mut ids = [0u8; MAX_LISTENERS];
-        let mut count = 0usize;
-        for i in 0..self.listener_count {
-            let listener = self.listeners[i];
-            let len = listener.event_len as usize;
-            if listener.node == target && len == event.len() && &listener.event[..len] == event {
-                if count < ids.len() {
-                    ids[count] = listener.fn_id;
-                    count += 1;
+        // Bubble phase (DOM Standard §2.9): the event runs on the target and then
+        // on each ancestor up to the document root, so a listener on an ancestor
+        // fires for an event dispatched on a descendant (event delegation). The
+        // path is collected first so a handler that mutates the tree cannot change
+        // it mid-dispatch.
+        let mut path = [NO_NODE; 64];
+        let mut depth = 0usize;
+        let root = self.dom.root();
+        let limit = self.dom.node_count();
+        let mut guard = 0usize;
+        let mut cur = Some(target);
+        while let Some(nid) = cur {
+            if depth >= path.len() {
+                break;
+            }
+            path[depth] = nid;
+            depth += 1;
+            if nid == root {
+                break;
+            }
+            guard += 1;
+            if guard > limit {
+                break;
+            }
+            cur = self.dom.parent(nid);
+        }
+        for i in 0..depth {
+            let node = path[i];
+            let mut ids = [0u8; MAX_LISTENERS];
+            let mut count = 0usize;
+            for j in 0..self.listener_count {
+                let listener = self.listeners[j];
+                let len = listener.event_len as usize;
+                if listener.node == node && len == event.len() && &listener.event[..len] == event {
+                    if count < ids.len() {
+                        ids[count] = listener.fn_id;
+                        count += 1;
+                    }
                 }
             }
-        }
-        for i in 0..count {
-            self.invoke_function(parser, ids[i], &[])?;
+            for k in 0..count {
+                self.invoke_function(parser, ids[k], &[])?;
+            }
         }
         Ok(())
     }

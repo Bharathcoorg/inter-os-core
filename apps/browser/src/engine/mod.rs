@@ -312,6 +312,14 @@ impl BrowserEngine for NativeFlowEngine {
         let len = bytes.len().min(self.current_url.len());
         self.current_url[..len].copy_from_slice(&bytes[..len]);
         self.current_url_len = len;
+        // Fail closed: starting a navigation abandons the on-screen document now.
+        // If the fetch that follows fails, the viewport must show an empty/Loading
+        // state -- never the previous page's DOM/title laid out under the new URL,
+        // which would attribute stale content to the new origin.
+        self.dom = Dom::new();
+        self.layout = TextLayout::new();
+        self.title_len = 0;
+        self.script_report = ScriptRunReport::default();
         self.scroll_y = 0;
         self.status = EngineStatus::Loading;
         Ok(())

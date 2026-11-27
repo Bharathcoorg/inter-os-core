@@ -290,6 +290,36 @@ pub fn parse_ipv4(host: &[u8]) -> Option<[u8; 4]> {
     Some(octets)
 }
 
+/// Validates a TLS `server_name` (SNI) per RFC 6066 §3 and RFC 1035.
+///
+/// A browser must not place an IP literal in SNI, and must not verify a
+/// certificate against a name it would refuse to store. Returns `true` only for
+/// a syntactically valid DNS host name of 1..=253 bytes whose labels are 1..=63
+/// bytes of `[A-Za-z0-9-]` with no leading/trailing hyphen. IP literals (IPv4 or
+/// bracketed IPv6) are rejected.
+pub fn is_valid_tls_server_name(host: &[u8]) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    if parse_ipv4(host).is_some() || host.starts_with(b"[") {
+        return false;
+    }
+    for label in host.split(|&b| b == b'.') {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        if label[0] == b'-' || label[label.len() - 1] == b'-' {
+            return false;
+        }
+        for &c in label {
+            if !(c.is_ascii_alphanumeric() || c == b'-') {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 // =============================================================================
 // Header access
 // =============================================================================
