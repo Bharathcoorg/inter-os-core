@@ -460,6 +460,26 @@ impl DexPackage {
             types.push(strings[descriptor_idx].clone());
         }
 
+        // 2b. Parse Proto IDs. Each proto_ids entry is 12 bytes:
+        // shorty_idx:u32, return_type_idx:u32, parameters_off:u32. A method's
+        // proto_idx indexes THIS table, not the string pool; the shorty string
+        // is strings[shorty_idx].
+        let proto_ids_size = u32::from_le(header.proto_ids_size) as usize;
+        let proto_ids_off = u32::from_le(header.proto_ids_off) as usize;
+        let proto_table_bytes = proto_ids_size.checked_mul(12).ok_or(DexError::UnexpectedEof)?;
+        if proto_ids_off.checked_add(proto_table_bytes).map_or(true, |end| end > raw.len()) {
+            return Err(DexError::UnexpectedEof);
+        }
+        let mut proto_shorty_indices = Vec::with_capacity(proto_ids_size);
+        for i in 0..proto_ids_size {
+            let pos = proto_ids_off + i * 12;
+            if pos + 12 > raw.len() {
+                return Err(DexError::UnexpectedEof);
+            }
+            let shorty_idx = u32::from_le_bytes(raw[pos..pos + 4].try_into().unwrap()) as usize;
+            proto_shorty_indices.push(shorty_idx);
+        }
+
         // 3. Parse Method IDs
         let method_ids_size = u32::from_le(header.method_ids_size) as usize;
         let method_ids_off = u32::from_le(header.method_ids_off) as usize;
@@ -480,7 +500,10 @@ impl DexPackage {
 
             let class_name = if class_idx < types.len() { types[class_idx].clone() } else { String::from("<unknown>") };
             let method_name = if name_idx < strings.len() { strings[name_idx].clone() } else { String::from("<unknown>") };
-            let proto_str = if proto_idx < strings.len() { strings[proto_idx].clone() } else { String::from("V") };
+            let proto_str = match proto_shorty_indices.get(proto_idx) {
+                Some(&shorty_idx) if shorty_idx < strings.len() => strings[shorty_idx].clone(),
+                _ => String::from("V"),
+            };
 
             charge_string_bytes(&mut string_budget, class_name.len() + method_name.len() + proto_str.len())?;
             method_entries.push((class_name, method_name, proto_str));
@@ -1526,6 +1549,89 @@ mod tests {
         let bad_uleb_overflow = &[0x80, 0x80, 0x80, 0x80, 0x70];
         let mut offset = 0;
         assert_eq!(read_uleb128(bad_uleb_overflow, &mut offset), Err(DexError::MalformedUleb128));
+    }
+
+    // Builds a minimal valid DEX whose single method has proto_idx = 0, but whose
+    // proto_ids[0].shorty_idx = 1 -> "VL", while string 0 is "V". A parser that
+    // wrongly indexes the string pool by proto_idx yields "V"; a correct parser
+    // resolves proto_ids -> shorty_idx and yields "VL".
+    fn build_proto_shorty_dex() -> Vec<u8> {
+        let strings = ["V", "VL", "Lpkg/Cls;", "m"];
+        let string_ids_off = DEX_HEADER_SIZE;
+        let string_ids_size = strings.len();
+        let type_ids_off = string_ids_off + string_ids_size * 4;
+        let type_ids_size = 1usize;
+        let proto_ids_off = type_ids_off + type_ids_size * 4;
+        let proto_ids_size = 1usize;
+        let method_ids_off = proto_ids_off + proto_ids_size * 12;
+        let method_ids_size = 1usize;
+        let class_defs_off = method_ids_off + method_ids_size * 8;
+        let class_defs_size = 1usize;
+        let data_off = class_defs_off + class_defs_size * 32;
+        let mut dex = alloc::vec![0u8; data_off];
+
+        let mut string_offsets = Vec::with_capacity(string_ids_size);
+        for s in &strings {
+            string_offsets.push(dex.len() as u32);
+            push_uleb128(&mut dex, s.len() as u32);
+            dex.extend_from_slice(s.as_bytes());
+            dex.push(0);
+        }
+        while dex.len() % 4 != 0 { dex.push(0); }
+
+        let class_data_off = dex.len() as u32;
+        push_uleb128(&mut dex, 0);
+        push_uleb128(&mut dex, 0);
+        push_uleb128(&mut dex, 1);
+        push_uleb128(&mut dex, 0);
+        push_uleb128(&mut dex, 0);
+        push_uleb128(&mut dex, 1);
+        push_uleb128(&mut dex, 0);
+
+        let file_size = dex.len() as u32;
+        let data_size = file_size - data_off as u32;
+        let hdr = DexHeader {
+            magic: *DEX_MAGIC, checksum: 0, signature: [0u8; 20],
+            file_size: file_size.to_le(), header_size: (DEX_HEADER_SIZE as u32).to_le(),
+            endian_tag: ENDIAN_CONSTANT.to_le(), link_size: 0, link_off: 0, map_off: 0,
+            string_ids_size: (string_ids_size as u32).to_le(), string_ids_off: (string_ids_off as u32).to_le(),
+            type_ids_size: (type_ids_size as u32).to_le(), type_ids_off: (type_ids_off as u32).to_le(),
+            proto_ids_size: (proto_ids_size as u32).to_le(), proto_ids_off: (proto_ids_off as u32).to_le(),
+            field_ids_size: 0, field_ids_off: 0,
+            method_ids_size: (method_ids_size as u32).to_le(), method_ids_off: (method_ids_off as u32).to_le(),
+            class_defs_size: (class_defs_size as u32).to_le(), class_defs_off: (class_defs_off as u32).to_le(),
+            data_size: data_size.to_le(), data_off: (data_off as u32).to_le(),
+        };
+        for (i, off) in string_offsets.iter().enumerate() {
+            let pos = string_ids_off + i * 4;
+            dex[pos..pos + 4].copy_from_slice(&off.to_le_bytes());
+        }
+        dex[type_ids_off..type_ids_off + 4].copy_from_slice(&2u32.to_le_bytes());
+        dex[proto_ids_off..proto_ids_off + 4].copy_from_slice(&1u32.to_le_bytes());
+        dex[proto_ids_off + 4..proto_ids_off + 8].copy_from_slice(&0u32.to_le_bytes());
+        dex[proto_ids_off + 8..proto_ids_off + 12].copy_from_slice(&0u32.to_le_bytes());
+        dex[method_ids_off..method_ids_off + 2].copy_from_slice(&0u16.to_le_bytes());
+        dex[method_ids_off + 2..method_ids_off + 4].copy_from_slice(&0u16.to_le_bytes());
+        dex[method_ids_off + 4..method_ids_off + 8].copy_from_slice(&3u32.to_le_bytes());
+        dex[class_defs_off..class_defs_off + 4].copy_from_slice(&0u32.to_le_bytes());
+        dex[class_defs_off + 4..class_defs_off + 8].copy_from_slice(&1u32.to_le_bytes());
+        dex[class_defs_off + 8..class_defs_off + 12].copy_from_slice(&1u32.to_le_bytes());
+        dex[class_defs_off + 24..class_defs_off + 28].copy_from_slice(&class_data_off.to_le_bytes());
+
+        let hdr_bytes = unsafe {
+            core::slice::from_raw_parts(&hdr as *const DexHeader as *const u8, DEX_HEADER_SIZE)
+        };
+        dex[..DEX_HEADER_SIZE].copy_from_slice(hdr_bytes);
+        let checksum = compute_adler32(&dex[12..]);
+        dex[8..12].copy_from_slice(&checksum.to_le_bytes());
+        dex
+    }
+
+    #[test]
+    fn dex_method_proto_idx_resolves_through_proto_ids_shorty() {
+        let dex = DexPackage::parse(&build_proto_shorty_dex()).expect("proto DEX must parse");
+        let m = dex.methods.iter().find(|m| m.method_name == "m").expect("method m");
+        assert_eq!(m.proto_shorty, "VL", "proto_idx must resolve via proto_ids -> shorty_idx");
     }
 }
 

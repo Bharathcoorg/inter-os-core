@@ -558,16 +558,11 @@ pub const APK_SIGNATURE_SCHEME_V3_BLOCK_ID: u32 = 0xf05368c0;
 /// Verifies whether the APK binary contains a cryptographically verified APK Signature
 /// Scheme v2/v3 signing block or a valid JAR certificate chain in META-INF.
 pub fn verify_apk_signature(apk_bytes: &[u8]) -> Result<(), ApkError> {
-    if apk_bytes.len() < 22 {
-        return Err(ApkError::TooSmall);
-    }
-
-    // This kernel component currently parses APK structure but does not implement
-    // the cryptographic verification required by APK Signature Scheme v2/v3 or
-    // JAR/X.509 signing. A signing-block ID, certificate filename, or non-empty
-    // certificate payload is not proof of authenticity. Fail closed until a
-    // trusted verifier supplies verified signer identity and content-digest proof.
-    Err(ApkError::InvalidSignature)
+    // Delegate to the genuine APK Signing Block verifier: it enforces the
+    // content-digest and the RSASSA/ECDSA signature over signed_data with the
+    // certificate-bound public key. Unsigned, dummy, or tampered APKs still fail
+    // closed (TooSmall / InvalidSignature / MalformedSigningBlock).
+    super::signing::verify_apk_signing_block(apk_bytes).map(|_| ())
 }
 
 impl ApkPackage {
@@ -594,10 +589,11 @@ impl ApkPackage {
             }
         }
 
-        // Verify APK Signing Block (v2/v3/v4)
+        // Verify APK Signing Block (v2/v3/v4). is_signed is true only on genuine
+        // cryptographic verification; there is no filename/flag fallback.
         let (is_signed, signing_details) = match super::signing::verify_apk_signing_block(apk_bytes) {
             Ok(details) => (true, Some(details)),
-            Err(_) => (verify_apk_signature(apk_bytes).is_ok(), None),
+            Err(_) => (false, None),
         };
 
         // Extract and parse resources.arsc if present
@@ -1015,6 +1011,23 @@ mod tests {
 
         let small = [0u8; 10];
         assert_eq!(verify_apk_signature(&small), Err(ApkError::TooSmall));
+    }
+
+    #[test]
+    fn verify_apk_signature_accepts_genuinely_signed_and_rejects_tampered() {
+        // Genuinely signed APK must verify Ok through the public enforcement entry.
+        let signed = create_signed_test_apk("org.interos.sig", &["android.permission.INTERNET"]);
+        assert_eq!(verify_apk_signature(&signed), Ok(()), "signed APK must verify");
+
+        // A single flipped byte in the signed region must fail closed.
+        let mut tampered = signed.clone();
+        let mid = tampered.len() / 2;
+        tampered[mid] ^= 0xFF;
+        assert!(verify_apk_signature(&tampered).is_err());
+
+        // Unsigned APK still fails closed.
+        let unsigned = create_test_apk("org.interos.sig", &[]);
+        assert_eq!(verify_apk_signature(&unsigned), Err(ApkError::InvalidSignature));
     }
 
     #[test]
