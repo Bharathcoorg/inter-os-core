@@ -1682,6 +1682,50 @@ pub mod rtc {
         parse(data)
     }
 
+    /// Reads the kernel's reported timezone offset in minutes from payload bytes.
+    ///
+    /// Parses `"tz_offset_min":<signed_int>` if present. Returns `None` if the field
+    /// is missing or malformed.
+    pub fn tz_offset_from_payload(data: &[u8]) -> Option<i32> {
+        const KEY: &[u8] = b"\"tz_offset_min\"";
+        let mut i = 0usize;
+        while i + KEY.len() < data.len() {
+            if &data[i..i + KEY.len()] == KEY {
+                let mut j = i + KEY.len();
+                while j < data.len() && data[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < data.len() && data[j] == b':' {
+                    j += 1;
+                }
+                while j < data.len() && data[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                let mut negative = false;
+                if j < data.len() && data[j] == b'-' {
+                    negative = true;
+                    j += 1;
+                } else if j < data.len() && data[j] == b'+' {
+                    j += 1;
+                }
+                let start = j;
+                let mut value: i32 = 0;
+                while j < data.len() && data[j].is_ascii_digit() {
+                    if j - start >= 6 {
+                        return None;
+                    }
+                    value = value.checked_mul(10)?.checked_add((data[j] - b'0') as i32)?;
+                    j += 1;
+                }
+                if j > start {
+                    return Some(if negative { -value } else { value });
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
     /// Turns the kernel's payload into a reading, or refuses it.
     fn parse(data: &[u8]) -> Option<Reading> {
         let (year, month, day, hour, minute) = (

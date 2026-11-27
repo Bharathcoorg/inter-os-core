@@ -5866,7 +5866,8 @@ fn row_pixel(
                 let reported = app.rtc == TelemetryState::Reported;
                 let mut rbuf = [0u8; 80];
                 let n = if reported {
-                    if let Some(r) = std::rtc::from_payload(&app.rtc_time[..app.rtc_time_len]) {
+                    let raw = &app.rtc_time[..app.rtc_time_len];
+                    if let Some(r) = std::rtc::from_payload(raw) {
                         let mut cursor = 0;
                         let y = r.year;
                         rbuf[cursor] = b'0' + ((y / 1000) % 10) as u8; cursor += 1;
@@ -5884,9 +5885,30 @@ fn row_pixel(
                         rbuf[cursor] = b' '; cursor += 1;
                         let ct = r.clock_text();
                         rbuf[cursor..cursor + 5].copy_from_slice(&ct); cursor += 5;
-                        let suffix = b" (Asia/Kolkata)";
-                        let slen = suffix.len().min(rbuf.len() - cursor);
-                        rbuf[cursor..cursor + slen].copy_from_slice(&suffix[..slen]); cursor += slen;
+                        match std::rtc::tz_offset_from_payload(raw) {
+                            Some(offset) if offset != 0 => {
+                                let sign = if offset < 0 { b'-' } else { b'+' };
+                                let total_min = if offset < 0 { (-offset) as u32 } else { offset as u32 };
+                                let hours = (total_min / 60).min(23) as u8;
+                                let mins = (total_min % 60).min(59) as u8;
+                                let suffix = [
+                                    b' ', b'(', b'U', b'T', b'C', sign,
+                                    b'0' + (hours / 10), b'0' + (hours % 10),
+                                    b':',
+                                    b'0' + (mins / 10), b'0' + (mins % 10),
+                                    b')',
+                                ];
+                                let slen = suffix.len().min(rbuf.len() - cursor);
+                                rbuf[cursor..cursor + slen].copy_from_slice(&suffix[..slen]);
+                                cursor += slen;
+                            }
+                            _ => {
+                                let suffix = b" (UTC)";
+                                let slen = suffix.len().min(rbuf.len() - cursor);
+                                rbuf[cursor..cursor + slen].copy_from_slice(&suffix[..slen]);
+                                cursor += slen;
+                            }
+                        }
                         cursor
                     } else {
                         let src = &app.rtc_time[..app.rtc_time_len];
