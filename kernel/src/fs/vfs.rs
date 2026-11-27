@@ -6867,3 +6867,40 @@ mod tests {
 }
 
 
+
+#[cfg(test)]
+mod protected_enforcement_tests {
+    use super::*;
+
+    /// Proves the production VFS read path enforces the authenticated manifest:
+    /// a tampered read-only system file is refused, an intact one is served, and
+    /// a file not in the manifest is refused.
+    #[test]
+    fn protected_read_enforced_through_vfs() {
+        crate::storage::verified::reset_root_for_test();
+        let mut vfs = Vfs::new();
+        vfs.create_static_file("/system/bin/init", b"ELFbytes");
+        let id = vfs.lookup("/system/bin/init").expect("inode");
+        let digest = vfs.inodes.get(&id).unwrap().sha256_digest;
+        let entries = [("/system/bin/init", digest)];
+        crate::storage::verified::provision_from_inventory(&entries).expect("arm");
+
+        let mut buf = [0u8; 64];
+        assert!(vfs.read_file_by_path("/system/bin/init", &mut buf).is_ok());
+
+        // A file not in the manifest is refused.
+        vfs.create_static_file("/system/bin/other", b"x");
+        assert_eq!(
+            vfs.read_file_by_path("/system/bin/other", &mut buf),
+            Err(FsError::IntegrityViolation)
+        );
+
+        // Tamper the attested file's bytes: the read path must refuse.
+        vfs.inodes.get_mut(&id).unwrap().data = InodeData::Dynamic(b"TAMPERED".to_vec());
+        assert_eq!(
+            vfs.read_file_by_path("/system/bin/init", &mut buf),
+            Err(FsError::IntegrityViolation)
+        );
+        crate::storage::verified::reset_root_for_test();
+    }
+}
