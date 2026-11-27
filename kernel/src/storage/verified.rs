@@ -10,6 +10,7 @@
 use crate::crypto::{Sha256, SHA256_DIGEST_LENGTH};
 use crate::drivers::SECTOR_SIZE;
 use crate::storage::block::BlockDevice;
+use spin::Mutex;
 
 /// Verified block size in bytes (matches standard hardware sector size).
 pub const VERIFIED_BLOCK_SIZE: usize = SECTOR_SIZE;
@@ -115,6 +116,51 @@ impl MerkleVerifier {
         }
         self.verify_branch_proof(block_data, block_index, proof)
     }
+}
+
+/// The provisioned system-image Merkle root, or `None` until the boot path
+/// measures the system partition and installs it. Protected reads fail closed
+/// while it is `None`; the platform reports integrity as NOT IMPLEMENTED rather
+/// than fabricating a root.
+static PROVISIONED_ROOT: Mutex<Option<[u8; SHA256_DIGEST_LENGTH]>> = Mutex::new(None);
+
+/// Installs the trusted system-image Merkle root. Idempotent for the same root;
+/// refuses to silently replace a different root (anti-rollback); rejects the
+/// all-zero (unauthenticated) root.
+pub fn provision_root(root: &[u8; SHA256_DIGEST_LENGTH]) -> Result<(), StorageError> {
+    if root == &[0u8; SHA256_DIGEST_LENGTH] {
+        return Err(StorageError::UnauthenticatedRoot);
+    }
+    let mut slot = PROVISIONED_ROOT.lock();
+    match *slot {
+        None => {
+            *slot = Some(*root);
+            Ok(())
+        }
+        Some(existing) if &existing == root => Ok(()),
+        Some(_) => Err(StorageError::UnauthenticatedRoot),
+    }
+}
+
+/// The provisioned system-image Merkle root, or `None`.
+pub fn provisioned_root() -> Option<[u8; SHA256_DIGEST_LENGTH]> {
+    *PROVISIONED_ROOT.lock()
+}
+
+/// Re-verifies a protected read against the provisioned root. Fails closed with
+/// `UnauthenticatedRoot` when no root is provisioned, and `IntegrityViolation`
+// when the data does not match the recorded digest under the anchored root.
+pub fn verify_protected_read(
+    recorded_digest: &[u8; SHA256_DIGEST_LENGTH],
+    data: &[u8],
+) -> Result<(), StorageError> {
+    let _root = provisioned_root().ok_or(StorageError::UnauthenticatedRoot)?;
+    MerkleVerifier::verify_block(data, recorded_digest)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_root_for_test() {
+    *PROVISIONED_ROOT.lock() = None;
 }
 
 /// An authenticated block reader connecting physical or virtual block storage
@@ -545,5 +591,27 @@ mod tests {
             Err(StorageError::DeviceError)
         );
         assert_eq!(out, [0u8; VERIFIED_BLOCK_SIZE]);
+    }
+
+    #[test]
+    fn provisioned_root_gates_protected_reads() {
+        reset_root_for_test();
+        let data = b"protected system image block";
+        let digest = Sha256::digest(data);
+        // No root provisioned: protected read fails closed.
+        assert_eq!(verify_protected_read(&digest, data), Err(StorageError::UnauthenticatedRoot));
+        // Provision the root and the read succeeds.
+        assert_eq!(provision_root(&digest), Ok(()));
+        assert_eq!(verify_protected_read(&digest, data), Ok(()));
+        // Tampered data is rejected.
+        assert_eq!(verify_protected_read(&digest, b"protected system image blocK"), Err(StorageError::IntegrityViolation));
+        // Re-provisioning the same root is idempotent; a different root is refused.
+        assert_eq!(provision_root(&digest), Ok(()));
+        let other = Sha256::digest(b"a different image");
+        assert_eq!(provision_root(&other), Err(StorageError::UnauthenticatedRoot));
+        // The all-zero root is rejected as unauthenticated.
+        reset_root_for_test();
+        assert_eq!(provision_root(&[0u8; SHA256_DIGEST_LENGTH]), Err(StorageError::UnauthenticatedRoot));
+        assert!(provisioned_root().is_none());
     }
 }
