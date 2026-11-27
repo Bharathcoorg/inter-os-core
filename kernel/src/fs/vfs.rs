@@ -893,6 +893,14 @@ impl Vfs {
         let inode_id = self.path_to_inode.get(path).copied().ok_or(FsError::FileNotFound)?;
         let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
         if inode.block_backed {
+            // A protected, block-backed read cannot be attested from an in-memory
+            // slice; once a root is provisioned it must fail closed rather than
+            // stream unauthenticated bytes.
+            if inode.file_type == FileType::ReadOnlySystem
+                && crate::storage::verified::provisioned_root().is_some()
+            {
+                return Err(FsError::IntegrityViolation);
+            }
             let name = spill_path_for(&inode.path);
             let size = inode.size;
             return self.stream_read(&name, offset, size, out);
@@ -909,6 +917,11 @@ impl Vfs {
         let inode_id = self.path_to_inode.get(path).copied().ok_or(FsError::FileNotFound)?;
         let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
         if inode.block_backed {
+            if inode.file_type == FileType::ReadOnlySystem
+                && crate::storage::verified::provisioned_root().is_some()
+            {
+                return Err(FsError::IntegrityViolation);
+            }
             let name = spill_path_for(&inode.path);
             let size = inode.size;
             return self.stream_read(&name, 0, size, out);
