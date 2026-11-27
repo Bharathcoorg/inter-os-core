@@ -11,9 +11,10 @@
 //! The model is a deliberately small block layout: every block owns the
 //! column it is given, inline content is wrapped into lines, lists get a
 //! marker, tables divide their width equally between columns, and form
-//! controls occupy a box in the line. Floats, flexbox, grid, absolute
-//! positioning and margin collapsing are not implemented and are not
-//! approximated.
+//! controls occupy a box in the line. A narrow flexbox subset (row/column
+//! direction, `justify-content`, `gap`) and a narrow grid subset
+//! (`grid-columns`, `gap`) are laid out by `layout_flex` / `layout_grid`.
+//! Floats and margin collapsing are not implemented and are not approximated.
 
 use crate::css;
 use crate::std::design::font;
