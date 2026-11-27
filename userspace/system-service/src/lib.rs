@@ -3468,6 +3468,12 @@ pub fn is_model_trusted(source: &str) -> bool {
     PROVISIONED_MODELS.lock().is_trusted(source)
 }
 
+/// Reclaims a loaded model's resource reservations from the broker ledger: its
+/// resident bytes and every session bound to its handle. Returns sessions reaped.
+pub fn unload_model_resources(model_handle: u64) -> usize {
+    with_broker_ledger(|ledger| ledger.unload_model(model_handle))
+}
+
 pub fn with_broker_ledger<F, R>(f: F) -> R
 where
     F: FnOnce(&mut backend::BrokerLedger) -> R,

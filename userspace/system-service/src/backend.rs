@@ -686,9 +686,18 @@ struct SessionRecord {
     id: u64,
     owner: u64,
     backend_id: u32,
+    model_handle: u64,
     reserved_bytes: u64,
     active: bool,
     cancelled: bool,
+}
+
+/// Per-model resident reservation so unloading a model reclaims its bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ModelReservation {
+    handle: u64,
+    resident_bytes: u64,
+    active: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -709,6 +718,7 @@ pub struct BrokerLedger {
     resident_bytes: u64,
     session_bytes: u64,
     sessions: [SessionRecord; MAX_SESSIONS],
+    models: [ModelReservation; MAX_LOADED_MODELS],
     next_session: u64,
 }
 
@@ -724,10 +734,16 @@ impl BrokerLedger {
                 id: 0,
                 owner: 0,
                 backend_id: 0,
+                model_handle: 0,
                 reserved_bytes: 0,
                 active: false,
                 cancelled: false,
             }; MAX_SESSIONS],
+            models: [ModelReservation {
+                handle: 0,
+                resident_bytes: 0,
+                active: false,
+            }; MAX_LOADED_MODELS],
             next_session: 1,
         }
     }
@@ -769,14 +785,23 @@ impl BrokerLedger {
         backend_id: u32,
         estimate: ResourceEstimate,
     ) -> Result<u64, AdmissionError> {
+        self.create_session_for_model(owner, backend_id, 0, estimate)
+    }
+
+    /// Like [`create_session`] but attributes the session to a loaded model
+    /// handle, so [`unload_model`] reclaims it with the model's resident bytes.
+    pub fn create_session_for_model(
+        &mut self,
+        owner: u64,
+        backend_id: u32,
+        model_handle: u64,
+        estimate: ResourceEstimate,
+    ) -> Result<u64, AdmissionError> {
         let bytes = estimate.session_bytes().ok_or(AdmissionError::Arithmetic)?;
         self.reserve_ram(bytes)?;
         if self.sessions.iter().all(|session| session.active) {
             return Err(AdmissionError::SessionCapacity);
         }
-        // Never reuse an identifier while its previous session is live, even
-        // after the counter wraps.  A stale cancellation must not address a
-        // different owner's new session.
         let mut id = self.next_session;
         for _ in 0..=MAX_SESSIONS {
             if !self.sessions.iter().any(|session| session.active && session.id == id) {
@@ -791,12 +816,58 @@ impl BrokerLedger {
             id,
             owner,
             backend_id,
+            model_handle,
             reserved_bytes: bytes,
             active: true,
             cancelled: false,
         };
         self.session_bytes += bytes;
         Ok(id)
+    }
+
+    /// Reserves resident bytes attributed to a loaded model handle.
+    pub fn reserve_resident_for(
+        &mut self,
+        handle: u64,
+        estimate: ResourceEstimate,
+    ) -> Result<(), AdmissionError> {
+        let bytes = estimate.resident_bytes().ok_or(AdmissionError::Arithmetic)?;
+        self.reserve_ram(bytes)?;
+        if let Some(slot) = self.models.iter_mut().find(|m| m.active && m.handle == handle) {
+            slot.resident_bytes = slot.resident_bytes.saturating_add(bytes);
+        } else if let Some(slot) = self.models.iter_mut().find(|m| !m.active) {
+            *slot = ModelReservation {
+                handle,
+                resident_bytes: bytes,
+                active: true,
+            };
+        } else {
+            return Err(AdmissionError::SessionCapacity);
+        }
+        self.resident_bytes += bytes;
+        Ok(())
+    }
+
+    /// Reclaims a model's resident reservation and every session bound to it.
+    /// Returns the number of sessions reaped. Idempotent for unknown handles.
+    pub fn unload_model(&mut self, handle: u64) -> usize {
+        let resident = if let Some(slot) = self.models.iter_mut().find(|m| m.active && m.handle == handle) {
+            let bytes = slot.resident_bytes;
+            *slot = ModelReservation::default();
+            bytes
+        } else {
+            0
+        };
+        self.resident_bytes = self.resident_bytes.saturating_sub(resident);
+        let mut reaped = 0;
+        for session in &mut self.sessions {
+            if session.active && session.model_handle == handle {
+                self.session_bytes = self.session_bytes.saturating_sub(session.reserved_bytes);
+                *session = SessionRecord::default();
+                reaped += 1;
+            }
+        }
+        reaped
     }
 
     pub fn cancel(&mut self, owner: u64, id: u64) -> Result<(), AdmissionError> {
@@ -1965,6 +2036,28 @@ mod tests {
         assert!(!registry.is_trusted("/absent.gguf"));
         assert!(!registry.revoke("/absent.gguf"));
         assert_eq!(registry.trust_state("/absent.gguf"), None);
+    }
+
+    #[test]
+    fn unload_model_reclaims_resident_and_sessions_for_that_model_only() {
+        let mut ledger = BrokerLedger::new(1 << 20, 1 << 20, 0);
+        let est_a = ResourceEstimate { model_weights: 4096, runtime_overhead: 256, kv_cache: 1024, ..ResourceEstimate::ZERO };
+        let est_b = ResourceEstimate { model_weights: 2048, runtime_overhead: 128, kv_cache: 512, ..ResourceEstimate::ZERO };
+        ledger.reserve_resident_for(1, est_a).expect("resident a");
+        ledger.reserve_resident_for(2, est_b).expect("resident b");
+        let _sa = ledger.create_session_for_model(10, 1, 1, est_a).expect("session a");
+        let _sb = ledger.create_session_for_model(20, 1, 2, est_b).expect("session b");
+        let before = ledger.reserved_bytes();
+        assert!(before > 0);
+        // Unloading model 1 reclaims its resident bytes and its session only.
+        assert_eq!(ledger.unload_model(1), 1);
+        let after_a = ledger.reserved_bytes();
+        assert!(after_a < before, "unloading model 1 must reclaim resources");
+        assert!(after_a > 0, "model 2's reservation remains");
+        // Idempotent; unloading model 2 reclaims the remainder.
+        assert_eq!(ledger.unload_model(1), 0);
+        assert_eq!(ledger.unload_model(2), 1);
+        assert_eq!(ledger.reserved_bytes(), 0);
     }
 
     #[test]
