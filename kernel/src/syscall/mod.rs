@@ -3255,7 +3255,7 @@ pub extern "C" fn sys_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5:
             if end == surface.pixels.len() {
                 surface.frame_ready = true;
                 surface.frame_complete = true;
-            } else if offset == 0 {
+            } else if offset == 0 && !surface.frame_complete {
                 surface.frame_ready = false;
                 surface.frame_complete = false;
             }
