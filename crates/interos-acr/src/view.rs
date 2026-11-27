@@ -540,6 +540,15 @@ impl View {
         match &self.view_type {
             ViewType::Button { text, text_color, is_pressed, text_size } => {
                 let border_color = if *is_pressed { 0xFF666666 } else { *text_color };
+                if self.clicked_count > 0 {
+                    let _ = draw_list.push(DrawOp::FillRect {
+                        x: self.bounds.left + 1,
+                        y: self.bounds.top + 1,
+                        width: w.saturating_sub(2),
+                        height: h.saturating_sub(2),
+                        color: 0xFF1B5E20,
+                    });
+                }
                 // Draw 1-px button border
                 let _ = draw_list.push(DrawOp::DrawHLine {
                     x: self.bounds.left,
@@ -565,11 +574,16 @@ impl View {
                     height: h,
                     color: border_color,
                 });
-                // Render actual button text glyphs using sovereign typography stack!
+                // Render actual button text glyphs (reflecting mutated state if clicked)
+                let display_text = if self.clicked_count > 0 {
+                    alloc::format!("{} [Clicked: {}]", text, self.clicked_count)
+                } else {
+                    text.clone()
+                };
                 let _ = draw_list.push(DrawOp::DrawText {
                     x: self.bounds.left + 8,
                     y: self.bounds.top + 8,
-                    text: text.clone(),
+                    text: display_text,
                     color: *text_color,
                     size: *text_size,
                 });
@@ -750,6 +764,27 @@ mod tests {
         if let ViewType::ViewGroup { children, .. } = &root.view_type {
             assert_eq!(children[1].clicked_count, 1);
         }
+
+        let mut dl_after = DrawList::new();
+        root.draw(&mut dl_after);
+        // Verify that UI state mutation is reflected in the rendered draw list:
+        // button text contains "[Clicked: 1]" and draw list is distinct from initial frame
+        let has_clicked_text = dl_after.ops().iter().any(|op| {
+            if let DrawOp::DrawText { text, .. } = op {
+                text.contains("[Clicked: 1]")
+            } else {
+                false
+            }
+        });
+        assert!(has_clicked_text, "UI state must reflect touch mutation in rendered text");
+        let has_activated_bg = dl_after.ops().iter().any(|op| {
+            if let DrawOp::FillRect { color, .. } = op {
+                *color == 0xFF1B5E20
+            } else {
+                false
+            }
+        });
+        assert!(has_activated_bg, "UI state must reflect touch mutation in button background");
     }
 
     #[test]
