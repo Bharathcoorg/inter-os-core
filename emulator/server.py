@@ -6351,7 +6351,10 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', app_name or os.path.basename(src) or 'webapp')
                 out_rapp = os.path.join(dist_dir, f"{clean_name}.rapp")
 
-                sign_requested = bool(data.get('sign', False))
+                # Strict boolean: only the JSON literal true enables developer-key
+                # signing. A string "false" is truthy under bool() and would sign
+                # a package the caller asked to leave unsigned (type confusion).
+                sign_requested = data.get('sign') is True
 
                 cmd = [sys.executable, port_script, src, '--output', out_rapp]
                 if sign_requested:

@@ -32,7 +32,11 @@ pub const RAPP_MAX_INTENT_VALUE_LEN: usize = 96;
 pub(crate) const fn requires_platform_publisher(id: u16) -> bool {
     // Raw storage bypasses the VFS. Global control, camera control and
     // cross-task surface capture bypass their app-facing consent boundaries.
-    matches!(id, 11 | 18 | 22 | 27)
+    // NetworkSocket/Send/Receive (12/13/14) are netd's data-plane authority:
+    // granting them ambiently from a third-party manifest would hand any
+    // installed package unscoped network send/receive, so they are
+    // default-denied to non-platform publishers and reached only through netd.
+    matches!(id, 11 | 12 | 13 | 14 | 18 | 22 | 27)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -626,7 +630,7 @@ mod tests {
         use crate::services::*;
 
         let all_ids: alloc::vec::Vec<u16> = (1..=24).collect();
-        for id in [11, 18, 22, 27] {
+        for id in [11, 12, 13, 14, 18, 22, 27] {
             assert!(crate::task::user::capabilities_from_rapp(&[id], 0x1234).is_err(),
                 "ordinary publisher must not receive platform capability {id}");
             assert!(crate::task::user::capabilities_from_rapp_with_trust(&[id], 0x1234, true).is_ok(),
