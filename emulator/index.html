@@ -1176,6 +1176,21 @@ SPDX-FileCopyrightText: 2026 Bharath B R <https://github.com/Bharathcoorg> -->
           </label>
         </div>
 
+        <!-- Developer Ed25519 Signing Authorization Switch -->
+        <div class="hmr-toggle-box" style="margin-top: 10px;">
+          <div class="hmr-toggle-info">
+            <div class="hmr-toggle-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6366F1" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              <span>Authorize Developer Ed25519 Package Signing</span>
+            </div>
+            <div class="hmr-toggle-desc">Explicitly authorize signing with host developer key for guest installation. Off by default: imported packages are emitted unsigned.</div>
+          </div>
+          <label class="studio-switch">
+            <input type="checkbox" id="toggle-sign-package">
+            <span class="studio-slider"></span>
+          </label>
+        </div>
+
         <!-- Realtime Progress Output -->
         <div class="import-terminal-wrap" id="import-terminal-wrap" style="display: none;">
           <div class="import-terminal-header">

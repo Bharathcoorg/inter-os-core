@@ -3279,11 +3279,13 @@ document.addEventListener('DOMContentLoaded', () => {
         permissions.push(cb.value);
       });
 
+      const authorizeSigning = !!document.getElementById('toggle-sign-package')?.checked;
+
       // Prepare UI for execution
       if (importTerminalWrap) importTerminalWrap.style.display = 'flex';
       if (importTerminalLogs) importTerminalLogs.innerHTML = '';
       if (importStatusTag) {
-        importStatusTag.textContent = 'PORTING & SIGNING';
+        importStatusTag.textContent = authorizeSigning ? 'PORTING & SIGNING' : 'PORTING (UNSIGNED)';
         importStatusTag.style.background = 'rgba(59, 130, 246, 0.2)';
         importStatusTag.style.color = '#60A5FA';
       }
@@ -3292,7 +3294,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
       appendImportLog(`Target: ${targetSource} (Mode: ${activeImportTab})`, '#93C5FD');
       appendImportLog(`Selected permissions: [${permissions.join(', ')}]`);
-      appendImportLog('Calling InterOS Web-to-RAPP Porting Engine & Ed25519 signer...');
+      if (authorizeSigning) {
+        appendImportLog('Calling InterOS Web-to-RAPP Porting Engine with authorized Ed25519 signing...');
+      } else {
+        appendImportLog('Calling InterOS Web-to-RAPP Porting Engine (signing not authorized by operator)...', '#FBBF24');
+      }
 
       try {
         const resp = await fetch('/api/web/import', {
@@ -3304,7 +3310,7 @@ document.addEventListener('DOMContentLoaded', () => {
             id: appId || undefined,
             permissions: permissions.length > 0 ? permissions : undefined,
             hmr: enableHmr,
-            sign: true
+            sign: authorizeSigning
           })
         });
 
