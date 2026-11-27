@@ -3427,6 +3427,28 @@ impl<'a, T> Drop for TicketGuard<'a, T> {
 pub static BROKER_LEDGER: TicketSpinLock<Option<backend::BrokerLedger>> = TicketSpinLock::new(None);
 pub static NATIVE_GGUF_BACKEND: TicketSpinLock<backend::NativeGgufBackend> = TicketSpinLock::new(backend::NativeGgufBackend::new());
 pub static NATIVE_LITERTLM_BACKEND: TicketSpinLock<backend::NativeLiteRtLmBackend> = TicketSpinLock::new(backend::NativeLiteRtLmBackend::new());
+/// Trusted, out-of-band digests for installed models, keyed by source path.
+///
+/// The installer records the digest a model's bytes must have from a signed
+/// provisioning manifest. The generation path verifies the on-disk artifact
+/// against this before the model is admitted, so rewriting both a file and its
+/// `fs_stat` digest still fails the comparison against this provisioned root.
+pub static PROVISIONED_MODELS: TicketSpinLock<backend::ProvisionedRegistry> =
+    TicketSpinLock::new(backend::ProvisionedRegistry::new());
+
+/// Records the trusted digest for an installed model at `source`.
+///
+/// `manifest_text` is a signed provisioning manifest (see
+/// [`backend::parse_model_manifest`]); its `sha256` and `artifact_bytes` are the
+/// trusted values. Returns whether the entry was recorded.
+pub fn provision_installed_model(manifest_text: &[u8]) -> bool {
+    match backend::parse_model_manifest(manifest_text) {
+        Ok(manifest) => PROVISIONED_MODELS
+            .lock()
+            .provision(manifest.source, manifest.sha256, manifest.artifact_bytes),
+        Err(_) => false,
+    }
+}
 
 pub fn with_broker_ledger<F, R>(f: F) -> R
 where
@@ -4672,42 +4694,136 @@ fn run_installed_generation(
         }
     };
 
+    // A generative model must hold an output head before it is admitted. Refuse
+    // here, before any model slot or session is created, so a headless GGUF is
+    // never loaded as an active generative model.
+    let mut reader = weights::WeightReader::new(table, source);
+    if !reader.has_output_head() {
+        let _ = std::fs_close(fd);
+        reply_with_answer(
+            sender_task_id,
+            std::ai::STATUS_UNSUPPORTED,
+            b"Generation refused: the installed model declares no output tensor, so it cannot generate tokens.",
+            tx_buf,
+        );
+        return false;
+    }
+
     let backend_session_id = {
-        // Bind the model's identity to the real artifact: the size and digest
-        // come from the filesystem's own record for this path, and the
-        // architecture, tokenizer and quantization come from the file's GGUF
-        // header. A zeroed digest or a size of 0 means the artifact could not be
-        // stat'd and is reported unverified rather than substituted with a
-        // hardcoded architecture.
+        // Resolve the artifact's observed identity (size + digest) from the
+        // filesystem, then verify it against the trusted provisioned digest when
+        // the installer registered one. The model is bound to the verified bytes;
+        // a file that changed since admission is unloaded and refused.
         let mut stat_buf = [0u8; std::FILE_STAT_BYTES];
-        let identity = match std::fs_stat(path, &mut stat_buf) {
-            Ok(_) => match std::FileStatRecord::parse(&stat_buf) {
-                Some(record) => Some((record.size, record.sha256)),
-                None => None,
-            },
+        let observed = match std::fs_stat(path, &mut stat_buf) {
+            Ok(_) => std::FileStatRecord::parse(&stat_buf).map(|r| (r.size, r.sha256)),
             Err(_) => None,
         };
-        let mut backend = NATIVE_GGUF_BACKEND.lock();
-        let model_handle = backend
-            .models
-            .iter()
-            .find(|m| m.active && &m.source[..m.source_len] == path.as_bytes())
-            .map(|m| m.handle)
-            .unwrap_or_else(|| {
-                let (artifact_bytes, sha256) =
-                    identity.unwrap_or((0, [0u8; 32]));
-                let manifest = backend::installed_generative_manifest(
-                    info.architecture(),
-                    info.tokenizer_model(),
-                    info.file_type,
-                    path,
-                    artifact_bytes,
-                    sha256,
-                    estimate,
+        let (artifact_bytes, sha256) = match observed {
+            Some(v) => v,
+            None => {
+                let _ = std::fs_close(fd);
+                reply_with_answer(
+                    sender_task_id,
+                    std::ai::STATUS_UNAVAILABLE,
+                    b"Generation unavailable: the installed model file could not be stat'd, so its bytes cannot be verified.",
+                    tx_buf,
                 );
-                backend.load_model(&manifest).unwrap_or(1)
-            });
-        backend.create_session(model_handle, sender_task_id).ok()
+                return false;
+            }
+        };
+        let architecture = info.architecture();
+        // Enforce a trusted provisioned digest when one exists for this path.
+        if let Some((expected_sha, expected_len)) = PROVISIONED_MODELS.lock().expected_for(path) {
+            let manifest = backend::installed_generative_manifest(
+                architecture,
+                info.file_type,
+                path,
+                artifact_bytes,
+                sha256,
+                estimate,
+            );
+            if backend::verify_artifact(
+                &manifest,
+                expected_len,
+                &expected_sha,
+                architecture,
+            )
+            .is_err()
+            {
+                let _ = std::fs_close(fd);
+                reply_with_answer(
+                    sender_task_id,
+                    std::ai::STATUS_UNAVAILABLE,
+                    b"Generation refused: the installed model's bytes do not match the provisioned digest; the artifact is not the model that was authorized.",
+                    tx_buf,
+                );
+                return false;
+            }
+        }
+        let mut backend = NATIVE_GGUF_BACKEND.lock();
+        // Detect a changed file: an already-loaded model from this path whose
+        // recorded digest/size differ from disk now is unloaded and refused.
+        if let Some((handle, bound_sha, bound_len)) = backend.active_model_by_path(path) {
+            if bound_sha != sha256 || bound_len != artifact_bytes {
+                backend.unload_active_model(handle);
+                let _ = std::fs_close(fd);
+                reply_with_answer(
+                    sender_task_id,
+                    std::ai::STATUS_UNAVAILABLE,
+                    b"Generation refused: the installed model file changed since it was loaded; it must be re-verified before use.",
+                    tx_buf,
+                );
+                return false;
+            }
+            match backend.create_session(handle, sender_task_id) {
+                Ok(sid) => Some(sid),
+                Err(_) => {
+                    let _ = std::fs_close(fd);
+                    reply_with_answer(
+                        sender_task_id,
+                        std::ai::STATUS_UNAVAILABLE,
+                        b"Generation unavailable: a session could not be created for the installed model.",
+                        tx_buf,
+                    );
+                    return false;
+                }
+            }
+        } else {
+            let manifest = backend::installed_generative_manifest(
+                architecture,
+                info.file_type,
+                path,
+                artifact_bytes,
+                sha256,
+                estimate,
+            );
+            match backend.load_model(&manifest) {
+                Ok(handle) => match backend.create_session(handle, sender_task_id) {
+                    Ok(sid) => Some(sid),
+                    Err(_) => {
+                        let _ = std::fs_close(fd);
+                        reply_with_answer(
+                            sender_task_id,
+                            std::ai::STATUS_UNAVAILABLE,
+                            b"Generation unavailable: a session could not be created for the installed model.",
+                            tx_buf,
+                        );
+                        return false;
+                    }
+                },
+                Err(_) => {
+                    let _ = std::fs_close(fd);
+                    reply_with_answer(
+                        sender_task_id,
+                        std::ai::STATUS_UNSUPPORTED,
+                        b"Generation refused: the installed model is not a supported generative GGUF (architecture, quantization or tokenizer unsupported).",
+                        tx_buf,
+                    );
+                    return false;
+                }
+            }
+        }
     };
 
     struct SessionGuard {
@@ -4731,12 +4847,6 @@ fn run_installed_generation(
         ledger_session_id,
         backend_session_id,
     };
-
-    let mut reader = weights::WeightReader::new(table, source);
-    if !reader.has_output_head() {
-        let _ = std::fs_close(fd);
-        return false;
-    }
 
     let prompt_text = extract_prompt_text(payload);
     if prompt_text.is_empty() {

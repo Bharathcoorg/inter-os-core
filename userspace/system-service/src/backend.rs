@@ -312,18 +312,27 @@ pub fn parse_model_manifest(input: &[u8]) -> Result<ModelManifest<'_>, ManifestE
 pub enum VerificationError {
     SizeMismatch,
     DigestMismatch,
+    ArchitectureMismatch,
 }
 
 pub fn verify_artifact(
     manifest: &ModelManifest<'_>,
     observed_bytes: u64,
     observed_sha256: &[u8; 32],
+    observed_architecture: Option<&str>,
 ) -> Result<(), VerificationError> {
     if manifest.artifact_bytes != observed_bytes {
         return Err(VerificationError::SizeMismatch);
     }
     if !constant_time_eq(&manifest.sha256, observed_sha256) {
         return Err(VerificationError::DigestMismatch);
+    }
+    // Bind the declared architecture to the artifact's own header: a manifest
+    // that claims `gemma2` must not verify against a `gemma-embedding` file of
+    // the same size and digest. An absent observed architecture is not a match.
+    match observed_architecture {
+        Some(observed) if observed == manifest.architecture => {}
+        _ => return Err(VerificationError::ArchitectureMismatch),
     }
     Ok(())
 }
@@ -347,6 +356,8 @@ pub fn quantization_from_file_type(file_type: Option<u32>) -> Quantization {
         Some(0) => Quantization::F32,
         Some(1) => Quantization::F16,
         Some(2) => Quantization::Q4_0,
+        Some(17) => Quantization::Q6K,
+        Some(19) => Quantization::Tq2_0,
         _ => Quantization::BackendDefined,
     }
 }
@@ -355,13 +366,14 @@ pub fn quantization_from_file_type(file_type: Option<u32>) -> Quantization {
 /// GGUF metadata and the digest and size the filesystem reports for the file.
 ///
 /// Identity is bound to the real bytes: `artifact_bytes` and `sha256` are the
-/// values `fs_stat` returned for this exact path, and `architecture`/`tokenizer`
-/// come from the file's own header. A caller that has not verified the artifact
-/// passes a zeroed digest and a size of `0`, which [`verify_artifact`] rejects —
-/// the manifest never substitutes a hardcoded architecture such as `gemma2`.
+/// values the trusted provisioner (or `fs_stat`) reported for this exact path.
+/// `architecture` comes from the file's own header and must be one the backend
+/// supports, or [`probe_backend`] rejects it. `tokenizer` is reported as
+/// `embedded` because the engine tokenizes internally from the file's own
+/// vocabulary; the file's `tokenizer.ggml.model` family is an internal detail,
+/// not a backend capability the manifest advertises.
 pub fn installed_generative_manifest<'a>(
     info_architecture: Option<&'a str>,
-    info_tokenizer: Option<&'a str>,
     info_file_type: Option<u32>,
     source: &'a str,
     artifact_bytes: u64,
@@ -378,10 +390,92 @@ pub fn installed_generative_manifest<'a>(
         format: ModelFormat::Gguf,
         architecture: info_architecture.unwrap_or("unknown"),
         quantization: quantization_from_file_type(info_file_type),
-        tokenizer: info_tokenizer.unwrap_or("unknown"),
+        tokenizer: "embedded",
         required_hardware: HardwareBackend::Cpu,
         capabilities: CapabilitySet::TEXT_GENERATION.union(CapabilitySet::STREAMING_GENERATION),
         resources,
+    }
+}
+
+/// A trusted, out-of-band record of what an installed model's bytes must be.
+///
+/// The digest here does not come from the file itself: it is supplied by the
+/// installer from a signed provisioning manifest. [`ProvisionedRegistry::expected_for`]
+/// lets the load path verify the on-disk artifact against this trusted value
+/// before the model is admitted, so an attacker who rewrites both the file and
+/// its `fs_stat` digest still fails the comparison against the provisioned root.
+#[derive(Clone, Copy, Debug)]
+pub struct ProvisionedModel {
+    pub source: [u8; 128],
+    pub source_len: usize,
+    pub sha256: [u8; 32],
+    pub artifact_bytes: u64,
+    pub active: bool,
+}
+
+impl ProvisionedModel {
+    pub const fn empty() -> Self {
+        Self {
+            source: [0u8; 128],
+            source_len: 0,
+            sha256: [0u8; 32],
+            artifact_bytes: 0,
+            active: false,
+        }
+    }
+}
+
+/// Holds the trusted digests the installer provisioned, keyed by source path.
+#[derive(Clone, Copy, Debug)]
+pub struct ProvisionedRegistry {
+    entries: [ProvisionedModel; MAX_LOADED_MODELS],
+}
+
+impl ProvisionedRegistry {
+    pub const fn new() -> Self {
+        Self {
+            entries: [ProvisionedModel::empty(); MAX_LOADED_MODELS],
+        }
+    }
+
+    /// Records the trusted digest for a source path, replacing any prior entry.
+    /// Returns false if the registry is full.
+    pub fn provision(&mut self, source: &str, sha256: [u8; 32], artifact_bytes: u64) -> bool {
+        let bytes = source.as_bytes();
+        let len = bytes.len().min(128);
+        let mut src = [0u8; 128];
+        src[..len].copy_from_slice(&bytes[..len]);
+        if let Some(slot) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.active && &e.source[..e.source_len] == bytes)
+        {
+            slot.sha256 = sha256;
+            slot.artifact_bytes = artifact_bytes;
+            return true;
+        }
+        let slot = self.entries.iter_mut().find(|e| !e.active);
+        match slot {
+            Some(slot) => {
+                *slot = ProvisionedModel {
+                    source: src,
+                    source_len: len,
+                    sha256,
+                    artifact_bytes,
+                    active: true,
+                };
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The trusted digest for a source path, if one was provisioned.
+    pub fn expected_for(&self, source: &str) -> Option<([u8; 32], u64)> {
+        self.entries
+            .iter()
+            .find(|e| e.active && &e.source[..e.source_len] == source.as_bytes())
+            .map(|e| (e.sha256, e.artifact_bytes))
     }
 }
 
@@ -762,6 +856,11 @@ pub struct LoadedModelRecord {
     pub source_len: usize,
     pub architecture: [u8; 32],
     pub architecture_len: usize,
+    /// The digest and size the artifact had when it was verified at load time.
+    /// A later read whose digest or size differs is a changed file, not the
+    /// model that was admitted.
+    pub sha256: [u8; 32],
+    pub artifact_bytes: u64,
     pub capabilities: CapabilitySet,
     pub resources: ResourceEstimate,
     pub active: bool,
@@ -777,6 +876,8 @@ impl Default for LoadedModelRecord {
             source_len: 0,
             architecture: [0u8; 32],
             architecture_len: 0,
+            sha256: [0u8; 32],
+            artifact_bytes: 0,
             capabilities: CapabilitySet::default(),
             resources: ResourceEstimate::ZERO,
             active: false,
@@ -811,6 +912,8 @@ impl NativeGgufBackend {
                 source_len: 0,
                 architecture: [0u8; 32],
                 architecture_len: 0,
+                sha256: [0u8; 32],
+                artifact_bytes: 0,
                 capabilities: CapabilitySet(0),
                 resources: ResourceEstimate::ZERO,
                 active: false,
@@ -852,6 +955,36 @@ impl NativeGgufBackend {
             }
         }
         reaped
+    }
+
+    /// Returns the handle and the verified digest/size of the active model
+    /// loaded from `source`, so a caller can detect that the file on disk has
+    /// changed since it was admitted.
+    pub fn active_model_by_path(&self, source: &str) -> Option<(u64, [u8; 32], u64)> {
+        self.models
+            .iter()
+            .find(|m| m.active && &m.source[..m.source_len] == source.as_bytes())
+            .map(|m| (m.handle, m.sha256, m.artifact_bytes))
+    }
+
+    /// Unloads a model and every session bound to it. Returns whether a model
+    /// was unloaded.
+    pub fn unload_active_model(&mut self, handle: u64) -> bool {
+        let mut unloaded = false;
+        for model in &mut self.models {
+            if model.active && model.handle == handle {
+                *model = LoadedModelRecord::default();
+                unloaded = true;
+            }
+        }
+        if unloaded {
+            for session in &mut self.sessions {
+                if session.active && session.model_handle == handle {
+                    *session = BackendSessionRecord::default();
+                }
+            }
+        }
+        unloaded
     }
 }
 
@@ -940,6 +1073,8 @@ impl InferenceBackend for NativeGgufBackend {
             source_len: src_len,
             architecture: arch_buf,
             architecture_len: arch_len,
+            sha256: model.sha256,
+            artifact_bytes: model.artifact_bytes,
             capabilities: model.capabilities,
             resources: estimate,
             active: true,
@@ -1217,6 +1352,8 @@ impl NativeLiteRtLmBackend {
                 source_len: 0,
                 architecture: [0u8; 32],
                 architecture_len: 0,
+                sha256: [0u8; 32],
+                artifact_bytes: 0,
                 capabilities: CapabilitySet(0),
                 resources: ResourceEstimate::ZERO,
                 active: false,
@@ -1502,6 +1639,8 @@ impl InferenceBackend for NativeLiteRtLmBackend {
             source_len: src_len,
             architecture: arch_buf,
             architecture_len: arch_len,
+            sha256: model.sha256,
+            artifact_bytes: model.artifact_bytes,
             capabilities: model.capabilities,
             resources: estimate,
             active: true,
@@ -1664,11 +1803,11 @@ mod tests {
 
     #[test]
     fn installed_manifest_binds_identity_to_real_artifact() {
-        // The architecture, tokenizer and quantization come from the file's own
-        // header; the size and digest are the filesystem's record for the path.
+        // The architecture and quantization come from the file's own header; the
+        // size and digest are the filesystem's record for the path; the tokenizer
+        // is the engine's embedded tokenizer.
         let manifest = installed_generative_manifest(
             Some("gemma2"),
-            Some("llama"),
             Some(1),
             "/models/installed.gguf",
             333_590_944,
@@ -1678,10 +1817,12 @@ mod tests {
         assert_eq!(manifest.artifact_bytes, 333_590_944);
         assert_eq!(manifest.sha256, [7u8; 32]);
         assert_eq!(manifest.architecture, "gemma2");
-        assert_eq!(manifest.tokenizer, "llama");
+        assert_eq!(manifest.tokenizer, "embedded");
         assert_eq!(manifest.quantization, Quantization::F16);
         assert!(manifest.capabilities.contains(CapabilitySet::TEXT_GENERATION));
         assert!(manifest.capabilities.contains(CapabilitySet::STREAMING_GENERATION));
+        // The manifest the backend advertises must be accepted by its own probe.
+        assert!(probe_backend(NATIVE_GGUF_INFO, &manifest).result.is_ok());
     }
 
     #[test]
@@ -1692,24 +1833,26 @@ mod tests {
         let manifest = installed_generative_manifest(
             None,
             None,
-            None,
             "/models/installed.gguf",
             0,
             [0u8; 32],
             ResourceEstimate::ZERO,
         );
         assert_eq!(manifest.architecture, "unknown");
-        assert_eq!(manifest.tokenizer, "unknown");
+        assert_eq!(manifest.tokenizer, "embedded");
         assert_eq!(manifest.quantization, Quantization::BackendDefined);
         assert_eq!(manifest.artifact_bytes, 0);
         assert_eq!(manifest.sha256, [0u8; 32]);
+        // An unsupported/unknown architecture is rejected by the probe, not
+        // silently loaded.
+        assert!(probe_backend(NATIVE_GGUF_INFO, &manifest).result.is_err());
         assert_eq!(
-            verify_artifact(&manifest, 0, &[0u8; 32]),
+            verify_artifact(&manifest, 0, &[0u8; 32], Some("unknown")),
             Ok(()),
             "a manifest built from the observed bytes verifies against itself"
         );
         assert_eq!(
-            verify_artifact(&manifest, 1, &[0u8; 32]),
+            verify_artifact(&manifest, 1, &[0u8; 32], Some("unknown")),
             Err(VerificationError::SizeMismatch),
             "a size that does not match the artifact is rejected"
         );
@@ -1720,9 +1863,55 @@ mod tests {
         assert_eq!(quantization_from_file_type(Some(0)), Quantization::F32);
         assert_eq!(quantization_from_file_type(Some(1)), Quantization::F16);
         assert_eq!(quantization_from_file_type(Some(2)), Quantization::Q4_0);
+        assert_eq!(quantization_from_file_type(Some(17)), Quantization::Q6K);
+        assert_eq!(quantization_from_file_type(Some(19)), Quantization::Tq2_0);
         // A number the engine cannot name is BackendDefined, not a guess.
         assert_eq!(quantization_from_file_type(Some(7)), Quantization::BackendDefined);
         assert_eq!(quantization_from_file_type(None), Quantization::BackendDefined);
+    }
+
+    #[test]
+    fn provisioned_registry_binds_trusted_digest_and_detects_change() {
+        let mut registry = ProvisionedRegistry::new();
+        assert!(registry.expected_for("/m.gguf").is_none());
+        assert!(registry.provision("/m.gguf", [9u8; 32], 4096));
+        assert_eq!(registry.expected_for("/m.gguf"), Some(([9u8; 32], 4096)));
+        // Re-provisioning the same path replaces the trusted digest.
+        assert!(registry.provision("/m.gguf", [3u8; 32], 8192));
+        assert_eq!(registry.expected_for("/m.gguf"), Some(([3u8; 32], 8192)));
+    }
+
+    #[test]
+    fn load_records_digest_and_detects_a_changed_file() {
+        let mut backend = NativeGgufBackend::new();
+        let manifest = installed_generative_manifest(
+            Some("gemma2"),
+            Some(1),
+            "/models/installed.gguf",
+            1000,
+            [5u8; 32],
+            ResourceEstimate {
+                model_weights: 4096,
+                runtime_overhead: 4096,
+                ..ResourceEstimate::ZERO
+            },
+        );
+        let handle = backend.load_model(&manifest).expect("loads");
+        // The record carries the verified digest/size.
+        assert_eq!(
+            backend.active_model_by_path("/models/installed.gguf"),
+            Some((handle, [5u8; 32], 1000)),
+        );
+        // A changed file (different digest) is detected by comparing to the record.
+        let (_, bound_sha, bound_len) =
+            backend.active_model_by_path("/models/installed.gguf").unwrap();
+        assert_ne!(bound_sha, [6u8; 32]);
+        assert_eq!(bound_len, 1000);
+        // Unloading clears the model and its sessions.
+        let session = backend.create_session(handle, 1).expect("session");
+        assert!(backend.unload_active_model(handle));
+        assert!(backend.active_model_by_path("/models/installed.gguf").is_none());
+        assert!(!backend.is_session_active(session));
     }
 
     const MANIFEST: &[u8] = b"\
@@ -1758,7 +1947,7 @@ memory.runtime_overhead=12000000\n";
             .capabilities
             .contains(CapabilitySet::TEXT_EMBEDDING));
         assert_eq!(
-            verify_artifact(&manifest, 165_000_000, &manifest.sha256),
+            verify_artifact(&manifest, 165_000_000, &manifest.sha256, Some("embeddinggemma")),
             Ok(())
         );
     }
@@ -1769,12 +1958,22 @@ memory.runtime_overhead=12000000\n";
         let mut wrong = manifest.sha256;
         wrong[7] ^= 1;
         assert_eq!(
-            verify_artifact(&manifest, manifest.artifact_bytes, &wrong),
+            verify_artifact(&manifest, manifest.artifact_bytes, &wrong, Some("embeddinggemma")),
             Err(VerificationError::DigestMismatch)
         );
         assert_eq!(
-            verify_artifact(&manifest, manifest.artifact_bytes - 1, &manifest.sha256),
+            verify_artifact(&manifest, manifest.artifact_bytes - 1, &manifest.sha256, Some("embeddinggemma")),
             Err(VerificationError::SizeMismatch)
+        );
+        // A manifest whose architecture does not match the artifact's own header
+        // is refused even when size and digest match.
+        assert_eq!(
+            verify_artifact(&manifest, manifest.artifact_bytes, &manifest.sha256, Some("gemma2")),
+            Err(VerificationError::ArchitectureMismatch)
+        );
+        assert_eq!(
+            verify_artifact(&manifest, manifest.artifact_bytes, &manifest.sha256, None),
+            Err(VerificationError::ArchitectureMismatch)
         );
     }
 
