@@ -282,7 +282,8 @@ pub struct CalendarApp {
     current_day: u8,
     current_hour: u8,
     current_minute: u8,
-    notified_mask: u16,
+    notified_keys: [calendar::NotifyKey; MAX_EVENTS],
+    notified_len: usize,
     total_events: u32,
     rtc_synchronized: bool,
     sector_encrypted: bool,
@@ -325,7 +326,8 @@ impl CalendarApp {
             current_day: 0,
             current_hour: 0,
             current_minute: 0,
-            notified_mask: 0,
+            notified_keys: [(0, 0, 0, 0, 0); MAX_EVENTS],
+            notified_len: 0,
             total_events: 0,
             rtc_synchronized: false,
             sector_encrypted: false,
@@ -485,22 +487,36 @@ impl CalendarApp {
         if !self.date_known {
             return;
         }
-        for i in 0..self.store.len() {
-            if i >= 16 {
-                break;
-            }
+        // De-dup by the event's own identity (notify_key), not its store index:
+        // delete_at_in_memory shifts records, so an index bitset both re-alerts a
+        // shifted event and silences the one that took a set slot.
+        let mut due = [(0u16, 0u8, 0u8, 0u8, 0u8); MAX_EVENTS];
+        let mut n = 0usize;
+        for i in 0..self.store.len as usize {
             let rec = &self.store.records[i];
-            if (self.notified_mask & (1 << i)) == 0
-                && rec.year == self.current_year as u16
+            if rec.year == self.current_year as u16
                 && rec.month == self.current_month
                 && rec.day == self.current_day
                 && rec.hour == self.current_hour
                 && rec.minute <= self.current_minute
             {
-                self.notified_mask |= 1 << i;
-                let _ = std::notification_post("app_calendar", "calendar|Calendar Alert|Scheduled event reached");
-                std::log("[CALENDAR APP] Triggered notification for scheduled event.").ok();
+                let key = rec.notify_key();
+                if self.notified_keys[..self.notified_len].contains(&key) {
+                    continue;
+                }
+                if n < due.len() {
+                    due[n] = key;
+                    n += 1;
+                }
             }
+        }
+        for &key in &due[..n] {
+            if self.notified_len < MAX_EVENTS {
+                self.notified_keys[self.notified_len] = key;
+                self.notified_len += 1;
+            }
+            let _ = std::notification_post("app_calendar", "calendar|Calendar Alert|Scheduled event reached");
+            std::log("[CALENDAR APP] Triggered notification for scheduled event.").ok();
         }
     }
 
