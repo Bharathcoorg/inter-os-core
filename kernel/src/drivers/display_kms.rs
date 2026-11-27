@@ -3106,6 +3106,47 @@ mod tests {
     }
 
     #[test]
+    fn band_repaint_keeps_surface_presentable_but_first_partial_frame_is_not() {
+        // The `offset == 0 && !frame_complete` guard in write_surface_pixels does
+        // two jobs: (1) `!frame_complete` keeps a surface that already held a
+        // whole frame presentable during an offset-0 band repaint; (2) `offset ==
+        // 0` un-latches frame_ready for a first, incomplete frame so the
+        // compositor does not publish a half-drawn frame. Dropping the whole
+        // `else if` fails phase A; dropping only `!frame_complete` fails phase C.
+        let mut kms = DrmKmsController::new(100, 100);
+        kms.set_display_mode(100, 100, 60).expect("mode");
+        let id = kms.create_surface(10, 10, 1, 7);
+        assert_ne!(id, 0);
+        const FIRST: u32 = 0xFF112233;
+        const REPAINT: u32 = 0xFF445566;
+
+        // Phase A: an initial incomplete frame starting at offset 0 must not be
+        // accepted; frame_ready defaults true, so only the offset==0 branch pulls
+        // it back to false.
+        kms.write_surface_pixels(id, 7, 0, &[FIRST; 20]).expect("write head");
+        assert!(!kms.surfaces[0].is_frame_ready(), "a first partial frame must un-latch frame_ready");
+        assert!(!kms.surfaces[0].frame_complete, "a first partial frame is not a whole frame");
+        kms.composite();
+        assert_eq!(kms.back_buffer[0], PLATFORM_BACKGROUND, "an unlatched first frame must not be published");
+
+        // Phase B: completing the frame publishes it.
+        kms.write_surface_pixels(id, 7, 20, &[FIRST; 80]).expect("write tail");
+        assert!(kms.surfaces[0].frame_complete, "the completed frame is whole");
+        assert!(kms.surfaces[0].is_frame_ready());
+        kms.composite();
+        assert_eq!(kms.back_buffer[0], FIRST, "a whole frame reaches the display");
+
+        // Phase C: an offset-0 band repaint on a surface that already held a
+        // whole frame must keep it presentable; only !frame_complete prevents the
+        // repaint from un-latching it.
+        kms.write_surface_pixels(id, 7, 0, &[REPAINT; 20]).expect("band repaint");
+        assert!(kms.surfaces[0].is_frame_ready(), "a band repaint must not un-latch a presentable surface");
+        assert!(kms.surfaces[0].frame_complete, "a band repaint must not clear frame_complete");
+        kms.composite();
+        assert_eq!(kms.back_buffer[0], REPAINT, "the repainted band reaches the display while the surface stays presentable");
+    }
+
+    #[test]
     fn a_surface_the_owner_has_not_painted_at_all_is_never_blended() {
         // WHY this test exists: a surface nobody has written into holds the
         // allocator's fill -- opaque black -- in every pixel, and blending it
