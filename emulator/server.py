@@ -6011,11 +6011,19 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if self.path == '/api/qemu/cmd':
-            content_length = int(self.headers.get('Content-Length', 0))
-            if content_length > 4096:
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+            except (TypeError, ValueError):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': False, 'error': 'Invalid Content-Length'}).encode())
+                return
+            if content_length < 0 or content_length > 4096:
                 if content_length > 0:
                     _ = self.rfile.read(min(content_length, 1024 * 1024))
-                self.send_response(413)
+                self.send_response(413 if content_length > 4096 else 400)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Connection', 'close')
                 self.end_headers()
@@ -6316,6 +6324,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
 
                 if not src or src == 'template':
                     src = os.path.join(WORKSPACE_ROOT, 'templates', 'web_app_template')
+                if src.startswith('-'):
+                    raise RuntimeError('Invalid source specifier')
 
                 port_script = os.path.join(WORKSPACE_ROOT, 'tools', 'port_web.py')
                 dist_dir = os.path.join(WORKSPACE_ROOT, 'dist')
@@ -6345,7 +6355,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     raise RuntimeError(f"Verification of generated .rapp failed: {msg}")
 
                 guest_ok = False
-                if latest_telemetry.get("qemu_running"):
+                if latest_telemetry.get("qemu_alive") or tracked_qemu_process_alive():
                     guest_ok, guest_msg = transfer_rapp_to_guest(rapp_bytes, app_entry["id"])
                     if guest_ok:
                         serial_lines.append(f"[WEB_IMPORT] Installed '{app_entry['name']}' ({app_entry['id']}) into guest.")
