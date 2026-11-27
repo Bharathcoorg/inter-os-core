@@ -347,7 +347,18 @@ pub extern "C" fn handle_sync_lower64(frame: &mut ExceptionFrame) {
             }
         }
 
+        let unmask_irq = (frame.spsr & (1 << 7)) == 0;
+        #[cfg(target_arch = "aarch64")]
+        if unmask_irq {
+            unsafe {
+                core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+            }
+        }
         let ret = crate::syscall::sys_dispatch(syscall_nr, a0, a1, a2, a3, a4);
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+        }
         frame.regs[0] = ret as u64;
 
         if syscall_nr == crate::syscall::SYS_GET_TICKS {
@@ -430,8 +441,43 @@ pub extern "C" fn handle_sync_lower32(frame: &mut ExceptionFrame) {
 pub static IN_VBAR_SVC_TEST: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+const ZERO_ATOMIC_U64: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static USER_COPY_FIXUP_PC: [core::sync::atomic::AtomicU64; crate::task::MAX_CPUS] =
+    [ZERO_ATOMIC_U64; crate::task::MAX_CPUS];
+
+/// Returns the per-CPU fixup PC slot used by guarded EL1 user-memory copy
+/// routines. Must be read with local IRQs masked (`IrqMaskGuard`).
+pub(crate) fn user_copy_fixup_slot() -> *mut u64 {
+    let cid = crate::task::current_cpu_logical_id().min(crate::task::MAX_CPUS - 1);
+    USER_COPY_FIXUP_PC[cid].as_ptr()
+}
+
 fn handle_sync(frame: &mut ExceptionFrame, context_name: &str) {
     let ec = (frame.esr >> 26) & 0x3F;
+
+    if ec == 0x25 {
+        // EC 0x25: Data Abort at EL1. If an active guarded user copy armed a
+        // fixup PC on this CPU and the fault targets user VA space, redirect
+        // ELR to the recovery stub so copy_from_user/copy_to_user returns -EFAULT
+        // cleanly instead of panicking the kernel.
+        let cid = crate::task::current_cpu_logical_id().min(crate::task::MAX_CPUS - 1);
+        let fixup_pc = USER_COPY_FIXUP_PC[cid].swap(0, core::sync::atomic::Ordering::AcqRel);
+        if fixup_pc != 0 {
+            let far: u64;
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nomem, nostack));
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                far = 0;
+            }
+            if far < 0x4000_0000 {
+                frame.elr = fixup_pc;
+                return;
+            }
+        }
+    }
 
     if ec == 0x15 && IN_VBAR_SVC_TEST.load(core::sync::atomic::Ordering::Acquire) {
         // EC 0x15: SVC instruction permitted only during the guarded boot self-test in EL1h
@@ -442,7 +488,18 @@ fn handle_sync(frame: &mut ExceptionFrame, context_name: &str) {
         let a3 = frame.regs[3];
         let a4 = frame.regs[4];
 
+        let unmask_irq = (frame.spsr & (1 << 7)) == 0;
+        #[cfg(target_arch = "aarch64")]
+        if unmask_irq {
+            unsafe {
+                core::arch::asm!("msr daifclr, #2", options(nomem, nostack));
+            }
+        }
         let ret = crate::syscall::sys_dispatch(syscall_nr, a0, a1, a2, a3, a4);
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            core::arch::asm!("msr daifset, #2", options(nomem, nostack));
+        }
         frame.regs[0] = ret as u64;
     } else {
         let far: u64;

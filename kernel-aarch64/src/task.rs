@@ -302,6 +302,9 @@ pub static SMP_SCHEDULING_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub fn set_smp_scheduling_enabled(enabled: bool) {
     SMP_SCHEDULING_ENABLED.store(enabled, Ordering::Release);
+    if !enabled {
+        per_cpu(0).current_pid.store(INVALID_PID, Ordering::Release);
+    }
 }
 
 pub fn is_smp_scheduling_enabled() -> bool {
@@ -390,6 +393,9 @@ impl Scheduler {
     pub fn current_pid(&self) -> u32 {
         let cid = current_cpu_logical_id();
         let pid = per_cpu(cid).current_pid.load(Ordering::Acquire);
+        if pid == SUPERVISOR_PID {
+            return INVALID_PID;
+        }
         if !is_reserved_pid(pid) && self.tasks.iter().any(|t| t.id == pid) {
             return pid;
         }
@@ -403,6 +409,9 @@ impl Scheduler {
     pub fn current_task_pos(&self) -> Option<usize> {
         let cid = current_cpu_logical_id();
         let pid = per_cpu(cid).current_pid.load(Ordering::Acquire);
+        if pid == SUPERVISOR_PID {
+            return None;
+        }
         if !is_reserved_pid(pid) {
             if let Some(pos) = self.tasks.iter().position(|t| t.id == pid) {
                 return Some(pos);
@@ -1152,7 +1161,12 @@ impl Scheduler {
             }
             ctx_ptr
         } else {
-            pcpu.current_pid.store(INVALID_PID, Ordering::Release);
+            let idle_pid = if cpu_id == 0 {
+                SUPERVISOR_PID
+            } else {
+                INVALID_PID
+            };
+            pcpu.current_pid.store(idle_pid, Ordering::Release);
             unsafe { &raw const PER_CPU_DATA[cpu_id].idle_context }
         };
 
@@ -2075,11 +2089,13 @@ pub fn test_reap_evacuation_protocol() {
 
     // Reset p1 as Ready for subsequent switch tests
     let p1_pos = sched.tasks.iter().position(|t| t.id == p1).unwrap();
-    sched.tasks[p1_pos].state = TaskState::Ready;
+    sched.current_task_idx = p1_pos;
+    sched.tasks[p1_pos].state = TaskState::Running;
     // Remove c_ready so only p1 and the tested child exist
     let c_ready_pos = sched.tasks.iter().position(|t| t.id == c_ready).unwrap();
     sched.tasks[c_ready_pos].state = TaskState::Terminated;
     assert_eq!(sched.reap_task(p1, false, c_ready), Ok(0));
+    sched.tasks[p1_pos].state = TaskState::Ready;
 
     // 2 & 3. Address space remains attached in TaskState::Reaping after begin_reap,
     // and outgoing prepare_switch from a Reaping task still accesses and deactivates curr.address_space.

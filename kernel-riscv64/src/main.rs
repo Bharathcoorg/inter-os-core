@@ -274,9 +274,13 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
             trap::enter_user_mode_with_return(loaded.entry_point, loaded.stack_top, trap::kernel_stack_top());
         }
 
-        // Switch back to kernel page table
+        // Switch back to kernel page table and restore kernel scheduler index before reaping child
         unsafe {
             mmu::switch_satp(kernel_satp);
+        }
+        {
+            let mut sched = task::SCHEDULER.lock();
+            sched.current_task_idx = sched.tasks.len();
         }
 
         assert_eq!(task::reap_task_locksafe(888, false, child_pid), Err(-13), "Non-child reap without supervisor rights must fail");
@@ -319,6 +323,7 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         if let Some(t) = sched.tasks.iter_mut().find(|t| t.id == active_pid) {
             t.state = task::TaskState::Terminated;
         }
+        sched.current_task_idx = sched.tasks.len();
         assert!(sched.reap_task(99, false, active_pid).is_ok());
         drop(sched);
 
@@ -527,6 +532,10 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
             trap::enter_user_mode_with_return(loaded.entry_point, loaded.stack_top, trap::kernel_stack_top());
             mmu::switch_satp(kernel_satp);
         }
+        {
+            let mut sched = task::SCHEDULER.lock();
+            sched.current_task_idx = sched.tasks.len();
+        }
         assert_eq!(task::reap_task_locksafe(99, false, pid_ok), Ok(0), "RISC-V U-mode syscall/IPC/capability checks must exit(0)");
 
         // U-mode unmapped load page fault containment
@@ -556,6 +565,10 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
             trap::enter_user_mode_with_return(loaded_f.entry_point, loaded_f.stack_top, trap::kernel_stack_top());
             mmu::switch_satp(kernel_satp);
             trap::IN_LIFECYCLE_TEST = false;
+        }
+        {
+            let mut sched = task::SCHEDULER.lock();
+            sched.current_task_idx = sched.tasks.len();
         }
         assert_eq!(trap::LAST_USER_FAULT_CODE.load(core::sync::atomic::Ordering::Acquire), -11);
         assert!(task::reap_task_locksafe(99, false, pid_f).is_ok());
@@ -700,6 +713,9 @@ pub extern "C" fn kmain(hart_id: usize, dtb_addr: usize) -> ! {
         mmu::USER_STACK_TOP,
         trap::kernel_stack_top(),
     );
+    if registered {
+        task::SCHEDULER.lock().current_task_idx = 0;
+    }
     assert!(registered, "RISC-V primordial userspace task must register with scheduler");
 
     println!("[INIT] Loaded native U-mode payload at VA 0x{:08x} (W^X RX code segment).", mmu::USER_CODE_VADDR);

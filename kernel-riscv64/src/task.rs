@@ -581,6 +581,9 @@ impl Scheduler {
 
         let satp = address_space.as_ref().map(|a| a.satp);
 
+        if self.tasks.is_empty() && self.current_task_idx == 0 {
+            self.current_task_idx = usize::MAX;
+        }
         self.tasks.push(TaskControlBlock {
             id: task_id,
             parent_id,
@@ -637,6 +640,9 @@ impl Scheduler {
 
         let satp = address_space.as_ref().map(|a| a.satp);
 
+        if self.tasks.is_empty() && self.current_task_idx == 0 {
+            self.current_task_idx = usize::MAX;
+        }
         self.tasks.push(TaskControlBlock {
             id: task_id,
             parent_id: SUPERVISOR_PID,
@@ -845,9 +851,104 @@ pub extern "C" fn user_process_entry() -> ! {
     }
 }
 
-pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+#[inline(always)]
+fn save_and_disable_irq() -> usize {
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        let sstatus: usize;
+        core::arch::asm!(
+            "csrrci {0}, sstatus, 2",
+            out(reg) sstatus,
+            options(nomem, nostack)
+        );
+        sstatus
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        0
+    }
+}
+
+#[inline(always)]
+fn restore_irq(saved_sstatus: usize) {
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        if (saved_sstatus & (1usize << 1)) != 0 {
+            core::arch::asm!("csrsi sstatus, 2", options(nomem, nostack));
+        }
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    {
+        let _ = saved_sstatus;
+    }
+}
+
+/// Mutual exclusion spinlock that masks `sstatus.SIE` while held and restores
+/// the caller's interrupt enable state on drop, preventing timer/S-mode trap
+/// reentrancy deadlocks on `SCHEDULER`.
+pub struct IrqSpinLock<T> {
+    inner: Mutex<T>,
+}
+
+impl<T> IrqSpinLock<T> {
+    pub const fn new(value: T) -> Self {
+        Self {
+            inner: Mutex::new(value),
+        }
+    }
+
+    pub fn lock(&self) -> IrqSpinGuard<'_, T> {
+        let saved_sstatus = save_and_disable_irq();
+        let guard = self.inner.lock();
+        IrqSpinGuard {
+            guard,
+            saved_sstatus,
+        }
+    }
+
+    pub fn try_lock(&self) -> Option<IrqSpinGuard<'_, T>> {
+        let saved_sstatus = save_and_disable_irq();
+        match self.inner.try_lock() {
+            Some(guard) => Some(IrqSpinGuard {
+                guard,
+                saved_sstatus,
+            }),
+            None => {
+                restore_irq(saved_sstatus);
+                None
+            }
+        }
+    }
+}
+
+pub struct IrqSpinGuard<'a, T> {
+    guard: spin::MutexGuard<'a, T>,
+    saved_sstatus: usize,
+}
+
+impl<T> core::ops::Deref for IrqSpinGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> core::ops::DerefMut for IrqSpinGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for IrqSpinGuard<'_, T> {
+    fn drop(&mut self) {
+        restore_irq(self.saved_sstatus);
+    }
+}
+
+pub static SCHEDULER: IrqSpinLock<Scheduler> = IrqSpinLock::new(Scheduler::new());
 
 pub fn yield_now() {
+    let saved_sstatus = save_and_disable_irq();
     let (old_opt, new_opt) = {
         let mut sched = SCHEDULER.lock();
         sched.prepare_switch()
@@ -857,6 +958,25 @@ pub fn yield_now() {
             switch_context(old_ctx, new_ctx);
         }
     }
+    restore_irq(saved_sstatus);
+}
+
+/// Non-blocking preemption hook for supervisor timer trap context.
+/// Skips this tick cleanly if `SCHEDULER` is contended on another hart.
+pub fn try_yield_from_irq() {
+    let saved_sstatus = save_and_disable_irq();
+    let (old_opt, new_opt) = {
+        match SCHEDULER.try_lock() {
+            Some(mut sched) => sched.prepare_switch(),
+            None => (None, None),
+        }
+    };
+    if let (Some(old_ctx), Some(new_ctx)) = (old_opt, new_opt) {
+        unsafe {
+            switch_context(old_ctx, new_ctx);
+        }
+    }
+    restore_irq(saved_sstatus);
 }
 
 #[no_mangle]
@@ -1552,8 +1672,10 @@ pub fn test_task_lifecycle() {
     assert_eq!(sched3.finish_reap(h1), Err(-3));
 
     // 8c: Outgoing prepare_switch from a Reaping task accesses curr.address_space and deactivates it
+    sched3.current_task_idx = 0;
     let h2 = sched3.begin_reap(p_idle, false, c_evac).expect("retry begin_reap on ReapFailed");
     assert_eq!(h2.generation, h1.generation.wrapping_add(2));
+    sched3.current_task_idx = 1;
     let (evac_old, evac_new) = sched3.prepare_switch();
     let current_sscratch: usize;
     unsafe {
@@ -1604,17 +1726,23 @@ pub fn test_task_lifecycle() {
     assert_eq!(sched3.reap_task(p_idle, false, c_deact), Ok(0));
 
     // End-to-end reap_task_locksafe() on global SCHEDULER: rejects while active -> preserves address_space -> succeeds after deactivate()
-    let (orig_len, orig_next_pid, ls_pid) = {
+    let (orig_len, orig_next_pid, spawned_dummy, ls_pid) = {
         let mut g_sched = SCHEDULER.lock();
         let len = g_sched.tasks.len();
         let next_p = g_sched.next_pid;
+        let dummy = if len == 0 {
+            g_sched.add_task(TaskId(1), 0, 0, 0, 0)
+        } else {
+            false
+        };
+        g_sched.current_task_idx = 0;
         let aspace_ls = crate::mmu::UserAddressSpace::new().expect("Address space alloc for locksafe e2e");
         aspace_ls.try_activate().expect("activate locksafe test aspace");
         let pid = g_sched.spawn_user_process(1, "locksafe_e2e", 0, 0, Some(aspace_ls), CapabilityTable::new());
         if let Some(t) = g_sched.tasks.iter_mut().find(|t| t.id == pid) {
             t.state = TaskState::Terminated;
         }
-        (len, next_p, pid)
+        (len, next_p, dummy, pid)
     };
     assert_eq!(reap_task_locksafe(ls_pid.wrapping_add(100), true, ls_pid), Err(-16));
     {
@@ -1631,6 +1759,9 @@ pub fn test_task_lifecycle() {
     assert_eq!(reap_task_locksafe(ls_pid.wrapping_add(100), true, ls_pid), Ok(0));
     {
         let mut g_sched = SCHEDULER.lock();
+        if spawned_dummy {
+            let _ = g_sched.remove_task_at(0);
+        }
         assert_eq!(g_sched.tasks.len(), orig_len);
         g_sched.next_pid = orig_next_pid;
     }

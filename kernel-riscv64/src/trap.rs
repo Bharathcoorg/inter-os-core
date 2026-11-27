@@ -116,7 +116,7 @@ fn timer_tick() {
     TIMER_TICKS.fetch_add(1, Ordering::SeqCst);
     arm_timer_from_now();
     if PREEMPTIVE.load(Ordering::SeqCst) {
-        crate::task::yield_now();
+        crate::task::try_yield_from_irq();
     }
 }
 
@@ -246,6 +246,54 @@ pub unsafe extern "C" fn trap_entry() -> ! {
     );
 }
 
+/// Marks the active userspace task exited, evacuates its Sv39 address space on
+/// this hart, and either returns to the lifecycle test harness or yields/parks
+/// until reaped.
+fn terminate_and_park_user_task(exit_code: i32, fault_code: Option<i32>, log_prefix: &str) -> ! {
+    let exited = if exit_code == 0 {
+        crate::task::SCHEDULER.lock().exit_current()
+    } else {
+        crate::task::SCHEDULER.lock().exit_current_with_code(exit_code)
+    };
+    {
+        let sched = crate::task::SCHEDULER.lock();
+        let curr = sched.current_task_idx;
+        if curr < sched.tasks.len() {
+            if let Some(ref aspace) = sched.tasks[curr].address_space {
+                aspace.deactivate();
+            } else {
+                unsafe {
+                    crate::mmu::switch_to_kernel_satp();
+                }
+            }
+        } else {
+            unsafe {
+                crate::mmu::switch_to_kernel_satp();
+            }
+        }
+    }
+    println!("{}{}", log_prefix, exited);
+    if unsafe { IN_LIFECYCLE_TEST } {
+        if let Some(code) = fault_code {
+            LAST_USER_FAULT_CODE.store(code, core::sync::atomic::Ordering::Release);
+        }
+        unsafe {
+            return_to_kernel_mode();
+        }
+    }
+    loop {
+        crate::task::yield_now();
+        unsafe {
+            core::arch::asm!(
+                "csrsi sstatus, 2",
+                "wfi",
+                "csrci sstatus, 2",
+                options(nomem, nostack)
+            );
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
     let scause = tf.scause;
@@ -298,6 +346,7 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                                     if !sched.tasks.is_empty() {
                                         sched.tasks[0].name = "init";
                                         sched.tasks[0].state = crate::task::TaskState::Running;
+                                        sched.tasks[0].exit_code = None;
                                         sched.tasks[0].page_table = Some(loaded.address_space.satp);
                                         sched.tasks[0].user_entry = loaded.entry_point;
                                         sched.tasks[0].user_stack_top = loaded.stack_top;
@@ -306,6 +355,16 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                                         let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::DisplayServer, crate::capability::Rights::WRITE, None);
                                         let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::EventPoll, crate::capability::Rights::READ, None);
                                         let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::TimerTickRead, crate::capability::Rights::READ, None);
+                                        let _ = sched.tasks[0].cap_table.mint(crate::capability::CapabilityType::SerialOutput, crate::capability::Rights::WRITE, None);
+                                        let _ = sched.tasks[0].cap_table.mint(
+                                            crate::capability::CapabilityType::SystemResource,
+                                            crate::capability::Rights(
+                                                crate::capability::Rights::READ.0
+                                                    | crate::capability::Rights::WRITE.0
+                                                    | crate::capability::Rights::ADMIN.0,
+                                            ),
+                                            None,
+                                        );
                                         loaded.address_space.try_activate().expect("Failed to activate init address space");
                                         sched.tasks[0].address_space = Some(loaded.address_space);
                                     }
@@ -323,22 +382,7 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                             }
                         }
                     }
-                    let exited = crate::task::SCHEDULER.lock().exit_current();
-                    println!("[INIT] Userspace exit recorded by scheduler: {}", exited);
-                    unsafe {
-                        crate::mmu::switch_to_kernel_satp();
-                    }
-                    loop {
-                        crate::task::yield_now();
-                        unsafe {
-                            core::arch::asm!(
-                                "csrsi sstatus, 2",
-                                "wfi",
-                                "csrci sstatus, 2",
-                                options(nomem, nostack)
-                            );
-                        }
-                    }
+                    terminate_and_park_user_task(0, None, "[INIT] Userspace exit recorded by scheduler: ");
                 }
             }
             // Environment call from S-mode is never a valid syscall path
@@ -359,28 +403,7 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                     panic!("Supervisor page fault at sepc=0x{:016x} stval=0x{:016x} cause={}", tf.sepc, tf.stval, code);
                 }
                 tf.regs[10] = (-14isize) as usize; // -EFAULT
-                let exited = crate::task::SCHEDULER.lock().exit_current_with_code(-11);
-                println!("[TRAP] Faulted userspace task marked exited: {}", exited);
-                unsafe {
-                    crate::mmu::switch_to_kernel_satp();
-                }
-                if unsafe { IN_LIFECYCLE_TEST } {
-                    LAST_USER_FAULT_CODE.store(-11, core::sync::atomic::Ordering::Release);
-                    unsafe {
-                        return_to_kernel_mode();
-                    }
-                }
-                loop {
-                    crate::task::yield_now();
-                    unsafe {
-                        core::arch::asm!(
-                            "csrsi sstatus, 2",
-                            "wfi",
-                            "csrci sstatus, 2",
-                            options(nomem, nostack)
-                        );
-                    }
-                }
+                terminate_and_park_user_task(-11, Some(-11), "[TRAP] Faulted userspace task marked exited: ");
             }
             // Illegal instruction
             2 => {
@@ -394,28 +417,7 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 if !from_user {
                     panic!("Supervisor illegal instruction at sepc=0x{:016x}", tf.sepc);
                 }
-                let exited = crate::task::SCHEDULER.lock().exit_current_with_code(-4);
-                println!("[TRAP] Illegal-instruction task marked exited: {}", exited);
-                unsafe {
-                    crate::mmu::switch_to_kernel_satp();
-                }
-                if unsafe { IN_LIFECYCLE_TEST } {
-                    LAST_USER_FAULT_CODE.store(-4, core::sync::atomic::Ordering::Release);
-                    unsafe {
-                        return_to_kernel_mode();
-                    }
-                }
-                loop {
-                    crate::task::yield_now();
-                    unsafe {
-                        core::arch::asm!(
-                            "csrsi sstatus, 2",
-                            "wfi",
-                            "csrci sstatus, 2",
-                            options(nomem, nostack)
-                        );
-                    }
-                }
+                terminate_and_park_user_task(-4, Some(-4), "[TRAP] Illegal-instruction task marked exited: ");
             }
             _ => {
                 let from_user = (tf.sstatus & (1 << 8)) == 0;
@@ -429,28 +431,7 @@ pub extern "C" fn trap_handler(tf: &mut TrapFrame) {
                 if !from_user {
                     panic!("Unhandled supervisor exception scause={} at sepc=0x{:016x}", code, tf.sepc);
                 }
-                let exited = crate::task::SCHEDULER.lock().exit_current_with_code(-1);
-                println!("[TRAP] Unhandled exception task marked exited: {}", exited);
-                unsafe {
-                    crate::mmu::switch_to_kernel_satp();
-                }
-                if unsafe { IN_LIFECYCLE_TEST } {
-                    LAST_USER_FAULT_CODE.store(-1, core::sync::atomic::Ordering::Release);
-                    unsafe {
-                        return_to_kernel_mode();
-                    }
-                }
-                loop {
-                    crate::task::yield_now();
-                    unsafe {
-                        core::arch::asm!(
-                            "csrsi sstatus, 2",
-                            "wfi",
-                            "csrci sstatus, 2",
-                            options(nomem, nostack)
-                        );
-                    }
-                }
+                terminate_and_park_user_task(-1, Some(-1), "[TRAP] Unhandled exception task marked exited: ");
             }
         }
     }

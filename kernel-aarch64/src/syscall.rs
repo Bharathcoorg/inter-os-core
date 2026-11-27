@@ -156,6 +156,62 @@ impl Drop for UserCopyGuard {
     }
 }
 
+/// Copies `len` bytes from `src` to `dst` while registering a per-CPU EL1 Data
+/// Abort fixup PC in `fixup_slot`. Must be called with IRQs masked (`IrqMaskGuard`)
+/// and `UserCopyGuard` held. Returns `0` on success or `-14` (`-EFAULT`) if a
+/// user-address abort is caught by `exceptions::handle_sync`.
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+unsafe extern "C" fn user_copy_raw(
+    dst: *mut u8,
+    src: *const u8,
+    len: usize,
+    fixup_slot: *mut u64,
+) -> i64 {
+    core::arch::naked_asm!(
+        // x0 = dst, x1 = src, x2 = len, x3 = fixup_slot
+        "adr x4, 4f",
+        "str x4, [x3]",
+        "orr x4, x0, x1",
+        "tst x4, #7",
+        "b.ne 2f",
+        "1:",
+        "cmp x2, #8",
+        "b.lo 2f",
+        "ldr x5, [x1], #8",
+        "str x5, [x0], #8",
+        "sub x2, x2, #8",
+        "b 1b",
+        "2:",
+        "cbz x2, 3f",
+        "ldrb w5, [x1], #1",
+        "strb w5, [x0], #1",
+        "subs x2, x2, #1",
+        "b.ne 2b",
+        "3:",
+        "str xzr, [x3]",
+        "mov x0, #0",
+        "ret",
+        "4:",
+        "str xzr, [x3]",
+        "mov x0, #-14",
+        "ret",
+    );
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+unsafe extern "C" fn user_copy_raw(
+    dst: *mut u8,
+    src: *const u8,
+    len: usize,
+    _fixup_slot: *mut u64,
+) -> i64 {
+    if len > 0 {
+        core::ptr::copy_nonoverlapping(src, dst, len);
+    }
+    0
+}
+
 pub(crate) fn copy_from_user(dst: &mut [u8], addr: u64, len: usize) -> Result<(), i64> {
     if len > dst.len() {
         return Err(-22);
@@ -172,12 +228,17 @@ pub(crate) fn copy_from_user(dst: &mut [u8], addr: u64, len: usize) -> Result<()
         let chunk = (len - done).min(USER_COPY_CHUNK);
         let _no_preempt = IrqMaskGuard::new();
         validate_user_range(addr + done as u64, chunk, false)?;
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                (addr + done as u64) as *const u8,
+        let fixup_slot = crate::exceptions::user_copy_fixup_slot();
+        let rc = unsafe {
+            user_copy_raw(
                 dst.as_mut_ptr().add(done),
+                (addr + done as u64) as *const u8,
                 chunk,
-            );
+                fixup_slot,
+            )
+        };
+        if rc != 0 {
+            return Err(rc);
         }
         done += chunk;
     }
@@ -191,12 +252,17 @@ fn copy_to_user(addr: u64, src: &[u8]) -> Result<(), i64> {
         let chunk = (src.len() - done).min(USER_COPY_CHUNK);
         let _no_preempt = IrqMaskGuard::new();
         validate_user_range(addr + done as u64, chunk, true)?;
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                src.as_ptr().add(done),
+        let fixup_slot = crate::exceptions::user_copy_fixup_slot();
+        let rc = unsafe {
+            user_copy_raw(
                 (addr + done as u64) as *mut u8,
+                src.as_ptr().add(done),
                 chunk,
-            );
+                fixup_slot,
+            )
+        };
+        if rc != 0 {
+            return Err(rc);
         }
         done += chunk;
     }

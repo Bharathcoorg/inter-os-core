@@ -2959,6 +2959,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             user::enter_user_mode(loaded.entry_point, loaded.stack_top);
             mmu::ArmMmu::switch_to_kernel();
         }
+        {
+            let mut sched = task::SCHEDULER.lock();
+            sched.current_task_idx = 0;
+        }
         assert_eq!(
             task::reap_task_locksafe(1, false, pid_ok),
             Ok(0),
@@ -3002,6 +3006,10 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
             user::enter_user_mode(loaded_f.entry_point, loaded_f.stack_top);
             mmu::ArmMmu::switch_to_kernel();
             user::IN_LIFECYCLE_TEST = false;
+        }
+        {
+            let mut sched = task::SCHEDULER.lock();
+            sched.current_task_idx = 0;
         }
         assert_eq!(
             task::reap_task_locksafe(1, false, pid_f),
@@ -3703,10 +3711,21 @@ fn run_smp_scheduler_verification(
         task::yield_now();
         core::hint::spin_loop();
     }
-    task::set_smp_scheduling_enabled(false);
 
-    let coord_exit = task::reap_task_locksafe(task::SUPERVISOR_PID, true, coord_pid)
-        .expect("SMP coordinator reap");
+    let mut coord_exit = Err(-30i64);
+    for _ in 0..200_000 {
+        coord_exit = task::reap_task_locksafe(task::SUPERVISOR_PID, true, coord_pid);
+        match coord_exit {
+            Ok(_) => break,
+            Err(-16) | Err(-30) => {
+                task::yield_now();
+                core::hint::spin_loop();
+            }
+            Err(_) => break,
+        }
+    }
+    task::set_smp_scheduling_enabled(false);
+    let coord_exit = coord_exit.expect("SMP coordinator reap");
     assert_eq!(coord_exit, 0);
     assert_eq!(
         mmu::active_allocated_frames(),

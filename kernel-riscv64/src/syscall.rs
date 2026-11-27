@@ -76,6 +76,13 @@ pub const USER_SPACE_MIN: usize = 0x0000_1000;
 pub const USER_SPACE_MAX: usize = 0x7FFF_FFFF; // Below 2GB Kernel DRAM
 pub const KERNEL_DRAM_START: usize = 0x8000_0000;
 
+/// Validates a userspace virtual range directly against the provided `satp` root
+/// without acquiring `SCHEDULER.lock()`. Safe to call while `SCHEDULER` is held.
+fn validate_user_range_with_satp(satp: usize, addr: usize, len: usize, write: bool) -> Result<(), i64> {
+    let _ = addr.checked_add(len).ok_or(-14i64)?;
+    crate::mmu::validate_sv39_user_range(satp, addr, len, write)
+}
+
 fn validate_user_range(addr: usize, len: usize, write: bool) -> Result<(), i64> {
     let _ = addr.checked_add(len).ok_or(-14i64)?;
     let satp_from_task = {
@@ -104,7 +111,7 @@ fn validate_user_range(addr: usize, len: usize, write: bool) -> Result<(), i64> 
             s
         }
     };
-    crate::mmu::validate_sv39_user_range(satp, addr, len, write)
+    validate_user_range_with_satp(satp, addr, len, write)
 }
 
 fn copy_from_user(dst: &mut [u8], addr: usize, len: usize) -> Result<(), i64> {
@@ -1391,19 +1398,22 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                             "/dev/urandom" => buf_len as i64,
                             "/dev/input/event0" => -13,
                             "/dev/ptmx" => {
+                                if buf_len > 0 && validate_user_range(buf_ptr, buf_len, false).is_err() {
+                                    return { tf.regs[10] = (-14i64) as usize; };
+                                }
                                 let mut kbuf = [0u8; 256];
                                 let mut read_pos = 0;
                                 while read_pos < buf_len {
                                     let chunk = (buf_len - read_pos).min(256);
                                     if copy_from_user(&mut kbuf[..chunk], buf_ptr + read_pos, chunk).is_err() {
-                                        break;
+                                        return { tf.regs[10] = (-14i64) as usize; };
                                     }
                                     for &b in &kbuf[..chunk] {
                                         crate::print!("{}", b as char);
                                     }
                                     read_pos += chunk;
                                 }
-                                buf_len as i64
+                                read_pos as i64
                             }
                             _ => -2,
                         }
@@ -1454,7 +1464,16 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                             -22
                         } else {
                             if out_borrower_vaddr_ptr != 0 {
-                                if validate_user_range(out_borrower_vaddr_ptr, 8, true).is_err() {
+                                let lender_satp = match sched.tasks[current_pos].address_space.as_ref() {
+                                    Some(a) => {
+                                        if a.destroyed || a.is_closing() {
+                                            return { tf.regs[10] = (-22i64) as usize; };
+                                        }
+                                        a.satp
+                                    }
+                                    None => return { tf.regs[10] = (-13i64) as usize; },
+                                };
+                                if validate_user_range_with_satp(lender_satp, out_borrower_vaddr_ptr, 8, true).is_err() {
                                     return { tf.regs[10] = (-22i64) as usize; };
                                 }
                             }
@@ -1660,7 +1679,16 @@ pub fn dispatch_syscall(tf: &mut TrapFrame) {
                             -22
                         } else {
                             if out_receiver_vaddr_ptr != 0 {
-                                if validate_user_range(out_receiver_vaddr_ptr, 8, true).is_err() {
+                                let sender_satp = match sched.tasks[current_pos].address_space.as_ref() {
+                                    Some(a) => {
+                                        if a.destroyed || a.is_closing() {
+                                            return { tf.regs[10] = (-22i64) as usize; };
+                                        }
+                                        a.satp
+                                    }
+                                    None => return { tf.regs[10] = (-13i64) as usize; },
+                                };
+                                if validate_user_range_with_satp(sender_satp, out_receiver_vaddr_ptr, 8, true).is_err() {
                                     return { tf.regs[10] = (-22i64) as usize; };
                                 }
                             }
