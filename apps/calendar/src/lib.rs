@@ -18,6 +18,9 @@ pub const STORE_BLOB_BYTES: usize = 2 + MAX_EVENTS * RECORD_BYTES;
 pub const STORE_VERSION: u8 = 2;
 pub const STORE_VERSION_LEGACY: u8 = 1;
 pub const STORE_KEY: &str = "calendar.events.v1";
+
+/// Identity of one alert for de-duplication: (year, month, day, hour, minute).
+pub type NotifyKey = (u16, u8, u8, u8, u8);
 pub const STORE_YEAR_MIN: u16 = 1970;
 pub const STORE_YEAR_MAX: u16 = 9999;
 
@@ -615,6 +618,12 @@ impl EventRecord {
 
     pub fn title_bytes(&self) -> &[u8] {
         &self.title[..self.title_len as usize]
+    }
+
+    /// A stable identity for notification de-duplication: the event's own civil
+    /// slot, unchanged when the store shifts records on delete/insert.
+    pub const fn notify_key(&self) -> NotifyKey {
+        (self.year, self.month, self.day, self.hour, self.minute)
     }
 
     /// Stores a value in the low 7 bits with bit 7 set, so no field byte can
@@ -1424,4 +1433,59 @@ mod tests {
             "{widest:?} measures {w} px against the 632 px footer"
         );
     }
+
+    #[test]
+    fn newly_due_is_stable_across_a_delete() {
+        let mut store = EventStore::EMPTY;
+        let a = EventRecord::from_parts(2026, 11, 27, 10, 0, b"Standup");
+        let b = EventRecord::from_parts(2026, 11, 27, 12, 0, b"Lunch");
+        assert!(store.add_in_memory(a));
+        assert!(store.add_in_memory(b));
+        let mut notified = [(0u16, 0, 0, 0, 0); MAX_EVENTS];
+        let mut len = 0usize;
+        let mut due = [(0u16, 0, 0, 0, 0); MAX_EVENTS];
+        let n = newly_due(&store, 2026, 11, 27, 10, 1, &notified, len, &mut due);
+        assert_eq!(n, 1);
+        assert_eq!(due[0], a.notify_key());
+        notified[len] = due[0];
+        len += 1;
+        // Delete record 0; the 12:00 event shifts to index 0.
+        assert!(store.delete_at_in_memory(0));
+        // The 12:00 event is due exactly once (no duplicate, no missed alert).
+        let n = newly_due(&store, 2026, 11, 27, 12, 1, &notified, len, &mut due);
+        assert_eq!(n, 1);
+        assert_eq!(due[0], b.notify_key());
+        notified[len] = due[0];
+        len += 1;
+        let n = newly_due(&store, 2026, 11, 27, 12, 5, &notified, len, &mut due);
+        assert_eq!(n, 0);
+    }
+}
+pub fn newly_due(
+    store: &EventStore,
+    year: u16,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    notified: &[NotifyKey; MAX_EVENTS],
+    notified_len: usize,
+    out: &mut [NotifyKey; MAX_EVENTS],
+) -> usize {
+    let mut n = 0;
+    for i in 0..store.len() {
+        let rec = &store.records[i];
+        if rec.year != year || rec.month != month || rec.day != day || rec.hour != hour || rec.minute > minute {
+            continue;
+        }
+        let key = rec.notify_key();
+        if notified[..notified_len].contains(&key) {
+            continue;
+        }
+        if n < out.len() {
+            out[n] = key;
+            n += 1;
+        }
+    }
+    n
 }
