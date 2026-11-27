@@ -21,7 +21,10 @@ pub use filesystem::{BLOCK_FS_BASE_LBA, BLOCK_FS_TAIL_RESERVED, init_block_files
 pub use encrypted::{seal, open, EncryptionError, ENCRYPTED_MAGIC, ENCRYPTED_VERSION, ENCRYPTED_OVERHEAD};
 
 pub use persistent::{MAX_PERSISTENT_STORAGE_BYTES, MAX_PERSISTENT_STORAGE_SECTORS};
-pub use verified::{MerkleVerifier, StorageError, VerifiedBlock, VERIFIED_BLOCK_SIZE};
+pub use verified::{
+    AuthenticatedBlockReader, MerkleVerifier, StorageError, VerifiedBlock,
+    MAX_MERKLE_PROOF_DEPTH, VERIFIED_BLOCK_SIZE,
+};
 pub use crashdump::{CrashDumpHeader, CrashDumpManager, CRASH_DUMP, CRASH_DUMP_MAGIC};
 pub use vault::{StorageVault, VaultBlock, VaultError, STORAGE_VAULT, VAULT_SECTOR_SIZE};
 

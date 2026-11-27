@@ -9,9 +9,13 @@
 
 use crate::crypto::{Sha256, SHA256_DIGEST_LENGTH};
 use crate::drivers::SECTOR_SIZE;
+use crate::storage::block::BlockDevice;
 
 /// Verified block size in bytes (matches standard hardware sector size).
 pub const VERIFIED_BLOCK_SIZE: usize = SECTOR_SIZE;
+
+/// Maximum Merkle branch proof depth (supports partitions up to 2^16 = 65,536 blocks = 32 MiB).
+pub const MAX_MERKLE_PROOF_DEPTH: usize = 16;
 
 /// Verification and storage error states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,11 +93,126 @@ impl MerkleVerifier {
             Err(StorageError::IntegrityViolation)
         }
     }
+
+    /// Validates an in-memory block read with bounds and proof verification.
+    pub fn verify_authenticated_read(
+        &self,
+        block_index: usize,
+        total_blocks: usize,
+        block_data: &[u8],
+        proof: &[[u8; SHA256_DIGEST_LENGTH]],
+    ) -> Result<(), StorageError> {
+        if block_index >= total_blocks {
+            return Err(StorageError::BlockOutOfRange);
+        }
+        if proof.len() > MAX_MERKLE_PROOF_DEPTH {
+            return Err(StorageError::BlockOutOfRange);
+        }
+        if block_data.len() != VERIFIED_BLOCK_SIZE {
+            return Err(StorageError::IntegrityViolation);
+        }
+        self.verify_branch_proof(block_data, block_index, proof)
+    }
+}
+
+/// An authenticated block reader connecting physical or virtual block storage
+/// to cryptographic Merkle proof verification, ensuring block authentication before use.
+pub struct AuthenticatedBlockReader<D> {
+    device: D,
+    verifier: MerkleVerifier,
+    total_blocks: usize,
+}
+
+impl<D> AuthenticatedBlockReader<D> {
+    /// Creates a new authenticated block reader anchored by a trusted Merkle root.
+    pub const fn new(device: D, verifier: MerkleVerifier, total_blocks: usize) -> Self {
+        Self {
+            device,
+            verifier,
+            total_blocks,
+        }
+    }
+
+    /// Access the underlying block device.
+    pub fn device(&self) -> &D {
+        &self.device
+    }
+
+    /// Access the underlying block device mutably.
+    pub fn device_mut(&mut self) -> &mut D {
+        &mut self.device
+    }
+
+    /// Access the verifier.
+    pub fn verifier(&self) -> &MerkleVerifier {
+        &self.verifier
+    }
+
+    /// Total verified block count.
+    pub fn total_blocks(&self) -> usize {
+        self.total_blocks
+    }
+}
+
+impl<D: BlockDevice> AuthenticatedBlockReader<D> {
+    /// Reads a block from the underlying block device and cryptographically authenticates it
+    /// against the anchored Merkle root before returning the verified data to callers.
+    pub fn read_authenticated_block(
+        &mut self,
+        block_index: usize,
+        proof: &[[u8; SHA256_DIGEST_LENGTH]],
+        out: &mut [u8; VERIFIED_BLOCK_SIZE],
+    ) -> Result<(), StorageError> {
+        if block_index >= self.total_blocks {
+            return Err(StorageError::BlockOutOfRange);
+        }
+        if proof.len() > MAX_MERKLE_PROOF_DEPTH {
+            return Err(StorageError::BlockOutOfRange);
+        }
+
+        self.device
+            .read_sector(block_index as u32, out)
+            .map_err(|_| StorageError::DeviceError)?;
+
+        self.verifier.verify_branch_proof(out, block_index, proof)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::block::BlockDeviceError;
+
+    struct MockBlockDevice {
+        blocks: [[u8; VERIFIED_BLOCK_SIZE]; 4],
+        fail_reads: bool,
+    }
+
+    impl BlockDevice for MockBlockDevice {
+        fn read_sector(&mut self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+            if self.fail_reads {
+                return Err(BlockDeviceError::ReadError);
+            }
+            if (lba as usize) < self.blocks.len() {
+                buf.copy_from_slice(&self.blocks[lba as usize]);
+                Ok(())
+            } else {
+                Err(BlockDeviceError::LbaOutOfRange)
+            }
+        }
+
+        fn write_sector(&mut self, _lba: u32, _buf: &[u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
+            Ok(())
+        }
+
+        fn sector_count(&self) -> u32 {
+            self.blocks.len() as u32
+        }
+
+        fn model(&self) -> &str {
+            "MockVerifiedStorage"
+        }
+    }
 
     #[test]
     fn merkle_branch_proof_valid_and_tampered() {
@@ -132,6 +251,72 @@ mod tests {
         assert_eq!(
             verifier.verify_branch_proof(leaf0, 0, &[tampered_h1, parent1]),
             Err(StorageError::IntegrityViolation)
+        );
+    }
+
+    #[test]
+    fn authenticated_block_reader_full_lifecycle() {
+        let mut b0 = [0u8; VERIFIED_BLOCK_SIZE];
+        let mut b1 = [0u8; VERIFIED_BLOCK_SIZE];
+        let mut b2 = [0u8; VERIFIED_BLOCK_SIZE];
+        let mut b3 = [0u8; VERIFIED_BLOCK_SIZE];
+
+        b0[0..12].copy_from_slice(b"RootFsBlock0");
+        b1[0..12].copy_from_slice(b"RootFsBlock1");
+        b2[0..12].copy_from_slice(b"RootFsBlock2");
+        b3[0..12].copy_from_slice(b"RootFsBlock3");
+
+        let h0 = Sha256::digest(&b0);
+        let h1 = Sha256::digest(&b1);
+        let h2 = Sha256::digest(&b2);
+        let h3 = Sha256::digest(&b3);
+
+        let parent0 = MerkleVerifier::combine_hashes(&h0, &h1);
+        let parent1 = MerkleVerifier::combine_hashes(&h2, &h3);
+        let root = MerkleVerifier::combine_hashes(&parent0, &parent1);
+
+        let verifier = MerkleVerifier::new(root);
+        let dev = MockBlockDevice {
+            blocks: [b0, b1, b2, b3],
+            fail_reads: false,
+        };
+
+        let mut reader = AuthenticatedBlockReader::new(dev, verifier, 4);
+
+        // 1. Valid read of block 0
+        let mut out = [0u8; VERIFIED_BLOCK_SIZE];
+        assert_eq!(reader.read_authenticated_block(0, &[h1, parent1], &mut out), Ok(()));
+        assert_eq!(&out[0..12], b"RootFsBlock0");
+
+        // 2. Valid read of block 2
+        assert_eq!(reader.read_authenticated_block(2, &[h3, parent0], &mut out), Ok(()));
+        assert_eq!(&out[0..12], b"RootFsBlock2");
+
+        // 3. Out of bounds block index
+        assert_eq!(
+            reader.read_authenticated_block(4, &[h1, parent1], &mut out),
+            Err(StorageError::BlockOutOfRange)
+        );
+
+        // 4. Proof depth overflow
+        let deep_proof = [[0u8; SHA256_DIGEST_LENGTH]; MAX_MERKLE_PROOF_DEPTH + 1];
+        assert_eq!(
+            reader.read_authenticated_block(0, &deep_proof, &mut out),
+            Err(StorageError::BlockOutOfRange)
+        );
+
+        // 5. Tampered block on storage device
+        reader.device_mut().blocks[0][0] ^= 0x55;
+        assert_eq!(
+            reader.read_authenticated_block(0, &[h1, parent1], &mut out),
+            Err(StorageError::IntegrityViolation)
+        );
+
+        // 6. Device I/O failure
+        reader.device_mut().fail_reads = true;
+        assert_eq!(
+            reader.read_authenticated_block(2, &[h3, parent0], &mut out),
+            Err(StorageError::DeviceError)
         );
     }
 }
