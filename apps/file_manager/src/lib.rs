@@ -1446,7 +1446,7 @@ pub const HOME_STORAGE_CARD: Rect = Rect::new(36, HEADER_H, 648, 148);
 /// re-state the distances the painter already used and add each run's own growth.
 const HOME_CARD_TITLE_DY: usize = 20;
 const HOME_CARD_LINE1_STRIDE: usize = 56;
-const HOME_CARD_LINE2_STRIDE: usize = 28;
+const HOME_CARD_LINE2_STRIDE: usize = 34;
 const HOME_CARD_FOOT_AIR: usize = 148
     - (HOME_CARD_TITLE_DY
         + HOME_CARD_LINE1_STRIDE

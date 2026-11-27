@@ -5866,10 +5866,34 @@ fn row_pixel(
                 let reported = app.rtc == TelemetryState::Reported;
                 let mut rbuf = [0u8; 80];
                 let n = if reported {
-                    let src = &app.rtc_time[..app.rtc_time_len];
-                    let n = src.len().min(rbuf.len());
-                    rbuf[..n].copy_from_slice(&src[..n]);
-                    n
+                    if let Some(r) = std::rtc::from_payload(&app.rtc_time[..app.rtc_time_len]) {
+                        let mut cursor = 0;
+                        let y = r.year;
+                        rbuf[cursor] = b'0' + ((y / 1000) % 10) as u8; cursor += 1;
+                        rbuf[cursor] = b'0' + ((y / 100) % 10) as u8; cursor += 1;
+                        rbuf[cursor] = b'0' + ((y / 10) % 10) as u8; cursor += 1;
+                        rbuf[cursor] = b'0' + (y % 10) as u8; cursor += 1;
+                        rbuf[cursor] = b'-'; cursor += 1;
+                        let m = r.month;
+                        rbuf[cursor] = b'0' + ((m / 10) % 10) as u8; cursor += 1;
+                        rbuf[cursor] = b'0' + (m % 10) as u8; cursor += 1;
+                        rbuf[cursor] = b'-'; cursor += 1;
+                        let d = r.day;
+                        rbuf[cursor] = b'0' + ((d / 10) % 10) as u8; cursor += 1;
+                        rbuf[cursor] = b'0' + (d % 10) as u8; cursor += 1;
+                        rbuf[cursor] = b' '; cursor += 1;
+                        let ct = r.clock_text();
+                        rbuf[cursor..cursor + 5].copy_from_slice(&ct); cursor += 5;
+                        let suffix = b" (Asia/Kolkata)";
+                        let slen = suffix.len().min(rbuf.len() - cursor);
+                        rbuf[cursor..cursor + slen].copy_from_slice(&suffix[..slen]); cursor += slen;
+                        cursor
+                    } else {
+                        let src = &app.rtc_time[..app.rtc_time_len];
+                        let n = src.len().min(rbuf.len());
+                        rbuf[..n].copy_from_slice(&src[..n]);
+                        n
+                    }
                 } else {
                     let s = b"No RTC reading (query failed or was refused)";
                     rbuf[..s.len()].copy_from_slice(s);

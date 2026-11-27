@@ -4682,14 +4682,17 @@ fn body_cards_pixel(x: usize, y: usize, app: &AgentManagerApp) -> Option<u32> {
                     }
                     let value = &line.value[..line.value_len as usize];
                     if line.chip {
-                        // WHY a chip and not coloured text: a state written
-                        // in colour is a state a person has to read, and a
-                        // state written as a dot and a word is a state a
-                        // person can find at a glance.
+                        // Keep chips clear of the floating action button column on surfaces
+                        // where the button floats over the right-hand side of cards.
+                        let chip_right = if app.surface != Surface::Chat {
+                            (W - GUTTER - FAB_R * 2 - FAB_MARGIN).saturating_sub(8)
+                        } else {
+                            GUTTER + CONTENT_W - CARD_PAD_X
+                        };
                         if let Some(c) = chip_px(
                             x,
                             y,
-                            GUTTER + CONTENT_W - CARD_PAD_X,
+                            chip_right,
                             screen_y + (row_h() - chip_h()) / 2,
                             value,
                             line.tone,
