@@ -8,7 +8,7 @@
 //! runtime. Unsupported opcodes and framework effects fail closed; callers must not
 //! treat this interpreter as general APK compatibility or a process-isolation boundary.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::binder::Parcel;
@@ -425,6 +425,8 @@ impl DalvikObject {
 pub const DEFAULT_HEAP_MAX_BYTES: usize = 16 * 1024 * 1024; // 16 MB default quota
 pub const MAX_HEAP_CEILING_BYTES: usize = 64 * 1024 * 1024; // 64 MB maximum ceiling
 pub const MAX_REGISTERS_LIMIT: usize = 2048;
+/// Reserved DalvikObject field slot holding an application click method handle.
+const FIELD_ON_CLICK_METHOD: u16 = 0xFFFE;
 
 /// Execution state of the sovereign Dalvik Virtual Machine.
 pub struct DalvikVmState {
@@ -466,6 +468,8 @@ pub struct DalvikVmState {
     /// fail-closed pure `framework::dispatch`). Rendered by the system service.
     content_view_id: Option<u32>,
     static_fields: Vec<(u16, u32)>,
+    /// Classes whose `<clinit>` has already executed in this VM (JVM "initialized").
+    initialized_classes: BTreeSet<String>,
     pub heap_max_bytes: usize,
     pub heap_used_bytes: usize,
     pub gc_trigger_threshold_bytes: usize,
@@ -793,6 +797,7 @@ impl DalvikVmState {
             next_object_id: 1,
             content_view_id: None,
             static_fields: Vec::new(),
+            initialized_classes: BTreeSet::new(),
             heap_max_bytes: DEFAULT_HEAP_MAX_BYTES,
             heap_used_bytes: 0,
             gc_trigger_threshold_bytes: DEFAULT_HEAP_MAX_BYTES * 3 / 4,
@@ -1584,6 +1589,33 @@ impl DalvikVmState {
                     self.last_return_string = None;
                     Ok(Some(0))
                 }
+                "setOnClickListener" => {
+                    if receiver == 0 {
+                        return Err(self.throw_npe(Some("Null receiver in View.setOnClickListener")));
+                    }
+                    // Resolve the listener's application-defined onClick method handle.
+                    let listener = arg_values.get(1).copied().unwrap_or(0);
+                    let handle = if listener != 0 {
+                        if let Ok(lobj) = self.get_object(listener) {
+                            let desc = lobj.class_descriptor.clone();
+                            dex.methods
+                                .iter()
+                                .find(|m| m.class_name == desc && m.method_name == "onClick")
+                                .map(|m| m.method_index as u32)
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    if let Ok(obj) = self.get_object_mut(receiver) {
+                        obj.set_field(FIELD_ON_CLICK_METHOD, handle);
+                    }
+                    self.last_return_value = 0;
+                    self.last_return_string = None;
+                    Ok(Some(0))
+                }
                 _ => Ok(None),
             },
             "android/app/Activity" if method_name == "setContentView" => {
@@ -1637,6 +1669,12 @@ impl DalvikVmState {
                 },
             ),
         };
+        // Carry the application click callback (set via setOnClickListener) onto
+        // the render node so a touch can execute the real DEX method.
+        let click_handle = obj.get_field(FIELD_ON_CLICK_METHOD);
+        if click_handle != 0 {
+            view.on_click_callback = Some(click_handle);
+        }
         for &child_id in children {
             if let Some(child) = self.build_view_inner(child_id, depth + 1, visited) {
                 view.add_child(child);
@@ -3808,6 +3846,40 @@ impl DalvikVmState {
         }
     }
 
+    /// Runs a class's `<clinit>` exactly once before its first use, matching the
+    /// JVM "initialize on first active use" rule. The class is marked initialized
+    /// before its body runs so a re-entrant call is a no-op. The caller's register
+    /// frame is saved/restored so the initializer cannot clobber live registers.
+    fn ensure_class_initialized(
+        &mut self,
+        dex: &DexPackage,
+        class_name: &str,
+    ) -> Result<(), DalvikVmError> {
+        if self.initialized_classes.contains(class_name) {
+            return Ok(());
+        }
+        self.initialized_classes.insert(String::from(class_name));
+        let clinit = match dex
+            .methods
+            .iter()
+            .find(|m| m.class_name == class_name && m.method_name == "<clinit>")
+        {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+        let frame_size = (clinit.registers_size as usize).max(32).min(MAX_REGISTERS_LIMIT);
+        let saved_regs = core::mem::replace(&mut self.registers, alloc::vec![0u32; frame_size]);
+        let saved_strs =
+            core::mem::replace(&mut self.string_registers, alloc::vec![None; frame_size]);
+        let saved_depth = self.call_depth;
+        self.call_depth = self.call_depth.max(1);
+        let res = self.invoke_method_inner(dex, class_name, "<clinit>");
+        self.call_depth = saved_depth;
+        self.registers = saved_regs;
+        self.string_registers = saved_strs;
+        res.map(|_| ())
+    }
+
     /// Invokes a specific method on a class by name, executing its Dalvik bytecode.
     pub fn invoke_method(
         &mut self,
@@ -3817,6 +3889,9 @@ impl DalvikVmState {
     ) -> Result<u32, DalvikVmError> {
         if self.call_depth >= 32 {
             return Err(DalvikVmError::ExecutionStepLimit);
+        }
+        if method_name != "<clinit>" {
+            self.ensure_class_initialized(dex, class_name)?;
         }
         if self.call_depth == 0 {
             let initial_size = (dex.methods.iter().find(|m| m.class_name == class_name && m.method_name == method_name).map(|m| m.registers_size as usize).unwrap_or(32)).max(32).min(MAX_REGISTERS_LIMIT);
