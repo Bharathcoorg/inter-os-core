@@ -202,6 +202,7 @@ impl AcrManager {
             dex_bytes,
         );
         instance.vm = vm;
+        instance.parsed_dex = Some(parsed_dex);
         instance.activity_state = ActivityLifecycleState::Resumed;
 
         self.apps.insert(pid, instance);
@@ -211,12 +212,31 @@ impl AcrManager {
 
     /// Dispatches a touch event to the active application's View hierarchy.
     pub fn dispatch_touch(&mut self, pid: u32, event: &MotionEvent) -> bool {
-        if let Some(app) = self.apps.get_mut(&pid) {
-            if let Some(root) = &mut app.root_view {
-                return root.dispatch_touch_event(event);
+        let Some(app) = self.apps.get_mut(&pid) else {
+            return false;
+        };
+        let consumed = match app.root_view.as_mut() {
+            Some(root) => root.dispatch_touch_event(event),
+            None => false,
+        };
+        // Execute the application-defined click callback (a real DEX method),
+        // not a fabricated label, through the VM.
+        let pending = app
+            .root_view
+            .as_mut()
+            .and_then(|root| root.take_pending_click());
+        if let Some(method_index) = pending {
+            let dex = app.parsed_dex.as_ref();
+            let vm = &mut app.vm;
+            if let Some(dex) = dex {
+                if let Some(m) = dex.methods.iter().find(|m| m.method_index as u32 == method_index) {
+                    let class_name = m.class_name.clone();
+                    let method_name = m.method_name.clone();
+                    let _ = vm.invoke_method(dex, &class_name, &method_name);
+                }
             }
         }
-        false
+        consumed
     }
 
     /// Drives a Choreographer vsync tick and Looper message processing for an application.

@@ -224,6 +224,9 @@ pub struct View {
     pub view_type: ViewType,
     pub on_click_callback: Option<u32>, // Listener or method handle
     pub clicked_count: u32,
+    /// Method handle of an application click callback fired by the last
+    /// completed click, drained by the owner via `take_pending_click`.
+    pub pending_click_callback: Option<u32>,
 }
 
 #[inline(always)]
@@ -259,7 +262,29 @@ impl View {
             view_type,
             on_click_callback: None,
             clicked_count: 0,
+            pending_click_callback: None,
         }
+    }
+
+    /// Installs the application-defined click callback (a DEX method handle).
+    pub fn set_on_click_callback(&mut self, method_handle: u32) {
+        self.on_click_callback = Some(method_handle);
+    }
+
+    /// Depth-first drain of the first pending click callback recorded by this
+    /// subtree, clearing it so each click is delivered exactly once.
+    pub fn take_pending_click(&mut self) -> Option<u32> {
+        if let Some(cb) = self.pending_click_callback.take() {
+            return Some(cb);
+        }
+        if let ViewType::ViewGroup { children, .. } = &mut self.view_type {
+            for child in children.iter_mut() {
+                if let Some(cb) = child.take_pending_click() {
+                    return Some(cb);
+                }
+            }
+        }
+        None
     }
 
     pub fn text_view(id: i32, text: &str, text_size: u32, text_color: u32) -> Self {
@@ -574,12 +599,9 @@ impl View {
                     height: h,
                     color: border_color,
                 });
-                // Render actual button text glyphs (reflecting mutated state if clicked)
-                let display_text = if self.clicked_count > 0 {
-                    alloc::format!("{} [Clicked: {}]", text, self.clicked_count)
-                } else {
-                    text.clone()
-                };
+                // Render the real button text. Click state is shown by the
+                // activated background, never by a fabricated "[Clicked: N]" label.
+                let display_text = text.clone();
                 let _ = draw_list.push(DrawOp::DrawText {
                     x: self.bounds.left + 8,
                     y: self.bounds.top + 8,
@@ -691,6 +713,11 @@ impl View {
                         *is_pressed = false;
                     }
                     self.clicked_count += 1;
+                    // Record the application-defined callback (method handle) for
+                    // the owner to execute; no label is fabricated here.
+                    if let Some(cb) = self.on_click_callback {
+                        self.pending_click_callback = Some(cb);
+                    }
                     return true;
                 }
                 MotionAction::Cancel => {
@@ -767,16 +794,16 @@ mod tests {
 
         let mut dl_after = DrawList::new();
         root.draw(&mut dl_after);
-        // Verify that UI state mutation is reflected in the rendered draw list:
-        // button text contains "[Clicked: 1]" and draw list is distinct from initial frame
-        let has_clicked_text = dl_after.ops().iter().any(|op| {
+        // A completed click must NOT synthesize a "[Clicked: N]" label; the real
+        // button text is rendered and the app callback is dispatched by the owner.
+        let has_fabricated_label = dl_after.ops().iter().any(|op| {
             if let DrawOp::DrawText { text, .. } = op {
-                text.contains("[Clicked: 1]")
+                text.contains("[Clicked:")
             } else {
                 false
             }
         });
-        assert!(has_clicked_text, "UI state must reflect touch mutation in rendered text");
+        assert!(!has_fabricated_label, "no hardcoded [Clicked:N] label may be rendered");
         let has_activated_bg = dl_after.ops().iter().any(|op| {
             if let DrawOp::FillRect { color, .. } = op {
                 *color == 0xFF1B5E20
