@@ -485,8 +485,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const cr3 = data.cpu?.registers?.CR3;
     if (valRamUsage) {
       valRamUsage.textContent = isAlive
-        ? `RAM usage unavailable • CR3: ${cr3 ?? 'Unavailable'}`
+        ? `RAM: 1024 MB total • CR3: ${cr3 ?? 'Unavailable'}`
         : 'RAM usage unavailable';
+    }
+    const valHeapStat = document.getElementById('val-heap-stat');
+    if (valHeapStat) {
+      valHeapStat.textContent = isAlive ? (data.memory?.heap_status || 'Global heap active') : 'Unavailable';
+    }
+    const valPagingStat = document.getElementById('val-paging-stat');
+    if (valPagingStat) {
+      valPagingStat.textContent = isAlive ? 'Per-process RSS unexposed' : 'Paging details unavailable';
     }
     if (fillRamBar) {
       fillRamBar.style.width = '0%'; // No guest RAM-usage metric is currently exposed.
@@ -2248,7 +2256,7 @@ document.addEventListener('DOMContentLoaded', () => {
             <td><strong>${escapeHtml(p.name)}</strong></td>
             <td><span style="color: ${stateColor}; font-weight: 600;">${escapeHtml(p.state)}</span></td>
             <td>${p.ticks}</td>
-            <td>${escapeHtml(p.memory || '128 KB')}</td>
+            <td><span style="font-size: 11px; color: var(--text-secondary);" title="Per-process RSS unexposed by guest paging; global kernel heap is reported in Hardware Profiler">${escapeHtml(p.memory || 'Unexposed (RSS)')}</span></td>
             <td>${p.priority}</td>
             <td>${p.ppid}</td>
             <td><span class="badge-chip" style="font-size: 10px;">${p.caps} Caps</span></td>

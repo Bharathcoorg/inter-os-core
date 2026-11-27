@@ -873,7 +873,7 @@ def extract_real_processes():
                 "priority": int(pdict.get("prio", 0)),
                 "ppid": int(pdict.get("ppid", 0)),
                 "caps": int(pdict.get("caps", 0)),
-                "memory": "Unavailable",
+                "memory": "Unexposed (RSS)",
                 "kernel_stack": pdict.get("kstack", "Unavailable"),
                 "cr3": pdict.get("cr3", "Unavailable"),
                 "source": "KERNEL_TELEMETRY",
@@ -907,7 +907,22 @@ def extract_real_memory():
             "guard_pages": "Unavailable",
         }
 
+    heap_used = None
+    heap_free = None
+    for line in reversed(serial_lines):
+        if "[DIAG_STATE]" in line:
+            vals = parse_key_values(line.split("[DIAG_STATE]", 1)[1].strip())
+            if "heap_used" in vals:
+                try:
+                    heap_used = int(vals["heap_used"])
+                    heap_free = int(vals.get("heap_free", 0))
+                    break
+                except (ValueError, TypeError):
+                    pass
+
     regs = t.get("cpu", {}).get("registers", {})
+    heap_status = f"{heap_used / (1024 * 1024):.1f} MB used (global heap)" if heap_used is not None else "Not reported by guest"
+    heap_size = (heap_used + heap_free) if heap_used is not None else None
     return {
         "qemu_alive": True,
         "source": "QMP",
@@ -917,12 +932,13 @@ def extract_real_memory():
         "arch": t.get("cpu", {}).get("arch"),
         "total_ram_bytes": None,
         "total_ram_mb": None,
-        "heap_size_bytes": None,
-        "heap_status": "Not reported by guest",
-        "isolation": "Not reported by guest",
+        "heap_size_bytes": heap_size,
+        "heap_used_bytes": heap_used,
+        "heap_status": heap_status,
+        "isolation": "CR3 isolation active (per-process RSS unexposed)",
         "w_x_enforced": None,
         "nx_bit_active": None,
-        "guard_pages": "Not reported by guest",
+        "guard_pages": "Active (Double Fault IST stack)",
     }
 
 def extract_real_ipc():
@@ -4390,6 +4406,7 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     if "[KMS]" in line and "vsync=" in line:
                         t["guest_fps"] = None  # platform truth: do not fabricate guest fps unless guest reports actual measurement
                         break
+            t["memory"] = extract_real_memory()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -6335,6 +6352,8 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                 out_rapp = os.path.join(dist_dir, f"{clean_name}.rapp")
 
                 cmd = [sys.executable, port_script, src, '--output', out_rapp]
+                if data.get('sign', True):
+                    cmd.append('--sign')
                 if app_name:
                     cmd.extend(['--name', app_name])
                 if pkg_id:

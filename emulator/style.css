@@ -1031,20 +1031,21 @@ html, body.dark-theme {
 }
 
 .bus-stat-lbl {
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-family: var(--font-mono);
   color: var(--white-dim);
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .bus-stat-v {
-  font-size: 0.78rem;
+  font-size: 0.70rem;
   font-family: var(--font-mono);
   color: var(--white-soft);
   font-weight: 500;
-  /* Wrap long bus values (e.g. "720×1440 scanout") instead of clipping them. */
-  white-space: normal;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   min-width: 0;
 }
 
