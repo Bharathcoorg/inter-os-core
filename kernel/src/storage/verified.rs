@@ -205,6 +205,26 @@ pub fn provisioned_root() -> Option<[u8; SHA256_DIGEST_LENGTH]> {
     *PROVISIONED_ROOT.lock()
 }
 
+/// Provisions the protected-storage root from the kernel's own authenticated
+/// `ReadOnlySystem` inventory at boot.
+///
+/// WHY this is an authorized source and not first-writer enrollment: the entries
+/// are the VFS's read-only system inodes, which the kernel itself built from its
+/// own embedded constants (the embedded ELFs are already verified against the
+/// build-time `EXPECTED_IMAGE_DIGESTS` at boot). The root is recomputed
+/// deterministically from that inventory each boot, so an attacker who can only
+/// write the data partition cannot change it; the trust anchor is the kernel
+/// image (software-trusted, NOT hardware secure boot). An empty inventory leaves
+/// the chain inert (NOT IMPLEMENTED).
+pub fn provision_from_inventory(entries: &[(&str, [u8; SHA256_DIGEST_LENGTH])]) -> Result<(), StorageError> {
+    if entries.is_empty() {
+        return Err(StorageError::UnauthenticatedRoot);
+    }
+    let root = manifest_digest(entries);
+    let attestation = BootAttestation { boot_manifest_digest: root };
+    provision_root_from_boot(&attestation, &root, entries)
+}
+
 /// Re-verifies protected metadata: the root must be provisioned and the object's
 /// **full canonical path** and `recorded_digest` must be attested by the signed
 /// manifest. Basename matching is never used for authorization, so two files

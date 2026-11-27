@@ -3759,7 +3759,7 @@ pub fn init() {
   "os": "Inter OS",
   "version": "0.3.0",
   "security_model": "Zero-Trust Object Capabilities",
-  "integrity_protection": "NOT IMPLEMENTED (Merkle block primitive self-tested on a synthetic block only; no partition is measured and no root digest is provisioned)",
+  "integrity_protection": "SOFTWARE-TRUSTED: read-only system objects are attested on every read against a kernel-anchored manifest (embedded ELFs verified against the build-time manifest; NOT hardware secure boot; no measured hardware partition)",
   "ambient_authority": false,
   "default_sandbox": "strict"
 }"#;
@@ -3809,6 +3809,32 @@ pub fn init() {
     // would exist but be unreachable from the directory it names.
     vfs.import_provisioned_models();
     vfs.rebuild_children();
+    // Provision the protected-storage trust anchor from the kernel's own
+    // authenticated read-only system inventory (embedded ELFs already verified
+    // against the build-time manifest at boot). This arms mandatory protected-read
+    // enforcement; an empty inventory leaves it inert (NOT IMPLEMENTED). The
+    // anchor is the kernel image (software-trusted), not a disk-supplied value.
+    {
+        use alloc::string::String as _;
+        let mut entries: alloc::vec::Vec<(alloc::string::String, [u8; 32])> = alloc::vec::Vec::new();
+        for inode in vfs.inodes.values() {
+            if inode.file_type == FileType::ReadOnlySystem {
+                entries.push((alloc::string::String::from(inode.path.as_str()), inode.sha256_digest));
+            }
+        }
+        let refs: alloc::vec::Vec<(&str, [u8; 32])> =
+            entries.iter().map(|(p, d)| (p.as_str(), *d)).collect();
+        match crate::storage::verified::provision_from_inventory(&refs) {
+            Ok(()) => crate::serial_println!(
+                "[STORAGE] Protected-read enforcement ARMED: {} authenticated system objects.",
+                refs.len()
+            ),
+            Err(e) => crate::serial_println!(
+                "[STORAGE] Protected-read enforcement inert ({:?}); reporting NOT IMPLEMENTED.",
+                e
+            ),
+        }
+    }
     let _ = vfs.persist_metadata_snapshot();
     vfs.persisted_data_generation.set(vfs.data_generation.get());
     vfs.persisted_metadata_generation.set(vfs.metadata_generation.get());
