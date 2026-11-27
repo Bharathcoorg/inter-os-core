@@ -4673,6 +4673,20 @@ fn run_installed_generation(
     };
 
     let backend_session_id = {
+        // Bind the model's identity to the real artifact: the size and digest
+        // come from the filesystem's own record for this path, and the
+        // architecture, tokenizer and quantization come from the file's GGUF
+        // header. A zeroed digest or a size of 0 means the artifact could not be
+        // stat'd and is reported unverified rather than substituted with a
+        // hardcoded architecture.
+        let mut stat_buf = [0u8; std::FILE_STAT_BYTES];
+        let identity = match std::fs_stat(path, &mut stat_buf) {
+            Ok(_) => match std::FileStatRecord::parse(&stat_buf) {
+                Some(record) => Some((record.size, record.sha256)),
+                None => None,
+            },
+            Err(_) => None,
+        };
         let mut backend = NATIVE_GGUF_BACKEND.lock();
         let model_handle = backend
             .models
@@ -4680,22 +4694,17 @@ fn run_installed_generation(
             .find(|m| m.active && &m.source[..m.source_len] == path.as_bytes())
             .map(|m| m.handle)
             .unwrap_or_else(|| {
-                let manifest = backend::ModelManifest {
-                    id: "org.interos.installed-generative",
-                    display_name: "Installed Generative Model",
-                    source: path,
-                    revision: "local",
-                    sha256: [0; 32],
-                    artifact_bytes: 0,
-                    format: backend::ModelFormat::Gguf,
-                    architecture: "gemma2",
-                    quantization: backend::Quantization::Q6K,
-                    tokenizer: "embedded",
-                    required_hardware: backend::HardwareBackend::Cpu,
-                    capabilities: backend::CapabilitySet::TEXT_GENERATION
-                        .union(backend::CapabilitySet::STREAMING_GENERATION),
-                    resources: estimate,
-                };
+                let (artifact_bytes, sha256) =
+                    identity.unwrap_or((0, [0u8; 32]));
+                let manifest = backend::installed_generative_manifest(
+                    info.architecture(),
+                    info.tokenizer_model(),
+                    info.file_type,
+                    path,
+                    artifact_bytes,
+                    sha256,
+                    estimate,
+                );
                 backend.load_model(&manifest).unwrap_or(1)
             });
         backend.create_session(model_handle, sender_task_id).ok()

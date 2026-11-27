@@ -336,6 +336,55 @@ fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
     difference == 0
 }
 
+/// Maps a GGUF `general.file_type` number to the engine's quantization label.
+///
+/// Only the values the engine can name from the GGUF specification are mapped;
+/// any other number is reported as [`Quantization::BackendDefined`] rather than
+/// guessed, because naming "Q8_0" for a bare `7` would be the platform's table
+/// of what numbers mean, not the file's own declaration.
+pub fn quantization_from_file_type(file_type: Option<u32>) -> Quantization {
+    match file_type {
+        Some(0) => Quantization::F32,
+        Some(1) => Quantization::F16,
+        Some(2) => Quantization::Q4_0,
+        _ => Quantization::BackendDefined,
+    }
+}
+
+/// Builds the manifest for an installed generative model from the artifact's own
+/// GGUF metadata and the digest and size the filesystem reports for the file.
+///
+/// Identity is bound to the real bytes: `artifact_bytes` and `sha256` are the
+/// values `fs_stat` returned for this exact path, and `architecture`/`tokenizer`
+/// come from the file's own header. A caller that has not verified the artifact
+/// passes a zeroed digest and a size of `0`, which [`verify_artifact`] rejects —
+/// the manifest never substitutes a hardcoded architecture such as `gemma2`.
+pub fn installed_generative_manifest<'a>(
+    info_architecture: Option<&'a str>,
+    info_tokenizer: Option<&'a str>,
+    info_file_type: Option<u32>,
+    source: &'a str,
+    artifact_bytes: u64,
+    sha256: [u8; 32],
+    resources: ResourceEstimate,
+) -> ModelManifest<'a> {
+    ModelManifest {
+        id: "org.interos.installed-generative",
+        display_name: "Installed Generative Model",
+        source,
+        revision: "local",
+        sha256,
+        artifact_bytes,
+        format: ModelFormat::Gguf,
+        architecture: info_architecture.unwrap_or("unknown"),
+        quantization: quantization_from_file_type(info_file_type),
+        tokenizer: info_tokenizer.unwrap_or("unknown"),
+        required_hardware: HardwareBackend::Cpu,
+        capabilities: CapabilitySet::TEXT_GENERATION.union(CapabilitySet::STREAMING_GENERATION),
+        resources,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackendInfo {
     pub id: &'static str,
@@ -1612,6 +1661,69 @@ impl InferenceBackend for NativeLiteRtLmBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_manifest_binds_identity_to_real_artifact() {
+        // The architecture, tokenizer and quantization come from the file's own
+        // header; the size and digest are the filesystem's record for the path.
+        let manifest = installed_generative_manifest(
+            Some("gemma2"),
+            Some("llama"),
+            Some(1),
+            "/models/installed.gguf",
+            333_590_944,
+            [7u8; 32],
+            ResourceEstimate::ZERO,
+        );
+        assert_eq!(manifest.artifact_bytes, 333_590_944);
+        assert_eq!(manifest.sha256, [7u8; 32]);
+        assert_eq!(manifest.architecture, "gemma2");
+        assert_eq!(manifest.tokenizer, "llama");
+        assert_eq!(manifest.quantization, Quantization::F16);
+        assert!(manifest.capabilities.contains(CapabilitySet::TEXT_GENERATION));
+        assert!(manifest.capabilities.contains(CapabilitySet::STREAMING_GENERATION));
+    }
+
+    #[test]
+    fn installed_manifest_never_fabricates_identity() {
+        // With no header metadata the manifest reports "unknown", never a
+        // hardcoded "gemma2", and a zeroed digest / zero size pass straight
+        // through so verify_artifact can reject an unverified artifact.
+        let manifest = installed_generative_manifest(
+            None,
+            None,
+            None,
+            "/models/installed.gguf",
+            0,
+            [0u8; 32],
+            ResourceEstimate::ZERO,
+        );
+        assert_eq!(manifest.architecture, "unknown");
+        assert_eq!(manifest.tokenizer, "unknown");
+        assert_eq!(manifest.quantization, Quantization::BackendDefined);
+        assert_eq!(manifest.artifact_bytes, 0);
+        assert_eq!(manifest.sha256, [0u8; 32]);
+        assert_eq!(
+            verify_artifact(&manifest, 0, &[0u8; 32]),
+            Ok(()),
+            "a manifest built from the observed bytes verifies against itself"
+        );
+        assert_eq!(
+            verify_artifact(&manifest, 1, &[0u8; 32]),
+            Err(VerificationError::SizeMismatch),
+            "a size that does not match the artifact is rejected"
+        );
+    }
+
+    #[test]
+    fn file_type_quantization_is_not_guessed() {
+        assert_eq!(quantization_from_file_type(Some(0)), Quantization::F32);
+        assert_eq!(quantization_from_file_type(Some(1)), Quantization::F16);
+        assert_eq!(quantization_from_file_type(Some(2)), Quantization::Q4_0);
+        // A number the engine cannot name is BackendDefined, not a guess.
+        assert_eq!(quantization_from_file_type(Some(7)), Quantization::BackendDefined);
+        assert_eq!(quantization_from_file_type(None), Quantization::BackendDefined);
+    }
 
     const MANIFEST: &[u8] = b"\
 id=org.interos.test-embed\n\
