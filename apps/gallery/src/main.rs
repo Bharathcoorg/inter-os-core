@@ -6132,6 +6132,14 @@ pub extern "C" fn _start() -> ! {
                     }
 
                     // Double-tap toggles between fit and 2x, clamped to bounds.
+                    //
+                    // WHY the flag: the full-screen photo viewer has a double
+                    // tap of its own, so there the second of two quick presses
+                    // is that gesture and not a second press on the control
+                    // under the finger. Everywhere else in this app a kind 2
+                    // press is the second of two quick presses on the same
+                    // control, and it is answered as a tap below.
+                    let mut double_tap_claimed = false;
                     if input.kind == 2
                         && app.open.is_some()
                         && app.photo_fullscreen
@@ -6145,6 +6153,7 @@ pub extern "C" fn _start() -> ! {
                         }
                         std::log("[GALLERY] Double tap changed the viewer zoom.").ok();
                         dirty = Dirty::All;
+                        double_tap_claimed = true;
                     }
 
                     // In the full-screen viewer a drag pans a zoomed picture;
@@ -6185,7 +6194,16 @@ pub extern "C" fn _start() -> ! {
                         }
                     }
 
-                    if input.kind == 1 {
+                    // WHY the double tap answers as a tap: the kernel emits one
+                    // event per physical release and labels the second of two
+                    // quick presses at the same spot a double tap, so an app
+                    // that answers only the plain tap loses the second press.
+                    //
+                    // WHY the viewer's own double tap is excluded: the flag
+                    // above is set when the second press was the zoom gesture,
+                    // and answering it as a tap as well would run the control
+                    // under the finger a second time on top of the zoom.
+                    if !double_tap_claimed && std::input_event_is_tap(input.kind) {
                         match handle_tap(&mut app, input.x as usize, input.y as usize) {
                             Tap::Leave(msg) => {
                                 std::log(msg).ok();

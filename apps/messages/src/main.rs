@@ -5365,7 +5365,12 @@ pub extern "C" fn _start() -> ! {
                             }
                             std::exit_with_code(0);
                         }
-                        if input.kind == 1 {
+                        // WHY the double tap answers as a tap: the kernel emits
+                        // one event per physical release and labels the second
+                        // of two quick presses at the same spot a double tap.
+                        // Answering only the plain tap lost the second of two
+                        // identical letters typed on the soft keyboard.
+                        if std::input_event_is_tap(input.kind) {
                             match handle_tap(&mut messages, input.x, input.y) {
                                 Tap::Leave(msg) => {
                                     std::log(msg).ok();

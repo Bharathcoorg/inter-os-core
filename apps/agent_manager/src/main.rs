@@ -5499,7 +5499,7 @@ pub extern "C" fn _start() -> ! {
                 let _ = std::surface_destroy(surface);
                 std::exit_with_code(0);
             }
-            if input.kind == 1 || input.kind == 2 {
+            if std::input_event_is_tap(input.kind) {
                 match handle_tap(&mut app, input.x, input.y) {
                     Tap::Leave(message) => {
                         std::log(message).ok();

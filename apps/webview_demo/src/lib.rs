@@ -223,9 +223,28 @@ pub fn demo_pixel(x: usize, y: usize, page: &InterWebView) -> u32 {
 /// that reads a `4` as "the back gesture" instead of "the finger moved" throws
 /// the reader out of the app on every scroll. The names are the one place this
 /// screen can say which meaning it is drawing on.
-pub const KERNEL_TAP: u8 = 1;
-pub const KERNEL_PAN: u8 = 4;
-pub const KERNEL_FLING: u8 = 10;
+    pub const KERNEL_TAP: u8 = 1;
+    pub const KERNEL_PAN: u8 = 4;
+    pub const KERNEL_FLING: u8 = 10;
+
+    /// The kernel's double tap: the second of two quick presses at the same spot.
+    ///
+    /// WHY it is named here beside the other kinds: the kernel emits one event
+    /// per physical release, and a second press within the double-tap window
+    /// arrives as this kind instead of a second `KERNEL_TAP`. An app that
+    /// answers only `KERNEL_TAP` loses that second press.
+    pub const KERNEL_DOUBLE_TAP: u8 = 2;
+
+    /// Whether an input kind is a press this app answers as a tap.
+    ///
+    /// WHY the double tap counts: the first of the two presses was already
+    /// delivered as `KERNEL_TAP`, so answering this one as a tap too is what
+    /// makes two quick presses two presses. The document this app shows has no
+    /// double-tap meaning of its own.
+    pub const fn is_tap(kind: u8) -> bool {
+        kind == KERNEL_TAP || kind == KERNEL_DOUBLE_TAP
+    }
+
 
 pub struct WebViewDemoApp {
     pub webview: InterWebView,
@@ -329,7 +348,7 @@ impl WebViewDemoApp {
                 self.webview.scroll_mut().apply_drag(input.dy);
                 true
             }
-            KERNEL_TAP => {
+            KERNEL_TAP | KERNEL_DOUBLE_TAP => {
                 let res = if self.at_first_screen() {
                     self.load_fed_fixture()
                 } else {

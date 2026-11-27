@@ -11,7 +11,7 @@ use std::design::back_button;
 use std::design::home_band;
 use std::design::viewport;
 use std::webview::InterWebView;
-use webview_demo::{demo_pixel, WebViewDemoApp, KERNEL_TAP};
+use webview_demo::{demo_pixel, WebViewDemoApp};
 
 /// The canvas this app is asked to answer, in the platform's own logical units.
 ///
@@ -89,7 +89,7 @@ pub extern "C" fn _start() -> ! {
 
         if events & std::EVENT_TOUCH_INPUT != 0 {
             while std::input_event_poll(&mut input).is_ok() {
-                if input.kind == KERNEL_TAP && back_button::contains(input.x as usize, input.y as usize) {
+                if webview_demo::is_tap(input.kind) && back_button::contains(input.x as usize, input.y as usize) {
                     // WHY answered before the controller and before the gesture
                     // exit: a tap where the control is painted is the control's,
                     // and the document underneath it cannot claim the point.
@@ -106,7 +106,7 @@ pub extern "C" fn _start() -> ! {
                     continue;
                 }
 
-                if input.kind == KERNEL_TAP && home_band::contains(input.x as usize, input.y as usize) {
+                if webview_demo::is_tap(input.kind) && home_band::contains(input.x as usize, input.y as usize) {
                     // The pill painted at the foot of the panel: go home, rather
                     // than unwind the document the way the back control does.
                     std::log("[WEBVIEW_DEMO] Home gesture pressed. Exiting to launcher.").ok();

@@ -5225,7 +5225,11 @@ pub extern "C" fn _start() -> ! {
                         }
                     }
 
-                    if input.kind == 1 {
+                    // WHY the double tap answers as a tap: the kernel emits one
+                    // event per physical release and labels the second of two
+                    // quick presses at the same spot a double tap, so an app
+                    // that answers only the plain tap loses the second press.
+                    if std::input_event_is_tap(input.kind) {
                         if app.suppress_tap {
                             // The long press that just started the selection
                             // already consumed this gesture.

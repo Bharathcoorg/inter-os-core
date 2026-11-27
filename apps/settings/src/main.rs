@@ -8260,7 +8260,11 @@ pub extern "C" fn _start() -> ! {
                         }
                         std::exit_with_code(0);
                     }
-                    if input.kind == 1 {
+                    // WHY the double tap answers as a tap: the kernel emits one
+                    // event per physical release and labels the second of two
+                    // quick presses at the same spot a double tap, so an app
+                    // that answers only the plain tap loses the second press.
+                    if std::input_event_is_tap(input.kind) {
                         let mut repainted_band = false;
                         handle_tap(&mut settings, &input, surface, &mut repainted_band);
                         if surface > 0 && !repainted_band {

@@ -3734,7 +3734,16 @@ pub extern "C" fn _start() -> ! {
                     match state.current_view {
                         ViewMode::BootScreen | ViewMode::PowerTransition => {}
                         ViewMode::PinEntry => {
-                            if input.kind == 1 {
+                            // WHY the double tap answers as a tap: the kernel's
+                            // input router emits exactly one event per physical
+                            // release, and a second press within 300 ticks of
+                            // the last tap at the same spot is classified
+                            // `DoubleTap` (kind 2) instead of a second `Tap`
+                            // (kind 1). The first of the two presses was already
+                            // delivered as kind 1, so answering kind 2 as a tap
+                            // is what makes a fast repeat of the same PIN digit
+                            // -- "11", "00" -- two digits instead of one.
+                            if std::input_event_is_tap(input.kind) {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
                                 let mut digit = 0u8;
@@ -3997,7 +4006,7 @@ pub extern "C" fn _start() -> ! {
                             }
 
                             // 2. Tap gestures
-                            if input.kind == 1 {
+                            if std::input_event_is_tap(input.kind) {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
@@ -4187,7 +4196,7 @@ pub extern "C" fn _start() -> ! {
                             // this input path can drive honestly; the level is
                             // stepped by two squares instead, and every inert row
                             // still answers `NoOp` so the shade stays open.
-                            if input.kind == 1 || input.kind == 2 {
+                            if std::input_event_is_tap(input.kind) {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
@@ -4313,7 +4322,7 @@ pub extern "C" fn _start() -> ! {
                             //    dropped every such keystroke: two presses must
                             //    be two digits. Distinct keys are 140+ px apart,
                             //    far outside TAP_SLOP, so they stay Taps.
-                            if input.kind == 1 || input.kind == 2 {
+                            if std::input_event_is_tap(input.kind) {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
@@ -4704,7 +4713,7 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             // Touch tap
-                            if input.kind == 1 {
+                            if std::input_event_is_tap(input.kind) {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
@@ -4895,7 +4904,7 @@ pub extern "C" fn _start() -> ! {
                             // band that claims no control still falls through to the
                             // dismiss rule below, because that rule is the drawer's own
                             // "nothing here" answer and not the bar's box.
-                            if input.kind == 1
+                            if std::input_event_is_tap(input.kind)
                                 && nav_panel_tap(
                                     surface,
                                     &mut state,
@@ -4907,7 +4916,7 @@ pub extern "C" fn _start() -> ! {
                                 break;
                             }
                             // 2. Launch the real package represented by the tapped registry cell.
-                            if input.kind == 1 {
+                            if std::input_event_is_tap(input.kind) {
                                 let _x = input.x as usize;
                                 let y = input.y as usize;
                                 if let Some(tab) = screens::app_drawer::app_drawer_chip_at(input.x as usize, input.y as usize) {
@@ -5026,7 +5035,7 @@ pub extern "C" fn _start() -> ! {
                             // still returns from anywhere; only the rows and columns
                             // that count as a home tap moved.
                             if (is_drag(input.kind) && input.dy <= -60)
-                                || (input.kind == 1
+                                || (std::input_event_is_tap(input.kind)
                                     && home_band::contains(
                                         input.x as usize,
                                         input.y as usize,
@@ -5046,7 +5055,7 @@ pub extern "C" fn _start() -> ! {
                                 while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
                             }
-                            if input.kind == 1 {
+                            if std::input_event_is_tap(input.kind) {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
                                 // WHY exactly the drawn pill: the old bands
@@ -5149,7 +5158,7 @@ pub extern "C" fn _start() -> ! {
                             // (240 x 48, rows 1392..=1439). Returning home is
                             // unchanged; the swipe right still works from anywhere.
                             if (is_drag(input.kind) && input.dx >= 60)
-                                || (input.kind == 1
+                                || (std::input_event_is_tap(input.kind)
                                     && home_band::contains(
                                         input.x as usize,
                                         input.y as usize,
@@ -5169,7 +5178,7 @@ pub extern "C" fn _start() -> ! {
                                 while std::input_event_poll(&mut drain).is_ok() {}
                                 break;
                             }
-                            if input.kind == 1 {
+                            if std::input_event_is_tap(input.kind) {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 
@@ -5324,7 +5333,7 @@ pub extern "C" fn _start() -> ! {
                             // says is a result that lies, and the whole point
                             // of this search is that every row names a
                             // destination that exists.
-                            if input.kind == 1 {
+                            if std::input_event_is_tap(input.kind) {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
                                 if let Some(mode) = screens::search::command_chip_at(x, y) {
@@ -5606,7 +5615,7 @@ pub extern "C" fn _start() -> ! {
                             }
 
                             // 2. Touch Tap
-                            if input.kind == 1 {
+                            if std::input_event_is_tap(input.kind) {
                                 let x = input.x as usize;
                                 let y = input.y as usize;
 

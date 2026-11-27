@@ -3960,7 +3960,14 @@ pub extern "C" fn _start() {
                             std::log("[CALENDAR APP] Navigation gesture recognized. Exiting to launcher.").ok();
                             exit_to_launcher(surface);
                         }
-                        if input.kind == 1 {
+                        // WHY the double tap answers as a tap: the kernel's
+                        // gesture router emits one event per physical release
+                        // and classifies the second of two quick presses at the
+                        // same spot as a double tap. Answering only the plain
+                        // tap dropped the second of two identical letters in
+                        // the title field, so "ACCEPTANCE" was stored with one
+                        // of its doubled letters missing.
+                        if std::input_event_is_tap(input.kind) {
                             match handle_tap(&mut calendar, input.x as usize, input.y as usize) {
                                 Tap::Leave(msg) => {
                                     std::log(msg).ok();

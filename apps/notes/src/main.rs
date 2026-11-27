@@ -3237,7 +3237,16 @@ pub extern "C" fn _start() -> ! {
                     std::exit_with_code(0);
                 }
 
-                if input.kind == 1 {
+                // WHY the double tap answers as a tap, and why the branch that
+                // used to answer kind 2 as a drag is gone: the kernel emits one
+                // event per physical release, and a second press within the
+                // double-tap window at the same spot is classified kind 2 --
+                // a double tap, not a drag. The drag is kind 4, and the list
+                // scroll already answers kind 4 and kind 10 above. So kind 2
+                // was never a scroll: it was the second of two quick presses
+                // on the same control, and the old branch swallowed it and
+                // scrolled the list by a delta the event never carried.
+                if std::input_event_is_tap(input.kind) {
                     // Touch tap event
                     match handle_tap(&mut state, input.x as usize, input.y as usize) {
                         TapAction::Exit => {
@@ -3246,12 +3255,6 @@ pub extern "C" fn _start() -> ! {
                         }
                         TapAction::Redraw => needs_redraw = true,
                         TapAction::None => {}
-                    }
-                } else if input.kind == 2 {
-                    // Touch drag / kinetic scroll event
-                    if state.view == ViewMode::List && !state.keyboard_visible {
-                        state.list_scroll.apply_drag(input.dy);
-                        needs_redraw = true;
                     }
                 }
             }

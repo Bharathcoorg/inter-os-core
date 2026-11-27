@@ -2364,7 +2364,11 @@ pub extern "C" fn _start() -> ! {
                         std::log("[CAMERA APP] Navigation gesture recognized. Returning to launcher.").ok();
                         exit_to_launcher(surface);
                     }
-                    if input.kind == 1 {
+                    // WHY the double tap answers as a tap: the kernel emits one
+                    // event per physical release and labels the second of two
+                    // quick presses at the same spot a double tap, so an app
+                    // that answers only the plain tap loses the second press.
+                    if std::input_event_is_tap(input.kind) {
                         match handle_camera_touch(&mut camera, input.x, input.y, &mut sheet_page) {
                             Tap::Leave(msg) => {
                                 std::log(msg).ok();

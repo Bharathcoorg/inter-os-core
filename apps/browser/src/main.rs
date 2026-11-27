@@ -12984,7 +12984,12 @@ pub extern "C" fn _start() -> ! {
                         // pan gesture reports. Negating it made the page travel
                         // against the finger, and against the top stop it simply
                         // refused to move.
-                        if (input.kind == 2 || input.kind == 4 || input.kind == 10) && browser.status == PageStatus::Loaded {
+                        // WHY kind 2 is not in this guard: the kernel emits one
+                        // event per physical release, and kind 2 is the second
+                        // of two quick presses at the same spot -- a double tap,
+                        // not a drag. The drags are kind 4 and kind 10. Listing
+                        // kind 2 here claimed a scroll the event never carried.
+                        if (input.kind == 4 || input.kind == 10) && browser.status == PageStatus::Loaded {
                             if input.dy != 0 {
                                 browser.scroll.apply_drag(input.dy);
                                 dirty = Dirty::All;
@@ -12995,7 +13000,11 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
                         }
-                        if input.kind == 1 {
+                        // WHY the double tap answers as a tap: the second of two
+                        // quick presses on the same spot arrives as kind 2, and
+                        // the browser's controls -- back, forward, reload, the
+                        // omnibox -- have no double-tap meaning of their own.
+                        if std::input_event_is_tap(input.kind) {
                             browser.scroll.stop_fling();
                             match handle_tap(&mut browser, input.x, input.y) {
                                 Tap::Leave(msg) => {

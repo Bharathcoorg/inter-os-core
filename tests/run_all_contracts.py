@@ -107,6 +107,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_inference_service_truth_contract.py": 66,
     "tests/test_input_contract.py": 7,
     "tests/test_input_coordinate_contract.py": 26,
+    "tests/test_input_double_tap_contract.py": 5,
     "tests/test_kernel_test_diagnostics.py": 16,
     "tests/test_keystore_domain_authorization.py": 7,
     "tests/test_keystore_package_isolation.py": 3,

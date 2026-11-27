@@ -43,13 +43,15 @@ pub const CARD_W: usize = PANEL_W - 2 * SIDE_GUTTER;
 
 /// The two states a chrome control of this app is honestly in.
 ///
-/// WHY only two: the kernel hands this app one tap event (`input.kind == 1`),
-/// never a press-down and a release, so there is no moment at which a control
-/// *is* pressed for the app to draw. What the app does know is which panel a
-/// tile opened: the tile whose sheet is on the screen is the current one, and
-/// a control that says "the panel under me is open" is reporting a state it
-/// actually holds. A resting/pressed highlight that no event could ever set is
-/// a state the app does not have, and would be a lie.
+/// WHY only two: the kernel hands this app one tap event per physical
+/// release (`input.kind == 1`, or kind 2 when the same spot is pressed twice
+/// in quick succession), never a press-down and a release, so there is no
+/// moment at which a control *is* pressed for the app to draw. What the app
+/// does know is which panel a tile opened: the tile whose sheet is on the
+/// screen is the current one, and a control that says "the panel under me is
+/// open" is reporting a state it actually holds. A resting/pressed highlight
+/// that no event could ever set is a state the app does not have, and would be
+/// a lie.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ChromeState {
     /// On the bar, doing nothing but waiting.

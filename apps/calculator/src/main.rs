@@ -2348,7 +2348,7 @@ pub extern "C" fn _start() -> ! {
                     }
                     std::exit_with_code(0);
                 }
-                if input.kind == 1 || input.kind == 2 {
+                if std::input_event_is_tap(input.kind) {
                     // WHY the gesture is ignored when the contact already
                     // answered: the contact that landed on the key is the
                     // same touch, and answering it twice would type two

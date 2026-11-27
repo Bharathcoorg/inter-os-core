@@ -2546,6 +2546,31 @@ pub struct InputEvent {
 /// Kind value used by the kernel's normalized input pipeline for keyboard events.
 pub const INPUT_EVENT_KIND_KEY: u8 = 11;
 
+/// Kind value used by the kernel's normalized input pipeline for a tap.
+pub const INPUT_EVENT_KIND_TAP: u8 = 1;
+
+/// Kind value used by the kernel's normalized input pipeline for a double tap.
+pub const INPUT_EVENT_KIND_DOUBLE_TAP: u8 = 2;
+
+/// Whether an input event kind is a press this app should answer as a tap.
+///
+/// WHY the double tap counts as a tap: the kernel's gesture router emits
+/// exactly one event per physical release, and a second press within the
+/// double-tap window at the same spot is classified `DoubleTap` (kind 2)
+/// instead of a second `Tap` (kind 1). An app that answers only kind 1
+/// therefore loses the second of two quick presses on the same control -- a
+/// repeated letter in an on-screen keyboard, a repeated PIN digit, a repeated
+/// button press. The first of the two presses was already delivered as kind
+/// 1, so answering kind 2 as a tap is what makes two presses two presses.
+///
+/// WHY this is not a "double tap" action: no platform control in this
+/// repository is drawn as a double-tap target, so a second press on the same
+/// spot is the same press repeated, not a different gesture.
+#[inline]
+pub const fn input_event_is_tap(kind: u8) -> bool {
+    kind == INPUT_EVENT_KIND_TAP || kind == INPUT_EVENT_KIND_DOUBLE_TAP
+}
+
 /// Resolves a capability slot by the capability's type.
 ///
 /// WHY this exists: a slot number is a position in a table, and the

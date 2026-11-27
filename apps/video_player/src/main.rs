@@ -5013,11 +5013,14 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
 
-                        // Touch tap (kind 1) or drag (kind 2)
-                        let in_seek = app.duration_sec > 0
-                            && SEEK_HIT.contains(input.x as usize, input.y as usize);
-                        let in_vol = VOL_HIT.contains(input.x as usize, input.y as usize);
-                        if input.kind == 1 || (input.kind == 2 && (in_seek || in_vol)) {
+                        // WHY the double tap answers as a tap: the kernel emits
+                        // one event per physical release, and kind 2 is the
+                        // second of two quick presses at the same spot -- not a
+                        // drag. The old guard read kind 2 as a drag and let it
+                        // through only over the scrubber and the volume bar,
+                        // so the second press on every other control was
+                        // dropped. Two presses are two presses here.
+                        if std::input_event_is_tap(input.kind) {
                             match handle_touch(&mut app, input.x, input.y) {
                                 EventAction::Exit(msg) => {
                                     std::log(msg).ok();

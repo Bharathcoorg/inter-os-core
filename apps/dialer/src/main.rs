@@ -6732,7 +6732,7 @@ pub extern "C" fn _start() -> ! {
                     // and the backspace disc have no double-tap action, so
                     // ignoring it silently lost a digit: typing three digits
                     // and tapping backspace three times deleted only two.
-                    if input.kind == 1 || input.kind == 2 {
+                    if std::input_event_is_tap(input.kind) {
                         match handle_tap(&mut dialer, input.x, input.y) {
                             Tap::Leave(msg) => {
                                 std::log(msg).ok();
