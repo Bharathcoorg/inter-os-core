@@ -1914,6 +1914,36 @@ mod tests {
         assert!(!backend.is_session_active(session));
     }
 
+    #[test]
+    fn ledger_capacity_recovers_after_destroy_and_repeated_failures() {
+        // A fresh ledger admits up to MAX_SESSIONS; the next is SessionCapacity.
+        let mut ledger = BrokerLedger::new(1 << 30, 1 << 30, 0);
+        let est = ResourceEstimate {
+            kv_cache: 1024,
+            activations: 1024,
+            scratch: 1024,
+            ..ResourceEstimate::ZERO
+        };
+        let mut ids = alloc::vec::Vec::new();
+        for owner in 0..(MAX_SESSIONS as u64) {
+            ids.push(ledger.create_session(owner, 1, est).expect("session within capacity"));
+        }
+        // Capacity is enforced, and the failed create does not consume a slot.
+        assert_eq!(
+            ledger.create_session(999, 1, est),
+            Err(AdmissionError::SessionCapacity)
+        );
+        // Destroying one session frees capacity for a new one (recovery).
+        ledger.destroy_session(0, ids[0]).expect("destroy");
+        let recovered = ledger.create_session(1000, 1, est).expect("capacity recovered");
+        // Repeated failed creates keep failing cleanly without leaking capacity.
+        for _ in 0..3 {
+            assert_eq!(ledger.create_session(1001, 1, est), Err(AdmissionError::SessionCapacity));
+        }
+        // The recovered session is still live and distinct.
+        assert!(ledger.destroy_session(1000, recovered).is_ok());
+    }
+
     const MANIFEST: &[u8] = b"\
 id=org.interos.test-embed\n\
 name=Test embedding model\n\

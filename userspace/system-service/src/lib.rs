@@ -4694,6 +4694,32 @@ fn run_installed_generation(
         }
     };
 
+    // Reclaim the broker-ledger session on EVERY exit from here on, including
+    // the head/stat/provisioned/changed refusals below. Constructing the guard
+    // immediately after the reservation is what makes a failed admission
+    // release its reservation instead of leaking it.
+    struct SessionGuard {
+        owner: u64,
+        ledger_session_id: u64,
+        backend_session_id: Option<u64>,
+    }
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            with_broker_ledger(|ledger| {
+                let _ = ledger.destroy_session(self.owner, self.ledger_session_id);
+            });
+            if let Some(bsid) = self.backend_session_id {
+                let mut backend = NATIVE_GGUF_BACKEND.lock();
+                let _ = backend.destroy_session(bsid);
+            }
+        }
+    }
+    let mut session_guard = SessionGuard {
+        owner: sender_task_id,
+        ledger_session_id,
+        backend_session_id: None,
+    };
+
     // A generative model must hold an output head before it is admitted. Refuse
     // here, before any model slot or session is created, so a headless GGUF is
     // never loaded as an active generative model.
@@ -4826,27 +4852,7 @@ fn run_installed_generation(
         }
     };
 
-    struct SessionGuard {
-        owner: u64,
-        ledger_session_id: u64,
-        backend_session_id: Option<u64>,
-    }
-    impl Drop for SessionGuard {
-        fn drop(&mut self) {
-            with_broker_ledger(|ledger| {
-                let _ = ledger.destroy_session(self.owner, self.ledger_session_id);
-            });
-            if let Some(bsid) = self.backend_session_id {
-                let mut backend = NATIVE_GGUF_BACKEND.lock();
-                let _ = backend.destroy_session(bsid);
-            }
-        }
-    }
-    let _session_guard = SessionGuard {
-        owner: sender_task_id,
-        ledger_session_id,
-        backend_session_id,
-    };
+    session_guard.backend_session_id = backend_session_id;
 
     let prompt_text = extract_prompt_text(payload);
     if prompt_text.is_empty() {
