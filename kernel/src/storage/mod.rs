@@ -24,7 +24,8 @@ pub use persistent::{MAX_PERSISTENT_STORAGE_BYTES, MAX_PERSISTENT_STORAGE_SECTOR
 pub use verified::{
     AuthenticatedBlockReader, MerkleVerifier, ProtectedSystemImage, StorageError,
     SystemImageGeometry, VerifiedBlock, MAX_MERKLE_PROOF_DEPTH, VERIFIED_BLOCK_SIZE,
-    provision_root, provisioned_root, verify_protected_read,
+    provision_root_from_boot, provisioned_root, verify_protected_metadata,
+    verify_protected_read, BootAttestation,
 };
 pub use crashdump::{CrashDumpHeader, CrashDumpManager, CRASH_DUMP, CRASH_DUMP_MAGIC};
 pub use vault::{StorageVault, VaultBlock, VaultError, STORAGE_VAULT, VAULT_SECTOR_SIZE};

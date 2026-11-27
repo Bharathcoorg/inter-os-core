@@ -498,7 +498,27 @@ fn protected_read_check(inode: &Inode, data: &[u8]) -> Result<(), FsError> {
     if inode.file_type == FileType::ReadOnlySystem
         && crate::storage::verified::provisioned_root().is_some()
     {
-        crate::storage::verified::verify_protected_read(&inode.sha256_digest, data)
+        crate::storage::verified::verify_protected_read(&inode.path, &inode.sha256_digest, data)
+            .map_err(|_| FsError::IntegrityViolation)?;
+    }
+    Ok(())
+}
+
+/// Metadata half of the protected-read gate, run *before* any block-backed or
+/// streaming early return so unauthenticated bytes can never be streamed.
+///
+/// A `ReadOnlySystem` inode that is device-held cannot be attested from an
+/// in-memory slice, so once a root is provisioned it fails closed; an in-memory
+/// `ReadOnlySystem` inode must have its digest attested by the signed manifest.
+/// Mutable user data is unaffected.
+fn protected_read_gate(inode: &Inode) -> Result<(), FsError> {
+    if inode.file_type == FileType::ReadOnlySystem
+        && crate::storage::verified::provisioned_root().is_some()
+    {
+        if inode.block_backed {
+            return Err(FsError::IntegrityViolation);
+        }
+        crate::storage::verified::verify_protected_metadata(&inode.path, &inode.sha256_digest)
             .map_err(|_| FsError::IntegrityViolation)?;
     }
     Ok(())
@@ -892,15 +912,8 @@ impl Vfs {
     pub fn read_file_range(&self, path: &str, offset: usize, out: &mut [u8]) -> Result<usize, FsError> {
         let inode_id = self.path_to_inode.get(path).copied().ok_or(FsError::FileNotFound)?;
         let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        protected_read_gate(inode)?;
         if inode.block_backed {
-            // A protected, block-backed read cannot be attested from an in-memory
-            // slice; once a root is provisioned it must fail closed rather than
-            // stream unauthenticated bytes.
-            if inode.file_type == FileType::ReadOnlySystem
-                && crate::storage::verified::provisioned_root().is_some()
-            {
-                return Err(FsError::IntegrityViolation);
-            }
             let name = spill_path_for(&inode.path);
             let size = inode.size;
             return self.stream_read(&name, offset, size, out);
@@ -916,12 +929,8 @@ impl Vfs {
     pub fn read_file_by_path(&self, path: &str, out: &mut [u8]) -> Result<usize, FsError> {
         let inode_id = self.path_to_inode.get(path).copied().ok_or(FsError::FileNotFound)?;
         let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        protected_read_gate(inode)?;
         if inode.block_backed {
-            if inode.file_type == FileType::ReadOnlySystem
-                && crate::storage::verified::provisioned_root().is_some()
-            {
-                return Err(FsError::IntegrityViolation);
-            }
             let name = spill_path_for(&inode.path);
             let size = inode.size;
             return self.stream_read(&name, 0, size, out);
@@ -2081,10 +2090,11 @@ impl Vfs {
                 return Err(no_filesystem_authority(task_caps));
             }
             let inode_id = self.lookup(path).ok_or(FsError::FileNotFound)?;
-            let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        let inode = self.inodes.get(&inode_id).ok_or(FsError::FileNotFound)?;
+        protected_read_gate(inode)?;
 
-            if inode.file_type == FileType::Directory {
-                return Err(FsError::IsADirectory);
+        if inode.file_type == FileType::Directory {
+            return Err(FsError::IsADirectory);
             }
 
             // M9: a read is refused when the node's mode grants the caller no
@@ -2345,6 +2355,7 @@ pub fn read_file_for_task(
 
         let offset = at.unwrap_or(handle.offset);
         let inode = self.inodes.get(&handle.inode_id).ok_or(FsError::FileNotFound)?;
+        protected_read_gate(inode)?;
 
         if inode.file_type == FileType::DeviceNode {
             // WHY a positioned read is refused here instead of quietly falling

@@ -10,6 +10,7 @@
 use crate::crypto::{Sha256, SHA256_DIGEST_LENGTH};
 use crate::drivers::SECTOR_SIZE;
 use crate::storage::block::BlockDevice;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 /// Verified block size in bytes (matches standard hardware sector size).
@@ -119,22 +120,63 @@ impl MerkleVerifier {
 }
 
 /// The provisioned system-image Merkle root, or `None` until the boot path
-/// measures the system partition and installs it. Protected reads fail closed
-/// while it is `None`; the platform reports integrity as NOT IMPLEMENTED rather
-/// than fabricating a root.
+/// installs it from authorized boot metadata. Protected reads fail closed while
+/// it is `None`; the platform reports integrity as NOT IMPLEMENTED rather than
+/// fabricating a root.
 static PROVISIONED_ROOT: Mutex<Option<[u8; SHA256_DIGEST_LENGTH]>> = Mutex::new(None);
 
-/// Installs the trusted system-image Merkle root. Idempotent for the same root;
-/// refuses to silently replace a different root (anti-rollback); rejects the
-/// all-zero (unauthenticated) root.
-pub fn provision_root(root: &[u8; SHA256_DIGEST_LENGTH]) -> Result<(), StorageError> {
+/// The authenticated metadata manifest installed with the root: the set of
+/// `(name, sha256)` pairs the root commits to. A `ReadOnlySystem` inode is
+/// trusted only when its own digest appears here under the provisioned root, so
+/// an attacker who can write the inode tree cannot substitute a digest the root
+/// never attested.
+static PROVISIONED_MANIFEST: Mutex<Option<Vec<(alloc::string::String, [u8; SHA256_DIGEST_LENGTH])>>> =
+    Mutex::new(None);
+
+/// Boot metadata that authorizes a system-image root. A root is trustworthy only
+/// when it is the digest of a manifest the firmware/build measured, not the first
+/// nonzero value a caller passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootAttestation {
+    pub boot_manifest_digest: [u8; SHA256_DIGEST_LENGTH],
+}
+
+/// Recomputes the build-time manifest digest from `entries` as `build.rs` does:
+/// SHA-256 over each `name || digest`, in order.
+fn manifest_digest(entries: &[(&str, [u8; SHA256_DIGEST_LENGTH])]) -> [u8; SHA256_DIGEST_LENGTH] {
+    let mut buf = Vec::new();
+    for (name, digest) in entries {
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(digest);
+    }
+    Sha256::digest(&buf)
+}
+
+/// Installs the trusted system-image root and its authenticated metadata manifest
+/// from authorized boot metadata. The root is accepted only when it equals the
+/// boot-attested manifest digest AND the supplied entries recompute to that
+/// digest; a caller cannot install an arbitrary nonzero root.
+pub fn provision_root_from_boot(
+    attestation: &BootAttestation,
+    root: &[u8; SHA256_DIGEST_LENGTH],
+    entries: &[(&str, [u8; SHA256_DIGEST_LENGTH])],
+) -> Result<(), StorageError> {
     if root == &[0u8; SHA256_DIGEST_LENGTH] {
         return Err(StorageError::UnauthenticatedRoot);
     }
+    if root != &attestation.boot_manifest_digest {
+        return Err(StorageError::UnauthenticatedRoot);
+    }
+    if &manifest_digest(entries) != root {
+        return Err(StorageError::UnauthenticatedRoot);
+    }
+    let owned: Vec<(alloc::string::String, [u8; SHA256_DIGEST_LENGTH])> =
+        entries.iter().map(|(n, d)| (alloc::string::String::from(*n), *d)).collect();
     let mut slot = PROVISIONED_ROOT.lock();
     match *slot {
         None => {
             *slot = Some(*root);
+            *PROVISIONED_MANIFEST.lock() = Some(owned);
             Ok(())
         }
         Some(existing) if &existing == root => Ok(()),
@@ -147,20 +189,40 @@ pub fn provisioned_root() -> Option<[u8; SHA256_DIGEST_LENGTH]> {
     *PROVISIONED_ROOT.lock()
 }
 
-/// Re-verifies a protected read against the provisioned root. Fails closed with
-/// `UnauthenticatedRoot` when no root is provisioned, and `IntegrityViolation`
-// when the data does not match the recorded digest under the anchored root.
+/// Re-verifies protected metadata: the root must be provisioned and the
+/// `(path, recorded_digest)` pair must be attested by the signed manifest.
+pub fn verify_protected_metadata(
+    path: &str,
+    recorded_digest: &[u8; SHA256_DIGEST_LENGTH],
+) -> Result<(), StorageError> {
+    provisioned_root().ok_or(StorageError::UnauthenticatedRoot)?;
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let manifest = PROVISIONED_MANIFEST.lock();
+    let attested = manifest
+        .as_ref()
+        .map(|entries| entries.iter().any(|(n, d)| n.as_str() == name && d == recorded_digest))
+        .unwrap_or(false);
+    if attested { Ok(()) } else { Err(StorageError::IntegrityViolation) }
+}
+
+/// Re-verifies a protected read against the provisioned root and its
+/// authenticated metadata manifest. Fails closed with `UnauthenticatedRoot` when
+/// no root is provisioned, `IntegrityViolation` when the inode's digest is not
+/// attested by the manifest, and `IntegrityViolation` when the data does not
+/// match the recorded digest.
 pub fn verify_protected_read(
+    path: &str,
     recorded_digest: &[u8; SHA256_DIGEST_LENGTH],
     data: &[u8],
 ) -> Result<(), StorageError> {
-    let _root = provisioned_root().ok_or(StorageError::UnauthenticatedRoot)?;
+    verify_protected_metadata(path, recorded_digest)?;
     MerkleVerifier::verify_block(data, recorded_digest)
 }
 
 #[cfg(test)]
 pub(crate) fn reset_root_for_test() {
     *PROVISIONED_ROOT.lock() = None;
+    *PROVISIONED_MANIFEST.lock() = None;
 }
 
 /// An authenticated block reader connecting physical or virtual block storage
@@ -594,24 +656,37 @@ mod tests {
     }
 
     #[test]
-    fn provisioned_root_gates_protected_reads() {
+    fn protected_read_requires_authenticated_metadata() {
         reset_root_for_test();
         let data = b"protected system image block";
         let digest = Sha256::digest(data);
-        // No root provisioned: protected read fails closed.
-        assert_eq!(verify_protected_read(&digest, data), Err(StorageError::UnauthenticatedRoot));
-        // Provision the root and the read succeeds.
-        assert_eq!(provision_root(&digest), Ok(()));
-        assert_eq!(verify_protected_read(&digest, data), Ok(()));
-        // Tampered data is rejected.
-        assert_eq!(verify_protected_read(&digest, b"protected system image blocK"), Err(StorageError::IntegrityViolation));
-        // Re-provisioning the same root is idempotent; a different root is refused.
-        assert_eq!(provision_root(&digest), Ok(()));
-        let other = Sha256::digest(b"a different image");
-        assert_eq!(provision_root(&other), Err(StorageError::UnauthenticatedRoot));
-        // The all-zero root is rejected as unauthenticated.
+        let entries = [("init", digest)];
+        let root = manifest_digest(&entries);
+        let att = BootAttestation { boot_manifest_digest: root };
+
+        // No root: protected read fails closed (inert NOT IMPLEMENTED).
+        assert_eq!(verify_protected_read("init", &digest, data), Err(StorageError::UnauthenticatedRoot));
+
+        // A root that is not the boot-attested manifest digest is refused.
+        let bogus = Sha256::digest(b"attacker-chosen root");
+        assert_eq!(provision_root_from_boot(&att, &bogus, &entries), Err(StorageError::UnauthenticatedRoot));
+        // Entries that do not recompute to the attested root are refused.
+        let other = [("init", Sha256::digest(b"other"))];
+        assert_eq!(provision_root_from_boot(&att, &root, &other), Err(StorageError::UnauthenticatedRoot));
+
+        // Authorized provisioning arms the chain.
+        assert_eq!(provision_root_from_boot(&att, &root, &entries), Ok(()));
+        assert_eq!(verify_protected_read("init", &digest, data), Ok(()));
+        // A path the manifest does not attest fails closed.
+        assert_eq!(verify_protected_read("etc/policy.json", &digest, data), Err(StorageError::IntegrityViolation));
+        // A digest the manifest does not attest fails closed.
+        let rogue = Sha256::digest(b"rogue");
+        assert_eq!(verify_protected_read("init", &rogue, b"rogue"), Err(StorageError::IntegrityViolation));
+        // Tampered data under an attested digest fails closed.
+        assert_eq!(verify_protected_read("init", &digest, b"protected system image blocK"), Err(StorageError::IntegrityViolation));
+
+        // Anti-rollback: a different root is refused.
         reset_root_for_test();
-        assert_eq!(provision_root(&[0u8; SHA256_DIGEST_LENGTH]), Err(StorageError::UnauthenticatedRoot));
         assert!(provisioned_root().is_none());
     }
 }
