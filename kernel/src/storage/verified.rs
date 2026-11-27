@@ -24,6 +24,8 @@ pub enum StorageError {
     BlockOutOfRange,
     DeviceError,
     TamperedData,
+    GeometryMismatch,
+    UnauthenticatedRoot,
 }
 
 /// Cryptographically attested block descriptor.
@@ -178,12 +180,152 @@ impl<D: BlockDevice> AuthenticatedBlockReader<D> {
     }
 }
 
+/// Layout and cryptographic proof geometry for a protected system image partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemImageGeometry {
+    pub start_lba: u32,
+    pub block_count: usize,
+    pub block_size: usize,
+    pub tree_depth: usize,
+}
+
+impl SystemImageGeometry {
+    /// Computes the exact tree depth required for `block_count` leaves.
+    pub const fn compute_depth(block_count: usize) -> usize {
+        if block_count <= 1 {
+            return 0;
+        }
+        let mut depth = 0;
+        let mut count = block_count - 1;
+        while count > 0 {
+            count >>= 1;
+            depth += 1;
+        }
+        depth
+    }
+
+    /// Creates and validates system image partition geometry.
+    pub fn new(start_lba: u32, block_count: usize) -> Result<Self, StorageError> {
+        if block_count == 0 {
+            return Err(StorageError::BlockOutOfRange);
+        }
+        let depth = Self::compute_depth(block_count);
+        if depth > MAX_MERKLE_PROOF_DEPTH {
+            return Err(StorageError::BlockOutOfRange);
+        }
+        Ok(Self {
+            start_lba,
+            block_count,
+            block_size: VERIFIED_BLOCK_SIZE,
+            tree_depth: depth,
+        })
+    }
+}
+
+/// A protected system image reader that enforces fail-closed cryptographic Merkle verification
+/// on every block read from the system partition.
+///
+/// Protected reads cannot bypass verification: any attempt to read from this partition
+/// requires a cryptographically valid branch proof leading to the authenticated Merkle root.
+pub struct ProtectedSystemImage<D> {
+    device: D,
+    geometry: SystemImageGeometry,
+    verifier: MerkleVerifier,
+}
+
+impl<D> ProtectedSystemImage<D> {
+    /// Anchors the protected system image with an authenticated root and partition geometry.
+    pub fn new(
+        device: D,
+        geometry: SystemImageGeometry,
+        root_digest: [u8; SHA256_DIGEST_LENGTH],
+    ) -> Result<Self, StorageError> {
+        if root_digest == [0u8; SHA256_DIGEST_LENGTH] {
+            return Err(StorageError::UnauthenticatedRoot);
+        }
+        Ok(Self {
+            device,
+            geometry,
+            verifier: MerkleVerifier::new(root_digest),
+        })
+    }
+
+    pub fn geometry(&self) -> &SystemImageGeometry {
+        &self.geometry
+    }
+
+    pub fn root_digest(&self) -> &[u8; SHA256_DIGEST_LENGTH] {
+        self.verifier.root_digest()
+    }
+
+    pub fn device(&self) -> &D {
+        &self.device
+    }
+
+    pub fn device_mut(&mut self) -> &mut D {
+        &mut self.device
+    }
+}
+
+impl<D: BlockDevice> ProtectedSystemImage<D> {
+    /// Reads and cryptographically authenticates a block from the protected system partition.
+    ///
+    /// Fails closed: if boundary check, proof geometry, device I/O, or SHA-256 branch proof fails,
+    /// `out` is zeroized and the error is returned immediately. Unauthenticated data is never leaked.
+    pub fn read_protected_block(
+        &mut self,
+        relative_lba: usize,
+        proof: &[[u8; SHA256_DIGEST_LENGTH]],
+        out: &mut [u8; VERIFIED_BLOCK_SIZE],
+    ) -> Result<(), StorageError> {
+        // 1. Boundary check: ensure read is strictly within partition geometry
+        if relative_lba >= self.geometry.block_count {
+            out.fill(0);
+            return Err(StorageError::BlockOutOfRange);
+        }
+
+        // 2. Exact proof geometry check
+        if proof.len() != self.geometry.tree_depth {
+            out.fill(0);
+            return Err(StorageError::GeometryMismatch);
+        }
+
+        // 3. Compute absolute LBA on hardware storage device
+        let physical_lba = self.geometry.start_lba
+            .checked_add(relative_lba as u32)
+            .ok_or_else(|| {
+                out.fill(0);
+                StorageError::BlockOutOfRange
+            })?;
+
+        // 4. Read raw sector from hardware storage device into private buffer
+        let mut temp_buf = [0u8; VERIFIED_BLOCK_SIZE];
+        if self.device.read_sector(physical_lba, &mut temp_buf).is_err() {
+            out.fill(0);
+            return Err(StorageError::DeviceError);
+        }
+
+        // 5. Cryptographic Merkle branch verification against authenticated root
+        match self.verifier.verify_branch_proof(&temp_buf, relative_lba, proof) {
+            Ok(()) => {
+                out.copy_from_slice(&temp_buf);
+                Ok(())
+            }
+            Err(e) => {
+                out.fill(0);
+                Err(e)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::block::BlockDeviceError;
 
     struct MockBlockDevice {
+        start_lba: u32,
         blocks: [[u8; VERIFIED_BLOCK_SIZE]; 4],
         fail_reads: bool,
     }
@@ -193,12 +335,14 @@ mod tests {
             if self.fail_reads {
                 return Err(BlockDeviceError::ReadError);
             }
-            if (lba as usize) < self.blocks.len() {
-                buf.copy_from_slice(&self.blocks[lba as usize]);
-                Ok(())
-            } else {
-                Err(BlockDeviceError::LbaOutOfRange)
+            if lba >= self.start_lba {
+                let idx = (lba - self.start_lba) as usize;
+                if idx < self.blocks.len() {
+                    buf.copy_from_slice(&self.blocks[idx]);
+                    return Ok(());
+                }
             }
+            Err(BlockDeviceError::LbaOutOfRange)
         }
 
         fn write_sector(&mut self, _lba: u32, _buf: &[u8; SECTOR_SIZE]) -> Result<(), BlockDeviceError> {
@@ -206,7 +350,7 @@ mod tests {
         }
 
         fn sector_count(&self) -> u32 {
-            self.blocks.len() as u32
+            self.start_lba + self.blocks.len() as u32
         }
 
         fn model(&self) -> &str {
@@ -277,6 +421,7 @@ mod tests {
 
         let verifier = MerkleVerifier::new(root);
         let dev = MockBlockDevice {
+            start_lba: 0,
             blocks: [b0, b1, b2, b3],
             fail_reads: false,
         };
@@ -318,5 +463,87 @@ mod tests {
             reader.read_authenticated_block(2, &[h3, parent0], &mut out),
             Err(StorageError::DeviceError)
         );
+    }
+
+    #[test]
+    fn protected_system_image_fail_closed_and_geometry() {
+        let mut b0 = [0u8; VERIFIED_BLOCK_SIZE];
+        let mut b1 = [0u8; VERIFIED_BLOCK_SIZE];
+        let mut b2 = [0u8; VERIFIED_BLOCK_SIZE];
+        let mut b3 = [0u8; VERIFIED_BLOCK_SIZE];
+
+        b0[0..16].copy_from_slice(b"SystemPartition0");
+        b1[0..16].copy_from_slice(b"SystemPartition1");
+        b2[0..16].copy_from_slice(b"SystemPartition2");
+        b3[0..16].copy_from_slice(b"SystemPartition3");
+
+        let h0 = Sha256::digest(&b0);
+        let h1 = Sha256::digest(&b1);
+        let h2 = Sha256::digest(&b2);
+        let h3 = Sha256::digest(&b3);
+
+        let parent0 = MerkleVerifier::combine_hashes(&h0, &h1);
+        let parent1 = MerkleVerifier::combine_hashes(&h2, &h3);
+        let root = MerkleVerifier::combine_hashes(&parent0, &parent1);
+
+        // Partition offset LBA 2048, 4 blocks
+        let geometry = SystemImageGeometry::new(2048, 4).expect("valid geometry");
+        assert_eq!(geometry.tree_depth, 2);
+        assert_eq!(geometry.start_lba, 2048);
+        assert_eq!(geometry.block_count, 4);
+
+        // Reject all-zero unauthenticated root
+        let zero_root = [0u8; SHA256_DIGEST_LENGTH];
+        let dev0 = MockBlockDevice { start_lba: 2048, blocks: [b0, b1, b2, b3], fail_reads: false };
+        assert_eq!(
+            ProtectedSystemImage::new(dev0, geometry, zero_root).map(|_| ()),
+            Err(StorageError::UnauthenticatedRoot)
+        );
+
+        let dev = MockBlockDevice { start_lba: 2048, blocks: [b0, b1, b2, b3], fail_reads: false };
+        let mut sys_img = ProtectedSystemImage::new(dev, geometry, root).expect("valid image");
+
+        // 1. Valid read of block 0 with exact proof geometry (depth = 2)
+        let mut out = [0u8; VERIFIED_BLOCK_SIZE];
+        assert_eq!(sys_img.read_protected_block(0, &[h1, parent1], &mut out), Ok(()));
+        assert_eq!(&out[0..16], b"SystemPartition0");
+
+        // 2. Valid read of block 3
+        assert_eq!(sys_img.read_protected_block(3, &[h2, parent0], &mut out), Ok(()));
+        assert_eq!(&out[0..16], b"SystemPartition3");
+
+        // 3. Proof geometry mismatch (depth 1 instead of 2) -> fail-closed, output zeroed
+        out.fill(0xAA);
+        assert_eq!(
+            sys_img.read_protected_block(0, &[h1], &mut out),
+            Err(StorageError::GeometryMismatch)
+        );
+        assert_eq!(out, [0u8; VERIFIED_BLOCK_SIZE]);
+
+        // 4. Boundary violation (relative_lba >= block_count) -> fail-closed, output zeroed
+        out.fill(0xAA);
+        assert_eq!(
+            sys_img.read_protected_block(4, &[h1, parent1], &mut out),
+            Err(StorageError::BlockOutOfRange)
+        );
+        assert_eq!(out, [0u8; VERIFIED_BLOCK_SIZE]);
+
+        // 5. Tampered media block on disk -> fail-closed, output zeroed
+        out.fill(0xAA);
+        sys_img.device_mut().blocks[0][0] ^= 0x55;
+        assert_eq!(
+            sys_img.read_protected_block(0, &[h1, parent1], &mut out),
+            Err(StorageError::IntegrityViolation)
+        );
+        assert_eq!(out, [0u8; VERIFIED_BLOCK_SIZE]);
+
+        // 6. Device I/O failure -> fail-closed, output zeroed
+        out.fill(0xAA);
+        sys_img.device_mut().fail_reads = true;
+        assert_eq!(
+            sys_img.read_protected_block(3, &[h2, parent0], &mut out),
+            Err(StorageError::DeviceError)
+        );
+        assert_eq!(out, [0u8; VERIFIED_BLOCK_SIZE]);
     }
 }
