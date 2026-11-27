@@ -3450,6 +3450,24 @@ pub fn provision_installed_model(manifest_text: &[u8]) -> bool {
     }
 }
 
+/// Explicitly grants cryptographic trust to a provisioned model source.
+/// Provisioning a digest does not imply trust; this is the only transition to a
+/// trusted state. Returns whether a provisioned entry exists for `source`.
+pub fn trust_installed_model(source: &str) -> bool {
+    PROVISIONED_MODELS.lock().mark_trusted(source)
+}
+
+/// Revokes cryptographic trust for a model source (returns it to user-imported)
+/// without forgetting its provisioned digest. Returns whether an entry exists.
+pub fn revoke_model_trust(source: &str) -> bool {
+    PROVISIONED_MODELS.lock().revoke(source)
+}
+
+/// Whether a model source is currently cryptographically trusted.
+pub fn is_model_trusted(source: &str) -> bool {
+    PROVISIONED_MODELS.lock().is_trusted(source)
+}
+
 pub fn with_broker_ledger<F, R>(f: F) -> R
 where
     F: FnOnce(&mut backend::BrokerLedger) -> R,

@@ -410,7 +410,22 @@ pub struct ProvisionedModel {
     pub source_len: usize,
     pub sha256: [u8; 32],
     pub artifact_bytes: u64,
+    /// Explicit cryptographic trust state. Provisioning records the digest but
+    /// does NOT imply trust; see [`ProvisionedRegistry::mark_trusted`].
+    pub trust: TrustState,
     pub active: bool,
+}
+
+/// Explicit cryptographic trust state for an installed model.
+///
+/// Provisioning records what a model's bytes must be (digest + size) so a changed
+/// file is detected; it does NOT make the model trusted. Trust is a separate,
+/// explicit, revocable decision, so a provisioned model the user did not
+/// authorize reports [`TrustState::UserImported`], never [`TrustState::Trusted`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrustState {
+    Trusted,
+    UserImported,
 }
 
 impl ProvisionedModel {
@@ -420,6 +435,7 @@ impl ProvisionedModel {
             source_len: 0,
             sha256: [0u8; 32],
             artifact_bytes: 0,
+            trust: TrustState::UserImported,
             active: false,
         }
     }
@@ -452,6 +468,7 @@ impl ProvisionedRegistry {
         {
             slot.sha256 = sha256;
             slot.artifact_bytes = artifact_bytes;
+            slot.trust = TrustState::UserImported;
             return true;
         }
         let slot = self.entries.iter_mut().find(|e| !e.active);
@@ -462,6 +479,7 @@ impl ProvisionedRegistry {
                     source_len: len,
                     sha256,
                     artifact_bytes,
+                    trust: TrustState::UserImported,
                     active: true,
                 };
                 true
@@ -476,6 +494,55 @@ impl ProvisionedRegistry {
             .iter()
             .find(|e| e.active && &e.source[..e.source_len] == source.as_bytes())
             .map(|e| (e.sha256, e.artifact_bytes))
+    }
+
+    /// Explicitly grants cryptographic trust to a provisioned source. The only
+    /// transition to [`TrustState::Trusted`]. Returns whether an entry exists.
+    pub fn mark_trusted(&mut self, source: &str) -> bool {
+        match self
+            .entries
+            .iter_mut()
+            .find(|e| e.active && &e.source[..e.source_len] == source.as_bytes())
+        {
+            Some(slot) => {
+                slot.trust = TrustState::Trusted;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Revokes trust for a source, returning it to [`TrustState::UserImported`]
+    /// without forgetting its provisioned digest (change detection still works).
+    pub fn revoke(&mut self, source: &str) -> bool {
+        match self
+            .entries
+            .iter_mut()
+            .find(|e| e.active && &e.source[..e.source_len] == source.as_bytes())
+        {
+            Some(slot) => {
+                slot.trust = TrustState::UserImported;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the source is currently cryptographically trusted.
+    pub fn is_trusted(&self, source: &str) -> bool {
+        self.entries
+            .iter()
+            .find(|e| e.active && &e.source[..e.source_len] == source.as_bytes())
+            .map(|e| e.trust == TrustState::Trusted)
+            .unwrap_or(false)
+    }
+
+    /// The explicit trust state for a source, if provisioned.
+    pub fn trust_state(&self, source: &str) -> Option<TrustState> {
+        self.entries
+            .iter()
+            .find(|e| e.active && &e.source[..e.source_len] == source.as_bytes())
+            .map(|e| e.trust)
     }
 }
 
@@ -1879,6 +1946,25 @@ mod tests {
         // Re-provisioning the same path replaces the trusted digest.
         assert!(registry.provision("/m.gguf", [3u8; 32], 8192));
         assert_eq!(registry.expected_for("/m.gguf"), Some(([3u8; 32], 8192)));
+    }
+
+    #[test]
+    fn provisioning_does_not_imply_trust_and_revoke_withdraws_it() {
+        let mut registry = ProvisionedRegistry::new();
+        // Provisioning records the digest but must NOT imply trust.
+        assert!(registry.provision("/m.gguf", [9u8; 32], 4096));
+        assert!(!registry.is_trusted("/m.gguf"));
+        assert_eq!(registry.trust_state("/m.gguf"), Some(TrustState::UserImported));
+        // Explicit grant, then revocation (digest retained for change detection).
+        assert!(registry.mark_trusted("/m.gguf"));
+        assert!(registry.is_trusted("/m.gguf"));
+        assert!(registry.revoke("/m.gguf"));
+        assert!(!registry.is_trusted("/m.gguf"));
+        assert_eq!(registry.expected_for("/m.gguf"), Some(([9u8; 32], 4096)));
+        // Unknown sources are never trusted.
+        assert!(!registry.is_trusted("/absent.gguf"));
+        assert!(!registry.revoke("/absent.gguf"));
+        assert_eq!(registry.trust_state("/absent.gguf"), None);
     }
 
     #[test]
