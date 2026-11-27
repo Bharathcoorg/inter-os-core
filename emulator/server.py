@@ -3163,6 +3163,128 @@ def is_safe_proxy_url(url_str):
         return False, f"Invalid URL: {e}"
 
 
+import http.client as _http_client
+
+# SSRF deny set shared by the pinning resolver (mirrors tools/port_web.py): an
+# address is forbidden unless it is public unicast.
+_PROXY_BLOCKED_HOSTNAMES = frozenset({
+    'localhost', 'localhost.localdomain', 'metadata.google.internal',
+    'instance-data', 'instance-data.ec2.internal', '169.254.169.254',
+})
+_PROXY_EXTRA_DENY_NETWORKS = tuple(
+    ipaddress.ip_network(cidr) for cidr in (
+        '0.0.0.0/8', '100.64.0.0/10', '192.0.0.0/24', '192.0.2.0/24',
+        '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24',
+        '240.0.0.0/4', '255.255.255.255/32', '::/128', '64:ff9b::/96',
+        '64:ff9b:1::/48', '2001:db8::/32', '3ffe::/16', '5f00::/16',
+    )
+)
+
+
+def _proxy_address_is_forbidden(ip):
+    mapped = getattr(ip, 'ipv4_mapped', None)
+    if mapped is not None:
+        ip = mapped
+    if (ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
+            or ip.is_multicast or ip.is_unspecified or not ip.is_global):
+        return True
+    return any(ip.version == net.version and ip in net for net in _PROXY_EXTRA_DENY_NETWORKS)
+
+
+def resolve_pinned_proxy_ip(url_str):
+    """Validate an outbound URL and pin the one address it may connect to.
+
+    Returns (safe, reason, pinned_ip). Every resolved address is checked (a
+    hostile server can answer public + private), and the pinned address is what
+    the socket connects to, so a second (rebinding) resolution between this check
+    and the connection cannot move the fetch onto loopback/link-local metadata.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url_str)
+        if parsed.scheme not in ('http', 'https'):
+            return False, f"Scheme '{parsed.scheme}' not allowed. Only HTTP and HTTPS protocols are permitted.", None
+        hostname = parsed.hostname
+        if not hostname:
+            return False, "Missing hostname in URL.", None
+        lowered = hostname.lower()
+        if lowered in _PROXY_BLOCKED_HOSTNAMES or lowered.endswith('.local') or lowered.endswith('.internal'):
+            return False, f"SSRF Boundary Violation: Target '{hostname}' is an internal reserved hostname.", None
+        try:
+            port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        except ValueError as e:
+            return False, f"Invalid port in URL: {e}", None
+        try:
+            infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except Exception as e:
+            return False, f"Could not resolve host '{hostname}': {e}", None
+        if not infos:
+            return False, f"Could not resolve host '{hostname}': no addresses", None
+        pinned = None
+        for info in infos:
+            ip_str = info[4][0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+            except ValueError:
+                return False, f"SSRF Boundary Violation: unparseable address '{ip_str}'.", None
+            if _proxy_address_is_forbidden(ip):
+                return False, f"SSRF Boundary Violation: Access to private/internal IP '{ip_str}' is forbidden.", None
+            if pinned is None:
+                pinned = ip_str
+        return True, "OK", pinned
+    except Exception as e:
+        return False, f"Invalid URL: {e}", None
+
+
+def _pinned_proxy_connection_class(base, pinned_ip):
+    """A connection class that reaches pinned_ip while keeping the hostname, so
+    the Host header, TLS SNI and certificate verification still name the origin."""
+    class _PinnedConnection(base):
+        def __init__(self, host, **kwargs):
+            super().__init__(host, **kwargs)
+
+            def _connect(address, timeout=None, source_address=None):
+                return socket.create_connection((pinned_ip, address[1]), timeout, source_address)
+
+            self._create_connection = _connect
+    return _PinnedConnection
+
+
+class _PinnedProxyHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, pinned_ip):
+        self._pinned_ip = pinned_ip
+        super().__init__()
+
+    def http_open(self, req):
+        return self.do_open(_pinned_proxy_connection_class(_http_client.HTTPConnection, self._pinned_ip), req)
+
+
+class _PinnedProxyHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, pinned_ip, context):
+        self._pinned_ip = pinned_ip
+        self._context = context
+        super().__init__(context=context)
+
+    def https_open(self, req):
+        return self.do_open(
+            _pinned_proxy_connection_class(_http_client.HTTPSConnection, self._pinned_ip),
+            req,
+            context=self._context,
+        )
+
+
+def _browser_proxy_opener(pinned_ip):
+    """An opener that can only reach the validated, pinned public origin.
+    Built from an explicit handler list (no File/FTP/Data/Proxy handlers)."""
+    opener = urllib.request.OpenerDirector()
+    opener.add_handler(urllib.request.UnknownHandler())
+    opener.add_handler(urllib.request.HTTPDefaultErrorHandler())
+    opener.add_handler(urllib.request.HTTPErrorProcessor())
+    opener.add_handler(_PinnedProxyHTTPHandler(pinned_ip))
+    opener.add_handler(_PinnedProxyHTTPSHandler(pinned_ip, _PROXY_SSL_CONTEXT))
+    opener.add_handler(_ProxyRedirectPassthrough())
+    return opener
+
+
 class _SsrfGuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Re-validates every redirect hop with the same SSRF boundary.
 
@@ -4055,8 +4177,15 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
         data = body if method not in ('GET', 'HEAD', 'OPTIONS') else None
         request = urllib.request.Request(
             target_url, data=data, headers=request_headers, method=method)
-        opener = urllib.request.build_opener(_ProxyRedirectPassthrough)
-        opener.add_handler(_ProxyTLSHandler(context=_PROXY_SSL_CONTEXT))
+        # Pin the connection to the address the SSRF guard validated: the socket
+        # reaches pinned_ip regardless of any second DNS answer, so a rebind
+        # between the check above and this connect cannot reach loopback/metadata.
+        _safe, _reason, pinned_ip = resolve_pinned_proxy_ip(target_url)
+        if pinned_ip is not None:
+            opener = _browser_proxy_opener(pinned_ip)
+        else:
+            opener = urllib.request.build_opener(_ProxyRedirectPassthrough)
+            opener.add_handler(_ProxyTLSHandler(context=_PROXY_SSL_CONTEXT))
         try:
             response = opener.open(request, timeout=6)
         except urllib.error.HTTPError as error:
