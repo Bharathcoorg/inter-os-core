@@ -489,6 +489,21 @@ fn mode_allows(inode: &Inode, caller: &CallerIdentity, write: bool) -> bool {
     bits & want != 0
 }
 
+/// Mandatory Merkle protected-read gate for read-only system files. When a
+/// system-image Merkle root has been provisioned, every read of a
+/// `ReadOnlySystem` file must re-hash to its attested digest under that root; a
+/// mismatch fails closed. While no root is provisioned the platform reports
+/// integrity as NOT IMPLEMENTED, so this gate is inert and never fabricates.
+fn protected_read_check(inode: &Inode, data: &[u8]) -> Result<(), FsError> {
+    if inode.file_type == FileType::ReadOnlySystem
+        && crate::storage::verified::provisioned_root().is_some()
+    {
+        crate::storage::verified::verify_protected_read(&inode.sha256_digest, data)
+            .map_err(|_| FsError::IntegrityViolation)?;
+    }
+    Ok(())
+}
+
 impl Vfs {
     /// Creates a new, empty VFS instance.
     pub fn new() -> Self {
@@ -884,6 +899,7 @@ impl Vfs {
         }
         if offset >= inode.data.as_slice().len() { return Ok(0); }
         let data = inode.data.as_slice();
+        protected_read_check(inode, data)?;
         let n = core::cmp::min(out.len(), data.len() - offset);
         out[..n].copy_from_slice(&data[offset..offset + n]);
         Ok(n)
@@ -898,6 +914,7 @@ impl Vfs {
             return self.stream_read(&name, 0, size, out);
         }
         let slice = inode.data.as_slice();
+        protected_read_check(inode, slice)?;
         let to_copy = slice.len().min(out.len());
         out[..to_copy].copy_from_slice(&slice[..to_copy]);
         Ok(to_copy)
@@ -2186,6 +2203,7 @@ pub fn read_file_for_task(
         return Err(FsError::FileTooLarge);
     }
 
+    protected_read_check(inode, inode.data.as_slice())?;
     Ok(inode.data.as_slice().to_vec())
 }
 
@@ -2348,6 +2366,7 @@ pub fn read_file_for_task(
         }
 
         let slice = inode.data.as_slice();
+        protected_read_check(inode, slice)?;
         let available = slice.len() - offset;
         let count = core::cmp::min(available, buf.len());
 
