@@ -1571,7 +1571,16 @@ pub extern "C" fn aarch64_kernel_main(dtb_phys_addr: usize) -> ! {
         0x0D, 0x0E,
     ];
     let publisher_pubkey = crypto::ed25519_public_key(&publisher_seed);
-    let mut ota = ota::OtaManager::new(540, publisher_pubkey, board_id); // Version 540 active on Slot A
+    // OTA self-test uses a RAM content-backed store so the full stage -> boot ->
+    // commit flow runs with real re-attestation; a metadata-only/noop store can
+    // no longer stage or promote (write_slot fails closed).
+    let mut ota = ota::OtaManager::with_store(
+        ota::MemoryOtaStore::default(),
+        540,
+        publisher_pubkey,
+        board_id,
+    )
+    .expect("OTA self-test store init"); // Version 540 active on Slot A
     assert_eq!(ota.active_slot, ota::PartitionSlot::SlotA);
     assert_eq!(ota.slot_a.version, 540);
     assert_eq!(ota.slot_a.status, ota::SlotStatus::Valid);

@@ -70,6 +70,13 @@ pub enum OtaError {
     AttestationFailed,
     /// The backend holds no slot content, so re-attestation is impossible.
     AttestationUnavailable,
+    /// The selected backend has no slot-content store; a staged image cannot be
+    /// durably written.
+    SlotContentUnsupported,
+    /// The slot-content backend failed while writing.
+    SlotWriteFailed,
+    /// The slot-content backend failed while reading.
+    SlotReadFailed,
 }
 
 /// OTA update package header.
@@ -132,8 +139,13 @@ pub trait OtaStore {
     /// re-attestation). Metadata-only / RAM-only backends return `false`.
     fn holds_slot_content(&self) -> bool { false }
 
-    /// Writes a slot image to durable media. Default: no content backend.
-    fn write_slot(&mut self, _slot: PartitionSlot, _image: &[u8]) -> Result<(), OtaError> { Ok(()) }
+    /// Writes a slot image to durable media.
+    ///
+    /// The default fails closed: a backend that does not override this cannot
+    /// silently claim a staged image was stored.
+    fn write_slot(&mut self, _slot: PartitionSlot, _image: &[u8]) -> Result<(), OtaError> {
+        Err(OtaError::SlotContentUnsupported)
+    }
 
     /// Reads a slot image back for re-attestation. `Ok(None)` = no content.
     fn read_slot(&mut self, _slot: PartitionSlot) -> Result<Option<Vec<u8>>, OtaError> { Ok(None) }
@@ -151,6 +163,43 @@ impl OtaStore for NoopStore {
 
     fn save(&mut self, _state: &PersistedOtaState) -> Result<(), OtaError> {
         Ok(())
+    }
+}
+
+/// RAM-only slot-content backend for QEMU and the boot self-test.
+///
+/// Holds both the metadata snapshot and the slot image bytes in memory so the
+/// full stage -> boot -> commit flow (including mandatory re-attestation) runs
+/// without a block device. It is explicitly NOT persistent across power loss and
+/// must never be described as on-device flash.
+#[derive(Default)]
+pub struct MemoryOtaStore {
+    state: Option<PersistedOtaState>,
+    slot_a: Vec<u8>,
+    slot_b: Vec<u8>,
+}
+
+impl OtaStore for MemoryOtaStore {
+    fn load(&mut self) -> Result<Option<PersistedOtaState>, OtaError> { Ok(self.state.clone()) }
+    fn save(&mut self, state: &PersistedOtaState) -> Result<(), OtaError> {
+        self.state = Some(state.clone());
+        Ok(())
+    }
+    fn holds_slot_content(&self) -> bool { true }
+    fn write_slot(&mut self, slot: PartitionSlot, image: &[u8]) -> Result<(), OtaError> {
+        let dst = match slot {
+            PartitionSlot::SlotA => &mut self.slot_a,
+            PartitionSlot::SlotB => &mut self.slot_b,
+        };
+        *dst = image.to_vec();
+        Ok(())
+    }
+    fn read_slot(&mut self, slot: PartitionSlot) -> Result<Option<Vec<u8>>, OtaError> {
+        let bytes = match slot {
+            PartitionSlot::SlotA => &self.slot_a,
+            PartitionSlot::SlotB => &self.slot_b,
+        };
+        if bytes.is_empty() { Ok(None) } else { Ok(Some(bytes.clone())) }
     }
 }
 
@@ -283,6 +332,22 @@ impl<S: OtaStore> OtaManager<S> {
         }
     }
 
+    /// Returns a reference to a specific slot's metadata.
+    fn slot_meta(&self, slot: PartitionSlot) -> &SlotMetadata {
+        match slot {
+            PartitionSlot::SlotA => &self.slot_a,
+            PartitionSlot::SlotB => &self.slot_b,
+        }
+    }
+
+    /// Returns a mutable reference to a specific slot's metadata.
+    fn slot_meta_mut(&mut self, slot: PartitionSlot) -> &mut SlotMetadata {
+        match slot {
+            PartitionSlot::SlotA => &mut self.slot_a,
+            PartitionSlot::SlotB => &mut self.slot_b,
+        }
+    }
+
     /// Cryptographically verifies an OTA package and stages it into the inactive partition slot.
     pub fn verify_and_stage_update(
         &mut self,
@@ -332,26 +397,37 @@ impl<S: OtaStore> OtaManager<S> {
             return Err(OtaError::InvalidSignature);
         }
 
-        // 8. Flash & Stage into inactive slot
+        // 8. Transactional stage: durably write the image bytes FIRST, then
+        //    publish metadata, then flip active_slot, then commit. Any failure
+        //    rolls the volatile manager back so a failed/partial write can never
+        //    leave active_slot pointing at a slot whose content was not stored.
         let target_slot = self.inactive_slot();
-        {
-            let inactive_meta = self.inactive_slot_meta_mut();
-            inactive_meta.version = header.version;
-            inactive_meta.status = SlotStatus::Testing;
-            inactive_meta.boot_tries_left = 3;
-            inactive_meta.digest = header.payload_sha256;
-        }
+        let prev_target_meta = self.slot_meta(target_slot).clone();
+        let prev_active = self.active_slot;
 
-        // Set staged slot as active for subsequent test boot
-        self.active_slot = target_slot;
-
-        // Persist the image bytes into the inactive slot so the commit path can
-        // re-attest the on-media content against the recorded digest.
+        // 8a. Durably store the image. A content-less or failing backend aborts
+        //     here with no metadata or active_slot mutation.
         self.store.write_slot(target_slot, payload)?;
 
-        // Durable commit: persist slot metadata + boot-tries before returning so
-        // the staged image survives a reboot into the new slot.
-        self.persist()?;
+        // 8b. Publish the staged slot metadata and select it for test boot.
+        {
+            let meta = self.slot_meta_mut(target_slot);
+            meta.version = header.version;
+            meta.status = SlotStatus::Testing;
+            meta.boot_tries_left = 3;
+            meta.digest = header.payload_sha256;
+        }
+        self.active_slot = target_slot;
+
+        // 8c. Durable metadata commit. On failure restore the previous active slot
+        //     and the target slot's prior metadata. A half-written image left in
+        //     the (still inactive) target slot is inert: committed metadata does
+        //     not reference it and the next stage overwrites it.
+        if let Err(err) = self.persist() {
+            *self.slot_meta_mut(target_slot) = prev_target_meta;
+            self.active_slot = prev_active;
+            return Err(err);
+        }
 
         Ok(target_slot)
     }
@@ -362,34 +438,35 @@ impl<S: OtaStore> OtaManager<S> {
             .check(CapabilityType::OtaUpdateManagement, Rights::WRITE)
             .map_err(|_| OtaError::CapabilityDenied)?;
 
-        // Kernel-side slot re-attestation: never promote a Testing slot to Valid
-        // without re-verifying its content against the digest recorded at staging.
+        // Nothing to promote unless the active slot is still in Testing.
+        if self.active_slot_meta().status != SlotStatus::Testing {
+            return self.persist();
+        }
+        // Promotion requires authenticated stored content. A metadata-only or
+        // RAM-only backend cannot produce the staged bytes, so it can never
+        // promote a Testing slot to Valid -- there is no nonzero-digest shortcut.
+        if !self.store.holds_slot_content() {
+            return Err(OtaError::AttestationUnavailable);
+        }
+        // Kernel-side re-attestation: re-hash the on-media content and compare it
+        // in constant time to the digest recorded at staging.
         let (slot, expected) = {
             let meta = self.active_slot_meta();
             (meta.slot, meta.digest)
         };
-        if self.store.holds_slot_content() {
-            match self.store.read_slot(slot)? {
-                Some(image) => {
-                    if !constant_time_eq_32(&sha256(&image), &expected) {
-                        self.active_slot_meta_mut().status = SlotStatus::Corrupted;
-                        let _ = self.persist();
-                        return Err(OtaError::AttestationFailed);
-                    }
+        match self.store.read_slot(slot)? {
+            Some(image) => {
+                if !constant_time_eq_32(&sha256(&image), &expected) {
+                    self.active_slot_meta_mut().status = SlotStatus::Corrupted;
+                    let _ = self.persist();
+                    return Err(OtaError::AttestationFailed);
                 }
-                None => return Err(OtaError::AttestationUnavailable),
             }
-        } else if expected == [0u8; 32] {
-            // Metadata-only backend: the only possible re-attestation is that the
-            // staged slot carries a non-zero attested digest.
-            return Err(OtaError::AttestationFailed);
+            None => return Err(OtaError::AttestationUnavailable),
         }
-
         let meta = self.active_slot_meta_mut();
-        if meta.status == SlotStatus::Testing {
-            meta.status = SlotStatus::Valid;
-            meta.boot_tries_left = 3;
-        }
+        meta.status = SlotStatus::Valid;
+        meta.boot_tries_left = 3;
         self.persist()?;
         Ok(())
     }
@@ -428,11 +505,19 @@ mod tests {
     #[derive(Clone, Default)]
     struct MemStore {
         backing: Rc<RefCell<Option<PersistedOtaState>>>,
+        slot_a: Rc<RefCell<Vec<u8>>>,
+        slot_b: Rc<RefCell<Vec<u8>>>,
     }
 
     impl MemStore {
         fn handle(&self) -> Rc<RefCell<Option<PersistedOtaState>>> {
             self.backing.clone()
+        }
+        fn slot(&self, slot: PartitionSlot) -> Rc<RefCell<Vec<u8>>> {
+            match slot {
+                PartitionSlot::SlotA => self.slot_a.clone(),
+                PartitionSlot::SlotB => self.slot_b.clone(),
+            }
         }
     }
 
@@ -444,6 +529,18 @@ mod tests {
         fn save(&mut self, state: &PersistedOtaState) -> Result<(), OtaError> {
             *self.backing.borrow_mut() = Some(state.clone());
             Ok(())
+        }
+
+        fn holds_slot_content(&self) -> bool { true }
+
+        fn write_slot(&mut self, slot: PartitionSlot, image: &[u8]) -> Result<(), OtaError> {
+            *self.slot(slot).borrow_mut() = image.to_vec();
+            Ok(())
+        }
+
+        fn read_slot(&mut self, slot: PartitionSlot) -> Result<Option<Vec<u8>>, OtaError> {
+            let b = self.slot(slot).borrow().clone();
+            if b.is_empty() { Ok(None) } else { Ok(Some(b)) }
         }
     }
 
