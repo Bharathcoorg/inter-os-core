@@ -1882,6 +1882,8 @@ impl<'a, 's> Builder<'a, 's> {
             self.textarea_value(node)
         } else if style.field == FieldKind::Select {
             self.selected_option(node)
+        } else if style.field == FieldKind::Button && style.field_value.is_empty() {
+            self.direct_text(node)
         } else {
             style.field_value
         };
@@ -2583,6 +2585,7 @@ mod tests {
         // Submit Button
         let btn_field = out.fields[6];
         assert_eq!(btn_field.kind, FieldKind::Button);
+        assert_eq!(btn_field.value.get(&dom), b"Save");
 
         // Hit testing for all fields
         for (i, f) in out.fields[..out.field_count].iter().enumerate() {

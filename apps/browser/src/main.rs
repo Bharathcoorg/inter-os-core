@@ -4666,6 +4666,7 @@ impl BrowserApp {
         // for, rather than measured twice and corrected on screen.
         self.fetch_linked_stylesheets(dom);
         self.execute_page_scripts();
+        dom.collect_names();
         let out = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_LAYOUT) };
         {
             let sheet = css::parse_stylesheet(dom.css(), dom.token_store());
@@ -4799,6 +4800,38 @@ impl BrowserApp {
         true
     }
 
+    fn log_js_error(err: browser::js::JsError) {
+        match err {
+            browser::js::JsError::StepBudgetExhausted => {
+                std::log("[BROWSER APP] JS execution halted: step budget exhausted (infinite loop prevention).").ok();
+            }
+            browser::js::JsError::CapacityExceeded => {
+                std::log("[BROWSER APP] JS execution halted: memory budget exceeded (AST/variable capacity limit).").ok();
+            }
+            browser::js::JsError::UnsupportedSyntax(feature) => {
+                let mut log_buf = [0u8; 128];
+                let prefix = b"[BROWSER APP] JS unsupported syntax: ";
+                let plen = prefix.len();
+                log_buf[..plen].copy_from_slice(prefix);
+                let fbytes = feature.as_bytes();
+                let flen = fbytes.len().min(log_buf.len() - plen);
+                log_buf[plen..plen + flen].copy_from_slice(&fbytes[..flen]);
+                if let Ok(msg) = core::str::from_utf8(&log_buf[..plen + flen]) {
+                    std::log(msg).ok();
+                }
+            }
+            browser::js::JsError::UnexpectedToken => {
+                std::log("[BROWSER APP] JS syntax error: unexpected token.").ok();
+            }
+            browser::js::JsError::ReferenceError => {
+                std::log("[BROWSER APP] JS runtime error: reference error (undeclared variable).").ok();
+            }
+            browser::js::JsError::TypeError => {
+                std::log("[BROWSER APP] JS runtime error: type error.").ok();
+            }
+        }
+    }
+
     /// Executes an inline script or event handler with deterministic step and memory budgets,
     /// and logs clear diagnostic messages for unsupported syntax and budget overruns.
     /// Returns true if the DOM was mutated by script execution.
@@ -4812,95 +4845,93 @@ impl BrowserApp {
                 std::log("[BROWSER APP] JS script executed successfully.").ok();
                 mutated
             }
-            Err(browser::js::JsError::StepBudgetExhausted) => {
-                std::log("[BROWSER APP] JS execution halted: step budget exhausted (infinite loop prevention).").ok();
-                false
-            }
-            Err(browser::js::JsError::CapacityExceeded) => {
-                std::log("[BROWSER APP] JS execution halted: memory budget exceeded (AST/variable capacity limit).").ok();
-                false
-            }
-            Err(browser::js::JsError::UnsupportedSyntax(feature)) => {
-                let mut log_buf = [0u8; 128];
-                let prefix = b"[BROWSER APP] JS unsupported syntax: ";
-                let plen = prefix.len();
-                log_buf[..plen].copy_from_slice(prefix);
-                let fbytes = feature.as_bytes();
-                let flen = fbytes.len().min(log_buf.len() - plen);
-                log_buf[plen..plen + flen].copy_from_slice(&fbytes[..flen]);
-                if let Ok(msg) = core::str::from_utf8(&log_buf[..plen + flen]) {
-                    std::log(msg).ok();
-                }
-                false
-            }
-            Err(browser::js::JsError::UnexpectedToken) => {
-                std::log("[BROWSER APP] JS syntax error: unexpected token.").ok();
-                false
-            }
-            Err(browser::js::JsError::ReferenceError) => {
-                std::log("[BROWSER APP] JS runtime error: reference error (undeclared variable).").ok();
-                false
-            }
-            Err(browser::js::JsError::TypeError) => {
-                std::log("[BROWSER APP] JS runtime error: type error.").ok();
+            Err(err) => {
+                Self::log_js_error(err);
                 false
             }
         }
     }
 
-    /// Dynamically re-lays out the current HTML page after script DOM mutations.
+    /// Executes a DOM event handler attribute (e.g. `onclick` or `onsubmit`)
+    /// without silent mid-statement truncation.
+    fn run_attr_script(
+        node: layout::NodeId,
+        attr: &[u8],
+        dom: &mut layout::Dom,
+        context: &str,
+    ) -> bool {
+        let Some(code) = dom.attr(node, attr) else {
+            return false;
+        };
+        let mut buf = [0u8; 4096];
+        if code.len() > buf.len() {
+            std::log("[BROWSER APP] JS handler skipped: exceeds script buffer capacity.").ok();
+            return false;
+        }
+        let n = code.len();
+        buf[..n].copy_from_slice(&code[..n]);
+        Self::run_script(&buf[..n], dom, context)
+    }
+
+    /// Dynamically re-lays out the current HTML page after script DOM mutations,
+    /// preserving clamped scroll offset, placed image boxes, and synced field text.
     pub fn relayout_page(&mut self) {
         if !self.html_view {
             return;
         }
-        let dom = unsafe { &*core::ptr::addr_of!(PAGE_DOM) };
+        let dom = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
         let out = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_LAYOUT) };
+        dom.collect_names();
         let sheet = css::parse_stylesheet(dom.css(), dom.token_store());
-        layout::build(dom, &sheet, browser::CONTENT_WIDTH, out);
+        if self.image_count > 0 {
+            let mut outcomes = [layout::ImageOutcome::Unknown; layout::MAX_IMAGES];
+            for slot in 0..self.image_count.min(layout::MAX_IMAGES) {
+                let (w, h) = Self::placed_image_box(&self.images[slot]);
+                outcomes[slot] = layout::ImageOutcome::Placed { w, h };
+            }
+            layout::build_with_outcomes(dom, &sheet, browser::CONTENT_WIDTH, &outcomes, out);
+        } else {
+            layout::build(dom, &sheet, browser::CONTENT_WIDTH, out);
+        }
+
+        let text = unsafe { &mut *core::ptr::addr_of_mut!(FIELD_TEXT) };
+        let lens = unsafe { &mut *core::ptr::addr_of_mut!(FIELD_TEXT_LEN) };
+        for index in 0..out.field_count {
+            let value = out.fields[index].value.get(dom);
+            let n = value.len().min(FIELD_TEXT_MAX);
+            text[index][..n].copy_from_slice(&value[..n]);
+            lens[index] = n as u8;
+        }
+        for index in out.field_count..layout::MAX_FIELDS {
+            lens[index] = 0;
+        }
+        if self.field_focus != NO_FIELD && (self.field_focus as usize) >= out.field_count {
+            self.field_focus = NO_FIELD;
+        }
+
         let height = out.height as usize;
         let note = if out.truncated { out.note_reserve() } else { 0 };
-        self.scroll = browser::reader_scroll(
+        self.scroll = ScrollState::new(
             height + browser::CONTENT_PADDING + note,
             READER_VIEWPORT_H,
+            self.scroll.offset,
         );
     }
 
-    /// Finds captured script tags in the DOM and executes them in order.
+    /// Runs captured inline classic scripts in order and dispatches `DOMContentLoaded`.
     pub fn execute_page_scripts(&mut self) {
         let dom = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
-        let node_count = dom.node_count();
-        let mut script_nodes: [layout::NodeId; 16] = [layout::NO_NODE; 16];
-        let mut script_count = 0usize;
-
-        for id in 0..node_count as layout::NodeId {
-            if dom.node(id).is_element() && dom.tag(id).eq_ignore_ascii_case(b"script") {
-                if let Some(t) = dom.attr(id, b"type") {
-                    let is_js = t.eq_ignore_ascii_case(b"text/javascript")
-                        || t.eq_ignore_ascii_case(b"application/javascript")
-                        || t.eq_ignore_ascii_case(b"text/ecmascript")
-                        || t.eq_ignore_ascii_case(b"application/ecmascript")
-                        || t.eq_ignore_ascii_case(b"module");
-                    if !is_js {
-                        continue;
-                    }
-                }
-                if script_count < script_nodes.len() {
-                    script_nodes[script_count] = id;
-                    script_count += 1;
-                }
-            }
+        let report = browser::engine::run_page_scripts(dom);
+        if report.unsupported_module {
+            std::log("[BROWSER APP] Unsupported script type='module' skipped.").ok();
         }
-
-        for i in 0..script_count {
-            let nid = script_nodes[i];
-            let mut buf = [0u8; 2048];
-            let body = dom.script_body(nid);
-            let n = body.len().min(buf.len());
-            if n == 0 {
-                continue;
-            }
-            buf[..n].copy_from_slice(&body[..n]);
-            Self::run_script(&buf[..n], dom, "inline script");
+        if report.truncated {
+            std::log("[BROWSER APP] Inline script exceeded script buffer capacity and was skipped without truncation.").ok();
+        }
+        if let Some(err) = report.last_error {
+            Self::log_js_error(err);
+        } else if report.executed_count > 0 {
+            std::log("[BROWSER APP] JS page scripts executed successfully.").ok();
         }
     }
 
@@ -5051,22 +5082,45 @@ impl BrowserApp {
     /// The body and the address are encoded into statics first, so the
     /// navigation that sends them does not borrow the display list.
     pub fn submit_form(&mut self, trigger: usize) {
+        let initial_field = {
+            let out = unsafe { &*core::ptr::addr_of!(PAGE_LAYOUT) };
+            if trigger >= out.field_count {
+                return;
+            }
+            out.fields[trigger]
+        };
+        let onclick_mutated = {
+            let dom_mut = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
+            Self::run_attr_script(initial_field.node, b"onclick", dom_mut, "button onclick")
+        };
+        if onclick_mutated {
+            self.relayout_page();
+        }
         let dom = unsafe { &*core::ptr::addr_of!(PAGE_DOM) };
         let out = unsafe { &*core::ptr::addr_of!(PAGE_LAYOUT) };
-        if trigger >= out.field_count {
-            return;
-        }
-        let field = out.fields[trigger];
-        {
-            let dom_mut = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
-            if let Some(onclick) = dom_mut.attr(field.node, b"onclick") {
-                let mut buf = [0u8; 512];
-                let n = onclick.len().min(buf.len());
-                buf[..n].copy_from_slice(&onclick[..n]);
-                Self::run_script(&buf[..n], dom_mut, "button onclick");
+        let mut active_trigger = trigger;
+        let mut field = initial_field;
+        for i in 0..out.field_count {
+            if out.fields[i].node == initial_field.node {
+                active_trigger = i;
+                field = out.fields[i];
+                break;
             }
         }
-        if field.input == layout::InputType::Reset {
+        if field.kind == layout::FieldKind::Button
+            && dom
+                .attr(field.node, b"type")
+                .map_or(false, |t| t.eq_ignore_ascii_case(b"button"))
+        {
+            let _ = std::audio_haptic_click();
+            return;
+        }
+        let is_reset = field.input == layout::InputType::Reset
+            || (field.kind == layout::FieldKind::Button
+                && dom
+                    .attr(field.node, b"type")
+                    .map_or(false, |t| t.eq_ignore_ascii_case(b"reset")));
+        if is_reset {
             // Reset restores the values the markup gave the controls.
             for index in 0..out.field_count {
                 if nearest_form(dom, out.fields[index].node) != nearest_form(dom, field.node) {
@@ -5087,15 +5141,18 @@ impl BrowserApp {
             std::log("[BROWSER APP] The control is not inside a form; nothing was submitted.").ok();
             return;
         };
-        {
+        let onsubmit_mutated = {
             let dom_mut = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
-            if let Some(onsubmit) = dom_mut.attr(form, b"onsubmit") {
-                let mut buf = [0u8; 512];
-                let n = onsubmit.len().min(buf.len());
-                buf[..n].copy_from_slice(&onsubmit[..n]);
-                Self::run_script(&buf[..n], dom_mut, "form onsubmit");
-            }
+            Self::run_attr_script(form, b"onsubmit", dom_mut, "form onsubmit")
+        };
+        if onsubmit_mutated {
+            self.relayout_page();
         }
+        let dom = unsafe { &*core::ptr::addr_of!(PAGE_DOM) };
+        let out = unsafe { &*core::ptr::addr_of!(PAGE_LAYOUT) };
+        let trigger = (0..out.field_count)
+            .find(|&i| out.fields[i].node == field.node)
+            .unwrap_or(active_trigger);
         let action = dom.attr(form, b"action").unwrap_or(b"");
         let method = if dom
             .attr(form, b"method")
@@ -8794,10 +8851,21 @@ fn html_page_pixel(x: usize, y: usize, app: &BrowserApp, _f: &Frame) -> u32 {
                 }
                 layout::FieldKind::Button
                 | layout::FieldKind::Input
-                    if field.input == layout::InputType::Submit
+                    if field.kind == layout::FieldKind::Button
+                        || field.input == layout::InputType::Submit
                         || field.input == layout::InputType::Reset =>
                 {
-                    let is_submit = field.input == layout::InputType::Submit;
+                    let is_reset = field.input == layout::InputType::Reset
+                        || (field.kind == layout::FieldKind::Button
+                            && dom
+                                .attr(field.node, b"type")
+                                .map_or(false, |t| t.eq_ignore_ascii_case(b"reset")));
+                    let is_submit = field.input == layout::InputType::Submit
+                        || (field.kind == layout::FieldKind::Button
+                            && !is_reset
+                            && dom
+                                .attr(field.node, b"type")
+                                .map_or(true, |t| t.eq_ignore_ascii_case(b"submit")));
                     let bg_col = if is_submit {
                         THEME.primary
                     } else {
@@ -8820,9 +8888,28 @@ fn html_page_pixel(x: usize, y: usize, app: &BrowserApp, _f: &Frame) -> u32 {
                         let v = field.value.get(dom);
                         if !v.is_empty() {
                             v
+                        } else if field.kind == layout::FieldKind::Button {
+                            let mut child = dom.first_child(field.node);
+                            let mut txt: &[u8] = b"";
+                            while let Some(cid) = child {
+                                if dom.node(cid).is_text() {
+                                    txt = dom.text_of(cid);
+                                    break;
+                                }
+                                child = dom.next_sibling(cid);
+                            }
+                            if !txt.is_empty() {
+                                txt
+                            } else if is_submit {
+                                b"Submit"
+                            } else if is_reset {
+                                b"Reset"
+                            } else {
+                                b"Button"
+                            }
                         } else if is_submit {
                             b"Submit"
-                        } else if field.input == layout::InputType::Reset {
+                        } else if is_reset {
                             b"Reset"
                         } else {
                             b"Button"
@@ -12352,15 +12439,17 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
             // 1. Hit test fields first
             if let Some(index) = out.field_at(doc_x as usize, doc_y as usize) {
                 let field = out.fields[index];
-                {
+                let delegates_onclick = field.kind == layout::FieldKind::Button
+                    || (field.kind == layout::FieldKind::Input
+                        && matches!(
+                            field.input,
+                            layout::InputType::Submit | layout::InputType::Reset
+                        ));
+                if !delegates_onclick {
                     let dom_mut = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
-                    if let Some(onclick) = dom_mut.attr(field.node, b"onclick") {
-                        let mut buf = [0u8; 512];
-                        let n = onclick.len().min(buf.len());
-                        buf[..n].copy_from_slice(&onclick[..n]);
-                        if BrowserApp::run_script(&buf[..n], dom_mut, "field onclick") {
-                            app.relayout_page();
-                        }
+                    if BrowserApp::run_attr_script(field.node, b"onclick", dom_mut, "field onclick")
+                    {
+                        app.relayout_page();
                     }
                 }
                 match field.kind {
@@ -12396,13 +12485,8 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                 let dom_mut = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
                 for nid in 0..dom_mut.node_count() as layout::NodeId {
                     if dom_mut.node(nid).link == link {
-                        if let Some(onclick) = dom_mut.attr(nid, b"onclick") {
-                            let mut buf = [0u8; 512];
-                            let n = onclick.len().min(buf.len());
-                            buf[..n].copy_from_slice(&onclick[..n]);
-                            if BrowserApp::run_script(&buf[..n], dom_mut, "link onclick") {
-                                app.relayout_page();
-                            }
+                        if BrowserApp::run_attr_script(nid, b"onclick", dom_mut, "link onclick") {
+                            app.relayout_page();
                         }
                         break;
                     }

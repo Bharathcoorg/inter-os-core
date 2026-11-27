@@ -20,67 +20,140 @@ const SCRIPT_BUF_BYTES: usize = 4096;
 /// The most `<script>` elements one page may run at load.
 const MAX_PAGE_SCRIPTS: usize = 16;
 
-/// Runs a page's inline scripts, then dispatches `DOMContentLoaded` to any
-/// listener they registered.
+/// Truthful outcome of executing a document's inline `<script>` elements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScriptRunReport {
+    pub executed_count: usize,
+    pub mutated: bool,
+    pub unsupported_module: bool,
+    pub skipped_external: usize,
+    pub truncated: bool,
+    pub last_error: Option<crate::js::JsError>,
+}
+
+/// Runs a page's inline classic scripts, then dispatches `DOMContentLoaded` to
+/// any listener they registered.
 ///
 /// WHY the scripts share one runtime: a browser runs all of a page's scripts
 /// in one global scope, so a function declared in one script is visible to the
-/// next and a listener registered by any of them fires on the load event. The
-/// bodies are joined with a newline into one program and executed once, which
-/// is what makes `addEventListener('DOMContentLoaded', ...)` build content
-/// during load. A script that overruns its budget or capacity is skipped and
-/// the rest still run, so one hostile script cannot blank the page.
-fn run_page_scripts(dom: &mut Dom) {
+/// next and a listener registered by any of them fires on the load event.
+/// `<script src>` tags are skipped without consuming inline script slots,
+/// `<script type="module">` is explicitly rejected/skipped without poisoning
+/// classic scripts, and inline scripts that exceed [`SCRIPT_BUF_BYTES`] are
+/// refused whole rather than truncated mid-statement.
+pub fn run_page_scripts(dom: &mut Dom) -> ScriptRunReport {
+    let mut report = ScriptRunReport::default();
     let node_count = dom.node_count();
     let mut scripts: [NodeId; MAX_PAGE_SCRIPTS] = [NO_NODE; MAX_PAGE_SCRIPTS];
     let mut script_count = 0usize;
     for id in 0..node_count as NodeId {
         if dom.node(id).is_element() && dom.tag(id).eq_ignore_ascii_case(b"script") {
             if let Some(t) = dom.attr(id, b"type") {
-                let is_js = t.eq_ignore_ascii_case(b"text/javascript")
+                if t.eq_ignore_ascii_case(b"module") {
+                    report.unsupported_module = true;
+                    continue;
+                }
+                let is_js = t.is_empty()
+                    || t.eq_ignore_ascii_case(b"text/javascript")
                     || t.eq_ignore_ascii_case(b"application/javascript")
                     || t.eq_ignore_ascii_case(b"text/ecmascript")
-                    || t.eq_ignore_ascii_case(b"application/ecmascript")
-                    || t.eq_ignore_ascii_case(b"module");
+                    || t.eq_ignore_ascii_case(b"application/ecmascript");
                 if !is_js {
                     continue;
                 }
             }
+            if dom.has_attr(id, b"src") {
+                report.skipped_external += 1;
+                continue;
+            }
             if script_count < scripts.len() {
                 scripts[script_count] = id;
                 script_count += 1;
+            } else {
+                report.truncated = true;
             }
         }
     }
     if script_count == 0 {
-        return;
+        return report;
     }
 
     let mut buf = [0u8; SCRIPT_BUF_BYTES];
     let mut len = 0usize;
+    let mut included: [NodeId; MAX_PAGE_SCRIPTS] = [NO_NODE; MAX_PAGE_SCRIPTS];
+    let mut included_count = 0usize;
     for i in 0..script_count {
         let body = dom.script_body(scripts[i]);
         if body.is_empty() {
             continue;
         }
-        let room = buf.len().saturating_sub(len);
-        let take = body.len().min(room);
-        if take == 0 {
-            break;
+        let sep = usize::from(len > 0);
+        let need = sep + body.len();
+        if need > buf.len().saturating_sub(len) {
+            report.truncated = true;
+            continue;
         }
-        buf[len..len + take].copy_from_slice(&body[..take]);
-        len += take;
-        // A newline separates one script's statements from the next so a
-        // trailing token cannot merge with the following script's first.
-        if len < buf.len() {
+        if sep > 0 {
             buf[len] = b'\n';
             len += 1;
         }
+        buf[len..len + body.len()].copy_from_slice(body);
+        len += body.len();
+        included[included_count] = scripts[i];
+        included_count += 1;
     }
     if len == 0 {
-        return;
+        return report;
     }
-    let _ = crate::js::execute_script_with_events(&buf[..len], dom, crate::js::DEFAULT_STEP_BUDGET, b"DOMContentLoaded");
+    match crate::js::execute_script_with_events(
+        &buf[..len],
+        dom,
+        crate::js::DEFAULT_STEP_BUDGET,
+        b"DOMContentLoaded",
+    ) {
+        Ok((_, mutated)) => {
+            report.executed_count = included_count;
+            report.mutated = mutated;
+        }
+        Err(err) => {
+            report.last_error = Some(err);
+            // If parsing/capacity failed on the combined buffer across multiple
+            // classic scripts, isolate each script so one bad tag cannot poison
+            // the remaining valid scripts on the page.
+            if included_count > 1
+                && matches!(
+                    err,
+                    crate::js::JsError::UnsupportedSyntax(_)
+                        | crate::js::JsError::UnexpectedToken
+                        | crate::js::JsError::CapacityExceeded
+                )
+            {
+                for i in 0..included_count {
+                    let body = dom.script_body(included[i]);
+                    let n = body.len();
+                    if n == 0 || n > buf.len() {
+                        continue;
+                    }
+                    buf[..n].copy_from_slice(body);
+                    match crate::js::execute_script_with_events(
+                        &buf[..n],
+                        dom,
+                        crate::js::DEFAULT_STEP_BUDGET,
+                        b"DOMContentLoaded",
+                    ) {
+                        Ok((_, mutated)) => {
+                            report.executed_count += 1;
+                            report.mutated |= mutated;
+                        }
+                        Err(e) => {
+                            report.last_error = Some(e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    report
 }
 
 /// Sovereign `#![no_std]` native flow layout browser engine.
@@ -95,6 +168,7 @@ pub struct NativeFlowEngine {
     title: [u8; 64],
     title_len: usize,
     status: EngineStatus,
+    script_report: ScriptRunReport,
 }
 
 impl NativeFlowEngine {
@@ -110,6 +184,7 @@ impl NativeFlowEngine {
             title: [0u8; 64],
             title_len: 0,
             status: EngineStatus::Ready,
+            script_report: ScriptRunReport::default(),
         }
     }
 
@@ -123,6 +198,59 @@ impl NativeFlowEngine {
 
     pub fn layout(&self) -> &TextLayout {
         &self.layout
+    }
+
+    pub fn script_report(&self) -> ScriptRunReport {
+        self.script_report
+    }
+
+    pub fn script_notice(&self) -> Option<&'static str> {
+        if self.script_report.unsupported_module {
+            Some("unsupported script type: module")
+        } else if self.script_report.truncated {
+            Some("script buffer capacity exceeded")
+        } else {
+            None
+        }
+    }
+
+    pub fn relayout(&mut self) {
+        self.layout = TextLayout::new();
+        self.dom.collect_names();
+        let sheet = crate::css::parse_stylesheet(self.dom.css(), self.dom.token_store());
+        let width = (self.viewport_w.saturating_sub(32) as usize).max(32);
+        flow::build(&self.dom, &sheet, width, &mut self.layout);
+        let max_scroll = (self.layout.height as i32)
+            .saturating_sub(self.viewport_h as i32)
+            .max(0);
+        self.scroll_y = self.scroll_y.clamp(0, max_scroll);
+    }
+
+    fn run_node_onclick(&mut self, node: NodeId) -> bool {
+        let Some(onclick) = self.dom.attr(node, b"onclick") else {
+            return false;
+        };
+        let mut buf = [0u8; SCRIPT_BUF_BYTES];
+        if onclick.len() > buf.len() {
+            self.script_report.truncated = true;
+            return false;
+        }
+        let n = onclick.len();
+        buf[..n].copy_from_slice(&onclick[..n]);
+        match crate::js::execute_script_with_mutations(
+            &buf[..n],
+            &mut self.dom,
+            crate::js::DEFAULT_STEP_BUDGET,
+        ) {
+            Ok((_, mutated)) => {
+                self.script_report.mutated |= mutated;
+                mutated
+            }
+            Err(err) => {
+                self.script_report.last_error = Some(err);
+                false
+            }
+        }
     }
 
     pub fn rect_color_at(&self, x: usize, doc_y: usize) -> Option<u32> {
@@ -212,14 +340,10 @@ impl BrowserEngine for NativeFlowEngine {
         self.dom.parse(html.as_bytes());
         // Scripts run before layout so a page that builds its own content is
         // laid out as it will be seen, not as the bare markup arrived.
-        run_page_scripts(&mut self.dom);
+        self.script_report = run_page_scripts(&mut self.dom);
 
-        self.layout = TextLayout::new();
-        self.dom.collect_names();
-        let sheet = crate::css::parse_stylesheet(self.dom.css(), self.dom.token_store());
-        let width = (self.viewport_w.saturating_sub(32) as usize).max(32);
-        flow::build(&self.dom, &sheet, width, &mut self.layout);
         self.scroll_y = 0;
+        self.relayout();
         self.status = EngineStatus::Ready;
         Ok(())
     }
@@ -297,7 +421,56 @@ impl BrowserEngine for NativeFlowEngine {
             }
         }
 
-        // 2. Check rect items (backgrounds, borders)
+        // 2. Form controls (buttons and inputs)
+        for i in 0..self.layout.field_count {
+            let field = &self.layout.fields[i];
+            let fx = field.x as usize;
+            let fy = field.y as usize;
+            let fw = field.w as usize;
+            let fh = field.h as usize;
+            if fw == 0 || fh == 0 || x < fx || x >= fx + fw || doc_y_u < fy || doc_y_u >= fy + fh {
+                continue;
+            }
+            let on_border = x == fx || x == fx + fw - 1 || doc_y_u == fy || doc_y_u == fy + fh - 1;
+            let is_button = field.kind == crate::layout::FieldKind::Button
+                || (field.kind == crate::layout::FieldKind::Input
+                    && (field.input == crate::layout::InputType::Submit
+                        || field.input == crate::layout::InputType::Reset));
+            if is_button {
+                let bg_col = 0xFFE2E8F0;
+                let fg_col = 0xFF1E293B;
+                let border_col = 0xFF64748B;
+                let raw = field.value.get(&self.dom);
+                let label: &[u8] = if !raw.is_empty() {
+                    raw
+                } else if field.input == crate::layout::InputType::Reset {
+                    b"Reset"
+                } else {
+                    b"Button"
+                };
+                let tw = interos_std::font::measure(label, 1) as usize;
+                let lh = interos_std::font::line_height(1);
+                let tx = fx + fw.saturating_sub(tw) / 2;
+                let ty = fy + fh.saturating_sub(lh) / 2;
+                if let Some(px) = interos_std::font::test_glyph_aa(
+                    x,
+                    doc_y_u,
+                    tx,
+                    ty,
+                    1,
+                    label,
+                    fg_col,
+                    bg_col,
+                    true,
+                ) {
+                    return px;
+                }
+                return if on_border { border_col } else { bg_col };
+            }
+            return if on_border { 0xFF94A3B8 } else { 0xFFF8FAFC };
+        }
+
+        // 3. Check rect items (backgrounds, borders)
         if let Some(color) = bg_color_cached.or_else(|| self.rect_color_at(x, doc_y_u)) {
             return color;
         }
@@ -316,6 +489,14 @@ impl BrowserEngine for NativeFlowEngine {
 
         // Hit-test links
         if let Some(link_id) = self.layout.link_at(x as usize, doc_y as usize) {
+            for nid in 0..self.dom.node_count() as NodeId {
+                if self.dom.node(nid).link == link_id {
+                    if self.run_node_onclick(nid) {
+                        self.relayout();
+                    }
+                    break;
+                }
+            }
             if let Some(href) = self.dom.link_href(link_id) {
                 let mut buf = [0u8; 256];
                 let len = href.len().min(buf.len());
@@ -327,7 +508,22 @@ impl BrowserEngine for NativeFlowEngine {
         // Hit-test form fields
         if let Some(field_idx) = self.layout.field_at(x as usize, doc_y as usize) {
             if field_idx < self.layout.field_count {
-                let field = &self.layout.fields[field_idx];
+                let field = self.layout.fields[field_idx];
+                if self.run_node_onclick(field.node) {
+                    self.relayout();
+                }
+                if field.kind == crate::layout::FieldKind::Button
+                    || (field.kind == crate::layout::FieldKind::Input
+                        && matches!(
+                            field.input,
+                            crate::layout::InputType::Submit
+                                | crate::layout::InputType::Reset
+                                | crate::layout::InputType::Checkbox
+                                | crate::layout::InputType::Radio
+                        ))
+                {
+                    return EngineAction::None;
+                }
                 return EngineAction::FocusInput(field.node as u32);
             }
         }
@@ -632,5 +828,175 @@ document.addEventListener('DOMContentLoaded', boot);</script></body></html>";
             laid_out,
             "the DOMContentLoaded listener must run at load and its content must be laid out"
         );
+    }
+
+    const DYNAMIC_HTML: &str = "<html><head><title>Dynamic App</title></head><body>\
+<h1>Interactive</h1>\
+<button id=\"btn\" onclick=\"var target = document.getElementById('out'); target.textContent = 'CLICKED';\">Trigger</button>\
+<script>\
+function init() {\
+  var p = document.createElement('p');\
+  p.id = 'out';\
+  p.textContent = 'READY';\
+  document.body.appendChild(p);\
+}\
+document.addEventListener('DOMContentLoaded', init);\
+</script>\
+</body></html>";
+
+    /// Acceptance: `DYNAMIC_HTML` exercises `createElement`, `appendChild`,
+    /// `p.id = 'out'`, `textContent`, `DOMContentLoaded`, button `<button>`
+    /// rendering, `onclick` live mutation resolved via `getElementById('out')`
+    /// (without any harness `set_attr` workaround), and relayout + repaint.
+    #[test]
+    fn dynamic_html_end_to_end_load_button_onclick_relayout_and_repaint() {
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        assert!(engine.load_html(DYNAMIC_HTML, None).is_ok());
+        assert_eq!(engine.title(), "Dynamic App");
+        assert!(engine.script_report().mutated);
+        assert_eq!(engine.script_report().last_error, None);
+
+        // 1. DOMContentLoaded created <p id="out">READY</p> and laid it out.
+        let ready_run = engine.layout().runs[..engine.layout().run_count]
+            .iter()
+            .find(|r| r.bytes(engine.dom()).windows(5).any(|w| w == b"READY"))
+            .expect("DOMContentLoaded must build and lay out READY");
+
+        let mut ready_ink = false;
+        for y in ready_run.y as usize..ready_run.y as usize + ready_run.h as usize {
+            for x in ready_run.x as usize..ready_run.x as usize + ready_run.w as usize {
+                let px = engine.render_pixel(x, y);
+                if px != 0xFFFFFFFF && px != 0xFF121212 {
+                    ready_ink = true;
+                    break;
+                }
+            }
+            if ready_ink {
+                break;
+            }
+        }
+        assert!(ready_ink, "READY must rasterize to glyph ink");
+
+        // 2. <button> child text node is in FieldItem.value and renders to pixels.
+        let btn = engine.layout().fields[..engine.layout().field_count]
+            .iter()
+            .find(|f| f.kind == crate::layout::FieldKind::Button)
+            .expect("button field must be laid out");
+        assert_eq!(btn.value.get(engine.dom()), b"Trigger");
+
+        let bx = (btn.x as usize) + (btn.w as usize) / 2;
+        let by = (btn.y as usize) + (btn.h as usize) / 2;
+        let mut btn_ink = false;
+        for y in btn.y as usize..btn.y as usize + btn.h as usize {
+            for x in btn.x as usize..btn.x as usize + btn.w as usize {
+                let px = engine.render_pixel(x, y);
+                if px == 0xFF1E293B {
+                    btn_ink = true;
+                    break;
+                }
+            }
+            if btn_ink {
+                break;
+            }
+        }
+        assert!(btn_ink, "<button> label 'Trigger' must rasterize inside button");
+
+        // 3. Tapping the button executes onclick -> getElementById('out') -> relayout.
+        let action = engine.handle_touch(bx as u32, by as u32, 1);
+        assert_eq!(action, EngineAction::None);
+        assert_eq!(engine.script_report().last_error, None);
+
+        let clicked_run = engine.layout().runs[..engine.layout().run_count]
+            .iter()
+            .find(|r| r.bytes(engine.dom()).windows(7).any(|w| w == b"CLICKED"))
+            .expect("onclick mutation must relayout CLICKED");
+        let still_ready = engine.layout().runs[..engine.layout().run_count]
+            .iter()
+            .any(|r| r.bytes(engine.dom()).windows(5).any(|w| w == b"READY"));
+        assert!(!still_ready, "old READY run must be replaced by CLICKED after relayout");
+
+        let mut clicked_ink = false;
+        for y in clicked_run.y as usize..clicked_run.y as usize + clicked_run.h as usize {
+            for x in clicked_run.x as usize..clicked_run.x as usize + clicked_run.w as usize {
+                let px = engine.render_pixel(x, y);
+                if px != 0xFFFFFFFF && px != 0xFF121212 {
+                    clicked_ink = true;
+                    break;
+                }
+            }
+            if clicked_ink {
+                break;
+            }
+        }
+        assert!(clicked_ink, "CLICKED must rasterize to glyph ink after relayout");
+    }
+
+    #[test]
+    fn module_script_is_skipped_with_unsupported_status_without_poisoning_classic() {
+        let html = "<html><body>\
+<script type=\"module\">import { x } from './app.js';</script>\
+<script>var p = document.createElement('p'); p.textContent = 'CLASSIC'; document.body.appendChild(p);</script>\
+</body></html>";
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        assert!(engine.load_html(html, None).is_ok());
+        assert!(engine.script_report().unsupported_module);
+        assert_eq!(engine.script_notice(), Some("unsupported script type: module"));
+        assert_eq!(engine.script_report().last_error, None);
+        let has_classic = engine.layout().runs[..engine.layout().run_count]
+            .iter()
+            .any(|r| r.bytes(engine.dom()).windows(7).any(|w| w == b"CLASSIC"));
+        assert!(has_classic, "classic script must still run when module script is present");
+    }
+
+    #[test]
+    fn external_script_src_does_not_consume_inline_slots() {
+        let mut buf = [0u8; 2048];
+        let mut pos = 0usize;
+        let head = b"<html><body>";
+        buf[pos..pos + head.len()].copy_from_slice(head);
+        pos += head.len();
+        let ext = b"<script src=\"/s.js\"></script>";
+        for _ in 0..MAX_PAGE_SCRIPTS {
+            buf[pos..pos + ext.len()].copy_from_slice(ext);
+            pos += ext.len();
+        }
+        let tail = b"<script>var p = document.createElement('p'); p.textContent = 'INLINE_OK'; document.body.appendChild(p);</script></body></html>";
+        buf[pos..pos + tail.len()].copy_from_slice(tail);
+        pos += tail.len();
+        let html = core::str::from_utf8(&buf[..pos]).unwrap();
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        assert!(engine.load_html(html, None).is_ok());
+        assert_eq!(engine.script_report().skipped_external, MAX_PAGE_SCRIPTS);
+        assert!(!engine.script_report().truncated);
+        let ok = engine.layout().runs[..engine.layout().run_count]
+            .iter()
+            .any(|r| r.bytes(engine.dom()).windows(9).any(|w| w == b"INLINE_OK"));
+        assert!(ok, "inline script after MAX_PAGE_SCRIPTS external scripts must run");
+    }
+
+    #[test]
+    fn oversized_inline_script_is_not_truncated_mid_statement() {
+        let mut buf = [0u8; 8192];
+        let mut pos = 0usize;
+        let head = b"<html><body><script>var x = 1; ";
+        buf[pos..pos + head.len()].copy_from_slice(head);
+        pos += head.len();
+        let stmt = b"x = x + 1; ";
+        while pos <= head.len() + SCRIPT_BUF_BYTES {
+            buf[pos..pos + stmt.len()].copy_from_slice(stmt);
+            pos += stmt.len();
+        }
+        let tail = b"var bad = document.createElement('p'); bad.textContent = 'BAD'; document.body.appendChild(bad);</script><script>var ok = document.createElement('p'); ok.textContent = 'SAFE'; document.body.appendChild(ok);</script></body></html>";
+        buf[pos..pos + tail.len()].copy_from_slice(tail);
+        pos += tail.len();
+        let html = core::str::from_utf8(&buf[..pos]).unwrap();
+        let mut engine = NativeFlowEngine::new(720, 1234);
+        assert!(engine.load_html(html, None).is_ok());
+        assert!(engine.script_report().truncated);
+        assert_eq!(engine.script_report().last_error, None);
+        let has_safe = engine.layout().runs[..engine.layout().run_count]
+            .iter()
+            .any(|r| r.bytes(engine.dom()).windows(4).any(|w| w == b"SAFE"));
+        assert!(has_safe, "subsequent fitting script runs without mid-statement syntax error");
     }
 }

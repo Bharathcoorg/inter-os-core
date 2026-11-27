@@ -501,50 +501,111 @@ impl Dom {
     }
 
     /// Sets or updates an attribute on an element node.
+    ///
+    /// Maintains contiguous attribute slices per node by relocating existing
+    /// attributes to the end of `self.attrs` when appending to a node whose
+    /// slice is followed by another node's attributes. Rejects lengths above
+    /// `u16::MAX` and notes [`OVERFLOW_ATTRS`] / [`OVERFLOW_TEXT`] on capacity
+    /// exhaustion without modifying state.
     pub fn set_attr(&mut self, id: NodeId, name: &[u8], value: &[u8]) -> bool {
         let idx = id as usize;
-        if idx >= self.node_count { return false; }
+        if idx >= self.node_count || !self.nodes[idx].is_element() {
+            return false;
+        }
+        if name.len() > u16::MAX as usize || value.len() > u16::MAX as usize {
+            self.note(OVERFLOW_TEXT);
+            return false;
+        }
+        let start = self.nodes[idx].attr_start as usize;
+        let count = self.nodes[idx].attr_count as usize;
+        let end = (start + count).min(self.attr_count);
+        let actual_count = end.saturating_sub(start);
+        for i in start..end {
+            if self.attrs[i].name.get(self).eq_ignore_ascii_case(name) {
+                if self.text_len + value.len() > MAX_TEXT_BYTES {
+                    self.note(OVERFLOW_TEXT);
+                    return false;
+                }
+                let v_start = self.text_len as u32;
+                let v_len = value.len() as u16;
+                self.text[self.text_len..self.text_len + value.len()].copy_from_slice(value);
+                self.text_len += value.len();
+                self.attrs[i].value = StrRef { start: v_start, len: v_len };
+                return true;
+            }
+        }
+        let relocate = actual_count > 0 && end < self.attr_count;
+        let need_attrs = if relocate { actual_count + 1 } else { 1 };
+        let mut ok = true;
+        if self.attr_count + need_attrs > MAX_ATTRS {
+            self.note(OVERFLOW_ATTRS);
+            ok = false;
+        }
+        if self.text_len + name.len() + value.len() > MAX_TEXT_BYTES {
+            self.note(OVERFLOW_TEXT);
+            ok = false;
+        }
+        if !ok {
+            return false;
+        }
+
+        let n_start = self.text_len as u32;
+        let n_len = name.len() as u16;
+        self.text[self.text_len..self.text_len + name.len()].copy_from_slice(name);
+        self.text_len += name.len();
+
+        let v_start = self.text_len as u32;
+        let v_len = value.len() as u16;
+        self.text[self.text_len..self.text_len + value.len()].copy_from_slice(value);
+        self.text_len += value.len();
+
+        if relocate {
+            // Relocate existing attributes to the end so this node's attribute
+            // slice remains contiguous and never overlaps neighboring nodes.
+            let new_start = self.attr_count;
+            for i in 0..actual_count {
+                self.attrs[new_start + i] = self.attrs[start + i];
+            }
+            self.nodes[idx].attr_start = new_start as u16;
+            self.attr_count += actual_count;
+        } else if actual_count == 0 {
+            self.nodes[idx].attr_start = self.attr_count as u16;
+        }
+
+        let attr_idx = self.attr_count;
+        self.attrs[attr_idx] = Attr {
+            name: StrRef { start: n_start, len: n_len },
+            value: StrRef { start: v_start, len: v_len },
+        };
+        self.attr_count += 1;
+        self.nodes[idx].attr_count = (actual_count + 1) as u16;
+        true
+    }
+
+    /// Removes the attribute `name` (ASCII case-insensitive) from `id`.
+    /// Returns whether the attribute was found and removed.
+    pub fn remove_attr(&mut self, id: NodeId, name: &[u8]) -> bool {
+        let idx = id as usize;
+        if idx >= self.node_count || !self.nodes[idx].is_element() {
+            return false;
+        }
         let start = self.nodes[idx].attr_start as usize;
         let count = self.nodes[idx].attr_count as usize;
         let end = (start + count).min(self.attr_count);
         for i in start..end {
             if self.attrs[i].name.get(self).eq_ignore_ascii_case(name) {
-                if self.text_len + value.len() <= MAX_TEXT_BYTES {
-                    let v_start = self.text_len as u32;
-                    let v_len = value.len().min(u16::MAX as usize) as u16;
-                    self.text[self.text_len..self.text_len + value.len()].copy_from_slice(value);
-                    self.text_len += value.len();
-                    self.attrs[i].value = StrRef { start: v_start, len: v_len };
-                    return true;
+                for j in i..end.saturating_sub(1) {
+                    self.attrs[j] = self.attrs[j + 1];
                 }
-                return false;
+                let new_count = end.saturating_sub(start).saturating_sub(1);
+                self.nodes[idx].attr_count = new_count as u16;
+                if end == self.attr_count && self.attr_count > 0 {
+                    self.attr_count -= 1;
+                }
+                return true;
             }
         }
-        if self.attr_count < MAX_ATTRS && self.text_len + name.len() + value.len() <= MAX_TEXT_BYTES {
-            let n_start = self.text_len as u32;
-            let n_len = name.len() as u16;
-            self.text[self.text_len..self.text_len + name.len()].copy_from_slice(name);
-            self.text_len += name.len();
-
-            let v_start = self.text_len as u32;
-            let v_len = value.len() as u16;
-            self.text[self.text_len..self.text_len + value.len()].copy_from_slice(value);
-            self.text_len += value.len();
-
-            let attr_idx = self.attr_count;
-            self.attrs[attr_idx] = Attr {
-                name: StrRef { start: n_start, len: n_len },
-                value: StrRef { start: v_start, len: v_len },
-            };
-            self.attr_count += 1;
-            if self.nodes[idx].attr_count == 0 {
-                self.nodes[idx].attr_start = attr_idx as u16;
-            }
-            self.nodes[idx].attr_count += 1;
-            true
-        } else {
-            false
-        }
+        false
     }
 
     /// Sets or replaces the text content of a node.
@@ -968,11 +1029,19 @@ impl Dom {
             self.note(OVERFLOW_NODES);
             return None;
         }
-        if self.text_len + tag.len() > MAX_TEXT_BYTES {
+        if tag.len() > u16::MAX as usize || self.text_len + tag.len() > MAX_TEXT_BYTES {
             self.note(OVERFLOW_TEXT);
             return None;
         }
-        let tag_ref = self.intern(tag);
+        let start = self.text_len;
+        for (i, &b) in tag.iter().enumerate() {
+            self.text[start + i] = b.to_ascii_lowercase();
+        }
+        self.text_len += tag.len();
+        let tag_ref = StrRef {
+            start: start as u32,
+            len: tag.len() as u16,
+        };
         let id = self.push_node(NodeKind::Element, tag_ref, StrRef::EMPTY);
         if id == NO_NODE {
             return None;
@@ -2464,5 +2533,78 @@ mod tests {
         let mut buf = std::vec::Vec::new();
         collect_text(&dom, e, &mut buf);
         assert_eq!(buf, b"keep");
+    }
+
+    #[test]
+    fn set_attr_preserves_existing_and_neighbor_attrs() {
+        let mut dom = Dom::new();
+        let a = dom.create_element(b"p").unwrap();
+        let b = dom.create_element(b"span").unwrap();
+        assert!(dom.set_attr(a, b"class", b"card"));
+        assert!(dom.set_attr(b, b"id", b"neighbor"));
+        // Adding id and value to `a` after `b` has attrs must relocate `a`'s
+        // slice cleanly without overlapping `b` or losing `class`.
+        assert!(dom.set_attr(a, b"id", b"out"));
+        assert!(dom.set_attr(a, b"value", b"v1"));
+        assert_eq!(dom.attr(a, b"class"), Some(&b"card"[..]));
+        assert_eq!(dom.attr(a, b"id"), Some(&b"out"[..]));
+        assert_eq!(dom.attr(a, b"value"), Some(&b"v1"[..]));
+        assert_eq!(dom.attr(b, b"id"), Some(&b"neighbor"[..]));
+        // Updating existing attribute updates value in place without duplicating.
+        assert!(dom.set_attr(a, b"value", b"v2"));
+        assert_eq!(dom.attr(a, b"value"), Some(&b"v2"[..]));
+        assert_eq!(dom.node(a).attr_count, 3);
+    }
+
+    #[test]
+    fn remove_attr_deletes_matching_and_preserves_siblings() {
+        let mut dom = Dom::new();
+        let cb = dom.create_element(b"input").unwrap();
+        assert!(dom.set_attr(cb, b"type", b"checkbox"));
+        assert!(dom.set_attr(cb, b"checked", b"checked"));
+        assert!(dom.set_attr(cb, b"id", b"agree"));
+        assert!(dom.remove_attr(cb, b"checked"));
+        assert!(!dom.has_attr(cb, b"checked"));
+        assert_eq!(dom.attr(cb, b"type"), Some(&b"checkbox"[..]));
+        assert_eq!(dom.attr(cb, b"id"), Some(&b"agree"[..]));
+        assert!(!dom.remove_attr(cb, b"checked"));
+    }
+
+    #[test]
+    fn set_attr_rejects_overflow_without_wrapping_and_notes_overflow() {
+        let mut dom = Dom::new();
+        let e = dom.create_element(b"div").unwrap();
+        let big = std::vec![b'a'; (u16::MAX as usize) + 1];
+        assert!(!dom.set_attr(e, b"id", &big));
+        assert_ne!(dom.overflow() & OVERFLOW_TEXT, 0);
+
+        let mut dom2 = Dom::new();
+        let target = dom2.create_element(b"div").unwrap();
+        let mut count = 0usize;
+        while count < MAX_ATTRS {
+            let n = dom2.create_element(b"span").unwrap();
+            for _ in 0..8 {
+                if count >= MAX_ATTRS {
+                    break;
+                }
+                let mut key = [b'k', b'0', b'0', b'0', b'0'];
+                key[1] = b'0' + ((count / 1000) % 10) as u8;
+                key[2] = b'0' + ((count / 100) % 10) as u8;
+                key[3] = b'0' + ((count / 10) % 10) as u8;
+                key[4] = b'0' + (count % 10) as u8;
+                assert!(dom2.set_attr(n, &key, b"v"));
+                count += 1;
+            }
+        }
+        assert!(!dom2.set_attr(target, b"id", b"overflow"));
+        assert_ne!(dom2.overflow() & OVERFLOW_ATTRS, 0);
+        assert_eq!(dom2.attr(target, b"id"), None);
+    }
+
+    #[test]
+    fn create_element_lowercases_ascii_tag_names() {
+        let mut dom = Dom::new();
+        let el = dom.create_element(b"DiV").unwrap();
+        assert_eq!(dom.tag(el), b"div");
     }
 }

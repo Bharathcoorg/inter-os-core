@@ -1532,6 +1532,9 @@ impl<'a> JsRuntime<'a> {
 
                         // Method: document.getElementById(id_str)
                         if method == b"getElementById" && *args_count >= 1 {
+                            if !matches!(obj, JsValue::Element(_)) {
+                                return Err(JsError::TypeError);
+                            }
                             let arg_id = parser.args_pool[*args_start];
                             let arg_val = self.eval_expr(parser, arg_id)?;
                             let target_id = arg_val.as_str().as_bytes();
@@ -1540,9 +1543,14 @@ impl<'a> JsRuntime<'a> {
                         }
 
                         // Method: document.getElementsByTagName(tag_str)
-                        // Returns an array of matching element nodes (empty
-                        // when none match), bounded by the array arena.
+                        // Returns an array of matching attached element nodes
+                        // under `obj` (empty when none match), bounded by the
+                        // array arena.
                         if method == b"getElementsByTagName" && *args_count >= 1 {
+                            let scope = match obj {
+                                JsValue::Element(n) => n,
+                                _ => return Err(JsError::TypeError),
+                            };
                             let arg_id = parser.args_pool[*args_start];
                             let arg_val = self.eval_expr(parser, arg_id)?;
                             let tag = arg_val.as_str().as_bytes();
@@ -1555,6 +1563,7 @@ impl<'a> JsRuntime<'a> {
                             for id in 0..n {
                                 let nid = id as NodeId;
                                 if self.dom.node(nid).is_element()
+                                    && self.is_descendant_of(nid, scope)
                                     && self.dom.tag(nid).eq_ignore_ascii_case(tag)
                                 {
                                     if count >= MAX_ARRAY_ELEMS {
@@ -1775,19 +1784,30 @@ impl<'a> JsRuntime<'a> {
         }
     }
 
-    /// Dispatches `event` to every listener registered for that name.
+    /// Dispatches `event` to every listener registered on `document` for that name.
+    fn dispatch_event(&mut self, parser: &Parser, event: &[u8]) -> Result<(), JsError> {
+        let root = self.dom.root();
+        self.dispatch_event_on(parser, root, event)
+    }
+
+    /// Dispatches `event` to every listener registered on `target` for that name.
     ///
     /// The matching function ids are gathered first so the mutable borrow
     /// taken by [`JsRuntime::invoke_function`] does not overlap the listener
     /// table read. A handler that overruns its budget aborts the dispatch
     /// with the same error an ordinary call would report.
-    fn dispatch_event(&mut self, parser: &Parser, event: &[u8]) -> Result<(), JsError> {
+    fn dispatch_event_on(
+        &mut self,
+        parser: &Parser,
+        target: NodeId,
+        event: &[u8],
+    ) -> Result<(), JsError> {
         let mut ids = [0u8; MAX_LISTENERS];
         let mut count = 0usize;
         for i in 0..self.listener_count {
             let listener = self.listeners[i];
             let len = listener.event_len as usize;
-            if len == event.len() && &listener.event[..len] == event {
+            if listener.node == target && len == event.len() && &listener.event[..len] == event {
                 if count < ids.len() {
                     ids[count] = listener.fn_id;
                     count += 1;
@@ -1812,21 +1832,108 @@ impl<'a> JsRuntime<'a> {
         }
     }
 
+    fn is_descendant_of(&self, node: NodeId, ancestor: NodeId) -> bool {
+        if node == ancestor {
+            return false;
+        }
+        let mut cur = self.dom.parent(node);
+        let mut guard = 0usize;
+        let limit = self.dom.node_count();
+        while let Some(nid) = cur {
+            if nid == ancestor {
+                return true;
+            }
+            if guard > limit {
+                return false;
+            }
+            guard += 1;
+            cur = self.dom.parent(nid);
+        }
+        false
+    }
+
+    fn is_in_document(&self, node: NodeId) -> bool {
+        let root = self.dom.root();
+        node == root || self.is_descendant_of(node, root)
+    }
+
     fn find_element_by_id(&self, target_id: &[u8]) -> Option<NodeId> {
         let n = self.dom.node_count();
         for id in 0..n {
             let nid = id as NodeId;
-            if let Some(id_attr) = self.dom.attr(nid, b"id") {
-                if id_attr == target_id {
-                    return Some(nid);
+            if self.dom.node(nid).is_element() && self.is_in_document(nid) {
+                if let Some(id_attr) = self.dom.attr(nid, b"id") {
+                    if id_attr == target_id {
+                        return Some(nid);
+                    }
                 }
             }
         }
         None
     }
 
+    fn collect_text_content(&self, node_id: NodeId) -> JsValue {
+        let mut buf = [0u8; MAX_STR_LEN];
+        if self.dom.node(node_id).is_text() {
+            let t = self.dom.text_of(node_id);
+            let take = t.len().min(MAX_STR_LEN);
+            buf[..take].copy_from_slice(&t[..take]);
+            return JsValue::String(buf, take as u8);
+        }
+        let mut len = 0usize;
+        let mut cur = self.dom.first_child(node_id);
+        let mut guard = 0usize;
+        let max_steps = self.dom.node_count().saturating_mul(2).max(1);
+        while let Some(id) = cur {
+            if guard > max_steps || len >= MAX_STR_LEN {
+                break;
+            }
+            guard += 1;
+            if self.dom.node(id).is_text() {
+                let t = self.dom.text_of(id);
+                let take = t.len().min(MAX_STR_LEN - len);
+                buf[len..len + take].copy_from_slice(&t[..take]);
+                len += take;
+            }
+            if let Some(child) = self.dom.first_child(id) {
+                cur = Some(child);
+            } else {
+                let mut backtrack = Some(id);
+                cur = None;
+                while let Some(b) = backtrack {
+                    if guard > max_steps {
+                        break;
+                    }
+                    guard += 1;
+                    if b == node_id {
+                        break;
+                    }
+                    if let Some(sib) = self.dom.next_sibling(b) {
+                        cur = Some(sib);
+                        break;
+                    }
+                    backtrack = self.dom.parent(b);
+                    if backtrack == Some(node_id) {
+                        break;
+                    }
+                }
+            }
+        }
+        JsValue::String(buf, len as u8)
+    }
+
     fn get_element_prop(&self, node_id: NodeId, prop: &[u8]) -> Result<JsValue, JsError> {
+        if (node_id as usize) >= self.dom.node_count() {
+            return Err(JsError::TypeError);
+        }
         match prop {
+            b"id" => {
+                if let Some(id_val) = self.dom.attr(node_id, b"id") {
+                    Ok(JsValue::string_from_slice(id_val))
+                } else {
+                    Ok(JsValue::string_from_slice(b""))
+                }
+            }
             b"value" => {
                 if let Some(val) = self.dom.attr(node_id, b"value") {
                     Ok(JsValue::string_from_slice(val))
@@ -1834,10 +1941,7 @@ impl<'a> JsRuntime<'a> {
                     Ok(JsValue::string_from_slice(b""))
                 }
             }
-            b"textContent" | b"innerText" => {
-                let txt = self.dom.text_of(node_id);
-                Ok(JsValue::string_from_slice(txt))
-            }
+            b"textContent" | b"innerText" => Ok(self.collect_text_content(node_id)),
             b"checked" => Ok(JsValue::Boolean(self.dom.has_attr(node_id, b"checked"))),
             b"disabled" => Ok(JsValue::Boolean(self.dom.has_attr(node_id, b"disabled"))),
             b"body" => {
@@ -1871,31 +1975,56 @@ impl<'a> JsRuntime<'a> {
         prop: &[u8],
         val: JsValue,
     ) -> Result<(), JsError> {
+        if (node_id as usize) >= self.dom.node_count() {
+            return Err(JsError::TypeError);
+        }
         match prop {
             b"value" => {
+                if !self.dom.node(node_id).is_element() {
+                    return Err(JsError::TypeError);
+                }
                 let bytes = val.as_str().as_bytes();
-                self.dom.set_attr(node_id, b"value", bytes);
-                self.mutated = true;
-                Ok(())
-            }
-            b"checked" => {
-                if val.to_bool() {
-                    self.dom.set_attr(node_id, b"checked", b"checked");
+                if !self.dom.set_attr(node_id, b"value", bytes) {
+                    return Err(JsError::CapacityExceeded);
                 }
                 self.mutated = true;
                 Ok(())
             }
+            b"checked" => {
+                if !self.dom.node(node_id).is_element() {
+                    return Err(JsError::TypeError);
+                }
+                if val.to_bool() {
+                    if !self.dom.set_attr(node_id, b"checked", b"checked") {
+                        return Err(JsError::CapacityExceeded);
+                    }
+                    self.mutated = true;
+                } else if self.dom.remove_attr(node_id, b"checked") {
+                    self.mutated = true;
+                }
+                Ok(())
+            }
             b"textContent" | b"innerText" => {
+                if !self.dom.node(node_id).is_element() && !self.dom.node(node_id).is_text() {
+                    return Err(JsError::TypeError);
+                }
                 let bytes = val.as_str().as_bytes();
-                self.dom.set_text(node_id, bytes);
+                if !self.dom.set_text(node_id, bytes) {
+                    return Err(JsError::CapacityExceeded);
+                }
                 self.mutated = true;
                 Ok(())
             }
             b"id" => {
+                if !self.dom.node(node_id).is_element() {
+                    return Err(JsError::TypeError);
+                }
                 // Assigning `id` must store the attribute so getElementById can
                 // resolve the node (used by script-built UI and event handlers).
                 let bytes = val.as_str().as_bytes();
-                self.dom.set_attr(node_id, b"id", bytes);
+                if !self.dom.set_attr(node_id, b"id", bytes) {
+                    return Err(JsError::CapacityExceeded);
+                }
                 self.mutated = true;
                 Ok(())
             }
@@ -2206,5 +2335,112 @@ mod tests {
             before,
             "no node may be added when the event name does not match"
         );
+    }
+
+    #[test]
+    fn test_multi_attribute_set_attr_and_get_element_by_id() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body><p class=\"card\">init</p><span id=\"other\">x</span></body></html>");
+        let src = b"var list = document.getElementsByTagName('p'); \
+                    var p = list[0]; \
+                    p.id = 'target'; \
+                    p.textContent = 'updated'; \
+                    var resolved = document.getElementById('target'); \
+                    var result = resolved.id + ':' + resolved.textContent;";
+        let (res, mutated) =
+            execute_script_with_mutations(src, &mut dom, 2000).expect("script succeeds");
+        assert!(mutated);
+        assert_eq!(res.as_str(), "target:updated");
+        let other = (0..dom.node_count() as NodeId)
+            .find(|&id| dom.attr(id, b"id") == Some(&b"other"[..]));
+        assert!(other.is_some(), "neighbor element attribute must remain intact");
+    }
+
+    #[test]
+    fn test_set_element_prop_fails_cleanly_on_attr_capacity_exhaustion() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body><p id=\"t\">keep</p></body></html>");
+        let mut count = 0usize;
+        'fill: while count < crate::layout::dom::MAX_ATTRS {
+            let Some(n) = dom.create_element(b"span") else {
+                break;
+            };
+            for _ in 0..8 {
+                if count >= crate::layout::dom::MAX_ATTRS {
+                    break 'fill;
+                }
+                let mut key = [b'k', b'0', b'0', b'0', b'0'];
+                key[1] = b'0' + ((count / 1000) % 10) as u8;
+                key[2] = b'0' + ((count / 100) % 10) as u8;
+                key[3] = b'0' + ((count / 10) % 10) as u8;
+                key[4] = b'0' + (count % 10) as u8;
+                if !dom.set_attr(n, &key, b"v") {
+                    break 'fill;
+                }
+                count += 1;
+            }
+        }
+        let mut rt = JsRuntime::new(&mut dom, 1000);
+        let t = rt.find_element_by_id(b"t").expect("target exists");
+        let err = rt
+            .set_element_prop(t, b"value", JsValue::string_from_slice(b"new"))
+            .expect_err("attribute capacity exhaustion must fail");
+        assert_eq!(err, JsError::CapacityExceeded);
+        assert!(!rt.dom_mutated(), "failed mutation must not mark runtime mutated");
+        assert_eq!(dom.attr(t, b"id"), Some(&b"t"[..]));
+        assert_eq!(dom.attr(t, b"value"), None);
+    }
+
+    #[test]
+    fn test_checked_false_removes_attribute() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body><input id=\"cb\" type=\"checkbox\" checked></body></html>");
+        let src = b"var cb = document.getElementById('cb'); \
+                    var was = cb.checked; \
+                    cb.checked = false; \
+                    var now = cb.checked; \
+                    was && !now;";
+        let (res, mutated) =
+            execute_script_with_mutations(src, &mut dom, 1000).expect("checked toggle succeeds");
+        assert!(mutated);
+        assert_eq!(res, JsValue::Boolean(true));
+        let cb = (0..dom.node_count() as NodeId)
+            .find(|&id| dom.attr(id, b"id") == Some(&b"cb"[..]))
+            .expect("checkbox exists");
+        assert!(!dom.has_attr(cb, b"checked"));
+    }
+
+    #[test]
+    fn test_el_id_and_text_content_getters_and_detached_nodes() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body><div id=\"box\"><span>hello </span>world</div></body></html>");
+        let src = b"var box = document.getElementById('box'); \
+                    var d = document.createElement('p'); \
+                    d.id = 'detached'; \
+                    var ghost = document.getElementById('detached'); \
+                    var ps = document.getElementsByTagName('p'); \
+                    var ok_before = (ghost == null) && (ps.length == 0); \
+                    document.body.appendChild(d); \
+                    var found = document.getElementById('detached'); \
+                    var ps_after = document.getElementsByTagName('p'); \
+                    var ok_after = ps_after.length == 1; \
+                    box.id + '|' + box.textContent + '|' + ok_before + '|' + found.id + '|' + ok_after;";
+        let res = execute_script(src, &mut dom, 2000).expect("getters and detached checks succeed");
+        assert_eq!(res.as_str(), "box|hello world|true|detached|true");
+    }
+
+    #[test]
+    fn test_listener_targeted_by_node() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body><button id=\"b\">Go</button></body></html>");
+        let before = dom.node_count();
+        let src = b"function onBtn() { var p = document.createElement('p'); p.textContent = 'WRONG'; document.body.appendChild(p); } \
+                    var b = document.getElementById('b'); \
+                    b.addEventListener('DOMContentLoaded', onBtn);";
+        let (_res, mutated) =
+            execute_script_with_events(src, &mut dom, 1000, b"DOMContentLoaded")
+                .expect("dispatch succeeds");
+        assert!(!mutated, "element listener must not fire on document DOMContentLoaded");
+        assert_eq!(dom.node_count(), before);
     }
 }
