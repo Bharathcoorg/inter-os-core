@@ -141,11 +141,14 @@ pub struct BootAttestation {
     pub boot_manifest_digest: [u8; SHA256_DIGEST_LENGTH],
 }
 
-/// Recomputes the build-time manifest digest from `entries` as `build.rs` does:
-/// SHA-256 over each `name || digest`, in order.
+/// Recomputes the build-time manifest digest from `entries` as
+/// `build.rs` does, but with an unambiguous length-prefixed encoding so no
+/// concatenation of `name || digest` can collide: SHA-256 over, for each entry
+/// in order, `u64 name_len || name || digest`.
 fn manifest_digest(entries: &[(&str, [u8; SHA256_DIGEST_LENGTH])]) -> [u8; SHA256_DIGEST_LENGTH] {
     let mut buf = Vec::new();
     for (name, digest) in entries {
+        buf.extend_from_slice(&(name.len() as u64).to_le_bytes());
         buf.extend_from_slice(name.as_bytes());
         buf.extend_from_slice(digest);
     }
@@ -155,7 +158,8 @@ fn manifest_digest(entries: &[(&str, [u8; SHA256_DIGEST_LENGTH])]) -> [u8; SHA25
 /// Installs the trusted system-image root and its authenticated metadata manifest
 /// from authorized boot metadata. The root is accepted only when it equals the
 /// boot-attested manifest digest AND the supplied entries recompute to that
-/// digest; a caller cannot install an arbitrary nonzero root.
+/// digest; a caller cannot install an arbitrary nonzero root. Duplicate canonical
+/// paths are refused so one entry can never shadow another.
 pub fn provision_root_from_boot(
     attestation: &BootAttestation,
     root: &[u8; SHA256_DIGEST_LENGTH],
@@ -169,6 +173,18 @@ pub fn provision_root_from_boot(
     }
     if &manifest_digest(entries) != root {
         return Err(StorageError::UnauthenticatedRoot);
+    }
+    // Reject duplicate canonical paths and empty/invalid names: an ambiguous
+    // manifest could authorize one object's digest for another.
+    let mut seen: Vec<&str> = Vec::with_capacity(entries.len());
+    for (name, _) in entries {
+        if name.is_empty() || name.contains('\\') || !name.starts_with('/') {
+            return Err(StorageError::UnauthenticatedRoot);
+        }
+        if seen.iter().any(|n| *n == *name) {
+            return Err(StorageError::UnauthenticatedRoot);
+        }
+        seen.push(name);
     }
     let owned: Vec<(alloc::string::String, [u8; SHA256_DIGEST_LENGTH])> =
         entries.iter().map(|(n, d)| (alloc::string::String::from(*n), *d)).collect();
@@ -189,18 +205,19 @@ pub fn provisioned_root() -> Option<[u8; SHA256_DIGEST_LENGTH]> {
     *PROVISIONED_ROOT.lock()
 }
 
-/// Re-verifies protected metadata: the root must be provisioned and the
-/// `(path, recorded_digest)` pair must be attested by the signed manifest.
+/// Re-verifies protected metadata: the root must be provisioned and the object's
+/// **full canonical path** and `recorded_digest` must be attested by the signed
+/// manifest. Basename matching is never used for authorization, so two files
+/// with the same basename in different directories are distinct objects.
 pub fn verify_protected_metadata(
     path: &str,
     recorded_digest: &[u8; SHA256_DIGEST_LENGTH],
 ) -> Result<(), StorageError> {
     provisioned_root().ok_or(StorageError::UnauthenticatedRoot)?;
-    let name = path.rsplit('/').next().unwrap_or(path);
     let manifest = PROVISIONED_MANIFEST.lock();
     let attested = manifest
         .as_ref()
-        .map(|entries| entries.iter().any(|(n, d)| n.as_str() == name && d == recorded_digest))
+        .map(|entries| entries.iter().any(|(n, d)| n.as_str() == path && d == recorded_digest))
         .unwrap_or(false);
     if attested { Ok(()) } else { Err(StorageError::IntegrityViolation) }
 }
@@ -660,33 +677,57 @@ mod tests {
         reset_root_for_test();
         let data = b"protected system image block";
         let digest = Sha256::digest(data);
-        let entries = [("init", digest)];
+        let entries = [("/system/bin/init", digest)];
         let root = manifest_digest(&entries);
         let att = BootAttestation { boot_manifest_digest: root };
 
         // No root: protected read fails closed (inert NOT IMPLEMENTED).
-        assert_eq!(verify_protected_read("init", &digest, data), Err(StorageError::UnauthenticatedRoot));
+        assert_eq!(verify_protected_read("/system/bin/init", &digest, data), Err(StorageError::UnauthenticatedRoot));
 
         // A root that is not the boot-attested manifest digest is refused.
         let bogus = Sha256::digest(b"attacker-chosen root");
         assert_eq!(provision_root_from_boot(&att, &bogus, &entries), Err(StorageError::UnauthenticatedRoot));
         // Entries that do not recompute to the attested root are refused.
-        let other = [("init", Sha256::digest(b"other"))];
+        let other = [("/system/bin/init", Sha256::digest(b"other"))];
         assert_eq!(provision_root_from_boot(&att, &root, &other), Err(StorageError::UnauthenticatedRoot));
 
         // Authorized provisioning arms the chain.
         assert_eq!(provision_root_from_boot(&att, &root, &entries), Ok(()));
-        assert_eq!(verify_protected_read("init", &digest, data), Ok(()));
-        // A path the manifest does not attest fails closed.
-        assert_eq!(verify_protected_read("etc/policy.json", &digest, data), Err(StorageError::IntegrityViolation));
+        assert_eq!(verify_protected_read("/system/bin/init", &digest, data), Ok(()));
+        // A path the manifest does not attest fails closed (full-path binding).
+        assert_eq!(verify_protected_read("/system/etc/policy.json", &digest, data), Err(StorageError::IntegrityViolation));
         // A digest the manifest does not attest fails closed.
         let rogue = Sha256::digest(b"rogue");
-        assert_eq!(verify_protected_read("init", &rogue, b"rogue"), Err(StorageError::IntegrityViolation));
+        assert_eq!(verify_protected_read("/system/bin/init", &rogue, b"rogue"), Err(StorageError::IntegrityViolation));
         // Tampered data under an attested digest fails closed.
-        assert_eq!(verify_protected_read("init", &digest, b"protected system image blocK"), Err(StorageError::IntegrityViolation));
+        assert_eq!(verify_protected_read("/system/bin/init", &digest, b"protected system image blocK"), Err(StorageError::IntegrityViolation));
 
-        // Anti-rollback: a different root is refused.
         reset_root_for_test();
         assert!(provisioned_root().is_none());
+    }
+
+    #[test]
+    fn same_basename_in_different_dirs_is_not_aliased() {
+        reset_root_for_test();
+        let a = b"init-A";
+        let b = b"init-B";
+        let da = Sha256::digest(a);
+        let db = Sha256::digest(b);
+        // Two objects named "init" in different directories, both attested.
+        let entries = [("/system/bin/init", da), ("/other/init", db)];
+        let root = manifest_digest(&entries);
+        let att = BootAttestation { boot_manifest_digest: root };
+        assert_eq!(provision_root_from_boot(&att, &root, &entries), Ok(()));
+        // Each full path authorizes only its own digest.
+        assert_eq!(verify_protected_read("/system/bin/init", &da, a), Ok(()));
+        assert_eq!(verify_protected_read("/other/init", &db, b), Ok(()));
+        assert_eq!(verify_protected_read("/system/bin/init", &db, b), Err(StorageError::IntegrityViolation));
+        // A duplicate canonical path is refused.
+        reset_root_for_test();
+        let dup = [("/system/bin/init", da), ("/system/bin/init", db)];
+        let root2 = manifest_digest(&dup);
+        let att2 = BootAttestation { boot_manifest_digest: root2 };
+        assert_eq!(provision_root_from_boot(&att2, &root2, &dup), Err(StorageError::UnauthenticatedRoot));
+        reset_root_for_test();
     }
 }
