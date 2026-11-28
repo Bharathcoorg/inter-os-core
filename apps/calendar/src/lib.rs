@@ -152,6 +152,27 @@ pub fn step_selected_day(day: u8, arrow: DayArrow, days_in_month: u8) -> Option<
     }
 }
 
+// The new-event sheet's close chip.
+//
+// WHY the chip is a disc and the press answers that same disc: the painter
+// drew a round button inside a square band and the press answered the whole
+// band, so a tap on any of the band's four corners closed the sheet although
+// nothing was painted there. The disc below is both the ink and the answer,
+// and its radius is the band's half-width, so the chip keeps the reach it
+// had while the corners stop answering.
+pub const SHEET_CLOSE_CX: usize = 650;
+pub const SHEET_CLOSE_CY: usize = 564;
+pub const SHEET_CLOSE_RADIUS: usize = 26;
+/// The half-length of one arm of the chip's X.
+pub const SHEET_CLOSE_CROSS: usize = 8;
+
+/// Whether a press lands on the new-event sheet's close chip.
+pub fn sheet_close_contains(x: usize, y: usize) -> bool {
+    let dx = x as isize - SHEET_CLOSE_CX as isize;
+    let dy = y as isize - SHEET_CLOSE_CY as isize;
+    dx * dx + dy * dy <= (SHEET_CLOSE_RADIUS * SHEET_CLOSE_RADIUS) as isize
+}
+
 // =============================================================================
 // The person's text size, and the geometry that follows it
 //
@@ -746,6 +767,19 @@ impl StoreState {
             StoreState::WriteRefused => "SETTINGS WRITE REFUSED: EVENT NOT PERSISTED",
             StoreState::Full => "STORE FULL: NO EVENT WRITTEN",
         }
+    }
+}
+
+/// The status an MCP caller is told when the agenda store refused a write.
+///
+/// WHY the refusal is not always "storage full": the store has two refusal
+/// reasons -- the agenda is full, and the settings store refused the write
+/// -- and a caller told "storage full" after a refused write goes looking
+/// for room that exists and retries a write the device has already refused.
+pub fn refusal_status(state: StoreState) -> u32 {
+    match state {
+        StoreState::Full => interos_std::appmcp::APPMCP_STATUS_STORAGE_FULL,
+        _ => interos_std::appmcp::APPMCP_STATUS_UNAVAILABLE,
     }
 }
 
@@ -1459,6 +1493,40 @@ mod tests {
         len += 1;
         let n = newly_due(&store, 2026, 11, 27, 12, 5, &notified, len, &mut due);
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_the_close_chip_answers_the_disc_the_sheet_paints() {
+        // The chip's centre is ink, so it answers.
+        assert!(sheet_close_contains(SHEET_CLOSE_CX, SHEET_CLOSE_CY));
+        // The disc's rim answers: it is the last row of ink.
+        assert!(sheet_close_contains(SHEET_CLOSE_CX + SHEET_CLOSE_RADIUS, SHEET_CLOSE_CY));
+        // The corners of the square band around the disc hold no ink, so they
+        // answer nothing.
+        assert!(!sheet_close_contains(
+            SHEET_CLOSE_CX - SHEET_CLOSE_RADIUS,
+            SHEET_CLOSE_CY - SHEET_CLOSE_RADIUS
+        ));
+        assert!(!sheet_close_contains(
+            SHEET_CLOSE_CX + SHEET_CLOSE_RADIUS,
+            SHEET_CLOSE_CY + SHEET_CLOSE_RADIUS
+        ));
+        // A press beside the chip is not a press on it.
+        assert!(!sheet_close_contains(SHEET_CLOSE_CX - SHEET_CLOSE_RADIUS - 1, SHEET_CLOSE_CY));
+    }
+
+    #[test]
+    fn test_a_refused_write_is_not_reported_as_storage_full() {
+        // A full agenda is the one refusal that is about room.
+        assert_eq!(
+            refusal_status(StoreState::Full),
+            interos_std::appmcp::APPMCP_STATUS_STORAGE_FULL
+        );
+        // A refused write is the device saying no, not the store saying no room.
+        assert_eq!(
+            refusal_status(StoreState::WriteRefused),
+            interos_std::appmcp::APPMCP_STATUS_UNAVAILABLE
+        );
     }
 }
 pub fn newly_due(

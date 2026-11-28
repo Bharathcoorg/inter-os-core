@@ -36,9 +36,10 @@ use settings::{
     UserTextScale,
     display_caption, handler_caption, json_i64, json_str, parse_battery_payload,
     parse_hardware_availability, parse_sensor_payload, parse_thermal_payload, stacked_height,
-    stacked_row_rect, syscall_status_name, text_scale_notice, NOTICE_INNER_W, BatteryTelemetry,
+    stacked_row_rect, syscall_status_name, text_scale_notice_for,
+    write_refusal_status, NOTICE_INNER_W, BatteryTelemetry,
     DispatchOutcome, DocumentSlot, HardwareAvailability, OrbState, QueryOutcome, SensorTelemetry,
-    ThermalTelemetry,
+    TextScaleWrite, ThermalTelemetry,
 };
 
 use interos_std::design::accessibility::DynamicType;
@@ -387,6 +388,12 @@ pub power_profile: Option<PowerProfile>,
     pub display_caption: [u8; 72],
     pub display_caption_len: usize,
     pub text_scale: UserTextScale,
+    /// What the settings store did with the last Font Scaling choice.
+    ///
+    /// WHY the row keeps it: the rung is published to this session whatever the
+    /// store says, but a choice the store refused is not carried into the next
+    /// launch, and the row's badge has to say which of the two happened.
+    pub text_scale_write: TextScaleWrite,
     /// The scroll model of the page on screen.
     ///
     /// WHY the page owns one: the section pages and the diagnostics page
@@ -635,6 +642,7 @@ impl SettingsApp {
             display_caption: [0u8; 72],
             display_caption_len: 0,
             text_scale: UserTextScale::Normal,
+            text_scale_write: TextScaleWrite::Unattempted,
             scroll: ScrollState::new(0, 0, 0),
             wallpaper_slot: DocumentSlot::EMPTY,
             ringtone_slot: DocumentSlot::EMPTY,
@@ -1249,7 +1257,18 @@ impl SettingsApp {
             UserTextScale::Large => b"large",
             UserTextScale::ExtraLarge => b"extralarge",
         };
-        let _ = std::settings_set("display.text_scale", val);
+        // WHY the outcome is kept and not dropped: the rung below is published
+        // either way, so a refused write would otherwise leave the row saying
+        // "APPLIED" over a choice the next launch will not have. The row's
+        // badge and scope line read this field.
+        self.text_scale_write = match std::settings_set("display.text_scale", val) {
+            Ok(()) => TextScaleWrite::Stored,
+            Err(_) => {
+                std::log("[SETTINGS APP] The settings store refused the text scale write; this session keeps it.")
+                    .ok();
+                TextScaleWrite::Refused
+            }
+        };
         // WHY the publish follows the store instead of the other way round: the
         // rung is what the screen is about to draw with, and a person who picks
         // "Large" and sees nothing change has been told a lie by the control.
@@ -4976,7 +4995,12 @@ fn row_pixel(
                 // changed". How far the rung reaches past this app is deliberately
                 // not listed here: `text_scale_notice` holds why, and where the
                 // reach stands today.
-                let notice = text_scale_notice(app.text_scale);
+                //
+                // WHY the notice carries what the store did with the last
+                // choice: the rung is published to this session whatever the
+                // store says, and a badge that read "APPLIED" over a refused
+                // write would claim a persistence that did not happen.
+                let notice = text_scale_notice_for(app.text_scale, app.text_scale_write);
                 if let Some(c) = row_head(
                     x,
                     y,
@@ -8026,16 +8050,24 @@ fn handle_appmcp_request(_settings: &mut SettingsApp, raw: &[u8], sender: u64, m
             if let Some(i) = delim {
                 let key = core::str::from_utf8(&payload[..i]).unwrap_or("");
                 let val = if i + 1 < payload.len() { &payload[i + 1..] } else { b"" };
-                if std::settings_set(key, val).is_ok() {
-                    let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token);
-                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
-                } else {
-                    let resp = std::appmcp::AppMcpResponse::error(
-                        std::appmcp::APPMCP_STATUS_STORAGE_FULL,
-                        req.tool_id,
-                        req.token,
-                    );
-                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                // WHY the status is read from the refusal and not fixed at
+                // "storage full": a refused write is the device saying no --
+                // to this caller, to this key, or to this moment -- and a
+                // caller told the store is full looks for room that exists
+                // and retries a write the device has already refused.
+                match std::settings_set(key, val) {
+                    Ok(()) => {
+                        let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token);
+                        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                    }
+                    Err(code) => {
+                        let resp = std::appmcp::AppMcpResponse::error(
+                            write_refusal_status(code),
+                            req.tool_id,
+                            req.token,
+                        );
+                        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                    }
                 }
             } else {
                 let resp = std::appmcp::AppMcpResponse::error(

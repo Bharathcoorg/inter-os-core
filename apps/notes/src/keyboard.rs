@@ -14,6 +14,15 @@
 //! more rows than a page of letters, and the sheet scrolls when it has
 //! more content than the dock can show. The letters page fits and does not
 //! scroll, and the scroll model says so rather than pretending to scroll.
+//!
+//! WHY the plate of a key is declared once, in [`key_plate`]: the painter and
+//! the press are two functions, and a keyboard whose press answers for rows
+//! the sheet never inked is a keyboard that types letters nobody can see
+//! under their thumb.
+
+/// The platform's rectangle, so the plate the painter fills and the plate the
+/// press answers are the same type the platform's controls are declared in.
+pub use interos_std::design::primitives::Rect;
 
 /// What a key of the soft keyboard does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -209,12 +218,36 @@ pub const fn row_y(index: usize, offset: usize) -> usize {
     KB_ROW0_Y + index * KB_ROW_STEP - offset
 }
 
+/// The plate a key is painted on, and the plate a press on that key answers.
+///
+/// WHY the plate is declared once: the painter and the press are two
+/// functions. While each held its own geometry the keyboard answered for rows
+/// and columns the sheet never inked -- the painter drew every key as a pill
+/// inset three columns from each side and twelve rows short at the bottom,
+/// while the press answered the whole cell and then reached half a gutter
+/// further into every gap. So the first column of the sheet answered 'q', the
+/// row above the first key answered a letter nobody could see, and the
+/// bottom of every key answered a key that was not drawn there.
+///
+/// WHY the plate is the cell and not the inset pill: the platform's own soft
+/// keyboard paints a stadium pill that fills the key's rect and answers that
+/// same rect, and a control that invents its own size is a control a
+/// third-party app cannot match.
+pub const fn key_plate(key: &Key, top: usize) -> Rect {
+    Rect::new(key.x, top, key.w, KB_KEY_H)
+}
+
 /// The action of the key at `(x, y)`, if there is one.
 ///
 /// WHY the offset is passed in and not read from the state: the renderer
 /// and the tap handler have to agree on which key is under the finger, and
 /// an offset each of them looked up separately is an offset that can
 /// differ.
+///
+/// WHY the answer is the plate and nothing wider: a press answers the key
+/// that is drawn under it. The gutter between two keys is sheet, and a press
+/// on sheet is not a press on a key -- the platform's own soft keyboard
+/// answers `None` there for the same reason.
 pub fn key_at(
     x: usize,
     y: usize,
@@ -222,43 +255,16 @@ pub fn key_at(
     symbols: bool,
     offset: usize,
 ) -> Option<KeyAction> {
+    // WHY the dock clips the answer: a row scrolled past the dock's bottom
+    // edge is not on the screen, so no press can land on it.
     if y < KB_Y0 || y >= KB_Y1 {
         return None;
     }
     let sheet = rows(symbols);
     for (index, row) in sheet.iter().enumerate() {
         let top = row_y(index, offset);
-        // Vertical hit testing with zero dead gaps:
-        // For the first row, allow margin up to KB_Y0.
-        // For internal rows, split the gap between row tops.
-        let row_top = if index == 0 {
-            top.saturating_sub(KB_TOP_MARGIN).max(KB_Y0)
-        } else {
-            top.saturating_sub((KB_ROW_STEP - KB_KEY_H) / 2)
-        };
-        let row_bottom = if index + 1 == sheet.len() {
-            (top + KB_KEY_H + 10).min(KB_Y1)
-        } else {
-            top + KB_KEY_H + (KB_ROW_STEP - KB_KEY_H) / 2
-        };
-        if y < row_top || y >= row_bottom {
-            continue;
-        }
-        // Horizontal hit testing with zero dead gaps:
-        for (k_idx, key) in row.keys.iter().enumerate() {
-            let left = if k_idx == 0 {
-                0
-            } else {
-                let prev = &row.keys[k_idx - 1];
-                prev.x + prev.w + (key.x.saturating_sub(prev.x + prev.w)) / 2
-            };
-            let right = if k_idx + 1 == row.keys.len() {
-                720
-            } else {
-                let next = &row.keys[k_idx + 1];
-                key.x + key.w + (next.x.saturating_sub(key.x + key.w)) / 2
-            };
-            if x >= left && x < right {
+        for key in row.keys {
+            if key_plate(key, top).contains(x, y) {
                 return Some(shifted(key.action, shift));
             }
         }
@@ -357,26 +363,86 @@ mod tests {
     }
 
     #[test]
-    fn tactile_hit_testing_eliminates_dead_zones_between_keys() {
-        // Tapping in the gap between 'Q' (15..75) and 'W' (85..145) at x=80
-        // smoothly resolves without dead zones.
-        let action = key_at(78, 994, false, false, 0);
-        assert_eq!(action, Some(KeyAction::Char(b'q')));
-        let action = key_at(82, 994, false, false, 0);
-        assert_eq!(action, Some(KeyAction::Char(b'w')));
+    fn the_gutter_between_two_keys_answers_nothing() {
+        // WHY this matters: the sheet draws 'Q' at 15..75 and 'W' at 85..145,
+        // and the ten columns between them are sheet. A press there is a press
+        // on the sheet, and the platform's own soft keyboard answers `None`
+        // for it -- a keyboard that types a letter out of the gutter is a
+        // keyboard whose answer and whose picture disagree.
+        assert_eq!(key_at(74, 994, false, false, 0), Some(KeyAction::Char(b'q')));
+        assert_eq!(key_at(75, 994, false, false, 0), None);
+        assert_eq!(key_at(84, 994, false, false, 0), None);
+        assert_eq!(key_at(85, 994, false, false, 0), Some(KeyAction::Char(b'w')));
 
-        // Tapping in the gap between row 0 (994..1066) and row 1 (1076..1148)
-        // at y=1070 resolves to the nearest row.
-        assert_eq!(key_at(15, 1070, false, false, 0), Some(KeyAction::Char(b'q')));
-        assert_eq!(key_at(46, 1073, false, false, 0), Some(KeyAction::Char(b'a')));
+        // The same between the rows: row 0 is painted 994..1066 and row 1
+        // 1076..1148, and 'A' stands at x=46.
+        assert_eq!(key_at(46, 1065, false, false, 0), Some(KeyAction::Char(b'q')));
+        assert_eq!(key_at(46, 1066, false, false, 0), None);
+        assert_eq!(key_at(46, 1075, false, false, 0), None);
+        assert_eq!(key_at(46, 1076, false, false, 0), Some(KeyAction::Char(b'a')));
+    }
+
+    #[test]
+    fn a_press_answers_the_key_whose_plate_it_is_on() {
+        // WHY this matters: the painter fills the plate and the press answers
+        // the plate, so every key on both pages has to answer on its own
+        // pixels and nowhere else.
+        for symbols in [false, true] {
+            for (index, row) in rows(symbols).iter().enumerate() {
+                let top = row_y(index, 0);
+                for key in row.keys {
+                    let plate = key_plate(key, top);
+                    // A plate the dock has cut off is answered only where it is
+                    // still on the screen.
+                    let visible_y0 = plate.y.max(KB_Y0);
+                    let visible_y1 = (plate.y + plate.h).min(KB_Y1);
+                    if visible_y0 >= visible_y1 {
+                        continue;
+                    }
+                    let cx = plate.x + plate.w / 2;
+                    let cy = visible_y0 + (visible_y1 - visible_y0) / 2;
+                    assert_eq!(
+                        key_at(cx, cy, false, symbols, 0),
+                        Some(shifted(key.action, false)),
+                        "the plate at ({}, {}) has to answer its own key",
+                        plate.x,
+                        plate.y
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_press_beside_a_plate_answers_nothing() {
+        // WHY this matters: the sheet beside a key is sheet. The press used to
+        // reach half a gutter into every gap, so the column to the left of
+        // the first key and the row above the first key answered a letter
+        // that was not drawn there.
+        let q = key_plate(&LETTER_ROWS[0].keys[0], row_y(0, 0));
+        assert_eq!(q.x, 15);
+        assert_eq!(q.y, 994);
+        assert_eq!(key_at(q.x - 1, q.y + q.h / 2, false, false, 0), None);
+        assert_eq!(key_at(q.x + q.w / 2, q.y - 1, false, false, 0), None);
+        // And the sheet below the last key of a row.
+        let backspace = key_plate(&LETTER_ROWS[2].keys[LETTER_ROWS[2].keys.len() - 1], row_y(2, 0));
+        assert_eq!(
+            key_at(backspace.x + backspace.w, backspace.y + backspace.h / 2, false, false, 0),
+            None
+        );
     }
 
     #[test]
     fn backspace_has_generous_touch_target_above_48px() {
         // Row 2 Backspace key at x=620, w=85 (620..705), top=1158, h=72.
         // Touch target spans >= 48px in both dimensions and accepts edge touches.
+        let plate = key_plate(&LETTER_ROWS[2].keys[LETTER_ROWS[2].keys.len() - 1], row_y(2, 0));
+        assert!(plate.w >= 48 && plate.h >= 48);
         assert_eq!(key_at(620, 1158, false, false, 0), Some(KeyAction::Backspace));
         assert_eq!(key_at(660, 1190, false, false, 0), Some(KeyAction::Backspace));
-        assert_eq!(key_at(710, 1200, false, false, 0), Some(KeyAction::Backspace));
+        // The last painted row of the key answers, and the sheet past it does not.
+        assert_eq!(key_at(704, 1229, false, false, 0), Some(KeyAction::Backspace));
+        assert_eq!(key_at(705, 1229, false, false, 0), None);
+        assert_eq!(key_at(710, 1200, false, false, 0), None);
     }
 }

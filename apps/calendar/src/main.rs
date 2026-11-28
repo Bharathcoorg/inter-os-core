@@ -33,12 +33,13 @@ use interos_std::design::outline_text;
 
 pub use calendar::{
     chevron_pixel, days_in_month, day_of_week, event_location, is_leap_year,
-    rtc_report_is_new, step_selected_day, ChevronDir, DayArrow,
+    rtc_report_is_new, sheet_close_contains, step_selected_day, ChevronDir, DayArrow,
     EventRecord, StoreState,
     DAY_ARROW_BAND_Y0, DAY_ARROW_BAND_Y1,
     DAY_NEXT_ARROW_APEX_X, DAY_NEXT_ARROW_APEX_Y, DAY_NEXT_ARROW_X0, DAY_NEXT_ARROW_X1,
     DAY_PREV_ARROW_APEX_X, DAY_PREV_ARROW_APEX_Y, DAY_PREV_ARROW_X0, DAY_PREV_ARROW_X1,
-    EVENT_TITLE_MAX, MAX_EVENTS, RECORD_BYTES, STORE_BLOB_BYTES, STORE_KEY, STORE_VERSION,
+    EVENT_TITLE_MAX, MAX_EVENTS, RECORD_BYTES, SHEET_CLOSE_CROSS, SHEET_CLOSE_CX,
+    SHEET_CLOSE_CY, SHEET_CLOSE_RADIUS, STORE_BLOB_BYTES, STORE_KEY, STORE_VERSION,
     STORE_YEAR_MAX, STORE_YEAR_MIN,
 };
 
@@ -2678,23 +2679,19 @@ fn flow_pixel(x: usize, y: usize, app: &CalendarApp) -> u32 {
     }
 
     // Touch Close [X] affordance at top-right
-    if x >= 624 && x < 676 && y >= 538 && y < 590 {
-        let cx = 650isize;
-        let cy = 564isize;
-        let dx = (x as isize) - cx;
-        let dy = (y as isize) - cy;
+    if sheet_close_contains(x, y) {
+        let dx = (x as isize) - SHEET_CLOSE_CX as isize;
+        let dy = (y as isize) - SHEET_CLOSE_CY as isize;
         let r2 = dx * dx + dy * dy;
-        if r2 <= 20 * 20 {
-            let adx = dx.abs();
-            let ady = dy.abs();
-            if (adx - ady).abs() <= 1 && adx <= 8 && ady <= 8 {
-                return THEME.on_surface;
-            }
-            if r2 >= 18 * 18 {
-                return THEME.border;
-            }
-            return THEME.surface_container_high;
+        let adx = dx.abs();
+        let ady = dy.abs();
+        if (adx - ady).abs() <= 1 && adx <= SHEET_CLOSE_CROSS as isize && ady <= SHEET_CLOSE_CROSS as isize {
+            return THEME.on_surface;
         }
+        if r2 >= ((SHEET_CLOSE_RADIUS - 2) * (SHEET_CLOSE_RADIUS - 2)) as isize {
+            return THEME.border;
+        }
+        return THEME.surface_container_high;
     }
 
     // Step string in Scale 2 Body
@@ -3377,7 +3374,11 @@ fn handle_flow_tap(app: &mut CalendarApp, x: usize, y: usize) -> Dirty {
     // the title run does not start until x=116 -- so they were a tap area that
     // painted nothing. The band that closes the sheet is now the box the chip
     // draws, one rect, read from the SDK by both the painter and this test.
-    if std::design::back_button::contains(x, y) || (x >= 624 && x < 676 && y >= 538 && y < 590) {
+    //
+    // WHY the sheet's own chip answers a disc and not the square band around
+    // it: the painter inks a round button, and a press that answered the
+    // band's corners closed the sheet from four places that hold no ink.
+    if std::design::back_button::contains(x, y) || sheet_close_contains(x, y) {
         app.flow = Flow::None;
         app.commit_status = "CANCELLED: NO EVENT WRITTEN";
         return Dirty::CONTENT;
@@ -3770,8 +3771,13 @@ fn handle_appmcp_request(calendar: &mut CalendarApp, raw: &[u8], sender: u64, ms
                     .with_payload(b"Event scheduled");
                 let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
             } else {
+                // WHY the status is read from the store's own state: the store
+                // refuses a write for two reasons -- the agenda is full, and
+                // the settings store refused the write -- and telling a caller
+                // "storage full" after a refused write sends it looking for
+                // room that exists and retrying a write the device refused.
                 let resp = std::appmcp::AppMcpResponse::error(
-                    std::appmcp::APPMCP_STATUS_STORAGE_FULL,
+                    calendar::refusal_status(calendar.store.state),
                     req.tool_id,
                     req.token,
                 );

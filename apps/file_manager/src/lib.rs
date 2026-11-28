@@ -4708,6 +4708,65 @@ impl TypedField {
     }
 }
 
+/// What a write did with the payload it was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// Every byte of the payload reached the file.
+    Complete,
+    /// The write stopped short: the file holds part of the payload, or none of
+    /// the part that was left to write.
+    Short,
+    /// The platform refused the write.
+    Refused,
+}
+
+/// Writes a whole payload through a writer that may take less than it is given.
+///
+/// WHY this exists: the kernel's `fs_write` reports how many bytes it wrote,
+/// and a write to a device-held file can write less than it was given. A
+/// caller that treats any `Ok` as a finished write tells its own caller the
+/// file holds the bytes that were sent when it does not -- and a half-written
+/// file is a file nobody knows the state of.
+///
+/// WHY the loop asks for the rest: the file's offset advances by the bytes
+/// that were written, so the next call continues where the last one stopped.
+pub fn write_payload<F>(mut write: F, payload: &[u8]) -> WriteOutcome
+where
+    F: FnMut(&[u8]) -> Result<usize, i64>,
+{
+    let mut written = 0usize;
+    while written < payload.len() {
+        match write(&payload[written..]) {
+            Ok(0) => return WriteOutcome::Short,
+            Ok(n) => written += n,
+            Err(_) => return WriteOutcome::Refused,
+        }
+    }
+    WriteOutcome::Complete
+}
+
+/// The kernel's code for "no such file".
+///
+/// WHY it is written down here: the SDK publishes the permission and invalid
+/// argument codes but not this one, and the MCP status vocabulary has a "not
+/// found" of its own that a caller can act on.
+pub const ERR_FILE_NOT_FOUND: i64 = -8;
+
+/// The status an MCP caller is told when the platform refused a file operation.
+///
+/// WHY the code is read and not fixed at "internal error": a caller that is
+/// told "internal error" cannot tell a missing file from a file it may not
+/// touch from a write the device refused, and each of those is a different
+/// thing to do next.
+pub fn fs_error_status(code: i64) -> u32 {
+    match code {
+        interos_std::content::ERR_PERMISSION_DENIED => interos_std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
+        interos_std::content::ERR_INVALID_ARGUMENTS => interos_std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+        ERR_FILE_NOT_FOUND => interos_std::appmcp::APPMCP_STATUS_NOT_FOUND,
+        _ => interos_std::appmcp::APPMCP_STATUS_UNAVAILABLE,
+    }
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -6414,5 +6473,75 @@ mod tests {
         let mut known = [0u8; MAX_DETAILS_LINE];
         let kn = format_mtime(Some(12345), &mut known);
         assert_eq!(&known[..kn], b"Modified: 12345 platform ticks");
+    }
+
+    /// A write that took less than it was given is not a finished write.
+    ///
+    /// WHY this is a test and not a review note: the kernel's `fs_write`
+    /// reports how many bytes it wrote, and a write to a device-held file can
+    /// write less than it was given. A caller that answers "written" after the
+    /// first `Ok` reports a file that holds half the payload as a file that
+    /// holds all of it.
+    #[test]
+    fn a_write_that_takes_less_than_it_was_given_is_carried_to_the_end() {
+        // A writer that accepts three bytes at a time: every call is an `Ok`,
+        // and the payload still has to be written whole.
+        let mut file = [0u8; 32];
+        let mut written = 0usize;
+        let outcome = write_payload(
+            |chunk| {
+                let take = chunk.len().min(3);
+                file[written..written + take].copy_from_slice(&chunk[..take]);
+                written += take;
+                Ok(take)
+            },
+            b"interos file manager payload",
+        );
+        assert_eq!(outcome, WriteOutcome::Complete);
+        assert_eq!(&file[..written], b"interos file manager payload");
+        assert_eq!(written, b"interos file manager payload".len());
+    }
+
+    /// A writer that stops making progress is a failed write, not a finished
+    /// one, and a refused write is refused.
+    #[test]
+    fn a_write_that_stops_short_is_not_a_finished_write() {
+        // A writer that accepts nothing at all: the file stays empty and the
+        // payload is not written.
+        let outcome = write_payload(|_chunk| Ok(0), b"payload");
+        assert_eq!(outcome, WriteOutcome::Short);
+        // A refused write is refused, and it is not "storage full": the file
+        // was not full, the platform said no.
+        let outcome = write_payload(|_chunk| Err(-1), b"payload");
+        assert_eq!(outcome, WriteOutcome::Refused);
+        // An empty payload is a complete write of nothing.
+        let outcome = write_payload(|_chunk| Ok(0), b"");
+        assert_eq!(outcome, WriteOutcome::Complete);
+    }
+
+    /// A refused file operation is reported for what it was.
+    ///
+    /// WHY this matters: a caller told "internal error" cannot tell a missing
+    /// file from a file it may not touch from a write the device refused, and
+    /// each of those is a different thing to do next.
+    #[test]
+    fn a_refused_file_operation_is_not_reported_as_an_internal_error() {
+        assert_eq!(
+            fs_error_status(interos_std::content::ERR_PERMISSION_DENIED),
+            interos_std::appmcp::APPMCP_STATUS_PERMISSION_DENIED
+        );
+        assert_eq!(
+            fs_error_status(interos_std::content::ERR_INVALID_ARGUMENTS),
+            interos_std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS
+        );
+        assert_eq!(
+            fs_error_status(ERR_FILE_NOT_FOUND),
+            interos_std::appmcp::APPMCP_STATUS_NOT_FOUND
+        );
+        assert_eq!(fs_error_status(-12), interos_std::appmcp::APPMCP_STATUS_UNAVAILABLE);
+        assert_ne!(
+            fs_error_status(-12),
+            interos_std::appmcp::APPMCP_STATUS_INTERNAL_ERROR
+        );
     }
 }

@@ -2039,17 +2039,24 @@ fn render_soft_keyboard(x: usize, y: usize, state: &AppState) -> u32 {
         }
         for key in row.keys {
             let action = key.action;
-            let kx = key.x;
-            let kw = key.w;
-            if x < kx || x >= kx + kw {
+            // The plate the key is painted on, read from the same declaration
+            // the press answers.
+            //
+            // WHY it is read here and not measured here: the painter and the
+            // press are two functions, and while each held its own geometry
+            // the keyboard answered for rows and columns the sheet never
+            // inked. The plate is the one statement of where a key is, and it
+            // is the statement both sides read.
+            let plate = keyboard::key_plate(key, top);
+            let kx = plate.x;
+            let kw = plate.w;
+            if !plate.contains(x, y) {
                 continue;
             }
-            if y < top || y >= top + keyboard::KB_KEY_H {
-                continue;
-            }
-            // The platform's pill treatment.
+            // The platform's pill treatment: the pill fills the plate, the way
+            // the platform's own soft keyboard draws it.
             let fill = THEME.surface_container_high;
-            if in_rounded_rect(x, y, kx + 3, top, kw - 6, keyboard::KB_KEY_H - 12, THEME.radii.pill) {
+            if in_rounded_rect(x, y, plate.x, plate.y, plate.w, plate.h, THEME.radii.pill) {
                 // The character the key types, in the case the shift state
                 // asks for.
                 if let Some(c) = keyboard::char_of(keyboard::shifted(action, state.kb_shift)) {
@@ -2898,7 +2905,24 @@ fn handle_appmcp_request(store: &mut NotesStore, raw: &[u8], sender: u64, msg_ty
         std::appmcp::TOOL_ID_NOTES_CREATE => {
             let (title, body) = parse_note_payload(req.payload());
             if let Some(id) = store.create_note(title, body) {
-                let _ = save_notes_to_storage(store);
+                // WHY the write decides the answer to the caller: a note that
+                // did not reach the device is not a note, and answering
+                // "created" for one tells the caller it can be found again
+                // after the next launch. The create is taken back out of the
+                // live store as well, so the app does not keep a note the
+                // device never accepted and no later save writes it out on
+                // the caller's behalf.
+                if !save_notes_to_storage(store) {
+                    let _ = store.delete_note(id);
+                    std::log("[NOTES] AppMCP create refused: the note did not reach the device.").ok();
+                    let resp = std::appmcp::AppMcpResponse::error(
+                        std::appmcp::APPMCP_STATUS_UNAVAILABLE,
+                        req.tool_id,
+                        req.token,
+                    );
+                    let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                    return true;
+                }
                 if let Some(note) = store.get_note(id).copied() {
                     let _ = library::publish_note(&note);
                     library::refresh_index();
@@ -2978,8 +3002,29 @@ fn handle_appmcp_request(store: &mut NotesStore, raw: &[u8], sender: u64, msg_ty
                     payload[2],
                     payload[3],
                 ]);
+                // WHY the note and its position are taken before the delete:
+                // a delete whose write did not land has to be undone, and the
+                // device still holds the note.
+                let removed = store.get_note(id).copied();
+                let removed_index = store.index_of(id);
                 if store.delete_note(id) {
-                    let _ = save_notes_to_storage(store);
+                    // WHY the write decides the answer to the caller: a delete
+                    // that did not reach the device did not delete anything,
+                    // and answering "deleted" for one tells the caller the
+                    // note is gone when the device still has it.
+                    if !save_notes_to_storage(store) {
+                        if let (Some(index), Some(note)) = (removed_index, removed) {
+                            store.restore_note_at(index, note);
+                        }
+                        std::log("[NOTES] AppMCP delete refused: the note did not reach the device.").ok();
+                        let resp = std::appmcp::AppMcpResponse::error(
+                            std::appmcp::APPMCP_STATUS_UNAVAILABLE,
+                            req.tool_id,
+                            req.token,
+                        );
+                        let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
+                        return true;
+                    }
                     let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token);
                     let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
                 } else {

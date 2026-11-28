@@ -107,6 +107,59 @@ pub const fn text_scale_notice(scale: UserTextScale) -> TextScaleNotice {
     }
 }
 
+/// What the settings store did with the last Font Scaling choice.
+///
+/// WHY the row needs to know: the rung is published to this session whatever
+/// the store says -- a person who picks "Large" and sees nothing change has
+/// been told a lie by the control -- but a choice the store refused is not
+/// carried into the next launch. A badge that says "APPLIED" over a refused
+/// write would claim a persistence that did not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextScaleWrite {
+    /// No choice has been made since the app started.
+    Unattempted,
+    /// The store accepted the choice; the next launch draws at it.
+    Stored,
+    /// The store refused the choice: this session draws at it, the next launch
+    /// does not.
+    Refused,
+}
+
+/// The notice for one level, with what the store did with the last choice.
+///
+/// WHY a second function and not an extra field on the level: the level is
+/// the rung and the outcome is the store's, and a caller that answered "what
+/// does this row say?" from the rung alone could not tell a stored choice from
+/// one the device refused.
+pub const fn text_scale_notice_for(
+    scale: UserTextScale,
+    write: TextScaleWrite,
+) -> TextScaleNotice {
+    let base = text_scale_notice(scale);
+    match write {
+        TextScaleWrite::Refused => TextScaleNotice {
+            caption: base.caption,
+            scope: b"The store refused it; session only",
+            badge: b"NOT SAVED",
+        },
+        _ => base,
+    }
+}
+
+/// The status an MCP caller is told when the settings store refused a write.
+///
+/// WHY the refusal is not always "storage full": a refused write is the
+/// device saying no -- to this caller, to this key, or to this moment -- and
+/// a caller told "storage full" goes looking for room that exists and
+/// retries a write the device has already refused.
+pub fn write_refusal_status(code: i64) -> u32 {
+    match code {
+        std::content::ERR_PERMISSION_DENIED => std::appmcp::APPMCP_STATUS_PERMISSION_DENIED,
+        std::content::ERR_INVALID_ARGUMENTS => std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS,
+        _ => std::appmcp::APPMCP_STATUS_UNAVAILABLE,
+    }
+}
+
 /// The content column a detail row paints inside: the panel less the page
 /// margin and the card's own padding on both sides.
 ///
@@ -1092,6 +1145,85 @@ mod tests {
         }
         assert_eq!(UserTextScale::ExtraLarge.percentage(), 150);
         assert_eq!(UserTextScale::Compact.percentage(), 80);
+    }
+
+    /// A refused write is said out loud, in the row that holds the setting.
+    ///
+    /// WHY this is a test and not a review note: the rung is published to this
+    /// session whatever the store says, so the only place a person can learn
+    /// that their choice will not survive a reboot is the row's own badge and
+    /// scope line. A badge that still read "APPLIED" over a refused write
+    /// would be the app claiming a persistence the device refused.
+    #[test]
+    fn a_refused_text_scale_write_is_said_in_the_row() {
+        for level in 0..=3u8 {
+            let scale = UserTextScale::from_u8(level);
+            let stored = text_scale_notice_for(scale, TextScaleWrite::Stored);
+            let refused = text_scale_notice_for(scale, TextScaleWrite::Refused);
+            // The caption names the rung either way: the rows really are drawn
+            // at it in this session.
+            assert_eq!(stored.caption, refused.caption);
+            // The badge stops claiming a persistence that did not happen.
+            assert_eq!(stored.badge, b"APPLIED");
+            assert_eq!(refused.badge, b"NOT SAVED");
+            // The scope line says what a refused write means.
+            assert_eq!(refused.scope, b"The store refused it; session only");
+            assert_ne!(stored.scope, refused.scope);
+        }
+    }
+
+    /// The refused-write notice still fits the boxes it is painted in.
+    ///
+    /// WHY this matters here too: the badge plate is measured from the badge
+    /// and the scope line is measured from the column, so a longer badge takes
+    /// room from the caption and a longer scope takes room from the row.
+    #[test]
+    fn the_refused_text_scale_notice_fits_the_row() {
+        for level in 0..=3u8 {
+            let notice = text_scale_notice_for(UserTextScale::from_u8(level), TextScaleWrite::Refused);
+            let caption_w = std::design::font::measure_user_scale(notice.caption, 1, level);
+            let cap = notice_caption_max_w(notice.badge, level);
+            assert!(
+                caption_w <= cap,
+                "the refused notice's caption measures {}px and the row gives it {}px",
+                caption_w,
+                cap
+            );
+            let scope_w = std::design::font::measure_user_scale(notice.scope, 1, level);
+            assert!(
+                scope_w <= NOTICE_INNER_W,
+                "the refused notice's scope line measures {}px in a {}px column",
+                scope_w,
+                NOTICE_INNER_W
+            );
+        }
+    }
+
+    /// A refused write is reported for what it was.
+    ///
+    /// WHY this is a test and not a review note: "storage full" is a claim
+    /// about room, and a caller that believes it goes looking for room that
+    /// exists and retries a write the device has already refused.
+    #[test]
+    fn a_refused_settings_write_is_not_reported_as_storage_full() {
+        assert_eq!(
+            write_refusal_status(std::content::ERR_PERMISSION_DENIED),
+            std::appmcp::APPMCP_STATUS_PERMISSION_DENIED
+        );
+        assert_eq!(
+            write_refusal_status(std::content::ERR_INVALID_ARGUMENTS),
+            std::appmcp::APPMCP_STATUS_INVALID_ARGUMENTS
+        );
+        // The settings store's own refusal is not a permission failure and not
+        // a full store: the device said no, and that is what the caller hears.
+        assert_eq!(
+            write_refusal_status(-12),
+            std::appmcp::APPMCP_STATUS_UNAVAILABLE
+        );
+        assert_ne!(
+            write_refusal_status(-12),
+            std::appmcp::APPMCP_STATUS_STORAGE_FULL
+        );
     }
 
     #[test]

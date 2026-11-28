@@ -1256,6 +1256,33 @@ impl NotesStore {
         }
     }
 
+    /// The position a note holds in the store, if the store holds it.
+    ///
+    /// WHY the position and not the note: a delete that did not reach the
+    /// device has to put the note back where it was, and a note's identity is
+    /// its id while its position is what the delete disturbed.
+    pub fn index_of(&self, id: u32) -> Option<usize> {
+        (0..self.count).find(|&i| self.notes[i].id == id)
+    }
+
+    /// Puts a note back where it was.
+    ///
+    /// WHY this exists: a delete whose write did not land has to leave the
+    /// live store as it was. A store that dropped the note anyway would show
+    /// a note the device still holds as gone, and the next successful save
+    /// would delete it without anybody asking again.
+    pub fn restore_note_at(&mut self, index: usize, note: Note) -> bool {
+        if index > self.count || self.count >= MAX_NOTES {
+            return false;
+        }
+        for i in (index..self.count).rev() {
+            self.notes[i + 1] = self.notes[i];
+        }
+        self.notes[index] = note;
+        self.count += 1;
+        true
+    }
+
     pub fn get_by_index_mut(&mut self, index: usize) -> Option<&mut Note> {
         if index < self.count {
             Some(&mut self.notes[index])
@@ -2041,6 +2068,34 @@ mod tests {
             n.set_title("Third Modified");
         }
         assert_eq!(store.get_note(id3).unwrap().as_title_str(), "Third Modified");
+    }
+
+    #[test]
+    fn test_a_refused_delete_puts_the_note_back_where_it_was() {
+        // WHY this test exists: the MCP delete tool takes the note out of the
+        // live store and writes the store out. When the write is refused the
+        // device still holds the note, so the live store has to be put back
+        // exactly as it was -- a store that dropped the note anyway would
+        // show a note the device still holds as gone, and the next successful
+        // save would delete it without anybody asking again.
+        let mut store = NotesStore::new();
+        let id1 = store.create_note("First", "Body 1").expect("id1");
+        let id2 = store.create_note("Second", "Body 2").expect("id2");
+        let id3 = store.create_note("Third", "Body 3").expect("id3");
+
+        let index = store.index_of(id2).expect("the note is in the store");
+        let removed = store.get_note(id2).copied().expect("the note is in the store");
+        assert!(store.delete_note(id2));
+        assert_eq!(store.count(), 2);
+        assert!(store.get_note(id2).is_none());
+
+        // The write was refused, so the delete is undone.
+        assert!(store.restore_note_at(index, removed));
+        assert_eq!(store.count(), 3);
+        assert_eq!(store.get_note(id2).expect("the note is back").as_title_str(), "Second");
+        assert_eq!(store.get_by_index(0).unwrap().id, id1);
+        assert_eq!(store.get_by_index(1).unwrap().id, id2);
+        assert_eq!(store.get_by_index(2).unwrap().id, id3);
     }
 
     #[test]

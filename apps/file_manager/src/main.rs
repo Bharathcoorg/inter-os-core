@@ -4952,16 +4952,28 @@ fn handle_appmcp_request(app: &mut FileManagerApp, raw: &[u8], sender: u64, msg_
                 if let Ok(path_str) = core::str::from_utf8(path_bytes) {
                     match std::fs_open(path_str, std::FS_WRITE) {
                         Ok(fd) => {
-                            let write_res = std::fs_write(fd, data_bytes);
+                            // WHY the whole payload has to land before the
+                            // answer is success: `fs_write` reports how many
+                            // bytes it wrote, and a write that took less than
+                            // it was given leaves a half-written file behind.
+                            // A success answer over that would tell the caller
+                            // the file holds the bytes it sent.
+                            let outcome = file_manager::write_payload(
+                                |chunk| std::fs_write(fd, chunk),
+                                data_bytes,
+                            );
                             let _ = std::fs_close(fd);
-                            match write_res {
-                                Ok(_) => {
+                            match outcome {
+                                file_manager::WriteOutcome::Complete => {
                                     let resp = std::appmcp::AppMcpResponse::success(req.tool_id, req.token);
                                     let _ = std::ipc_send(sender, std::appmcp::APPMCP_MSG_RESPONSE, &resp.to_bytes());
                                 }
-                                Err(_) => {
+                                // WHY the refusal is not "storage full": the file
+                                // was not full -- the device took the bytes it
+                                // took and refused the rest.
+                                _ => {
                                     let resp = std::appmcp::AppMcpResponse::error(
-                                        std::appmcp::APPMCP_STATUS_STORAGE_FULL,
+                                        std::appmcp::APPMCP_STATUS_UNAVAILABLE,
                                         req.tool_id,
                                         req.token,
                                     );
@@ -4969,9 +4981,12 @@ fn handle_appmcp_request(app: &mut FileManagerApp, raw: &[u8], sender: u64, msg_
                                 }
                             }
                         }
-                        Err(_) => {
+                        Err(code) => {
+                            // WHY the status is read from the refusal: a caller
+                            // told "internal error" cannot tell a missing file
+                            // from a file it may not touch.
                             let resp = std::appmcp::AppMcpResponse::error(
-                                std::appmcp::APPMCP_STATUS_INTERNAL_ERROR,
+                                file_manager::fs_error_status(code),
                                 req.tool_id,
                                 req.token,
                             );
