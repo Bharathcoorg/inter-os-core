@@ -428,6 +428,37 @@ pub enum TrustState {
     UserImported,
 }
 
+/// Why a model source may not be served, named per case.
+///
+/// WHY the arms are separate: `Option<TrustState>` has three answers --
+/// trusted, user-imported, and never provisioned -- and a caller told only
+/// "not trusted" cannot tell a model the user has not authorized from a model
+/// the platform has never heard of. They have different next moves (authorize
+/// this file, or install it at all), so each earns its own word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrustRefusal {
+    /// The registry holds no record for this source at all.
+    NotProvisioned,
+    /// The source is recorded, but the user has granted no explicit trust
+    /// decision. A revoked trust returns to this same state.
+    UserImported,
+}
+
+/// The refusal a trust state earns, or `None` when the source may be served.
+///
+/// WHY `Trusted` is the only state that serves: provisioning records what a
+/// model's bytes must be so that a changed file is detected; it does not
+/// authorize the model to run. A user-imported model runs only after the
+/// user's own explicit trust decision, and a source the registry has never
+/// heard of is never trusted.
+pub fn trust_refusal(state: Option<TrustState>) -> Option<TrustRefusal> {
+    match state {
+        Some(TrustState::Trusted) => None,
+        Some(TrustState::UserImported) => Some(TrustRefusal::UserImported),
+        None => Some(TrustRefusal::NotProvisioned),
+    }
+}
+
 impl ProvisionedModel {
     pub const fn empty() -> Self {
         Self {
@@ -706,6 +737,7 @@ pub enum AdmissionError {
     InsufficientRam,
     InsufficientStorage,
     SessionCapacity,
+    ModelCapacity,
     SessionNotFound,
     NotOwner,
 }
@@ -826,6 +858,10 @@ impl BrokerLedger {
     }
 
     /// Reserves resident bytes attributed to a loaded model handle.
+    ///
+    /// WHY the model table has its own capacity arm: the model table is
+    /// bounded separately from the session table, so a full model table is a
+    /// model-capacity refusal and must not be reported as a session refusal.
     pub fn reserve_resident_for(
         &mut self,
         handle: u64,
@@ -842,7 +878,7 @@ impl BrokerLedger {
                 active: true,
             };
         } else {
-            return Err(AdmissionError::SessionCapacity);
+            return Err(AdmissionError::ModelCapacity);
         }
         self.resident_bytes += bytes;
         Ok(())
@@ -920,6 +956,39 @@ impl BrokerLedger {
             .iter()
             .filter(|session| session.active)
             .count()
+    }
+
+    /// The loaded model a live session is bound to, if that session is live.
+    ///
+    /// WHY this is observable: a session created without a model handle is a
+    /// session the loader cannot reclaim when its model is unloaded, so the
+    /// binding has to be visible to be tested rather than assumed.
+    pub fn session_model_handle(&self, id: u64) -> Option<u64> {
+        self.sessions
+            .iter()
+            .find(|session| session.active && session.id == id)
+            .map(|session| session.model_handle)
+    }
+
+    /// The resident bytes still reserved for a loaded model handle.
+    ///
+    /// `None` means the handle holds no reservation, which is what an
+    /// unloaded model must report.
+    pub fn model_resident_bytes(&self, handle: u64) -> Option<u64> {
+        self.models
+            .iter()
+            .find(|reservation| reservation.active && reservation.handle == handle)
+            .map(|reservation| reservation.resident_bytes)
+    }
+
+    /// The bytes charged to loaded models, independent of session bytes.
+    pub fn resident_bytes(&self) -> u64 {
+        self.resident_bytes
+    }
+
+    /// The bytes charged to live sessions, independent of resident bytes.
+    pub fn session_bytes(&self) -> u64 {
+        self.session_bytes
     }
 
     fn reserve_ram(&self, bytes: u64) -> Result<(), AdmissionError> {
@@ -2058,6 +2127,167 @@ mod tests {
         assert_eq!(ledger.unload_model(1), 0);
         assert_eq!(ledger.unload_model(2), 1);
         assert_eq!(ledger.reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn trust_refusal_names_each_untrusted_state() {
+        // A trusted source is served.
+        assert_eq!(trust_refusal(Some(TrustState::Trusted)), None);
+        // A user-imported source has a recorded identity but no explicit user
+        // trust decision, and says so.
+        assert_eq!(
+            trust_refusal(Some(TrustState::UserImported)),
+            Some(TrustRefusal::UserImported)
+        );
+        // A source the registry has never heard of is a different refusal.
+        assert_eq!(trust_refusal(None), Some(TrustRefusal::NotProvisioned));
+        // The registry's own state machine agrees with the mapping.
+        let mut registry = ProvisionedRegistry::new();
+        assert_eq!(
+            trust_refusal(registry.trust_state("/m.gguf")),
+            Some(TrustRefusal::NotProvisioned)
+        );
+        assert!(registry.provision("/m.gguf", [1u8; 32], 4096));
+        assert_eq!(
+            trust_refusal(registry.trust_state("/m.gguf")),
+            Some(TrustRefusal::UserImported)
+        );
+        assert!(registry.mark_trusted("/m.gguf"));
+        assert_eq!(trust_refusal(registry.trust_state("/m.gguf")), None);
+        // Revocation returns the source to the user-imported refusal.
+        assert!(registry.revoke("/m.gguf"));
+        assert_eq!(
+            trust_refusal(registry.trust_state("/m.gguf")),
+            Some(TrustRefusal::UserImported)
+        );
+    }
+
+    #[test]
+    fn a_trusted_model_loads_and_its_session_carries_the_model_handle() {
+        // The trust decision is the registry's, the load is the backend's, and
+        // the session that runs the model is bound to the handle the load
+        // returned -- which is what lets an unload reclaim both.
+        let mut registry = ProvisionedRegistry::new();
+        assert!(registry.provision("/m.gguf", [5u8; 32], 4096));
+        assert!(registry.mark_trusted("/m.gguf"));
+        assert_eq!(trust_refusal(registry.trust_state("/m.gguf")), None);
+
+        let estimate = ResourceEstimate {
+            model_weights: 4096,
+            runtime_overhead: 4096,
+            ..ResourceEstimate::ZERO
+        };
+        let mut backend = NativeGgufBackend::new();
+        let manifest = installed_generative_manifest(
+            Some("gemma2"),
+            Some(1),
+            "/models/installed.gguf",
+            1000,
+            [5u8; 32],
+            estimate,
+        );
+        let handle = backend.load_model(&manifest).expect("the trusted model loads");
+
+        let mut ledger = BrokerLedger::new(1 << 20, 1 << 20, 0);
+        ledger
+            .reserve_resident_for(handle, estimate)
+            .expect("resident reservation");
+        // A session that names no model reports handle zero: the shape a run
+        // had before it was bound, where an unload could not reach it.
+        let unbound = ledger.create_session(10, 1, estimate).expect("unbound session");
+        assert_eq!(ledger.session_model_handle(unbound), Some(0));
+        // A session that names the model reports the handle the load returned.
+        let bound = ledger
+            .create_session_for_model(10, 1, handle, estimate)
+            .expect("bound session");
+        assert_eq!(ledger.session_model_handle(bound), Some(handle));
+    }
+
+    #[test]
+    fn unloading_a_model_releases_its_reservation_and_its_session() {
+        let mut ledger = BrokerLedger::new(1 << 20, 1 << 20, 0);
+        let est = ResourceEstimate {
+            model_weights: 4096,
+            runtime_overhead: 256,
+            kv_cache: 1024,
+            activations: 512,
+            ..ResourceEstimate::ZERO
+        };
+        ledger.reserve_resident_for(7, est).expect("resident reservation");
+        let session = ledger
+            .create_session_for_model(10, 1, 7, est)
+            .expect("session bound to the model");
+        // The live session names the model it runs.
+        assert_eq!(ledger.session_model_handle(session), Some(7));
+        // The model handle holds the resident bytes that were charged.
+        assert_eq!(
+            ledger.model_resident_bytes(7),
+            Some(est.resident_bytes().expect("resident bytes"))
+        );
+        let before = ledger.reserved_bytes();
+        assert!(before > 0);
+        // Unloading the model reclaims its bytes and its bound session.
+        assert_eq!(ledger.unload_model(7), 1);
+        assert_eq!(ledger.session_model_handle(session), None);
+        assert_eq!(ledger.model_resident_bytes(7), None);
+        assert_eq!(ledger.reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn a_session_for_one_model_does_not_reclaim_another_models_session() {
+        let mut ledger = BrokerLedger::new(1 << 20, 1 << 20, 0);
+        let est_a = ResourceEstimate {
+            model_weights: 4096,
+            runtime_overhead: 256,
+            ..ResourceEstimate::ZERO
+        };
+        let est_b = ResourceEstimate {
+            model_weights: 2048,
+            runtime_overhead: 128,
+            ..ResourceEstimate::ZERO
+        };
+        ledger.reserve_resident_for(1, est_a).expect("resident a");
+        ledger.reserve_resident_for(2, est_b).expect("resident b");
+        let session_a = ledger
+            .create_session_for_model(10, 1, 1, est_a)
+            .expect("session a");
+        let session_b = ledger
+            .create_session_for_model(20, 1, 2, est_b)
+            .expect("session b");
+        // Unloading one model reclaims that model's session and no other.
+        assert_eq!(ledger.unload_model(1), 1);
+        assert_eq!(ledger.session_model_handle(session_a), None);
+        assert_eq!(ledger.session_model_handle(session_b), Some(2));
+        assert_eq!(ledger.model_resident_bytes(1), None);
+        assert_eq!(
+            ledger.model_resident_bytes(2),
+            Some(est_b.resident_bytes().expect("resident bytes"))
+        );
+    }
+
+    #[test]
+    fn a_full_model_table_is_a_model_capacity_refusal() {
+        let mut ledger = BrokerLedger::new(1 << 30, 1 << 30, 0);
+        let est = ResourceEstimate {
+            model_weights: 1024,
+            runtime_overhead: 64,
+            ..ResourceEstimate::ZERO
+        };
+        for handle in 1..=(MAX_LOADED_MODELS as u64) {
+            ledger
+                .reserve_resident_for(handle, est)
+                .expect("reservation within capacity");
+        }
+        assert_eq!(
+            ledger.reserve_resident_for(99, est),
+            Err(AdmissionError::ModelCapacity)
+        );
+        // The refused reservation charged nothing.
+        assert_eq!(ledger.model_resident_bytes(99), None);
+        // Freeing a slot admits the next model.
+        ledger.unload_model(1);
+        assert!(ledger.reserve_resident_for(99, est).is_ok());
+        assert!(ledger.model_resident_bytes(99).is_some());
     }
 
     #[test]

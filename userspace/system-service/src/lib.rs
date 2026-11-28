@@ -3457,6 +3457,32 @@ pub fn trust_installed_model(source: &str) -> bool {
     PROVISIONED_MODELS.lock().mark_trusted(source)
 }
 
+/// Provisions the model at `path` against its own observed bytes and grants it
+/// the user's trust.
+///
+/// WHY the install is the user's trust decision: the person asked for this file
+/// to be put on the device, and the bytes that arrived are the bytes the
+/// filesystem reports for the installed path -- so the model is provisioned
+/// against its own observed digest and marked trusted by the request that
+/// installed it. A model that was never installed, or whose bytes changed
+/// afterwards, is not covered by that decision.
+fn trust_installed_model_file(path: &str) -> bool {
+    let mut stat_buf = [0u8; std::FILE_STAT_BYTES];
+    let observed = match std::fs_stat(path, &mut stat_buf) {
+        Ok(_) => std::FileStatRecord::parse(&stat_buf).map(|r| (r.size, r.sha256)),
+        Err(_) => None,
+    };
+    let (size, sha256) = match observed {
+        Some(value) => value,
+        None => return false,
+    };
+    let mut registry = PROVISIONED_MODELS.lock();
+    if !registry.provision(path, sha256, size) {
+        return false;
+    }
+    registry.mark_trusted(path)
+}
+
 /// Revokes cryptographic trust for a model source (returns it to user-imported)
 /// without forgetting its provisioned digest. Returns whether an entry exists.
 pub fn revoke_model_trust(source: &str) -> bool {
@@ -3472,6 +3498,78 @@ pub fn is_model_trusted(source: &str) -> bool {
 /// resident bytes and every session bound to its handle. Returns sessions reaped.
 pub fn unload_model_resources(model_handle: u64) -> usize {
     with_broker_ledger(|ledger| ledger.unload_model(model_handle))
+}
+
+/// Unloads a model from the backend and reclaims the ledger's reservation for it.
+///
+/// WHY both sides in one call: the backend holds the model's bytes and the
+/// ledger holds the accounting for them, and a model unloaded on one side
+/// alone leaves the other side charging for bytes nobody holds.
+fn unload_model_everywhere(model_handle: u64) -> bool {
+    let unloaded = {
+        let mut backend = NATIVE_GGUF_BACKEND.lock();
+        backend.unload_active_model(model_handle)
+    };
+    unload_model_resources(model_handle);
+    unloaded
+}
+
+/// The refusal a model source earns under the trust gate, if any.
+///
+/// WHY the gate reads the registry and nothing else: a model the user has not
+/// trusted must not have its bytes read at all, so the decision is made from
+/// the recorded trust state before any file is opened.
+pub fn model_trust_refusal(source: &str) -> Option<backend::TrustRefusal> {
+    let state = PROVISIONED_MODELS.lock().trust_state(source);
+    backend::trust_refusal(state)
+}
+
+/// The sentence a caller reads when the trust gate refuses a model.
+///
+/// WHY the reason is in the sentence: a refusal the caller cannot explain is a
+/// refusal the caller cannot act on, and the two refusals have different next
+/// moves -- a model the platform has never heard of has to be installed, while
+/// a model the user imported has to be trusted before it runs.
+///
+/// WHY `kind` is a parameter: the generative route and the embedding route
+/// answer with the same fact in their own words, and a caller that asked for a
+/// vector is not answered in the words of a generation.
+fn trust_refusal_notice<'a>(
+    kind: &[u8],
+    source: &str,
+    refusal: backend::TrustRefusal,
+    buf: &'a mut [u8],
+) -> (u32, &'a [u8]) {
+    let mut notice = Notice::new(buf);
+    notice.word(kind);
+    notice.word(b" refused: the model at ");
+    notice.word(source.as_bytes());
+    let status = match refusal {
+        backend::TrustRefusal::NotProvisioned => {
+            notice.word(
+                b" is not a provisioned model, so no trust decision covers it; install it through the service to provision its bytes.",
+            );
+            std::ai::STATUS_UNAVAILABLE
+        }
+        backend::TrustRefusal::UserImported => {
+            notice.word(
+                b" is user-imported and holds no explicit trust decision, so it was not run; grant the model's trust to serve it.",
+            );
+            std::ai::STATUS_UNAVAILABLE
+        }
+    };
+    (status, notice.finish())
+}
+
+/// The sentence the generative route sends when the device has no weights to run.
+///
+/// WHY the provider is named: the platform's generative provider is the
+/// host-backed development bridge, and a reply that called this route
+/// on-device would describe an architecture the platform does not have. The
+/// platform's answer comes from the host-backed bridge, which this route does
+/// not serve; what this route runs is the model file the user installed.
+fn generative_unavailable_notice() -> &'static [u8] {
+    b"Generative stream unavailable: no model weights are loaded to run on this device. The platform's generative provider is the host-backed development bridge, which this route does not serve."
 }
 
 pub fn with_broker_ledger<F, R>(f: F) -> R
@@ -3492,6 +3590,16 @@ where
 
 pub fn reset_broker_ledger(ram: u64, storage: u64, reserve: u64) {
     *BROKER_LEDGER.lock() = Some(backend::BrokerLedger::new(ram, storage, reserve));
+}
+
+/// Empties the provisioned-model registry.
+///
+/// WHY it exists: the registry is a process-wide record of what the user has
+/// trusted, and a host test that trusts one path would otherwise leave that
+/// trust standing for every test that runs after it.
+#[cfg(test)]
+pub fn reset_provisioned_models() {
+    *PROVISIONED_MODELS.lock() = backend::ProvisionedRegistry::new();
 }
 
 pub fn reap_process(task_id: u64) {
@@ -3668,6 +3776,11 @@ fn install_model_file(sender_task_id: u64, tx_buf: &mut [u8; 1024]) {
 
     if matches!(outcome, InstallOutcome::Installed(_)) {
         MODEL_NAMESPACE_CHANGED.store(true, core::sync::atomic::Ordering::Relaxed);
+        // The install is the user's trust decision for the file that arrived:
+        // the model is provisioned against the bytes the filesystem reports for
+        // the installed path, and marked trusted by the request that installed
+        // it. A model that was never installed stays untrusted and is refused.
+        trust_installed_model_file(gguf::PATH_LOCAL_MODEL_DATA);
     }
 
     let mut text = [0u8; 256];
@@ -4608,6 +4721,15 @@ fn run_installed_generation(
     session_id: u64,
     tx_buf: &mut [u8; 1024],
 ) -> bool {
+    // WHY the gate comes before the open: a model the user has not trusted must
+    // not have its bytes read at all, so the refusal is decided from the
+    // registry alone -- and the reply is the caller's only evidence of it.
+    if let Some(refusal) = model_trust_refusal(path) {
+        let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+        let (status, notice) = trust_refusal_notice(b"Generation", path, refusal, &mut scratch);
+        reply_with_answer(sender_task_id, status, notice, tx_buf);
+        return true;
+    }
     let fd = match std::fs_open(path, std::FS_READ) {
         Ok(fd) => fd,
         Err(_) => return false,
@@ -4681,8 +4803,222 @@ fn run_installed_generation(
             return true;
         }
     };
+    // WHY admission is checked before the model is loaded and recorded after:
+    // the ledger charges a model's resident bytes to the handle that owns them,
+    // and the handle does not exist until the backend has loaded the model. The
+    // check is what refuses a request the device could not hold; the
+    // reservation is what makes the model's bytes reclaimable.
+    match with_broker_ledger(|ledger| ledger.admit_operation(estimate)) {
+        Ok(()) => {}
+        Err(backend::AdmissionError::InsufficientRam) => {
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNAVAILABLE,
+                b"Generation unavailable: the backend working set plus the foreground OS reserve exceeds RAM available now.",
+                tx_buf,
+            );
+            return true;
+        }
+        Err(_) => {
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNAVAILABLE,
+                b"Generation unavailable: resource admission rejected request.",
+                tx_buf,
+            );
+            return true;
+        }
+    }
+
+    // A generative model must hold an output head before it is admitted. Refuse
+    // here, before any model slot or session is created, so a headless GGUF is
+    // never loaded as an active generative model.
+    let mut reader = weights::WeightReader::new(table, source);
+    if !reader.has_output_head() {
+        let _ = std::fs_close(fd);
+        reply_with_answer(
+            sender_task_id,
+            std::ai::STATUS_UNSUPPORTED,
+            b"Generation refused: the installed model declares no output tensor, so it cannot generate tokens.",
+            tx_buf,
+        );
+        return false;
+    }
+
+    // Resolve the artifact's observed identity (size + digest) from the
+    // filesystem, then verify it against the trusted provisioned digest when
+    // the installer registered one. The model is bound to the verified bytes;
+    // a file that changed since admission is unloaded and refused.
+    let mut stat_buf = [0u8; std::FILE_STAT_BYTES];
+    let observed = match std::fs_stat(path, &mut stat_buf) {
+        Ok(_) => std::FileStatRecord::parse(&stat_buf).map(|r| (r.size, r.sha256)),
+        Err(_) => None,
+    };
+    let (artifact_bytes, sha256) = match observed {
+        Some(v) => v,
+        None => {
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNAVAILABLE,
+                b"Generation unavailable: the installed model file could not be stat'd, so its bytes cannot be verified.",
+                tx_buf,
+            );
+            return false;
+        }
+    };
+    let architecture = info.architecture();
+    // Enforce a trusted provisioned digest when one exists for this path.
+    if let Some((expected_sha, expected_len)) = PROVISIONED_MODELS.lock().expected_for(path) {
+        let manifest = backend::installed_generative_manifest(
+            architecture,
+            info.file_type,
+            path,
+            artifact_bytes,
+            sha256,
+            estimate,
+        );
+        if backend::verify_artifact(
+            &manifest,
+            expected_len,
+            &expected_sha,
+            architecture,
+        )
+        .is_err()
+        {
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNAVAILABLE,
+                b"Generation refused: the installed model's bytes do not match the provisioned digest; the artifact is not the model that was authorized.",
+                tx_buf,
+            );
+            return false;
+        }
+    }
+
+    // The handle the ledger charges is the handle the backend hands back, so the
+    // backend's own work is done in one scope and the ledger's in another: two
+    // locks are never held at once, and no refusal is answered from inside a
+    // scope that holds one.
+    enum ModelLoad {
+        Ready { handle: u64, loaded_here: bool },
+        Changed { handle: u64 },
+        Unsupported,
+    }
+    let load = {
+        let mut backend = NATIVE_GGUF_BACKEND.lock();
+        // Detect a changed file: an already-loaded model from this path whose
+        // recorded digest/size differ from disk now is unloaded and refused.
+        match backend.active_model_by_path(path) {
+            Some((handle, bound_sha, bound_len)) => {
+                if bound_sha != sha256 || bound_len != artifact_bytes {
+                    backend.unload_active_model(handle);
+                    ModelLoad::Changed { handle }
+                } else {
+                    ModelLoad::Ready {
+                        handle,
+                        loaded_here: false,
+                    }
+                }
+            }
+            None => {
+                let manifest = backend::installed_generative_manifest(
+                    architecture,
+                    info.file_type,
+                    path,
+                    artifact_bytes,
+                    sha256,
+                    estimate,
+                );
+                match backend.load_model(&manifest) {
+                    Ok(handle) => ModelLoad::Ready {
+                        handle,
+                        loaded_here: true,
+                    },
+                    Err(_) => ModelLoad::Unsupported,
+                }
+            }
+        }
+    };
+    let (model_handle, model_loaded_here) = match load {
+        ModelLoad::Ready { handle, loaded_here } => (handle, loaded_here),
+        ModelLoad::Changed { handle } => {
+            // The model is gone from the backend, so the ledger's reservation for
+            // it goes with it: the bytes it charged for are no longer held.
+            unload_model_resources(handle);
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNAVAILABLE,
+                b"Generation refused: the installed model file changed since it was loaded; it must be re-verified before use.",
+                tx_buf,
+            );
+            return false;
+        }
+        ModelLoad::Unsupported => {
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNSUPPORTED,
+                b"Generation refused: the installed model is not a supported generative GGUF (architecture, quantization or tokenizer unsupported).",
+                tx_buf,
+            );
+            return false;
+        }
+    };
+
+    // The model's resident bytes are charged to its handle, and the session that
+    // runs it is bound to that handle, so an unload reclaims both.
+    let reservation = with_broker_ledger(|ledger| {
+        if ledger.model_resident_bytes(model_handle).is_some() {
+            // A model that was already loaded keeps the reservation it was
+            // given; charging it twice would double-count the bytes it holds.
+            Ok(())
+        } else {
+            ledger.reserve_resident_for(model_handle, estimate)
+        }
+    });
+    if let Err(error) = reservation {
+        // A model that cannot be accounted for is not left loaded: the bytes it
+        // holds would sit outside the ledger's accounting.
+        if model_loaded_here {
+            unload_model_everywhere(model_handle);
+        }
+        let _ = std::fs_close(fd);
+        match error {
+            backend::AdmissionError::ModelCapacity => {
+                reply_with_answer(
+                    sender_task_id,
+                    std::ai::STATUS_UNAVAILABLE,
+                    b"Generation unavailable: maximum loaded model capacity reached.",
+                    tx_buf,
+                );
+            }
+            backend::AdmissionError::InsufficientRam => {
+                reply_with_answer(
+                    sender_task_id,
+                    std::ai::STATUS_UNAVAILABLE,
+                    b"Generation unavailable: the backend working set plus the foreground OS reserve exceeds RAM available now.",
+                    tx_buf,
+                );
+            }
+            _ => {
+                reply_with_answer(
+                    sender_task_id,
+                    std::ai::STATUS_UNAVAILABLE,
+                    b"Generation unavailable: resource admission rejected request.",
+                    tx_buf,
+                );
+            }
+        }
+        return true;
+    }
+
     let ledger_session_res = with_broker_ledger(|ledger| {
-        ledger.create_session(sender_task_id, 1, estimate)
+        ledger.create_session_for_model(sender_task_id, 1, model_handle, estimate)
     });
     let ledger_session_id = match ledger_session_res {
         Ok(id) => id,
@@ -4718,10 +5054,9 @@ fn run_installed_generation(
         }
     };
 
-    // Reclaim the broker-ledger session on EVERY exit from here on, including
-    // the head/stat/provisioned/changed refusals below. Constructing the guard
-    // immediately after the reservation is what makes a failed admission
-    // release its reservation instead of leaking it.
+    // Reclaim the broker-ledger session on EVERY exit from here on. Constructing
+    // the guard immediately after the reservation is what makes a failed
+    // admission release its reservation instead of leaking it.
     struct SessionGuard {
         owner: u64,
         ledger_session_id: u64,
@@ -4744,139 +5079,25 @@ fn run_installed_generation(
         backend_session_id: None,
     };
 
-    // A generative model must hold an output head before it is admitted. Refuse
-    // here, before any model slot or session is created, so a headless GGUF is
-    // never loaded as an active generative model.
-    let mut reader = weights::WeightReader::new(table, source);
-    if !reader.has_output_head() {
-        let _ = std::fs_close(fd);
-        reply_with_answer(
-            sender_task_id,
-            std::ai::STATUS_UNSUPPORTED,
-            b"Generation refused: the installed model declares no output tensor, so it cannot generate tokens.",
-            tx_buf,
-        );
-        return false;
-    }
-
     let backend_session_id = {
-        // Resolve the artifact's observed identity (size + digest) from the
-        // filesystem, then verify it against the trusted provisioned digest when
-        // the installer registered one. The model is bound to the verified bytes;
-        // a file that changed since admission is unloaded and refused.
-        let mut stat_buf = [0u8; std::FILE_STAT_BYTES];
-        let observed = match std::fs_stat(path, &mut stat_buf) {
-            Ok(_) => std::FileStatRecord::parse(&stat_buf).map(|r| (r.size, r.sha256)),
-            Err(_) => None,
-        };
-        let (artifact_bytes, sha256) = match observed {
-            Some(v) => v,
-            None => {
-                let _ = std::fs_close(fd);
-                reply_with_answer(
-                    sender_task_id,
-                    std::ai::STATUS_UNAVAILABLE,
-                    b"Generation unavailable: the installed model file could not be stat'd, so its bytes cannot be verified.",
-                    tx_buf,
-                );
-                return false;
-            }
-        };
-        let architecture = info.architecture();
-        // Enforce a trusted provisioned digest when one exists for this path.
-        if let Some((expected_sha, expected_len)) = PROVISIONED_MODELS.lock().expected_for(path) {
-            let manifest = backend::installed_generative_manifest(
-                architecture,
-                info.file_type,
-                path,
-                artifact_bytes,
-                sha256,
-                estimate,
-            );
-            if backend::verify_artifact(
-                &manifest,
-                expected_len,
-                &expected_sha,
-                architecture,
-            )
-            .is_err()
-            {
-                let _ = std::fs_close(fd);
-                reply_with_answer(
-                    sender_task_id,
-                    std::ai::STATUS_UNAVAILABLE,
-                    b"Generation refused: the installed model's bytes do not match the provisioned digest; the artifact is not the model that was authorized.",
-                    tx_buf,
-                );
-                return false;
-            }
-        }
         let mut backend = NATIVE_GGUF_BACKEND.lock();
-        // Detect a changed file: an already-loaded model from this path whose
-        // recorded digest/size differ from disk now is unloaded and refused.
-        if let Some((handle, bound_sha, bound_len)) = backend.active_model_by_path(path) {
-            if bound_sha != sha256 || bound_len != artifact_bytes {
-                backend.unload_active_model(handle);
-                let _ = std::fs_close(fd);
-                reply_with_answer(
-                    sender_task_id,
-                    std::ai::STATUS_UNAVAILABLE,
-                    b"Generation refused: the installed model file changed since it was loaded; it must be re-verified before use.",
-                    tx_buf,
-                );
-                return false;
-            }
-            match backend.create_session(handle, sender_task_id) {
-                Ok(sid) => Some(sid),
-                Err(_) => {
-                    let _ = std::fs_close(fd);
-                    reply_with_answer(
-                        sender_task_id,
-                        std::ai::STATUS_UNAVAILABLE,
-                        b"Generation unavailable: a session could not be created for the installed model.",
-                        tx_buf,
-                    );
-                    return false;
-                }
-            }
-        } else {
-            let manifest = backend::installed_generative_manifest(
-                architecture,
-                info.file_type,
-                path,
-                artifact_bytes,
-                sha256,
-                estimate,
-            );
-            match backend.load_model(&manifest) {
-                Ok(handle) => match backend.create_session(handle, sender_task_id) {
-                    Ok(sid) => Some(sid),
-                    Err(_) => {
-                        let _ = std::fs_close(fd);
-                        reply_with_answer(
-                            sender_task_id,
-                            std::ai::STATUS_UNAVAILABLE,
-                            b"Generation unavailable: a session could not be created for the installed model.",
-                            tx_buf,
-                        );
-                        return false;
-                    }
-                },
-                Err(_) => {
-                    let _ = std::fs_close(fd);
-                    reply_with_answer(
-                        sender_task_id,
-                        std::ai::STATUS_UNSUPPORTED,
-                        b"Generation refused: the installed model is not a supported generative GGUF (architecture, quantization or tokenizer unsupported).",
-                        tx_buf,
-                    );
-                    return false;
-                }
-            }
-        }
+        backend.create_session(model_handle, sender_task_id)
     };
-
-    session_guard.backend_session_id = backend_session_id;
+    match backend_session_id {
+        Ok(sid) => {
+            session_guard.backend_session_id = Some(sid);
+        }
+        Err(_) => {
+            let _ = std::fs_close(fd);
+            reply_with_answer(
+                sender_task_id,
+                std::ai::STATUS_UNAVAILABLE,
+                b"Generation unavailable: a session could not be created for the installed model.",
+                tx_buf,
+            );
+            return false;
+        }
+    }
 
     let prompt_text = extract_prompt_text(payload);
     if prompt_text.is_empty() {
@@ -4973,7 +5194,7 @@ fn run_installed_generation(
                     with_broker_ledger(|ledger| {
                         let _ = ledger.cancel(sender_task_id, ledger_session_id);
                     });
-                    if let Some(bsid) = backend_session_id {
+                    if let Some(bsid) = session_guard.backend_session_id {
                         let mut backend = NATIVE_GGUF_BACKEND.lock();
                         let _ = backend.cancel(bsid);
                     }
@@ -5596,7 +5817,7 @@ pub fn handle_ipc_inference_query(
                             reply_with_answer(
                                 sender_task_id,
                                 std::ai::STATUS_UNAVAILABLE,
-                                b"On-device generative stream unavailable: no local model weights loaded.",
+                                generative_unavailable_notice(),
                                 tx_buf,
                             );
                         }
@@ -5614,7 +5835,7 @@ pub fn handle_ipc_inference_query(
                     reply_with_answer(
                         sender_task_id,
                         std::ai::STATUS_UNAVAILABLE,
-                        b"On-device generative stream unavailable: no local model weights loaded.",
+                        generative_unavailable_notice(),
                         tx_buf,
                     );
                 }
@@ -5624,7 +5845,7 @@ pub fn handle_ipc_inference_query(
             reply_with_answer(
                 sender_task_id,
                 std::ai::STATUS_UNAVAILABLE,
-                b"On-device generative stream unavailable: no local model weights loaded.",
+                generative_unavailable_notice(),
                 tx_buf,
             );
         }
@@ -5972,6 +6193,19 @@ pub fn handle_ipc_inference_query(
                 }
             };
 
+            // WHY the gate comes before the file is read: a model the user has
+            // not trusted must not have its bytes read at all. WHY there is no
+            // baseline fallback here: the lexical projection is a different
+            // answer, and a caller that asked for this model's vector would be
+            // handed another one instead of the refusal that names the reason.
+            if let Some(refusal) = model_trust_refusal(path) {
+                let mut scratch = [0u8; NOTICE_WINDOW_BYTES];
+                let (status, notice) =
+                    trust_refusal_notice(b"Embedding", path, refusal, &mut scratch);
+                emit_embed_notice(sender_task_id, status, notice, tx_buf);
+                return;
+            }
+
             let estimate = backend::ResourceEstimate {
                 model_weights: 0,
                 kv_cache: 1024 * 1024,
@@ -6226,15 +6460,21 @@ mod tests {
         // Status 1 = UNAVAILABLE
         assert_eq!(resp.status, 1);
         let reason = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
-        assert_eq!(
-            reason,
-            b"On-device generative stream unavailable: no local model weights loaded."
-        );
+        assert_eq!(reason, generative_unavailable_notice());
     }
 
     #[test]
     fn test_handle_ipc_generate_when_weights_unreadable_reports_truthful_unavailable() {
         let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+        // The model is trusted first: the trust gate refuses an untrusted model
+        // before it opens the file, so this case only reaches the unreadable
+        // answer for a model the user has already trusted.
+        reset_provisioned_models();
+        {
+            let mut registry = PROVISIONED_MODELS.lock();
+            assert!(registry.provision(gguf::PATH_GENERATIVE_MODEL_DATA, [0u8; 32], 1));
+            assert!(registry.mark_trusted(gguf::PATH_GENERATIVE_MODEL_DATA));
+        }
         let mut tx_buf = [0u8; 1024];
         let hdr = gguf::GgufHeader {
             magic: gguf::GGUF_MAGIC,
@@ -6261,10 +6501,10 @@ mod tests {
         // When physical file does not exist on disk, reports truthful unavailable
         assert_eq!(resp.status, 1);
         let reason = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
-        assert_eq!(
-            reason,
-            b"On-device generative stream unavailable: no local model weights loaded."
-        );
+        assert_eq!(reason, generative_unavailable_notice());
+        // The trust this test granted is this test's own: it does not stand for
+        // the tests that run after it.
+        reset_provisioned_models();
     }
 
     #[test]
@@ -8301,7 +8541,7 @@ mod tests {
         let reason = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
         assert_eq!(
             reason,
-            b"On-device generative stream unavailable: no local model weights loaded.",
+            generative_unavailable_notice(),
             "a prompt that arrived whole was refused for a cut that did not happen"
         );
     }
@@ -8786,6 +9026,180 @@ mod tests {
             authorize_keystore_derive_policy(&app_id, 20, 0x1337, rights),
             Err(std::keystore::KeystoreError::UnauthorizedDomain)
         );
+    }
+
+    /// The byte-string literals in a Rust source, as the sentences they are.
+    ///
+    /// WHY the literals and not the whole file: a comment is prose for a
+    /// reader of the source, and a user-visible string is a claim a caller
+    /// reads. Only the second can make the platform say something it does not
+    /// do.
+    fn byte_literals(source: &str) -> alloc::vec::Vec<&str> {
+        let bytes = source.as_bytes();
+        let mut found = alloc::vec::Vec::new();
+        let mut index = 0usize;
+        while index + 1 < bytes.len() {
+            if bytes[index] == b'b' && bytes[index + 1] == b'"' {
+                let start = index + 2;
+                let mut cursor = start;
+                while cursor < bytes.len() {
+                    match bytes[cursor] {
+                        b'\\' => cursor += 2,
+                        b'"' => break,
+                        _ => cursor += 1,
+                    }
+                }
+                if cursor < bytes.len() {
+                    found.push(&source[start..cursor]);
+                    index = cursor + 1;
+                    continue;
+                }
+            }
+            index += 1;
+        }
+        found
+    }
+
+    /// Every Rust source under `dir`, by path.
+    fn collect_sources(dir: &rust_std::path::Path, out: &mut alloc::vec::Vec<rust_std::path::PathBuf>) {
+        let entries = match rust_std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_sources(&path, out);
+            } else if path.extension().map(|ext| ext == "rs").unwrap_or(false) {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn the_service_never_claims_on_device_inference_and_names_the_host_backed_provider() {
+        // The needle is built from two halves so this test's own source does
+        // not carry the phrase it forbids.
+        let forbidden: alloc::vec::Vec<u8> = [b"on".as_slice(), b"-device".as_slice()].concat();
+        let src = rust_std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = alloc::vec::Vec::new();
+        collect_sources(&src, &mut files);
+        assert!(
+            !files.is_empty(),
+            "the service's own sources were not found at {}",
+            src.display()
+        );
+        let mut claims = alloc::vec::Vec::new();
+        let mut provider_reports = 0usize;
+        for file in &files {
+            let text = rust_std::fs::read_to_string(file)
+                .expect("the service's own source is readable");
+            for literal in byte_literals(&text) {
+                let lower = literal.to_ascii_lowercase();
+                if lower
+                    .as_bytes()
+                    .windows(forbidden.len())
+                    .any(|window| window == forbidden.as_slice())
+                {
+                    claims.push(alloc::format!("{}: {}", file.display(), literal));
+                }
+                if lower.contains("host-backed") {
+                    provider_reports += 1;
+                }
+            }
+        }
+        assert!(
+            claims.is_empty(),
+            "a user-visible string claims the platform answers from the device itself: {:?}",
+            claims
+        );
+        assert!(
+            provider_reports > 0,
+            "no user-visible string reports the platform's generative provider as host-backed"
+        );
+    }
+
+    #[test]
+    fn an_untrusted_model_is_refused_with_an_explicit_reason() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+        reset_provisioned_models();
+        let path = gguf::PATH_GENERATIVE_MODEL_DATA;
+
+        // A model the registry has never heard of is refused before its file is
+        // opened, and the refusal names the reason.
+        assert_eq!(
+            model_trust_refusal(path),
+            Some(backend::TrustRefusal::NotProvisioned)
+        );
+        let mut tx_buf = [0u8; 1024];
+        let hdr = gguf::GgufHeader {
+            magic: gguf::GGUF_MAGIC,
+            version: 3,
+            tensor_count: 240,
+            kv_count: 28,
+        };
+        let models = gguf::ProbedModels {
+            embedding: None,
+            generative: Some((hdr, path)),
+        };
+        handle_ipc_inference_query(
+            0,
+            MSG_TYPE_GENERATE,
+            b"Explain quantum computing",
+            &models,
+            &mut tx_buf,
+        );
+        let resp_hdr_len = core::mem::size_of::<std::ai::AiInferenceResponse>();
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp.status, STATUS_UNAVAILABLE);
+        let reason = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
+        let reason_text = core::str::from_utf8(reason).expect("the refusal is text");
+        assert!(
+            reason_text.contains("is not a provisioned model"),
+            "the refusal does not say why the model was not run: {}",
+            reason_text
+        );
+        assert!(
+            reason_text.contains(path),
+            "the refusal does not name the model it refused: {}",
+            reason_text
+        );
+
+        // A model the user imported but has not trusted is a different refusal,
+        // with a different next move.
+        {
+            let mut registry = PROVISIONED_MODELS.lock();
+            assert!(registry.provision(path, [1u8; 32], 4096));
+        }
+        assert_eq!(
+            model_trust_refusal(path),
+            Some(backend::TrustRefusal::UserImported)
+        );
+        let mut tx_buf = [0u8; 1024];
+        handle_ipc_inference_query(
+            0,
+            MSG_TYPE_GENERATE,
+            b"Explain quantum computing",
+            &models,
+            &mut tx_buf,
+        );
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp.status, STATUS_UNAVAILABLE);
+        let reason = &tx_buf[resp_hdr_len..resp_hdr_len + resp.output_dim as usize];
+        let reason_text = core::str::from_utf8(reason).expect("the refusal is text");
+        assert!(
+            reason_text.contains("holds no explicit trust decision"),
+            "the refusal does not say the model was never trusted: {}",
+            reason_text
+        );
+
+        // The trust this test granted is this test's own: it does not stand for
+        // the tests that run after it.
+        reset_provisioned_models();
     }
 }
 
