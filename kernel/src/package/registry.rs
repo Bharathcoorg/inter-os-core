@@ -21,6 +21,62 @@ pub enum PackageKind {
     AndroidApk = 1,
 }
 
+/// Why the registry refused to move a package forward.
+///
+/// WHY a named refusal and not the unit error: the registry is the
+/// authoritative record of what this device will launch, and "the publisher's
+/// key was revoked" and "the journal refused the write" are different faults
+/// with different remedies. A caller that cannot tell them apart can only
+/// answer "install failed", which is the answer the platform truth contract
+/// forbids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryRefusal {
+    /// The package's own identifier is on the device's revocation list.
+    RevokedPackage,
+    /// The publisher key that signed the package is on the device's
+    /// revocation list.
+    RevokedPublisher,
+    /// The manifest carries no publisher key at all.
+    MissingPublisher,
+    /// The manifest's declared policy is not internally consistent.
+    InvalidPolicy,
+    /// The registry holds no record of the named package.
+    UnknownPackage,
+    /// The version the caller asked for is not the version the registry
+    /// holds, or is older than the one it holds.
+    VersionRejected,
+    /// The record is not in a state that may become Active.
+    NotStaged,
+    /// A dependency of the manifest is not satisfied by an active package.
+    DependencyUnsatisfied,
+    /// The registry already holds the maximum number of records.
+    RegistryFull,
+    /// The journal refused the durable commit.
+    PersistenceFailed,
+}
+
+/// Answers whether the publisher key that signed a registry record is still
+/// acceptable to the device.
+///
+/// WHY the registry re-reads the CRL instead of trusting the verdict it was
+/// given when the container was parsed: a staged record outlives the moment
+/// it was written. The registry journal restores staged records across a
+/// reboot, and a publisher key can be revoked at any time after the package
+/// was verified. The question "may this package become Active" therefore has
+/// to be answered at the moment of the transition and not at the moment of the
+/// staging.
+///
+/// WHY the zero key is exempt: a zero-valued signer identity is how the
+/// registry records an entry that has no publisher key at all -- the
+/// first-party records the image seeds -- and not the identity of a publisher
+/// whose key happens to be zero. The CRL only ever holds real publisher keys.
+fn signer_is_revoked(signer: &[u8; 32]) -> bool {
+    if *signer == [0u8; 32] {
+        return false;
+    }
+    crate::package::REVOCATION_REGISTRY.lock().is_key_revoked(signer)
+}
+
 #[derive(Debug, Clone)]
 pub struct PackageEntry {
     pub package_id: String,
@@ -366,8 +422,8 @@ impl PackageRegistry {
         })
     }
 
-    pub fn activate_version_with_policy(&mut self, package_id: &str, version: (u16,u16,u16), policy: &PackagePolicy) -> Result<(), ()> {
-        if !self.dependencies_satisfied(policy) { return Err(()); }
+    pub fn activate_version_with_policy(&mut self, package_id: &str, version: (u16,u16,u16), policy: &PackagePolicy) -> Result<(), RegistryRefusal> {
+        if !self.dependencies_satisfied(policy) { return Err(RegistryRefusal::DependencyUnsatisfied); }
         self.activate_version(package_id, version)
     }
 
@@ -380,20 +436,38 @@ impl PackageRegistry {
     /// A package ID has one authoritative registry record. Replacing an existing
     /// record prevents an older active entry from shadowing a newly staged version
     /// and keeps launch/rollback decisions deterministic across reboots.
-    pub fn stage_verified(&mut self, manifest: &crate::package::RappManifest) -> Result<(), ()> {
-        if !manifest.policy.validate() { return Err(()); }
-        if crate::package::REVOCATION_REGISTRY.lock().is_package_revoked(&manifest.package_id) {
-            return Err(());
+    pub fn stage_verified(&mut self, manifest: &crate::package::RappManifest) -> Result<(), RegistryRefusal> {
+        if !manifest.policy.validate() { return Err(RegistryRefusal::InvalidPolicy); }
+        // WHY a manifest with no publisher key is refused here and not only at
+        // parse time: the registry is a public entry point, and a record with
+        // no signer is a record nobody can be held to. "Signed by nobody" is
+        // not a publisher.
+        if manifest.publisher_key == [0u8; 32] {
+            return Err(RegistryRefusal::MissingPublisher);
+        }
+        {
+            let crl = crate::package::REVOCATION_REGISTRY.lock();
+            if crl.is_package_revoked(&manifest.package_id) {
+                return Err(RegistryRefusal::RevokedPackage);
+            }
+            // WHY the publisher key is consulted here as well as at parse time:
+            // the container was verified a moment ago, and the key that signed
+            // it can have been revoked in between. A revoked publisher must not
+            // leave a staged record behind that a later activation would
+            // promote.
+            if crl.is_key_revoked(&manifest.publisher_key) {
+                return Err(RegistryRefusal::RevokedPublisher);
+            }
         }
 
         let old = self.entries.clone();
         let existing = self.entries.iter().position(|entry| entry.package_id == manifest.package_id);
-        if existing.is_none() && self.entries.len() >= MAX_ENTRIES { return Err(()); }
+        if existing.is_none() && self.entries.len() >= MAX_ENTRIES { return Err(RegistryRefusal::RegistryFull); }
 
         if let Some(idx) = existing {
             let previous = self.entries[idx].clone();
             if manifest.version < previous.version {
-                return Err(()); // Strict monotonic anti-rollback invariant
+                return Err(RegistryRefusal::VersionRejected); // Strict monotonic anti-rollback invariant
             }
             if manifest.version == previous.version && matches!(previous.state, PackageState::Staged | PackageState::Active) {
                 return Ok(());
@@ -440,7 +514,7 @@ impl PackageRegistry {
         if self.persist().is_err() {
             self.entries = old;
             self.generation = self.entries.iter().map(|entry| entry.generation).max().unwrap_or(0);
-            return Err(());
+            return Err(RegistryRefusal::PersistenceFailed);
         }
         Ok(())
     }
@@ -450,20 +524,34 @@ impl PackageRegistry {
     /// The transaction is kept in-memory because the registry snapshot itself is
     /// the durable commit point: either the new Active record is persisted, or the
     /// previous snapshot is restored before returning an error.
-    pub fn activate_version(&mut self, package_id: &str, version: (u16,u16,u16)) -> Result<(), ()> {
-        if crate::package::REVOCATION_REGISTRY.lock().is_package_revoked(package_id) {
-            return Err(());
+    pub fn activate_version(&mut self, package_id: &str, version: (u16,u16,u16)) -> Result<(), RegistryRefusal> {
+        {
+            let crl = crate::package::REVOCATION_REGISTRY.lock();
+            if crl.is_package_revoked(package_id) {
+                return Err(RegistryRefusal::RevokedPackage);
+            }
         }
-        let idx = self.entries.iter().position(|entry| entry.package_id == package_id).ok_or(())?;
+        let idx = self.entries.iter().position(|entry| entry.package_id == package_id).ok_or(RegistryRefusal::UnknownPackage)?;
         let previous = self.entries[idx].clone();
+        // WHY the signer's standing is re-read at this transition: this is the
+        // step that makes the package launchable, and it can happen long after
+        // the container was verified -- after a reboot that restored the staged
+        // record, and after the publisher's key was revoked. A transition that
+        // does not re-read the CRL can promote a package whose publisher the
+        // device has already stopped trusting, and the registry would then
+        // report the package as Active and launchable while the launch path
+        // refuses it.
+        if signer_is_revoked(&previous.signer_identity) {
+            return Err(RegistryRefusal::RevokedPublisher);
+        }
         if version < previous.version {
-            return Err(());
+            return Err(RegistryRefusal::VersionRejected);
         }
         if version != previous.version {
-            return Err(());
+            return Err(RegistryRefusal::VersionRejected);
         }
         if !matches!(previous.state, PackageState::Staged | PackageState::Active) {
-            return Err(());
+            return Err(RegistryRefusal::NotStaged);
         }
 
         let old = self.entries.clone();
@@ -471,7 +559,7 @@ impl PackageRegistry {
         let mut transaction = InstallTransaction::new(idx as u32, previous.state, next_generation);
         transaction.stage();
         if !matches!(transaction.stage, InstallStage::Staged) {
-            return Err(());
+            return Err(RegistryRefusal::NotStaged);
         }
 
         self.generation = next_generation;
@@ -483,13 +571,13 @@ impl PackageRegistry {
             transaction.rollback();
             self.entries = old;
             self.generation = self.entries.iter().map(|entry| entry.generation).max().unwrap_or(0);
-            return Err(());
+            return Err(RegistryRefusal::PersistenceFailed);
         }
         Ok(())
     }
 
-    pub fn activate(&mut self, package_id: &str) -> Result<(), ()> {
-        let version=self.entries.iter().find(|e| e.package_id==package_id).map(|e| e.version).ok_or(())?;
+    pub fn activate(&mut self, package_id: &str) -> Result<(), RegistryRefusal> {
+        let version=self.entries.iter().find(|e| e.package_id==package_id).map(|e| e.version).ok_or(RegistryRefusal::UnknownPackage)?;
         self.activate_version(package_id, version)
     }
 
@@ -733,6 +821,32 @@ impl PackageRegistry {
         });
     }
 
+    /// Inserts a *staged* record bound to a chosen publisher key.
+    ///
+    /// WHY this exists: the journal is not bound on a host test machine, so the
+    /// public staging path cannot leave a record behind for a test to inspect.
+    /// The invariant this record has to carry is the signer's identity, because
+    /// that is what the activation transition re-reads.
+    #[cfg(test)]
+    pub fn insert_staged_for_test(&mut self, package_id: &str, version: (u16, u16, u16), signer_identity: [u8; 32]) {
+        self.entries.retain(|e| e.package_id != package_id);
+        let uid = 1000 + (self.entries.len() as u32);
+        self.entries.push(PackageEntry {
+            package_id: package_id.to_string(),
+            generation: 1,
+            state: PackageState::Staged,
+            version,
+            kind: PackageKind::NativeRapp,
+            app_uid: uid,
+            code_digest: crate::crypto::Sha256::digest(package_id.as_bytes()),
+            version_code: 1,
+            min_sdk: 0,
+            target_sdk: 0,
+            signer_identity,
+            principal_id: uid as u64,
+        });
+    }
+
     #[cfg(test)]
     pub fn insert_active_apk_for_test(&mut self, package_id: &str, version: (u16, u16, u16), code_digest: [u8; 32]) -> u32 {
         self.register_verified_apk_simple(package_id, version, code_digest).unwrap_or(10000)
@@ -744,3 +858,155 @@ impl PackageRegistry {
     }
 }
 pub static PACKAGE_REGISTRY: Mutex<PackageRegistry> = Mutex::new(PackageRegistry::new());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::rapp::{RappArch, TrustState};
+    use crate::package::revocation::RevocationReason;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// Builds the manifest the registry is asked about, without going through
+    /// the container parser.
+    ///
+    /// WHY a hand-built manifest and not a signed container: the invariant under
+    /// test is the registry's trust decision, and a signed container would add
+    /// the signature check to the failure path without adding anything to the
+    /// decision being pinned.
+    fn manifest_for(package_id: &str, publisher_key: [u8; 32]) -> crate::package::RappManifest {
+        crate::package::RappManifest {
+            format_version: crate::package::rapp::RAPP_FORMAT_VERSION,
+            package_id: String::from(package_id),
+            publisher_key,
+            version: (1, 0, 0),
+            arch: RappArch::X86_64,
+            capabilities: Vec::new(),
+            payload_digest: [0u8; 32],
+            signature: [0u8; 64],
+            payload_offset: 0,
+            payload_len: 0,
+            policy: PackagePolicy { dependencies: Vec::new(), permissions: Vec::new() },
+            dependencies: Vec::new(),
+            intents: Vec::new(),
+            trust_state: TrustState::Trusted,
+        }
+    }
+
+    /// A package whose publisher key is on the CRL must not be staged.
+    ///
+    /// WHY the staging path is a trust decision and not a bookkeeping step: the
+    /// container parser checks the CRL at parse time, and the key that signed
+    /// the container can be revoked between that check and the staging. A
+    /// staged record is a record a later activation will promote.
+    ///
+    /// Pinning assertion: the refusal names the publisher, and no record for
+    /// the package is left behind.
+    #[test]
+    fn a_revoked_publisher_key_cannot_be_staged() {
+        let key = [0x71u8; 32];
+        let package_id = "org.interos.registry_revoked_stage_test";
+        crate::package::REVOCATION_REGISTRY
+            .lock()
+            .place_key_on_crl(&key, RevocationReason::KeyCompromised, 1, "registry-test")
+            .expect("the CRL has room");
+
+        let mut registry = PackageRegistry::new();
+        let refusal = registry
+            .stage_verified(&manifest_for(package_id, key))
+            .expect_err("a package signed by a revoked publisher must not be staged");
+        assert_eq!(refusal, RegistryRefusal::RevokedPublisher);
+        assert!(
+            registry.entries().iter().all(|e| e.package_id != package_id),
+            "a refused staging must leave no record behind"
+        );
+
+        crate::package::REVOCATION_REGISTRY.lock().revoked_keys.remove(&key);
+    }
+
+    /// A record staged while its publisher was still trusted must not become
+    /// Active after that publisher's key is revoked.
+    ///
+    /// WHY this is the transition that matters: activation is the step that
+    /// makes a package launchable, and it can happen long after the container
+    /// was verified -- after a reboot that restored the staged record from the
+    /// registry journal, and after the publisher's key was revoked. The
+    /// registry's answer about the package has to agree with the launch path's
+    /// answer, and the launch path re-reads the CRL.
+    ///
+    /// Pinning assertions: the refusal names the publisher, the record stays
+    /// staged, and the package stays unlaunchable.
+    #[test]
+    fn a_staged_package_whose_publisher_was_revoked_cannot_be_activated() {
+        let key = [0x72u8; 32];
+        let package_id = "org.interos.registry_revoked_activate_test";
+        let mut registry = PackageRegistry::new();
+        registry.insert_staged_for_test(package_id, (1, 0, 0), key);
+        assert!(
+            !registry.launch_allowed(package_id, (1, 0, 0)),
+            "a staged record must not be launchable"
+        );
+
+        crate::package::REVOCATION_REGISTRY
+            .lock()
+            .place_key_on_crl(&key, RevocationReason::KeyCompromised, 2, "registry-test")
+            .expect("the CRL has room");
+
+        let refusal = registry
+            .activate_version(package_id, (1, 0, 0))
+            .expect_err("a revoked publisher must not be promoted to Active");
+        assert_eq!(refusal, RegistryRefusal::RevokedPublisher);
+        let entry = registry
+            .entries()
+            .iter()
+            .find(|e| e.package_id == package_id)
+            .expect("the staged record survives a refused activation");
+        assert_eq!(
+            entry.state,
+            PackageState::Staged,
+            "a refused activation must leave the record staged"
+        );
+        assert!(
+            !registry.launch_allowed(package_id, (1, 0, 0)),
+            "a refused activation must not make the package launchable"
+        );
+
+        crate::package::REVOCATION_REGISTRY.lock().revoked_keys.remove(&key);
+    }
+
+    /// The revocation gate must not refuse a publisher that is still trusted.
+    ///
+    /// WHY this control exists: a gate that refuses everything is not a gate,
+    /// it is an outage. On a host with no journal bound the durable commit is
+    /// what fails, and the refusal has to name that fault instead of the
+    /// publisher.
+    #[test]
+    fn an_unrevoked_publisher_is_not_refused_for_revocation() {
+        let key = [0x73u8; 32];
+        let package_id = "org.interos.registry_unrevoked_test";
+        let mut registry = PackageRegistry::new();
+        registry.insert_staged_for_test(package_id, (1, 0, 0), key);
+
+        if let Err(refusal) = registry.activate_version(package_id, (1, 0, 0)) {
+            assert_ne!(
+                refusal,
+                RegistryRefusal::RevokedPublisher,
+                "a publisher that is not on the CRL must not be refused as revoked"
+            );
+        }
+    }
+
+    /// A manifest with no publisher key names no publisher at all, and the
+    /// registry may not hold a record for it.
+    ///
+    /// WHY this is refused: "signed by nobody" is not a publisher, and a
+    /// record with no signer is a record nobody can be held to.
+    #[test]
+    fn a_manifest_without_a_publisher_key_is_refused() {
+        let mut registry = PackageRegistry::new();
+        let refusal = registry
+            .stage_verified(&manifest_for("org.interos.registry_no_publisher_test", [0u8; 32]))
+            .expect_err("a package signed by nobody must not be staged");
+        assert_eq!(refusal, RegistryRefusal::MissingPublisher);
+    }
+}
