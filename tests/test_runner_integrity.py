@@ -321,12 +321,15 @@ class TestRunnerIntegrity(unittest.TestCase):
                  "--format", "terse", "--test-threads=8", "--skip", "task::"],
                 capture_output=True, text=True, timeout=280,
             )
+            # WHY both streams are read: a failure that names no case is a
+            # failure nobody can act on, and the harness is what has to carry
+            # the evidence that the next run can be compared against.
             failed = sorted(
                 line.strip()
-                for line in sweep.stdout.splitlines()
+                for line in (sweep.stdout + sweep.stderr).splitlines()
                 if line.strip().endswith("... FAILED")
             )
-            totals = [line for line in sweep.stdout.splitlines() if "passed;" in line]
+            totals = [line for line in (sweep.stdout + sweep.stderr).splitlines() if "passed;" in line]
             if sweep.returncode != 0 or failed:
                 unstable_runs.append((attempt, failed, totals))
 

@@ -134,6 +134,25 @@ impl InputEvent {
     }
 }
 
+/// What the pipeline did with an event that was routed to a task.
+///
+/// WHY this exists: the queue used to discard an event silently and the
+/// console still said the event had been dispatched, so a person whose tap
+/// never reached the app was told the platform had delivered it. The
+/// outcome lets the caller report what actually happened instead of
+/// claiming a delivery that did not take place.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RouteOutcome {
+    /// The event is in the task's queue.
+    Queued,
+    /// The task's queue was at its limit: its oldest event was discarded to
+    /// make room, and the new event is in the queue.
+    ReplacedOldest,
+    /// The pipeline was at its limit and the event was discarded. The task
+    /// never saw it.
+    Dropped,
+}
+
 pub struct InputPipeline {
     queue: VecDeque<(TaskId, InputEvent)>,
     service_queue: VecDeque<InputEvent>,
@@ -151,18 +170,41 @@ impl InputPipeline {
         if self.service_queue.len() < 128 { self.service_queue.push_back(event); }
     }
 
-    pub fn route_to_task(&mut self, task: TaskId, event: InputEvent) {
-        const MAX_PER_TASK: usize = 16;
-        const MAX_TOTAL: usize = 128;
+    /// Places an event in a task's queue and reports what happened to it.
+    ///
+    /// WHY the per-task limit is 64 and not 16: a person typing a URL
+    /// produces a tap, a clear, and a character per keypress, and a browser
+    /// that is repainting for a tenth of a second cannot read them one at a
+    /// time. The old limit of 16 threw the first events away, and the first
+    /// events are the ones that matter: the tap that opens the address field
+    /// was the event that vanished, so the characters that followed went to
+    /// a field that was never focused and the navigation never happened. The
+    /// limit now matches the PS/2 ring's own capacity, and the loss of an
+    /// event is reported rather than hidden.
+    ///
+    /// WHY the total limit is 256: the pipeline serves every task on the
+    /// device, so its ceiling is what a busy device shares among all of
+    /// them. At about thirty bytes an entry this is under eight kilobytes of
+    /// a sixty-four-megabyte kernel heap.
+    pub fn route_to_task(&mut self, task: TaskId, event: InputEvent) -> RouteOutcome {
+        const MAX_PER_TASK: usize = 64;
+        const MAX_TOTAL: usize = 256;
+        // WHY the total is checked first: the per-task eviction below removes
+        // an event to make room, and a pipeline that is already full must not
+        // lose that event as well.
+        if self.queue.len() >= MAX_TOTAL {
+            return RouteOutcome::Dropped;
+        }
         let task_count = self.queue.iter().filter(|(owner, _)| *owner == task).count();
         if task_count >= MAX_PER_TASK {
             if let Some(pos) = self.queue.iter().position(|(owner, _)| *owner == task) {
                 self.queue.remove(pos);
+                self.queue.push_back((task, event));
+                return RouteOutcome::ReplacedOldest;
             }
         }
-        if self.queue.len() < MAX_TOTAL {
-            self.queue.push_back((task, event));
-        }
+        self.queue.push_back((task, event));
+        RouteOutcome::Queued
     }
 
     pub fn pop_for_task(&mut self, task: TaskId) -> Option<InputEvent> {
@@ -614,9 +656,10 @@ fn dispatch_in_task_context(event: InputEvent) {
     };
     if let Some(owner) = owner {
         crate::serial_println!("[INPUT DISPATCH] Routing to task {}", owner);
+        let mut routed = RouteOutcome::Queued;
         for _ in 0..1000 {
             if let Some(mut pipe) = INPUT_PIPELINE.try_lock() {
-                pipe.route_to_task(TaskId(owner), event);
+                routed = pipe.route_to_task(TaskId(owner), event);
                 break;
             }
             core::hint::spin_loop();
@@ -640,7 +683,22 @@ fn dispatch_in_task_context(event: InputEvent) {
         // person waits on, which starts when the owning task is told there is
         // input and ends when a flip puts the result on the scanout.
         crate::performance::record_touch_dispatched(crate::interrupts::get_system_ticks(), owner);
-        crate::serial_println!("[INPUT DISPATCH] Dispatched to task {} complete", owner);
+        // WHY the outcome decides the wording: "complete" is a claim that the
+        // event reached the task. An event the pipeline refused never got
+        // there, so the console says the event was discarded instead of
+        // reporting a delivery that did not happen.
+        match routed {
+            RouteOutcome::Queued => {
+                crate::serial_println!("[INPUT DISPATCH] Dispatched to task {} complete", owner);
+            }
+            RouteOutcome::ReplacedOldest => {
+                crate::serial_println!("[INPUT DROP] The queue for task {} was full; its oldest event was discarded to make room, and the new event is queued.", owner);
+                crate::serial_println!("[INPUT DISPATCH] Dispatched to task {} complete", owner);
+            }
+            RouteOutcome::Dropped => {
+                crate::serial_println!("[INPUT DROP] The input pipeline was full; the event for task {} was discarded and never reached the task.", owner);
+            }
+        }
     }
 }
 
@@ -841,25 +899,79 @@ mod tests {
     }
 
     #[test]
-    fn input_pipeline_per_task_backpressure_max_16() {
+    fn input_pipeline_per_task_backpressure_max_64() {
         let mut pipe = InputPipeline::new();
-        for i in 0..20 {
-            pipe.route_to_task(TaskId(5), InputEvent {
+        for i in 0..80u32 {
+            let outcome = pipe.route_to_task(TaskId(5), InputEvent {
                 kind: InputEventKind::Pan,
                 x: i,
                 y: 100 + i,
                 ..InputEvent::EMPTY
             });
+            if i < 64 {
+                assert_eq!(outcome, RouteOutcome::Queued, "the first events fit the queue");
+            } else {
+                assert_eq!(
+                    outcome,
+                    RouteOutcome::ReplacedOldest,
+                    "a queue at its limit must say that it made room"
+                );
+            }
         }
-        // Task queue must be capped at MAX_PER_TASK = 16
+        // Task queue must be capped at MAX_PER_TASK = 64
         let mut count = 0;
         let mut last_x = 0;
         while let Some(ev) = pipe.pop_for_task(TaskId(5)) {
             count += 1;
             last_x = ev.x;
         }
-        assert_eq!(count, 16, "per-task queue must cap at 16");
-        assert_eq!(last_x, 19, "most recent event must be preserved in queue");
+        assert_eq!(count, 64, "per-task queue must cap at 64");
+        assert_eq!(last_x, 79, "most recent event must be preserved in queue");
+    }
+
+    /// A person's own burst of input must arrive whole.
+    ///
+    /// WHY this case exists: the browser typed a URL while the app was
+    /// repainting, and the tap that opened the address field was the first
+    /// event the queue threw away. The characters that followed went to a
+    /// field nobody had focused, the navigation never happened, and the
+    /// console had said the events were dispatched. The burst below is the
+    /// one the person actually made: a tap on the address field, a tap on
+    /// the clear chip, and the characters of the address.
+    #[test]
+    fn a_burst_of_taps_and_keys_reaches_the_task_in_order() {
+        let mut pipe = InputPipeline::new();
+        let mut send = |pipe: &mut InputPipeline, kind: InputEventKind, x: u32, y: u32| {
+            let outcome = pipe.route_to_task(TaskId(18), InputEvent {
+                kind,
+                x,
+                y,
+                ..InputEvent::EMPTY
+            });
+            assert_eq!(outcome, RouteOutcome::Queued, "no event of this burst may be lost");
+        };
+
+        send(&mut pipe, InputEventKind::Tap, 250, 80);
+        send(&mut pipe, InputEventKind::Tap, 364, 946);
+        for code in 0..22u32 {
+            send(&mut pipe, InputEventKind::Key, code, 1);
+        }
+
+        // The task must see the burst in the order it arrived, with the taps
+        // first: the tap that opens the address field is the event the old
+        // limit threw away.
+        let first = pipe.pop_for_task(TaskId(18)).expect("the first tap");
+        assert_eq!(first.kind, InputEventKind::Tap);
+        assert_eq!(first.x, 250);
+        let second = pipe.pop_for_task(TaskId(18)).expect("the second tap");
+        assert_eq!(second.kind, InputEventKind::Tap);
+        assert_eq!(second.x, 364);
+        for code in 0..22u32 {
+            let key = pipe.pop_for_task(TaskId(18)).expect("every key of the burst");
+            assert_eq!(key.kind, InputEventKind::Key);
+            assert_eq!(key.x, code, "the keys must arrive in the order they were typed");
+        }
+        assert!(pipe.pop_for_task(TaskId(18)).is_none(), "the burst is exactly what was sent");
     }
 
     #[test]
@@ -880,20 +992,34 @@ mod tests {
     }
 
     #[test]
-    fn input_pipeline_total_capacity_bounded_at_128() {
+    fn input_pipeline_total_capacity_bounded_at_256() {
         let mut pipe = InputPipeline::new();
-        // Route 10 events to 13 different tasks = 130 attempts
-        for task_idx in 0..13 {
-            for _ in 0..10 {
-                pipe.route_to_task(TaskId(100 + task_idx), InputEvent {
+        // Four tasks at eighty events each is three hundred and twenty
+        // attempts against a pipeline that holds two hundred and fifty-six.
+        // The first three tasks fill sixty-four entries each, which is the
+        // per-task limit, so their last sixteen events each take the place of
+        // their oldest. The fourth task fills the pipeline, and the sixteen
+        // events after that have nowhere to go and must be reported.
+        let mut dropped = 0;
+        let mut replaced = 0;
+        for task_idx in 0..4 {
+            for _ in 0..80 {
+                let outcome = pipe.route_to_task(TaskId(100 + task_idx), InputEvent {
                     kind: InputEventKind::Tap,
                     x: 50,
                     y: 50,
                     ..InputEvent::EMPTY
                 });
+                match outcome {
+                    RouteOutcome::Dropped => dropped += 1,
+                    RouteOutcome::ReplacedOldest => replaced += 1,
+                    RouteOutcome::Queued => {}
+                }
             }
         }
-        assert_eq!(pipe.queue.len(), 128, "total queue must not exceed MAX_TOTAL (128)");
+        assert_eq!(pipe.queue.len(), 256, "total queue must not exceed MAX_TOTAL (256)");
+        assert_eq!(replaced, 48, "every event that made room for another must be reported");
+        assert_eq!(dropped, 16, "every event the pipeline refused must be reported as refused");
     }
 
     #[test]

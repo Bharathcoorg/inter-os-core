@@ -80,10 +80,26 @@ def test_queue_overflow_and_backpressure_bounds():
     queue = (ROOT / "kernel/src/input/queue.rs").read_text(encoding="utf-8")
     ps2 = (ROOT / "kernel/src/drivers/ps2_mouse.rs").read_text(encoding="utf-8")
 
-    must(inp, "const MAX_PER_TASK: usize = 16;", "max per-task queue limit")
-    must(inp, "const MAX_TOTAL: usize = 128;", "max total input pipeline limit")
+    # WHY the limits are what they are: a person typing a URL produces a tap
+    # on the address field, a tap on the clear chip and a character per
+    # keypress, and an app that is repainting for a tenth of a second cannot
+    # read them one at a time. The old per-task limit of sixteen threw the
+    # first events away, and the first events were the tap that opened the
+    # field, so the characters that followed went nowhere.
+    must(inp, "const MAX_PER_TASK: usize = 64;", "max per-task queue limit")
+    must(inp, "const MAX_TOTAL: usize = 256;", "max total input pipeline limit")
     must(queue, "pub const INPUT_QUEUE_CAPACITY: usize = 64;", "hardware ring buffer capacity")
     must(queue, "self.dropped = self.dropped.saturating_add(1);", "overflow drop counter")
+
+    # WHY the outcome is reported: the queue used to discard an event
+    # silently while the console said the event had been dispatched, so a
+    # person whose tap never reached the app was told the platform had
+    # delivered it.
+    must(inp, "pub enum RouteOutcome", "routing outcome type")
+    must(inp, "RouteOutcome::Dropped", "dropped event outcome")
+    must(inp, "RouteOutcome::ReplacedOldest", "evicted event outcome")
+    must(inp, "[INPUT DROP]", "truthful report of a discarded input event")
+    must(inp, "routed = pipe.route_to_task(TaskId(owner), event);", "outcome-aware routing")
 
     # PS/2 driver drops Move when full to coalesce pointer motion
     must(ps2, "const EVENT_CAPACITY: usize = 64;", "PS/2 event capacity")
