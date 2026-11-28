@@ -3754,15 +3754,35 @@ pub fn init() {
 
     // 1. System Policy Configuration (Read-Only)
     // This file is readable by any authorized app, so it must agree with the
-    // boot report: no partition is attested and no Merkle root is provisioned.
-    let policy_content = br#"{
+    // boot report: the profile this boot runs under, what that profile means,
+    // and the fact that none of it is hardware secure boot. The two literals
+    // differ ONLY in the profile fields, so a reader cannot find one profile
+    // in the development branch.
+    let policy_content = if crate::storage::verified::boot_policy().is_verified_profile() {
+        &br#"{
   "os": "Inter OS",
   "version": "0.3.0",
   "security_model": "Zero-Trust Object Capabilities",
-  "integrity_protection": "SOFTWARE-TRUSTED: read-only system objects are attested on every read against a kernel-anchored manifest (embedded ELFs verified against the build-time manifest; NOT hardware secure boot; no measured hardware partition)",
+  "boot_integrity_profile": "Verified",
+  "boot_integrity_profile_meaning": "every required protected system object must authenticate against the kernel-anchored system inventory; a failure refuses activation and stops the boot. What this boot actually authenticated is reported in the kernel boot report",
+  "boot_integrity_profile_scope": "SOFTWARE-TRUSTED prototype boundary: the trust anchor is the kernel image. NOT hardware secure boot -- no secure element, no measured-boot register and no ROM trust anchor is bound to this device",
+  "integrity_protection": "SOFTWARE-TRUSTED: read-only system objects are attested on every read against a kernel-anchored manifest (embedded ELFs verified against the build-time embedded-image manifest; NOT hardware secure boot; no measured hardware partition)",
   "ambient_authority": false,
   "default_sandbox": "strict"
-}"#;
+}"#[..]
+    } else {
+        &br#"{
+  "os": "Inter OS",
+  "version": "0.3.0",
+  "security_model": "Zero-Trust Object Capabilities",
+  "boot_integrity_profile": "UnverifiedDevelopment",
+  "boot_integrity_profile_meaning": "NOT VERIFIED: this boot does not require every protected system object to authenticate; a failure to authenticate is reported and the device comes up anyway. What this boot actually authenticated is reported in the kernel boot report",
+  "boot_integrity_profile_scope": "SOFTWARE-TRUSTED prototype boundary: the trust anchor is the kernel image. NOT hardware secure boot -- no secure element, no measured-boot register and no ROM trust anchor is bound to this device",
+  "integrity_protection": "SOFTWARE-TRUSTED (development profile): read-only system objects are attested on every read against a kernel-anchored manifest when that chain is armed; this boot is NOT reported as verified; NOT hardware secure boot; no measured hardware partition",
+  "ambient_authority": false,
+  "default_sandbox": "strict"
+}"#[..]
+    };
     vfs.create_file("/system/etc/policy.json", policy_content, true);
 
     // 2. Sovereign Cryptographic Identity (Read-Only)

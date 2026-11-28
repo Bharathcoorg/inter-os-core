@@ -1,4 +1,6 @@
 InterOS v1.3 (x86_64 SMP)
 Pure Rust Microkernel
+Boot integrity profile: the effective profile of a boot (Verified or UnverifiedDevelopment) is reported by the kernel boot report; this file is profile-independent and is NOT a verified-boot claim. An UnverifiedDevelopment boot is never reported as verified.
+Software-trusted prototype boundary: NOT hardware secure boot -- no secure element, no measured-boot register and no ROM trust anchor is bound to this device.
 dm-verity Merkle Tree: NOT IMPLEMENTED (block primitive self-tested on a synthetic block only)
 Ring 0 / Ring 3 Privilege Separation: ENFORCED

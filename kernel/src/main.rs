@@ -177,22 +177,48 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // and match their build-time cryptographic SHA-256 digests.
     match kernel::task::images::verify_embedded_images() {
         Ok(count) => {
+            // WHY the aggregate is recomputed here instead of being taken on
+            // trust from the build script: the line below reports it as
+            // provenance, and a provenance value nobody checks is a value
+            // nobody can rely on. The encoding is the build script's own --
+            // the image name bytes followed by the 32 raw digest bytes, in
+            // build order -- so this recomputation and the build script agree
+            // byte for byte.
+            //
+            // WHY it is never compared with the runtime system-inventory
+            // digest: that digest covers the VFS's read-only objects with a
+            // length-prefixed encoding, so the two are different values over
+            // different data. They are named apart for exactly that reason.
+            let mut image_manifest_hasher = Sha256::new();
+            for (name, digest) in kernel::task::images::EXPECTED_IMAGE_DIGESTS {
+                image_manifest_hasher.update(name.as_bytes());
+                image_manifest_hasher.update(digest);
+            }
+            let recomputed_embedded_image_manifest: [u8; 32] = image_manifest_hasher.finalize();
+            assert_eq!(
+                recomputed_embedded_image_manifest, EMBEDDED_IMAGE_MANIFEST_SHA256,
+                "the embedded image manifest digest does not match the recomputed value"
+            );
             serial_println!("[OK] Authenticated Boot: verified SHA-256 and ET_EXEC headers of {} embedded Ring-3 binaries.", count);
             serial_println!("[BOOT] Hardware Secure Boot: NOT IMPLEMENTED (unmeasured BIOS/QEMU boot path; software-authenticated image manifest only).");
             let mut manifest_hex = [0u8; 64];
-            for (i, b) in EMBEDDED_MANIFEST_SHA256.iter().enumerate() {
+            for (i, b) in EMBEDDED_IMAGE_MANIFEST_SHA256.iter().enumerate() {
                 manifest_hex[i * 2] = b"0123456789abcdef"[(b >> 4) as usize];
                 manifest_hex[i * 2 + 1] = b"0123456789abcdef"[(b & 0x0f) as usize];
             }
             let manifest_str = core::str::from_utf8(&manifest_hex).unwrap_or("");
             serial_println!(
-                "[BUILD_PROVENANCE] git_sha={} git_dirty={} profile={} debug_control_plane={} embedded_count={} embedded_manifest_sha256={}",
+                "[BUILD_PROVENANCE] git_sha={} git_dirty={} profile={} debug_control_plane={} boot_integrity_profile_default={} embedded_count={} embedded_image_manifest_sha256={}",
                 BUILD_GIT_SHA,
                 BUILD_GIT_DIRTY,
                 BUILD_PROFILE,
                 BUILD_DEBUG_CONTROL_PLANE,
+                BUILD_BOOT_POLICY,
                 count,
                 manifest_str
+            );
+            serial_println!(
+                "[BUILD_PROVENANCE] embedded_image_manifest_sha256 is the digest OF the build-time embedded-image manifest (image name || raw digest, in build order); it is NOT the runtime system-inventory digest."
             );
         }
         Err(err) => {
@@ -295,6 +321,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         Err(e) => serial_println!("[WARN] Persistent InterFS unavailable: {:?}", e),
     }
 
+    // 10a. Resolve the boot integrity profile before the VFS seeds the policy
+    // file: the profile decides what the device says about itself, and the
+    // device-side request lives on the disk that was just mounted. A verified
+    // build refuses a request for the development profile here, so nothing
+    // downstream can talk it out of the profile it shipped with.
+    let policy_selection = kernel::storage::verified::resolve_boot_policy();
+
     // 10b. Virtual Filesystem (VFS) Initialization & Package Runtime
     serial_println!("\n--- [Initializing Virtual Filesystem & Package Runtime] ---");
     // Persistent storage is now ready; recovery/update journals are restored before userspace starts.
@@ -302,6 +335,51 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     kernel::update::init();
 
     kernel::fs::init();
+
+    // 10c. Authenticate the protected system objects before userspace starts.
+    //
+    // WHY this runs here and not inside the VFS seed: the profile decides what
+    // a failed authentication means, and the profile is only known once the
+    // device request has been read. The inventory the VFS armed is the list of
+    // objects that have to authenticate; each one is read back through the VFS
+    // -- the same path an application takes -- and re-hashed here, so the boot
+    // knows what the device actually holds before anything runs in userspace.
+    //
+    // WHY a refusal stops the boot under the verified profile: a device that
+    // promised to refuse to serve what it could not authenticate must not keep
+    // running with the promise broken. The development profile keeps the same
+    // checks and comes up anyway, reporting exactly what it did not verify.
+    match authenticate_protected_system_objects() {
+        Ok(record) => match record.refusal {
+            None if record.verified => serial_println!(
+                "[BOOT] Protected object activation: {} system object(s) authenticated under profile '{}'.",
+                record.protected_objects,
+                record.policy.token()
+            ),
+            None => serial_println!(
+                "[BOOT] Protected object activation: {} system object(s) authenticated under profile '{}'. This boot is NOT reported as verified: the development profile does not certify the device.",
+                record.protected_objects,
+                record.policy.token()
+            ),
+            Some(refusal) => serial_println!(
+                "[BOOT] Protected object activation REFUSED under profile '{}': {:?}. This boot is NOT verified and is not a hardware secure boot.",
+                record.policy.token(),
+                refusal
+            ),
+        },
+        Err(refusal) => {
+            serial_println!(
+                "[BOOT] REFUSED: boot integrity profile '{}' will not activate the protected system objects: {:?}. The boot stops here; this device is NOT verified.",
+                policy_selection.policy.token(),
+                refusal
+            );
+            panic!(
+                "boot integrity profile '{}' refused activation: {:?}",
+                policy_selection.policy.token(),
+                refusal
+            );
+        }
+    }
     kernel::package::PACKAGE_BLOB_STORE.lock().restore();
     kernel::package::PACKAGE_REGISTRY.lock().seed();
     kernel::package::REVOCATION_REGISTRY.lock().seed();
@@ -521,10 +599,74 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 }
 
 // ---------------------------------------------------------------------------
+// Boot integrity: authenticate the protected system objects.
+// ---------------------------------------------------------------------------
+
+/// The largest protected object the boot reads back in one pass.
+///
+/// WHY there is a bound: the read path copies the object into a buffer the
+/// boot provides, and the kernel heap is 64 MiB. An object past the bound is
+/// reported as unreadable rather than silently skipped or hashed truncated.
+const MAX_AUTHENTICATED_OBJECT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Authenticates every protected system object the VFS armed.
+///
+/// WHY the objects are read back through the VFS: that read is the path the
+/// device itself uses, and it enforces the armed manifest, so a boot that
+/// cannot read an object back has learned the same thing an application would.
+///
+/// WHY one read per object and not a chunked read: the read path re-hashes
+/// the whole object on every read, so reading one object in chunks would hash
+/// it once per chunk.
+fn authenticate_protected_system_objects(
+) -> Result<kernel::storage::verified::BootActivation, kernel::storage::verified::IntegrityRefusal> {
+    use kernel::storage::verified::{
+        activate_protected_objects, boot_policy, provisioned_inventory, ProtectedObject,
+    };
+
+    let inventory = provisioned_inventory();
+    let mut sizes: Vec<usize> = Vec::with_capacity(inventory.len());
+    {
+        let vfs = kernel::fs::VFS.lock();
+        for (path, _) in inventory.iter() {
+            sizes.push(vfs.lookup(path).map(|id| vfs.get_size(id)).unwrap_or(0));
+        }
+    }
+    let largest = sizes.iter().copied().max().unwrap_or(0);
+    let mut buffer = alloc::vec![0u8; largest.min(MAX_AUTHENTICATED_OBJECT_BYTES)];
+
+    let mut content_digests: Vec<Option<[u8; 32]>> = Vec::with_capacity(inventory.len());
+    for (index, (path, _)) in inventory.iter().enumerate() {
+        let size = sizes[index];
+        if size > MAX_AUTHENTICATED_OBJECT_BYTES {
+            // Too large to read back in one pass: it cannot be authenticated
+            // here, and saying so is better than hashing a truncated copy.
+            content_digests.push(None);
+            continue;
+        }
+        let read = {
+            let vfs = kernel::fs::VFS.lock();
+            vfs.read_file_range(path, 0, &mut buffer[..size])
+        };
+        content_digests.push(read.ok().map(|read| Sha256::digest(&buffer[..read])));
+    }
+
+    let mut objects: Vec<ProtectedObject<'_>> = Vec::with_capacity(inventory.len());
+    for (index, (path, attested)) in inventory.iter().enumerate() {
+        objects.push(ProtectedObject {
+            path: path.as_str(),
+            attested_digest: Some(attested),
+            content_digest: content_digests[index].as_ref(),
+        });
+    }
+    activate_protected_objects(boot_policy(), &objects)
+}
+
+// ---------------------------------------------------------------------------
 // Panic handler.
 //
-// Only a binary may define `#[panic_handler]`, so the policy API lives in the
-// library and the handler itself lives here.
+// Only a binary may define `#[panic_handler]`, so the policy API lives in
+// the library and the handler itself lives here.
 // ---------------------------------------------------------------------------
 
 use core::panic::PanicInfo;

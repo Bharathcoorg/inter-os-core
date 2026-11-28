@@ -713,6 +713,31 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("no digitizer is attached", main)
         self.assertIn("no secure element is bound", main)
 
+    def extract_policy_literals(self, vfs: str):
+        """Returns every policy.json literal the VFS seeds.
+
+        WHY the extraction is not a single slice any more: the seeded file is
+        now one literal per boot profile, so both branches have to be checked
+        -- a reader of the guest file must not find a profile that the boot
+        path cannot produce.
+        """
+        start = vfs.find("let policy_content =")
+        self.assertNotEqual(start, -1, "the seeded policy.json must still exist")
+        end = vfs.find('create_file("/system/etc/policy.json"', start)
+        self.assertNotEqual(end, -1, "the seeded policy.json must still be created")
+        region = vfs[start:end]
+        literals = []
+        cursor = 0
+        while True:
+            open_at = region.find('br#"{', cursor)
+            if open_at == -1:
+                break
+            close_at = region.find('}"#', open_at)
+            self.assertNotEqual(close_at, -1, "a policy literal is not terminated")
+            literals.append(region[open_at + len('br#"{'): close_at + 1])
+            cursor = close_at + len('}"#')
+        return literals
+
     def test_x86_integrity_claims_match_what_is_actually_attested(self):
         # WHY this exists: /system/etc/policy.json is a real file in the guest
         # VFS that any authorized app can read, and it used to declare
@@ -730,26 +755,134 @@ class PlatformRealityTests(unittest.TestCase):
         self.assertIn("synthetic_block", main)
 
         vfs = self.read("kernel/src/fs/vfs.rs")
-        start = vfs.find("let policy_content = br#\"{")
-        self.assertNotEqual(start, -1, "the seeded policy.json must still exist")
-        policy = vfs[start:vfs.find("}\"#;", start)]
-        self.assertIn('"integrity_protection"', policy)
-        # WHY the wording moved on from "NOT IMPLEMENTED": the guest now does
-        # attest the read-only system objects -- every protected read is
-        # checked against a kernel-anchored manifest -- and saying "NOT
-        # IMPLEMENTED" about the whole file would understate what is
-        # enforced. What the file must not do is claim hardware secure boot
-        # or a measured partition, because no secure element, no ROM and no
-        # measured-boot register is bound to this device.
-        self.assertIn("SOFTWARE-TRUSTED", policy)
-        self.assertIn("NOT hardware secure boot", policy)
-        self.assertNotIn("dm-verity Merkle Tree", policy)
-        self.assertNotIn("hardware secure boot: VERIFIED", policy)
+        policies = self.extract_policy_literals(vfs)
+        self.assertEqual(
+            len(policies), 2, "the seeded policy.json must exist once per boot profile"
+        )
+        profiles = set()
+        for policy in policies:
+            self.assertIn('"integrity_protection"', policy)
+            # WHY the wording moved on from "NOT IMPLEMENTED": the guest now does
+            # attest the read-only system objects -- every protected read is
+            # checked against a kernel-anchored manifest -- and saying "NOT
+            # IMPLEMENTED" about the whole file would understate what is
+            # enforced. What the file must not do is claim hardware secure boot
+            # or a measured partition, because no secure element, no ROM and no
+            # measured-boot register is bound to this device.
+            self.assertIn("SOFTWARE-TRUSTED", policy)
+            self.assertIn("NOT hardware secure boot", policy)
+            self.assertNotIn("dm-verity Merkle Tree", policy)
+            self.assertNotIn("hardware secure boot: VERIFIED", policy)
+            # The file must name the profile it belongs to, because an
+            # authorized app reads it and the boot report names the profile
+            # the device actually runs under.
+            self.assertIn('"boot_integrity_profile"', policy)
+            for candidate in ("Verified", "UnverifiedDevelopment"):
+                if f'"boot_integrity_profile": "{candidate}"' in policy:
+                    profiles.add(candidate)
+        self.assertEqual(
+            profiles,
+            {"Verified", "UnverifiedDevelopment"},
+            "each profile must seed its own policy file",
+        )
 
         # An unreferenced static artifact is still a claim a reader can find.
         info = self.read("emulator/data/vfs/sys/kernel_info.txt")
         self.assertNotIn("dm-verity Merkle Tree: VERIFIED", info)
         self.assertIn("NOT IMPLEMENTED", info)
+        # WHY the static file must not name a profile: it is the same bytes in
+        # both boots, so claiming one would be a claim about a boot it cannot
+        # know. It must instead say that the profile is reported by the boot.
+        self.assertIn("NOT hardware secure boot", info)
+        self.assertNotIn("Boot integrity profile: Verified", info)
+        self.assertNotIn("Boot integrity profile: UnverifiedDevelopment", info)
+
+    def test_the_boot_integrity_profile_is_a_code_path_not_a_label(self):
+        # WHY this exists: a profile that is only a string in a report is a
+        # label. A profile has to change what the boot does -- refuse and stop
+        # under one profile, come up and report under the other -- and the
+        # difference has to be in code the boot actually runs.
+        verified = self.read("kernel/src/storage/verified.rs")
+        self.assertIn("pub enum BootPolicy", verified)
+        self.assertIn("Verified", verified)
+        self.assertIn("UnverifiedDevelopment", verified)
+        self.assertIn("refuses_activation_on_failure", verified)
+        for refusal in (
+            "MissingTrustData",
+            "MalformedManifest",
+            "TamperedProtectedContent",
+            "UnreadableProtectedObject",
+        ):
+            self.assertIn(refusal, verified, f"the refusal {refusal} must exist")
+
+        main = self.read("kernel/src/main.rs")
+        # The profile is resolved before the VFS seeds the policy file, so the
+        # file cannot claim a profile the boot did not select.
+        resolve_at = main.index("kernel::storage::verified::resolve_boot_policy()")
+        seed_at = main.index("kernel::fs::init();")
+        self.assertLess(
+            resolve_at,
+            seed_at,
+            "the boot profile must be resolved before the VFS seeds policy.json",
+        )
+        # The protected objects are authenticated before userspace starts.
+        self.assertIn("authenticate_protected_system_objects()", main)
+        # A refusal under the verified profile stops the boot. The development
+        # profile reports the same refusal and keeps the device up.
+        self.assertIn("this device is NOT verified.", main)
+        self.assertIn("This boot is NOT verified and is not a hardware secure boot.", main)
+        # The build script chooses the default profile, and the kernel reads
+        # the token it wrote.
+        build = self.read("kernel/build.rs")
+        self.assertIn("INTEROS_BOOT_POLICY", build)
+        self.assertIn("unverified-development", build)
+        self.assertIn("BUILD_BOOT_POLICY", build)
+        self.assertIn('env!("INTEROS_BOOT_POLICY")', verified)
+
+    def test_a_verified_build_cannot_be_downgraded_by_a_device_request(self):
+        # WHY this exists: the profile may also be requested from the device.
+        # A request file is data on the disk, and data must not be able to
+        # talk a verified build out of the profile it shipped with.
+        verified = self.read("kernel/src/storage/verified.rs")
+        self.assertIn('BOOT_POLICY_REQUEST_PATH: &str = "/provision/boot.policy"', verified)
+        self.assertIn("load_data_file", verified)
+        self.assertIn("refused_downgrade", verified)
+        # The refusal has to be a real branch in the selection code.
+        select_start = verified.index("pub fn select_boot_policy(")
+        select_body = verified[select_start:verified.index("\n}\n", select_start)]
+        self.assertIn("refused_downgrade", select_body)
+
+        main = self.read("kernel/src/main.rs")
+        self.assertIn("resolve_boot_policy()", main)
+        # The refusal must reach the boot report, not only the selection value.
+        self.assertIn("policy_selection.policy.token()", main)
+
+    def test_the_build_time_manifest_digest_and_the_runtime_inventory_digest_are_not_one_value(self):
+        # WHY this exists: the kernel carried a build-time embedded-image
+        # manifest digest and a runtime system-inventory digest under
+        # confusingly similar names, over different data and different
+        # encodings. A reader could take them for the same value, and a
+        # comparison between them would be meaningless.
+        build = self.read("kernel/build.rs")
+        self.assertIn("EMBEDDED_IMAGE_MANIFEST_SHA256", build)
+        self.assertIn("embedded_image_manifest_sha256", build)
+        # WHY the scope travels with the value: a digest without its scope is
+        # the thing this workstream is removing.
+        self.assertIn("digest_scope", build)
+
+        main = self.read("kernel/src/main.rs")
+        self.assertIn("embedded_image_manifest_sha256={}", main)
+        self.assertNotIn("embedded_manifest_sha256={}", main)
+        # The report says outright that the value is not the runtime digest.
+        self.assertIn("it is NOT the runtime system-inventory digest", main)
+
+        verified = self.read("kernel/src/storage/verified.rs")
+        self.assertIn("fn system_inventory_manifest_digest(", verified)
+        # The runtime digest must not be compared with the build-time one
+        # anywhere in the boot path: the boot path never reads the runtime
+        # inventory digest at all.
+        self.assertNotIn("system_inventory_manifest_digest", main)
+        self.assertNotIn("EMBEDDED_MANIFEST_SHA256", main)
 
     def test_futex_wait_reads_the_user_word_only_under_a_pin(self):
         # WHY: sys_futex_wait reads the caller's word twice -- once to compare,
