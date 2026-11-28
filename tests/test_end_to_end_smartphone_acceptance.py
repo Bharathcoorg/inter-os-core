@@ -148,6 +148,24 @@ def get_free_port() -> int:
         return int(s.getsockname()[1])
 
 
+def get_free_vnc_display() -> int:
+    """A VNC display number whose port nothing is already listening on.
+
+    WHY this is not a fixed number: the suite has to run while the Device
+    Studio may already hold a guest on display :1, and a guest that cannot
+    bind its display never starts -- so the suite would report a launcher
+    failure for a reason that has nothing to do with the launcher.
+    """
+    for display in range(2, 32):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", 5900 + display))
+            except OSError:
+                continue
+            return display
+    raise RuntimeError("no free VNC display between :2 and :31")
+
+
 class MonotonicSerialReader:
     """Thread-safe serial reader with monotonic log advancement."""
 
@@ -688,6 +706,8 @@ def run_acceptance_suite() -> int:
     ser_port = get_free_port()
     mon_port = get_free_port()
     peer_port = get_free_port()
+    vnc_display = get_free_vnc_display()
+    print(f"  [VNC] Acceptance guest display :{vnc_display} (port {5900 + vnc_display})")
 
     # Build TLS certs (TrustedCA and RogueCA)
     tls_dir = artifact_dir / "tls"
@@ -698,8 +718,15 @@ def run_acceptance_suite() -> int:
     tls_peer.set_cert(trusted_chain, trusted_key)
     tls_peer.start()
 
-    proc1, reader1, mon1 = start_qemu_session(kernel_img, data_disk, ser_port, mon_port, qemu_exe)
+    proc1, reader1, mon1 = start_qemu_session(
+        kernel_img, data_disk, ser_port, mon_port, qemu_exe, vnc_display=vnc_display
+    )
 
+    # WHY this is set before the try: the cleanup path below reads it, and a
+    # suite that fails before the Studio server exists must still be able to
+    # report the failure it actually hit instead of raising about the server
+    # that was never started.
+    studio_httpd = None
     try:
         # =====================================================================
         # PART 1: Boot, Lockscreen, Unlock, Homescreen
@@ -750,11 +777,13 @@ def run_acceptance_suite() -> int:
 
         if emulator_server is not None:
             emulator_server.qemu_subproc = proc1
-            emulator_server.track_qemu_process(proc1, vnc_display=1, vnc_port=5901)
+            emulator_server.track_qemu_process(
+                proc1, vnc_display=vnc_display, vnc_port=5900 + vnc_display
+            )
             with emulator_server.serial_socket_lock:
                 emulator_server.serial_socket_conn = reader1.sock
             emulator_server.launcher_has_booted = True
-            emulator_server.vnc_client.set_port(5901)
+            emulator_server.vnc_client.set_port(5900 + vnc_display)
             emulator_server.vnc_client.force_reconnect()
 
             # 1. GET /api/qemu/status
@@ -1124,10 +1153,14 @@ def run_acceptance_suite() -> int:
     # PART 7: Session 2: Cold Reboot Durability & Persistence Verification
     # =========================================================================
     print("\n--- [PART 7: Reboot -> Unlock -> Bit-for-Bit VFS Verify -> Notes Reopen] ---")
-    proc2, reader2, mon2 = start_qemu_session(kernel_img, data_disk, ser_port, mon_port, qemu_exe)
+    proc2, reader2, mon2 = start_qemu_session(
+        kernel_img, data_disk, ser_port, mon_port, qemu_exe, vnc_display=vnc_display
+    )
     if emulator_server is not None:
         emulator_server.qemu_subproc = proc2
-        emulator_server.track_qemu_process(proc2, vnc_display=1, vnc_port=5901)
+        emulator_server.track_qemu_process(
+            proc2, vnc_display=vnc_display, vnc_port=5900 + vnc_display
+        )
         with emulator_server.serial_socket_lock:
             emulator_server.serial_socket_conn = reader2.sock
 

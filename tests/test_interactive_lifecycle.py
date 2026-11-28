@@ -124,6 +124,11 @@ class SerialReader:
         self.buf = b""
         self.captured_logs = []
         self.cmd_log_idx = 0
+        # WHY the clock: a guest that is slow and a guest that is stuck look the
+        # same in a log of lines alone, and the only thing that tells them
+        # apart is how long the gap between two lines was.
+        self.start_t = time.time()
+        self.log_times = []
 
     def send(self, line):
         """Sends one command line without disruptive socket option changes."""
@@ -154,9 +159,11 @@ class SerialReader:
                     line, self.buf = self.buf.split(b"\n", 1)
                     decoded = line.decode('utf-8', errors='replace').strip()
                     if decoded:
+                        elapsed = time.time() - self.start_t
                         self.captured_logs.append(decoded)
+                        self.log_times.append(elapsed)
                         if (print_keywords and any(k in decoded for k in print_keywords)) or any(k in decoded for k in ["PANIC", "Origin:", "Details:", "FAULT", "EXCEPTION", "AssertionError", "failed"]):
-                            print(f"  [GUEST] {decoded}")
+                            print(f"  [GUEST {elapsed:8.2f}s] {decoded}")
                         if isinstance(marker, (list, tuple)):
                             if any(m in decoded for m in marker):
                                 return True
