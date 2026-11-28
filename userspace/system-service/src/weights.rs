@@ -1779,6 +1779,13 @@ pub fn run_generative_model<S: PositionRead>(
 
     let h_dim = config.hidden_dim;
     let final_norm = reader.load_final_norm(h_dim)?;
+    // WHY the transformer names its stages: a generation that stops leaves a
+    // console that says only that the transformer began, and the stage that is
+    // missing is the only thing that says where the work stopped. Each line is
+    // placed after the work it reports, so the last line printed is the last
+    // thing the transformer finished.
+    #[cfg(not(test))]
+    let _ = interos_std::log("[aid] transformer: the final norm is loaded.");
     let head = reader
         .table()
         .locate(TENSOR_OUTPUT_HEAD.as_bytes())
@@ -1789,6 +1796,8 @@ pub fn run_generative_model<S: PositionRead>(
         .ok_or(LoadError::UnsupportedDtype(TENSOR_OUTPUT_HEAD, head.dtype))?;
     let mut scratch = Scratch::new(config)?;
     let mut kv_cache = KvCache::new(config)?;
+    #[cfg(not(test))]
+    let _ = interos_std::log("[aid] transformer: the scratch and the KV cache are allocated.");
     let mut row: Vec<u8> = Vec::new();
     let scale = f32_sqrt(h_dim as f32);
 
@@ -1805,6 +1814,8 @@ pub fn run_generative_model<S: PositionRead>(
             &final_norm, &mut row, scale,
         )?;
     }
+    #[cfg(not(test))]
+    let _ = interos_std::log("[aid] transformer: the pre-fill has finished.");
 
     let mut next_token = inference::sample_token(&scratch.logits[..config.vocab_size], temperature);
     let mut generated_count = 0usize;
@@ -1815,6 +1826,10 @@ pub fn run_generative_model<S: PositionRead>(
         }
         let keep_going = on_token(next_token);
         generated_count += 1;
+        #[cfg(not(test))]
+        if generated_count == 1 {
+            let _ = interos_std::log("[aid] transformer: the first token is delivered.");
+        }
         if !keep_going || next_token == crate::tokenizer::TOKEN_EOS {
             break;
         }

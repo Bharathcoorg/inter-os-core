@@ -3361,6 +3361,21 @@ static NEXT_GENERATION_SESSION_ID: core::sync::atomic::AtomicU64 = core::sync::a
 static ACTIVE_SESSION_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static ACTIVE_GENERATION_TASK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static ACTIVE_SESSION_CANCELLED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The broker-ledger session id of the generation now running, or zero when
+/// none is running.
+///
+/// WHY this is not the generation session id: the ledger numbers its own
+/// sessions, so a cancel that names the generation's id cancels a session the
+/// ledger never created. The top-level cancel path has to name the session the
+/// ledger actually knows about.
+static ACTIVE_LEDGER_SESSION_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The backend session id of the generation now running, or zero when none is
+/// running.
+///
+/// WHY this is separate from the ledger's id: the backend numbers its sessions
+/// from its own counter, so the two ids are unrelated numbers that happen to
+/// be live at the same time.
+static ACTIVE_BACKEND_SESSION_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Strict FIFO fair spinlock using ticket-based synchronization.
 /// Guarantees that threads acquire the lock in arrival order and eliminates starvation.
@@ -4780,6 +4795,24 @@ fn run_installed_generation(
     session_id: u64,
     tx_buf: &mut [u8; 1024],
 ) -> bool {
+    // WHY the route announces itself: a request that reaches the service and
+    // then produces no answer at all looks the same as a request that never
+    // arrived, and only the device's own words can tell the two apart. The
+    // announcement comes before the gate so that a refused request is seen to
+    // have been served by this route rather than swallowed.
+    let _ = std::log(&alloc::format!(
+        "[aid] generative route: serving task {} from {}.",
+        sender_task_id,
+        path
+    ));
+    // WHY the route names its stages: a request that stops between two stages
+    // leaves a console that says only "the route began", and the stage that
+    // is missing is the only thing that says where the work stopped. Each
+    // stage is named after the work it finished, not after the line it sits
+    // on, so the sequence reads as the route's own account of itself.
+    let stage = |name: &str| {
+        let _ = std::log(&alloc::format!("[aid] generative route stage: {}.", name));
+    };
     // WHY the gate comes before the open: a model the user has not trusted must
     // not have its bytes read at all, so the refusal is decided from the
     // registry alone -- and the reply is the caller's only evidence of it.
@@ -4832,6 +4865,7 @@ fn run_installed_generation(
             return false;
         }
     };
+    stage("the model file is open and its geometry is known");
 
     // Admission is based on memory available now, not total RAM and not a
     // model-name table. The native backend prices geometry parsed from this
@@ -4867,6 +4901,7 @@ fn run_installed_generation(
     // and the handle does not exist until the backend has loaded the model. The
     // check is what refuses a request the device could not hold; the
     // reservation is what makes the model's bytes reclaimable.
+    stage("the request is being admitted against the device's free memory");
     match with_broker_ledger(|ledger| ledger.admit_operation(estimate)) {
         Ok(()) => {}
         Err(backend::AdmissionError::InsufficientRam) => {
@@ -5031,6 +5066,7 @@ fn run_installed_generation(
 
     // The model's resident bytes are charged to its handle, and the session that
     // runs it is bound to that handle, so an unload reclaims both.
+    stage("the model is being loaded and its bytes are reserved");
     let reservation = with_broker_ledger(|ledger| {
         if ledger.model_resident_bytes(model_handle).is_some() {
             // A model that was already loaded keeps the reservation it was
@@ -5123,13 +5159,30 @@ fn run_installed_generation(
     }
     impl Drop for SessionGuard {
         fn drop(&mut self) {
-            with_broker_ledger(|ledger| {
-                let _ = ledger.destroy_session(self.owner, self.ledger_session_id);
-            });
+            // WHY the ids are cleared before the sessions are destroyed: a
+            // cancel that arrives during teardown must not name a session that
+            // is on its way out. WHY the compare-exchange: a session that ends
+            // must not clear the ids of a session that started after it, so
+            // only the holder of an id may withdraw it.
+            let _ = ACTIVE_LEDGER_SESSION_ID.compare_exchange(
+                self.ledger_session_id,
+                0,
+                core::sync::atomic::Ordering::SeqCst,
+                core::sync::atomic::Ordering::SeqCst,
+            );
             if let Some(bsid) = self.backend_session_id {
+                let _ = ACTIVE_BACKEND_SESSION_ID.compare_exchange(
+                    bsid,
+                    0,
+                    core::sync::atomic::Ordering::SeqCst,
+                    core::sync::atomic::Ordering::SeqCst,
+                );
                 let mut backend = NATIVE_GGUF_BACKEND.lock();
                 let _ = backend.destroy_session(bsid);
             }
+            with_broker_ledger(|ledger| {
+                let _ = ledger.destroy_session(self.owner, self.ledger_session_id);
+            });
         }
     }
     let mut session_guard = SessionGuard {
@@ -5137,14 +5190,23 @@ fn run_installed_generation(
         ledger_session_id,
         backend_session_id: None,
     };
+    // WHY the ledger id is published here: a cancel that arrives while the
+    // transformer runs has to name the session the ledger knows about, and
+    // the ledger's id is only known once the session exists.
+    ACTIVE_LEDGER_SESSION_ID.store(ledger_session_id, core::sync::atomic::Ordering::SeqCst);
 
     let backend_session_id = {
         let mut backend = NATIVE_GGUF_BACKEND.lock();
         backend.create_session(model_handle, sender_task_id)
     };
+    stage("the backend session is open");
     match backend_session_id {
         Ok(sid) => {
             session_guard.backend_session_id = Some(sid);
+            // WHY the backend id is published here: the backend numbers its own
+            // sessions, so a cancel that names the ledger's id would ask the
+            // backend to cancel a session it never created.
+            ACTIVE_BACKEND_SESSION_ID.store(sid, core::sync::atomic::Ordering::SeqCst);
         }
         Err(_) => {
             let _ = std::fs_close(fd);
@@ -5215,6 +5277,7 @@ fn run_installed_generation(
         }
     };
     let tokens = &prompt_ids[..num_ids];
+    stage("the prompt is tokenized");
 
     // WHY the run length is computed from the file: the positions the model
     // declares minus the prompt's own is the room it has for new tokens. A
@@ -5293,6 +5356,7 @@ fn run_installed_generation(
         false
     };
 
+    stage("the transformer is running");
     let ran = weights::run_generative_model(
         &mut reader,
         &config,
@@ -5546,6 +5610,11 @@ pub fn handle_ipc_inference_query(
     if msg_type == std::ai::MSG_TYPE_CANCEL {
         let active = ACTIVE_GENERATION_TASK.load(core::sync::atomic::Ordering::SeqCst);
         let active_sess = ACTIVE_SESSION_ID.load(core::sync::atomic::Ordering::SeqCst);
+        // WHY the two ids are read separately: the ledger and the backend each
+        // number their own sessions, and a cancel that names one system's id
+        // in the other system's table cancels nothing at all.
+        let ledger_sess = ACTIVE_LEDGER_SESSION_ID.load(core::sync::atomic::Ordering::SeqCst);
+        let backend_sess = ACTIVE_BACKEND_SESSION_ID.load(core::sync::atomic::Ordering::SeqCst);
         if active == 0 || active_sess == 0 {
             emit_inference_response(
                 sender_task_id,
@@ -5555,12 +5624,18 @@ pub fn handle_ipc_inference_query(
             );
         } else if sender_task_id == active || sender_task_id == 1 || std::task_identity_query(sender_task_id).map(|id| id.is_system != 0).unwrap_or(false) {
             ACTIVE_SESSION_CANCELLED.store(active_sess, core::sync::atomic::Ordering::SeqCst);
-            with_broker_ledger(|ledger| {
-                let _ = ledger.cancel(sender_task_id, active_sess);
-            });
-            {
+            // WHY the owner is the generation's task and not the sender: the
+            // ledger only lets a session's own owner cancel it, so an
+            // administrator cancelling somebody else's generation has to name
+            // the owner the session was created for.
+            if ledger_sess != 0 {
+                with_broker_ledger(|ledger| {
+                    let _ = ledger.cancel(active, ledger_sess);
+                });
+            }
+            if backend_sess != 0 {
                 let mut backend = NATIVE_GGUF_BACKEND.lock();
-                let _ = backend.cancel(active_sess);
+                let _ = backend.cancel(backend_sess);
             }
             emit_inference_response(
                 sender_task_id,
@@ -5697,6 +5772,7 @@ pub fn handle_ipc_inference_query(
 
         let new_session_id = NEXT_GENERATION_SESSION_ID.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         if ACTIVE_SESSION_ID.compare_exchange(0, new_session_id, core::sync::atomic::Ordering::SeqCst, core::sync::atomic::Ordering::SeqCst).is_err() {
+            let _ = std::log("[aid] a generative request arrived while a generation was still running; it was refused as busy.");
             emit_inference_response(
                 sender_task_id,
                 std::ai::STATUS_UNAVAILABLE,
@@ -5723,6 +5799,11 @@ pub fn handle_ipc_inference_query(
             if run_installed_generation(path, payload, sender_task_id, new_session_id, tx_buf) {
                 return;
             }
+
+            // WHY the fallback announces itself: the route returns false only
+            // when the weights could not be opened or read, and a reader of the
+            // console would otherwise see the request arrive and nothing else.
+            let _ = std::log("[aid] the generative route could not read the weights; the declaration-only report follows.");
 
             // Physical weights exist: execute real inference or report honest error if unreadable/unsupported
             let fd_res = std::fs_open(path, std::FS_READ);
@@ -5901,6 +5982,7 @@ pub fn handle_ipc_inference_query(
             }
         } else {
             // Platform Truth Contract: Report unavailable when physical generative weights are absent
+            let _ = std::log("[aid] no generative model is present in the namespace; the request was answered as unavailable.");
             reply_with_answer(
                 sender_task_id,
                 std::ai::STATUS_UNAVAILABLE,
@@ -6917,6 +6999,107 @@ mod tests {
         let payload = &tx_buf[core::mem::size_of::<std::ai::AiInferenceResponse>()..core::mem::size_of::<std::ai::AiInferenceResponse>() + resp.output_dim as usize];
         assert_eq!(payload, b"[No active inference session to cancel]");
         assert_eq!(ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// A cancel that names the wrong session id cancels nothing.
+    ///
+    /// WHY this case exists: the ledger and the backend each number their own
+    /// sessions, and neither number is the generation's own id. A cancel that
+    /// sent the generation id to both of them was acknowledged to the caller
+    /// and left both sessions running.
+    #[test]
+    fn a_cancel_names_the_ledger_and_backend_sessions_rather_than_the_generation_id() {
+        let _lock = TEST_CANCEL_LOCK.lock().unwrap();
+        let mut tx_buf = [0u8; 1024];
+        let empty_models = gguf::ProbedModels::empty();
+
+        // A ledger with room for one session, so the session the test creates
+        // is a real session and not a refusal.
+        reset_broker_ledger(1 << 20, 1 << 20, 0);
+        let estimate = backend::ResourceEstimate {
+            model_weights: 4096,
+            runtime_overhead: 256,
+            kv_cache: 1024,
+            ..backend::ResourceEstimate::ZERO
+        };
+        let ledger_sid = with_broker_ledger(|ledger| {
+            ledger
+                .create_session_for_model(42, 1, 1, estimate)
+                .expect("a ledger session for the owner")
+        });
+        // A backend session, placed directly because a backend session needs a
+        // loaded model and this case is about the id a cancel names.
+        let backend_sid = 9_001u64;
+        {
+            let mut backend = NATIVE_GGUF_BACKEND.lock();
+            let slot = backend
+                .sessions
+                .iter_mut()
+                .find(|session| !session.active)
+                .expect("a free backend session slot");
+            *slot = backend::BackendSessionRecord {
+                id: backend_sid,
+                model_handle: 1,
+                owner: 42,
+                active: true,
+                cancelled: false,
+            };
+        }
+
+        // The generation's own id is deliberately different from both.
+        let generation_sid = 500u64;
+        ACTIVE_SESSION_ID.store(generation_sid, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(42, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_LEDGER_SESSION_ID.store(ledger_sid, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_BACKEND_SESSION_ID.store(backend_sid, core::sync::atomic::Ordering::SeqCst);
+
+        // Task 1 administers the device and is not the session's owner.
+        handle_ipc_inference_query(
+            1,
+            MSG_TYPE_CANCEL,
+            b"",
+            &empty_models,
+            &mut tx_buf,
+        );
+        let resp = unsafe {
+            core::ptr::read_unaligned(tx_buf.as_ptr() as *const std::ai::AiInferenceResponse)
+        };
+        assert_eq!(resp.status, std::ai::STATUS_SUCCESS);
+        assert_eq!(ACTIVE_SESSION_CANCELLED.load(core::sync::atomic::Ordering::SeqCst), generation_sid);
+        assert!(
+            with_broker_ledger(|ledger| ledger.is_cancelled(ledger_sid)),
+            "the ledger session was not cancelled: the cancel named the wrong id or the wrong owner"
+        );
+        {
+            let backend = NATIVE_GGUF_BACKEND.lock();
+            let session = backend
+                .sessions
+                .iter()
+                .find(|session| session.id == backend_sid)
+                .expect("the backend session the test created");
+            assert!(
+                session.cancelled,
+                "the backend session was not cancelled: the cancel named the wrong id"
+            );
+        }
+
+        // The ledger's own session table must not have been cancelled under
+        // the generation's id, because no session carries that id.
+        assert!(!with_broker_ledger(|ledger| ledger.is_cancelled(generation_sid)));
+
+        with_broker_ledger(|ledger| {
+            let _ = ledger.destroy_session(42, ledger_sid);
+        });
+        {
+            let mut backend = NATIVE_GGUF_BACKEND.lock();
+            let _ = backend.destroy_session(backend_sid);
+        }
+        ACTIVE_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_LEDGER_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_BACKEND_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
     }
 
     #[test]
@@ -8925,9 +9108,34 @@ mod tests {
             ledger.create_session(42, 1, estimate)
         }).expect("session");
 
-        ACTIVE_SESSION_ID.store(sess_id, core::sync::atomic::Ordering::SeqCst);
+        // WHY the three ids are published separately: the generation, the
+        // ledger and the backend each number their sessions on their own, and
+        // a cancel that named the generation's id in the ledger's table would
+        // cancel nothing at all. The shipping route publishes each system's own
+        // id, so the test has to publish them the same way.
+        let generation_sid = sess_id.wrapping_add(1_000_000);
+        let backend_sid = 9_002u64;
+        {
+            let mut backend = NATIVE_GGUF_BACKEND.lock();
+            let slot = backend
+                .sessions
+                .iter_mut()
+                .find(|session| !session.active)
+                .expect("a free backend session slot");
+            *slot = backend::BackendSessionRecord {
+                id: backend_sid,
+                model_handle: 1,
+                owner: 42,
+                active: true,
+                cancelled: false,
+            };
+        }
+
+        ACTIVE_SESSION_ID.store(generation_sid, core::sync::atomic::Ordering::SeqCst);
         ACTIVE_GENERATION_TASK.store(42, core::sync::atomic::Ordering::SeqCst);
         ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_LEDGER_SESSION_ID.store(sess_id, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_BACKEND_SESSION_ID.store(backend_sid, core::sync::atomic::Ordering::SeqCst);
 
         let mut tx_buf = [0u8; 1024];
         let empty_models = gguf::ProbedModels::empty();
@@ -8945,14 +9153,29 @@ mod tests {
         };
         assert_eq!(resp.status, std::ai::STATUS_SUCCESS);
         assert!(with_broker_ledger(|ledger| ledger.is_cancelled(sess_id)));
+        {
+            let backend = NATIVE_GGUF_BACKEND.lock();
+            let session = backend
+                .sessions
+                .iter()
+                .find(|session| session.id == backend_sid)
+                .expect("the backend session the test created");
+            assert!(session.cancelled);
+        }
 
         // Clean up
         with_broker_ledger(|ledger| {
             let _ = ledger.destroy_session(42, sess_id);
         });
+        {
+            let mut backend = NATIVE_GGUF_BACKEND.lock();
+            let _ = backend.destroy_session(backend_sid);
+        }
         ACTIVE_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
         ACTIVE_GENERATION_TASK.store(0, core::sync::atomic::Ordering::SeqCst);
         ACTIVE_SESSION_CANCELLED.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_LEDGER_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
+        ACTIVE_BACKEND_SESSION_ID.store(0, core::sync::atomic::Ordering::SeqCst);
     }
 
     fn make_test_identity(task_id: u64, is_system: u8, name_str: &str) -> std::TaskIdentityInfo {
