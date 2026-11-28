@@ -22,7 +22,10 @@ the fault. The rules are:
     handle and the ledger's reservation for it;
   * the embedding route refuses an untrusted model instead of answering with
     the labelled lexical baseline;
-  * an install is the user's trust decision for the file that arrived;
+  * an install is the user's trust decision for the file that arrived, and it
+    is that decision for a model the device already holds as well: the file
+    that was probed is the file that is trusted, and the sentence says the
+    bytes were not copied;
   * no user-visible string claims the platform answers from the device itself,
     and the platform's generative provider is reported as host-backed.
 """
@@ -267,7 +270,7 @@ def _install_trust_faults(lib: str) -> list:
     """Every way the install can stop being the user's trust decision."""
     faults = []
     install = function_body(lib, "fn install_model_file")
-    if "trust_installed_model_file(" not in install:
+    if "trust_installed_model_file(gguf::PATH_LOCAL_MODEL_DATA)" not in install:
         faults.append("an install no longer grants the model's trust")
     if "gguf::PATH_LOCAL_MODEL_DATA" not in install:
         faults.append("the trust is not granted for the path the install writes")
@@ -277,6 +280,15 @@ def _install_trust_faults(lib: str) -> list:
             faults.append(f"the install's trust grant no longer makes the call {call!r}")
     if "std::fs_stat(" not in helper:
         faults.append("the install's trust grant does not record the installed file's own bytes")
+    # The adoption is the same decision for a model the device already holds:
+    # the file that was probed is the file that has to be trusted, and the
+    # sentence has to say the bytes were not copied.
+    if "trust_installed_model_file(path)" not in install:
+        faults.append("the adoption no longer grants trust for the model it adopted")
+    if "gguf::probe_all_models()" not in install:
+        faults.append("the adoption no longer looks for a model the device already holds")
+    if "Adopted(size, path)" not in install:
+        faults.append("the adoption no longer reports the model it adopted")
     return faults
 
 
@@ -435,7 +447,19 @@ def test_the_trust_and_reservation_contract_can_fail():
         for fault in _install_trust_faults(ungranted)
     ), "an install that grants no trust passed"
 
-    # 7. The user-visible string that claims the device answers by itself.
+    # 7. The adoption that stops trusting the model the device already holds.
+    unadopted = lib.replace(
+        "Some((_header, path)) => match trust_installed_model_file(path) {",
+        "Some((_header, path)) => match Some(0u64) {",
+        1,
+    )
+    assert unadopted != lib, "the adoption the detector watches moved; this fixture is stale"
+    assert any(
+        "no longer grants trust for the model it adopted" in fault
+        for fault in _install_trust_faults(unadopted)
+    ), "an adoption that trusts nothing passed"
+
+    # 8. The user-visible string that claims the device answers by itself.
     claiming = lib.replace(
         "Generative stream unavailable:",
         "On-device generative stream unavailable:",

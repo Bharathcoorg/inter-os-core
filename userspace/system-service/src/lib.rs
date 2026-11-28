@@ -3466,21 +3466,26 @@ pub fn trust_installed_model(source: &str) -> bool {
 /// against its own observed digest and marked trusted by the request that
 /// installed it. A model that was never installed, or whose bytes changed
 /// afterwards, is not covered by that decision.
-fn trust_installed_model_file(path: &str) -> bool {
+///
+/// WHY the size comes back: the notice a caller reads has to state the bytes
+/// the decision was made about, and the only measurement of them is the one
+/// this function took while it hashed them.
+fn trust_installed_model_file(path: &str) -> Option<u64> {
     let mut stat_buf = [0u8; std::FILE_STAT_BYTES];
     let observed = match std::fs_stat(path, &mut stat_buf) {
         Ok(_) => std::FileStatRecord::parse(&stat_buf).map(|r| (r.size, r.sha256)),
         Err(_) => None,
     };
-    let (size, sha256) = match observed {
-        Some(value) => value,
-        None => return false,
-    };
+    let (size, sha256) = observed?;
     let mut registry = PROVISIONED_MODELS.lock();
     if !registry.provision(path, sha256, size) {
-        return false;
+        return None;
     }
-    registry.mark_trusted(path)
+    if registry.mark_trusted(path) {
+        Some(size)
+    } else {
+        None
+    }
 }
 
 /// Revokes cryptographic trust for a model source (returns it to user-imported)
@@ -3751,7 +3756,25 @@ const INSTALL_WAIT_PASSES: usize = 512;
 fn install_model_file(sender_task_id: u64, tx_buf: &mut [u8; 1024]) {
     let mut source = [0u8; 96];
     let outcome = match gguf::find_installable_model(&mut source) {
-        None => InstallOutcome::NothingToInstall,
+        None => {
+            // WHY THE DEVICE'S OWN MODEL IS THE SECOND CHANCE: a model the
+            // device was given -- provisioned onto the data disk, or left in
+            // the model namespace by an earlier install -- is already a file
+            // the device holds, and copying it to itself would change nothing.
+            // What such a model still lacks is the person's trust decision,
+            // and this request is that decision. So the install adopts the
+            // file the device already holds, measures it, and marks it
+            // trusted. A model nobody installed and nobody provisioned is
+            // still refused, because there is nothing to adopt.
+            let probed = gguf::probe_all_models();
+            match probed.generative.or(probed.embedding) {
+                Some((_header, path)) => match trust_installed_model_file(path) {
+                    Some(size) => InstallOutcome::Adopted(size, path),
+                    None => InstallOutcome::AdoptionRefused,
+                },
+                None => InstallOutcome::NothingToInstall,
+            }
+        }
         Some((_path_len, stated_size)) => {
             if std::ipc_send(std::ai::SERVICE_STORAGE_TASK_ID, MSG_TYPE_INSTALL, b"INSL").is_err()
             {
@@ -3774,13 +3797,23 @@ fn install_model_file(sender_task_id: u64, tx_buf: &mut [u8; 1024]) {
         }
     };
 
-    if matches!(outcome, InstallOutcome::Installed(_)) {
-        MODEL_NAMESPACE_CHANGED.store(true, core::sync::atomic::Ordering::Relaxed);
-        // The install is the user's trust decision for the file that arrived:
-        // the model is provisioned against the bytes the filesystem reports for
-        // the installed path, and marked trusted by the request that installed
-        // it. A model that was never installed stays untrusted and is refused.
-        trust_installed_model_file(gguf::PATH_LOCAL_MODEL_DATA);
+    match outcome {
+        InstallOutcome::Installed(_) => {
+            MODEL_NAMESPACE_CHANGED.store(true, core::sync::atomic::Ordering::Relaxed);
+            // The install is the user's trust decision for the file that
+            // arrived: the model is provisioned against the bytes the
+            // filesystem reports for the installed path, and marked trusted by
+            // the request that installed it. A model that was never installed
+            // stays untrusted and is refused.
+            trust_installed_model_file(gguf::PATH_LOCAL_MODEL_DATA);
+        }
+        InstallOutcome::Adopted(_, _) => {
+            // The adoption already took the trust decision against the bytes
+            // it measured; what is left is to tell the service that the
+            // namespace holds a model it may now serve.
+            MODEL_NAMESPACE_CHANGED.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+        _ => {}
     }
 
     let mut text = [0u8; 256];
@@ -3791,8 +3824,10 @@ fn install_model_file(sender_task_id: u64, tx_buf: &mut [u8; 1024]) {
 }
 
 /// What an install can honestly say about the model namespace.
+#[derive(Clone, Copy)]
 enum InstallOutcome {
-    /// No source tree holds a file whose header parses as a model.
+    /// No source tree holds a file whose header parses as a model, and the
+    /// device holds no model of its own to adopt.
     NothingToInstall,
     /// The kernel would not deliver the request to the storage service.
     RequestRefused,
@@ -3802,6 +3837,12 @@ enum InstallOutcome {
     Short(u64, u64),
     /// The namespace reports no model file at all.
     Absent(u64),
+    /// The device already held the model, and this request made the trust
+    /// decision about the bytes the filesystem reports for it.
+    Adopted(u64, &'static str),
+    /// The device holds a model, but its bytes could not be read for the trust
+    /// decision, so no decision was recorded.
+    AdoptionRefused,
 }
 
 /// Pairs an install outcome with the status code and sentence it is reported as.
@@ -3843,6 +3884,24 @@ fn install_notice(outcome: InstallOutcome, out: &mut [u8]) -> (u32, &[u8]) {
             );
             notice.byte_count(*stated);
             notice.word(b" bytes the source states.");
+            std::ai::STATUS_ERROR
+        }
+        InstallOutcome::Adopted(size, path) => {
+            // WHY THE SENTENCE SAYS "already on the device": the request did
+            // not move any bytes, so saying it installed a file would be
+            // claiming a copy that never happened. What did happen is the
+            // trust decision, and the bytes it was made about.
+            notice.word(b"Model already on the device and now trusted: ");
+            notice.byte_count(*size);
+            notice.word(b" bytes at ");
+            notice.word(path.as_bytes());
+            notice.word(b".");
+            std::ai::STATUS_SUCCESS
+        }
+        InstallOutcome::AdoptionRefused => {
+            notice.word(
+                b"Install did not reach the device: the model it holds could not be read for the trust decision.",
+            );
             std::ai::STATUS_ERROR
         }
     };
@@ -7754,6 +7813,36 @@ mod tests {
         assert_eq!(
             notice,
             b"Install did not reach the device: the model namespace holds no file of the 4096 bytes the source states."
+        );
+    }
+
+    #[test]
+    fn test_install_notice_says_the_adopted_model_was_not_copied() {
+        let mut out = [0u8; 256];
+        let (status, notice) = install_notice(
+            InstallOutcome::Adopted(521_536, "/data/models/gemma4-mobile-lite.gguf"),
+            &mut out,
+        );
+        assert_eq!(status, std::ai::STATUS_SUCCESS);
+        assert_eq!(
+            notice,
+            b"Model already on the device and now trusted: 521536 bytes at /data/models/gemma4-mobile-lite.gguf."
+        );
+        assert!(
+            !notice.starts_with(b"Model file installed"),
+            "an adopted model was not copied, so the notice must not claim an install"
+        );
+        assert!(
+            notice.windows(7).any(|window| window == b"trusted"),
+            "the adoption is a trust decision, and the sentence has to say so"
+        );
+
+        let mut out = [0u8; 256];
+        let (status, notice) = install_notice(InstallOutcome::AdoptionRefused, &mut out);
+        assert_ne!(status, std::ai::STATUS_SUCCESS);
+        assert_eq!(
+            notice,
+            b"Install did not reach the device: the model it holds could not be read for the trust decision."
         );
     }
 

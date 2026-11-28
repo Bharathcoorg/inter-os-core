@@ -12,9 +12,11 @@ Exercises the guest inference path with a synthetic model:
 3. Verifies userspace AI inference daemon (aid) startup, model probing, and physical weight validation.
 4. Unlocks the device and launches Agent Manager from the App Drawer.
 5. Verifies Agent Manager Models tab reports physical generative weights as PRESENT.
-6. Switches to Agent Manager Chat tab, opens virtual soft keyboard, and types prompt.
-7. Dispatches inference generation request over IPC to aid.
-8. Verifies real guest token generation, streaming chunks, and assistant chat bubble rendering.
+6. Asks the inference service to install the model the device holds, which is
+   the person's trust decision: the service serves a model only after it.
+7. Switches to Agent Manager Chat tab, opens virtual soft keyboard, and types prompt.
+8. Dispatches inference generation request over IPC to aid.
+9. Verifies real guest token generation, streaming chunks, and assistant chat bubble rendering.
 9. Verifies request-scoped cancellation and busy handling during active generation.
 10. Validates memory safety, resource reclamation, and clean return to HomeScreen.
 """
@@ -234,6 +236,32 @@ def run_inference_acceptance_test():
             _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_agent_models}")
             wait_for_screendump(ppm_agent_models)
             print(f"[ACCEPTANCE TEST] Captured Agent Manager Models screendump: {ppm_agent_models}")
+
+        # 3b. The trust decision: the model's bytes are on the device, but the
+        #     service serves a model only after the person has asked for it.
+        #     The floating action button on the Models surface is that request:
+        #     it asks the inference service to install the model the device
+        #     holds, and the service records the trust decision against the
+        #     bytes it measured. Without this step the generative route refuses
+        #     the model, and the generation assertions below are what prove the
+        #     decision took effect.
+        print("[ACCEPTANCE TEST] Phase 3b: Asking the service to trust the model on the device...")
+        time.sleep(1.0)
+        reader.send(b"TAP 652 1240\n")
+        install_frame = reader.wait_for(
+            "[AGENT_MGR] Frame presented to scanout.",
+            timeout=20.0,
+            print_keywords=["AGENT_MGR", "scanout"],
+        )
+        if not install_frame:
+            print("[ACCEPTANCE TEST] WARNING: no frame after the install request.")
+        print("[ACCEPTANCE TEST] [OK] Install request sent; the trust decision is the service's to record.")
+
+        if monitor_sock:
+            ppm_agent_installed = os.path.join(workspace, "target", "test_inference_04b_agent_installed.ppm")
+            _ = send_monitor_cmd(monitor_sock, f"screendump {ppm_agent_installed}")
+            wait_for_screendump(ppm_agent_installed)
+            print(f"[ACCEPTANCE TEST] Captured Agent Manager after the install request: {ppm_agent_installed}")
 
         # 4. Switch to Chat Tab (Tab 5 at x=645, y=142)
         print("[ACCEPTANCE TEST] Phase 4: Switching to Agent Manager Chat Tab...")
