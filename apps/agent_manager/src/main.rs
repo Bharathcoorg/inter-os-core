@@ -1876,7 +1876,35 @@ impl AgentManagerApp {
         message[n..n + take].copy_from_slice(&name[..take]);
         n += take;
         self.set_action(&message[..n], Tone::Accent);
+        self.announce_selection();
         self.rebuild();
+    }
+
+    /// Says which provider the app has selected, on the console.
+    ///
+    /// WHY the choice is said out loud: the selected provider decides which
+    /// install route the floating button takes -- a package install for a
+    /// provider the platform ships, a file move for the one whose weights are
+    /// a document on the device -- and the screen shows the choice in a card
+    /// below a catalogue that may have to be scrolled to reach. A reader who
+    /// cannot see the screen learns from this line which route is armed, so a
+    /// request that was never sent is distinguishable from one that was
+    /// refused.
+    pub fn announce_selection(&self) {
+        let provider = self.selected_provider();
+        let mut line = [0u8; ACTION_LOG_MAX];
+        let mut n = 0;
+        for byte in b"[AGENT_MGR] Provider selected: " {
+            line[n] = *byte;
+            n += 1;
+        }
+        let name = provider.display_name().as_bytes();
+        let take = name.len().min(ACTION_LOG_MAX - n);
+        line[n..n + take].copy_from_slice(&name[..take]);
+        n += take;
+        if let Ok(text) = core::str::from_utf8(&line[..n]) {
+            let _ = std::log(text);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -3938,6 +3966,52 @@ fn handle_scroll_key(app: &mut AgentManagerApp, code: u32) -> bool {
     true
 }
 
+/// Moves the selected provider with the arrow keys.
+///
+/// WHY this exists: the provider catalogue is a list the person chooses from,
+/// and the only way to choose was to tap a row of text whose place on the
+/// screen depends on how much the body above it measured. A keyboard user
+/// could not reach the one provider whose weights are a document on the device
+/// at all, so the install route that provider owns could not be asked for from
+/// a keyboard.
+///
+/// WHY the choice stops at the ends instead of wrapping: the catalogue is a
+/// list of what this device can be, and wrapping would make a key press land
+/// on a provider the person never walked past.
+///
+/// WHY the selection is said even when the key changed nothing: a reader that
+/// cannot see the screen has to learn that the key was heard, and silence
+/// would read as a key that was swallowed.
+fn handle_provider_key(app: &mut AgentManagerApp, code: u32) -> bool {
+    use std::input_key_code;
+    if app.surface != Surface::Models {
+        return false;
+    }
+    let catalogue = providers();
+    match code {
+        input_key_code::ARROW_LEFT => {
+            let current = app.selected;
+            if current > 0 {
+                app.select_provider(current - 1);
+            } else {
+                app.announce_selection();
+            }
+            true
+        }
+        input_key_code::ARROW_RIGHT => {
+            let current = app.selected;
+            let last = catalogue.len().saturating_sub(1);
+            if current < last {
+                app.select_provider(current + 1);
+            } else {
+                app.announce_selection();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// What a key press did to the composer.
 enum ChatKey {
     /// The composer changed, so the body has to be rebuilt.
@@ -5474,6 +5548,10 @@ pub extern "C" fn _start() -> ! {
                             ChatKey::Edited => dirty = Dirty::All,
                             ChatKey::Ignored => {}
                         }
+                    } else if app.surface == Surface::Models
+                        && handle_provider_key(&mut app, key.code)
+                    {
+                        dirty = Dirty::All;
                     } else if handle_scroll_key(&mut app, key.code) {
                         dirty = Dirty::All;
                     }
