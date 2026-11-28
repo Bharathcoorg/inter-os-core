@@ -214,8 +214,6 @@ fn push_bounded_log(logs: &mut Vec<String>, msg: &str) {
     logs.push(line);
 }
 
-static FRAMEWORK_AUDIO_VOLUME: spin::Mutex<u32> = spin::Mutex::new(50);
-
 pub fn dispatch(
     class_name: &str,
     method_name: &str,
@@ -312,58 +310,43 @@ pub fn dispatch(
             }
         }
         // Service calls: NotificationManager
+        //
+        // WHY this fails closed: this crate holds no notification service. The
+        // call used to write a log line and answer 0, which is the Android
+        // shape of "the notification was posted" -- but nothing was posted,
+        // so the app was told a notification existed that no person could ever
+        // see, and the log line was the only trace of it. The kernel's own
+        // Android surface posts through the platform notification manager;
+        // until this runtime is wired to one, the honest answer is that the
+        // service is unavailable.
         "android/app/NotificationManager" => {
-            match method_name {
-                "notify" => {
-                    let message = string_args.get(1).and_then(|v| *v)
-                        .or_else(|| string_args.first().and_then(|v| *v))
-                        .unwrap_or("Android Notification");
-                    let mut log_entry = String::from("[ANDROID][NOTIFICATION] notify: ");
-                    log_entry.push_str(message);
-                    push_bounded_log(logs, &log_entry);
-                    Ok(AndroidFrameworkResult::Return(0))
-                }
-                "cancel" => {
-                    push_bounded_log(logs, "[ANDROID][NOTIFICATION] cancel");
-                    Ok(AndroidFrameworkResult::Return(0))
-                }
-                _ => Err(AndroidFrameworkError::UnsupportedApi),
+            if matches!(method_name, "notify" | "cancel") {
+                push_bounded_log(
+                    logs,
+                    "[ANDROID][NOTIFICATION] refused: no notification service is attached to this runtime",
+                );
             }
+            Err(AndroidFrameworkError::UnsupportedApi)
         }
         // Service calls: AudioManager
-        "android/media/AudioManager" => {
-            match method_name {
-                "getStreamVolume" => {
-                    Ok(AndroidFrameworkResult::Return(*FRAMEWORK_AUDIO_VOLUME.lock()))
-                }
-                "setStreamVolume" => {
-                    let target_vol = string_args.first()
-                        .and_then(|s| *s)
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(10);
-                    *FRAMEWORK_AUDIO_VOLUME.lock() = target_vol;
-                    push_bounded_log(logs, "[ANDROID][AUDIO] setStreamVolume");
-                    Ok(AndroidFrameworkResult::Return(target_vol))
-                }
-                _ => Err(AndroidFrameworkError::UnsupportedApi),
-            }
-        }
+        //
+        // WHY this fails closed: the answer used to come from a variable in
+        // this file, so `getStreamVolume` reported a number that was never the
+        // device's volume and `setStreamVolume` reported a change that never
+        // reached the device's mixer. The kernel's Android surface reads and
+        // writes the real audio manager; this runtime cannot, so it says the
+        // service is unavailable rather than describing an audio device it
+        // never touched.
+        "android/media/AudioManager" => Err(AndroidFrameworkError::UnsupportedApi),
         // Service calls: AudioTrack
-        "android/media/AudioTrack" => {
-            match method_name {
-                "<init>" => Ok(AndroidFrameworkResult::Return(0x2001)),
-                "play" => Ok(AndroidFrameworkResult::Return(0)),
-                "pause" => Ok(AndroidFrameworkResult::Return(0)),
-                "stop" => Ok(AndroidFrameworkResult::Return(0)),
-                "write" => {
-                    let len = string_args.first().and_then(|v| *v).map(|s| s.len() as u32).unwrap_or(0);
-                    Ok(AndroidFrameworkResult::Return(len))
-                }
-                "setVolume" => Ok(AndroidFrameworkResult::Return(0)),
-                "getPlayState" => Ok(AndroidFrameworkResult::Return(3)), // PLAYSTATE_PLAYING
-                _ => Err(AndroidFrameworkError::UnsupportedApi),
-            }
-        }
+        //
+        // WHY this fails closed: `<init>` used to answer with a made-up handle
+        // and `play`/`write`/`getPlayState` with the state of a track that did
+        // not exist, so an app was told it was playing audio the device never
+        // produced. The real audio path in this crate is the AIDL binder's
+        // player handles (`HANDLE_AUDIO_PLAYER_BASE`); the kernel's Android
+        // surface has no AudioTrack arm at all and refuses it the same way.
+        "android/media/AudioTrack" => Err(AndroidFrameworkError::UnsupportedApi),
         // Service calls: CameraManager
         "android/hardware/camera2/CameraManager" => {
             match method_name {
@@ -403,11 +386,20 @@ pub fn dispatch(
                 _ => Err(AndroidFrameworkError::UnsupportedApi),
             }
         }
-        // Service calls: LocationManager (Sovereign microG Location Provider)
+        // Service calls: LocationManager
+        //
+        // WHY these answer "no": the device has no location provider and no
+        // satellite fix. The answer used to be 1 -- provider "enabled" and a
+        // non-null last-known location -- but the object it pointed at was
+        // never allocated, so the guest read whatever object handle 1 happened
+        // to name. This crate's own location broker (`binder.rs`, the microG
+        // location handle) answers the same question with `has_location =
+        // false`, and this surface now says the same thing: no provider, no
+        // fix.
         "android/location/LocationManager" => {
             match method_name {
-                "isProviderEnabled" => Ok(AndroidFrameworkResult::Return(1)),
-                "getLastKnownLocation" => Ok(AndroidFrameworkResult::Return(1)),
+                "isProviderEnabled" => Ok(AndroidFrameworkResult::Return(0)),
+                "getLastKnownLocation" => Ok(AndroidFrameworkResult::Return(0)),
                 _ => Err(AndroidFrameworkError::UnsupportedApi),
             }
         }
@@ -696,24 +688,27 @@ mod tests {
             Err(AndroidFrameworkError::UnsupportedApi)
         );
 
-        // 2. NotificationManager notify and cancel
+        // 2. NotificationManager notify and cancel -- no notification service is
+        // attached to this runtime, so the call must refuse rather than report
+        // a notification that was never posted.
         assert_eq!(
             dispatch("Landroid/app/NotificationManager;", "notify", &[Some("tag"), Some("Alert text")], &mut logs),
-            Ok(AndroidFrameworkResult::Return(0))
+            Err(AndroidFrameworkError::UnsupportedApi)
         );
         assert_eq!(
             dispatch("Landroid/app/NotificationManager;", "cancel", &[], &mut logs),
-            Ok(AndroidFrameworkResult::Return(0))
+            Err(AndroidFrameworkError::UnsupportedApi)
         );
 
-        // 3. AudioManager getStreamVolume and setStreamVolume
+        // 3. AudioManager getStreamVolume and setStreamVolume -- this runtime
+        // holds no mixer, so it cannot report the device's volume.
         assert_eq!(
             dispatch("Landroid/media/AudioManager;", "setStreamVolume", &[Some("70")], &mut logs),
-            Ok(AndroidFrameworkResult::Return(70))
+            Err(AndroidFrameworkError::UnsupportedApi)
         );
         assert_eq!(
             dispatch("Landroid/media/AudioManager;", "getStreamVolume", &[], &mut logs),
-            Ok(AndroidFrameworkResult::Return(70))
+            Err(AndroidFrameworkError::UnsupportedApi)
         );
 
         // 4. TelephonyManager getSimState and getNetworkOperator
@@ -733,14 +728,23 @@ mod tests {
             Ok(AndroidFrameworkResult::ReturnString("/data/data/files"))
         );
 
-        // 7. AudioTrack lifecycle
+        // 7. AudioTrack lifecycle -- this runtime owns no audio device, so it
+        // cannot report a track as playing.
+        assert_eq!(
+            dispatch("Landroid/media/AudioTrack;", "<init>", &[], &mut logs),
+            Err(AndroidFrameworkError::UnsupportedApi)
+        );
         assert_eq!(
             dispatch("Landroid/media/AudioTrack;", "play", &[], &mut logs),
-            Ok(AndroidFrameworkResult::Return(0))
+            Err(AndroidFrameworkError::UnsupportedApi)
+        );
+        assert_eq!(
+            dispatch("Landroid/media/AudioTrack;", "write", &[Some("64")], &mut logs),
+            Err(AndroidFrameworkError::UnsupportedApi)
         );
         assert_eq!(
             dispatch("Landroid/media/AudioTrack;", "getPlayState", &[], &mut logs),
-            Ok(AndroidFrameworkResult::Return(3))
+            Err(AndroidFrameworkError::UnsupportedApi)
         );
 
         // 8. CameraManager & SensorManager platform truth
@@ -859,5 +863,78 @@ mod tests {
             dispatch("Lcom/google/android/gms/auth/api/signin/GoogleSignIn;", "getClient", &[], &mut logs),
             Err(AndroidFrameworkError::UnsupportedApi)
         );
+    }
+
+    #[test]
+    fn the_location_surface_agrees_with_the_location_broker_and_claims_no_fix() {
+        let mut logs = Vec::new();
+
+        // The binder's own location broker is the device's answer to "do you
+        // have a location?": no exception, no fix.
+        let mut mediator = crate::binder::BinderMediator::new();
+        let mut reply = [0u8; 64];
+        let len = mediator
+            .handle_microg_transaction(crate::binder::HANDLE_MICROG_LOCATION, 1, &[], &mut reply)
+            .expect("the location broker must answer its own handle");
+        let mut reader = crate::binder::ParcelReader::new(&reply[..len]);
+        assert_eq!(
+            reader.read_i32(),
+            Some(crate::binder::EX_NONE),
+            "the broker reply must carry no exception"
+        );
+        assert_eq!(
+            reader.read_i32(),
+            Some(0),
+            "the broker must report no satellite fix"
+        );
+
+        // The framework surface must say the same thing: no provider enabled,
+        // no last known location. A "yes" here would hand the guest a
+        // location object this runtime never produced.
+        assert_eq!(
+            dispatch(
+                "Landroid/location/LocationManager;",
+                "isProviderEnabled",
+                &[],
+                &mut logs
+            ),
+            Ok(AndroidFrameworkResult::Return(0)),
+            "no location provider exists on this device"
+        );
+        assert_eq!(
+            dispatch(
+                "Landroid/location/LocationManager;",
+                "getLastKnownLocation",
+                &[],
+                &mut logs
+            ),
+            Ok(AndroidFrameworkResult::Return(0)),
+            "no last known location exists on this device"
+        );
+    }
+
+    #[test]
+    fn surfaces_without_a_backing_service_refuse_instead_of_reporting_an_effect() {
+        let mut logs = Vec::new();
+        for (class, method) in [
+            // No notification service is attached to this runtime.
+            ("Landroid/app/NotificationManager;", "notify"),
+            ("Landroid/app/NotificationManager;", "cancel"),
+            // No mixer: the volume this runtime reports would be its own
+            // variable, never the device's.
+            ("Landroid/media/AudioManager;", "getStreamVolume"),
+            ("Landroid/media/AudioManager;", "setStreamVolume"),
+            // No audio device: a track cannot be constructed or played.
+            ("Landroid/media/AudioTrack;", "<init>"),
+            ("Landroid/media/AudioTrack;", "play"),
+            ("Landroid/media/AudioTrack;", "write"),
+            ("Landroid/media/AudioTrack;", "getPlayState"),
+        ] {
+            assert_eq!(
+                dispatch(class, method, &[], &mut logs),
+                Err(AndroidFrameworkError::UnsupportedApi),
+                "{class}->{method} must not report an effect this runtime never performed"
+            );
+        }
     }
 }

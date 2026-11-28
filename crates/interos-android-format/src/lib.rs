@@ -46,7 +46,8 @@ pub use signing::{
 
 pub use apk::{
     AcrAuditStatus, AcrContainerProfile, ApkError, ApkPackage, ZipArchive, ZipFileEntry,
-    create_test_apk, create_test_apk_with_dex, create_signed_test_apk, create_signed_ui_test_apk,
+    create_test_apk, create_test_apk_with_dex, create_signed_test_apk, create_signed_test_apk_with_dex,
+    create_signed_ui_test_apk, is_valid_package_name,
 };
 
 pub use manifest::{
@@ -54,6 +55,9 @@ pub use manifest::{
 };
 pub use xml::{AxmlDocument, AxmlElement, AxmlError};
 pub use resources::{ResourceError, ResourceTable, ResourceValue};
-pub use dex::{DexError, DexMethod, DexPackage, compute_adler32, create_test_dex, create_ui_test_dex};
+pub use dex::{
+    DexError, DexMethod, DexPackage, compute_adler32, create_lifecycle_test_dex, create_test_dex,
+    create_ui_test_dex,
+};
 pub use elf::{ElfError, LoadedElf, LoadedSegment, MemoryProtection};
 pub use inflate::InflateError;

@@ -565,6 +565,41 @@ pub fn verify_apk_signature(apk_bytes: &[u8]) -> Result<(), ApkError> {
     super::signing::verify_apk_signing_block(apk_bytes).map(|_| ())
 }
 
+/// Decides whether a manifest's package name may be used as an application
+/// identity and as a directory name.
+///
+/// WHY this is checked: the name an APK declares is the name its private
+/// storage directory is made from (`/data/data/<package>`). A name carrying
+/// a path separator, a parent reference or a control character would place
+/// that directory outside the app's own sandbox, and two applications could
+/// then be made to share one directory. The rule follows Android's own
+/// package name shape: dot-separated segments, each starting with a letter
+/// and holding only letters, digits and underscores.
+///
+/// A name of one segment is refused as well: Android requires at least two,
+/// and a single segment cannot say which application owns the directory.
+pub fn is_valid_package_name(name: &str) -> bool {
+    const MAX_PACKAGE_NAME_BYTES: usize = 128;
+    if name.is_empty() || name.len() > MAX_PACKAGE_NAME_BYTES {
+        return false;
+    }
+    let mut segments = 0usize;
+    for segment in name.split('.') {
+        let mut bytes = segment.bytes();
+        let Some(first) = bytes.next() else {
+            return false;
+        };
+        if !first.is_ascii_alphabetic() {
+            return false;
+        }
+        if !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return false;
+        }
+        segments += 1;
+    }
+    segments >= 2
+}
+
 impl ApkPackage {
     /// Parses an in-memory Android APK container package.
     pub fn parse(apk_bytes: &[u8]) -> Result<Self, ApkError> {
@@ -642,6 +677,26 @@ impl ApkPackage {
     pub fn audit_and_create_container(&self, _base_cap_id: u64) -> AcrContainerProfile {
         let mut granted_caps_count = 0;
         let mut denied_perms_count = 0;
+        let mut granted_permissions: Vec<String> = Vec::new();
+
+        // WHY the package name is checked here: the name the manifest
+        // declares becomes a directory the application's private files live
+        // in. A name carrying a path separator or a parent reference would
+        // place another application's directory -- or the platform's own --
+        // inside that application's sandbox, so the identity is refused
+        // before any directory is made from it.
+        if !is_valid_package_name(&self.manifest.package_name) {
+            return AcrContainerProfile {
+                package_name: self.manifest.package_name.clone(),
+                version_code: self.manifest.version_code,
+                target_sdk: self.manifest.target_sdk,
+                status: AcrAuditStatus::InvalidApkFormat,
+                granted_caps_count: 0,
+                denied_perms_count: self.manifest.permissions.len(),
+                memory_quota_bytes: 0,
+                granted_permissions,
+            };
+        }
 
         // Verify that the APK does NOT request forbidden ambient authority
         let forbidden_ambient_perms = [
@@ -663,6 +718,7 @@ impl ApkPackage {
                     granted_caps_count: 0,
                     denied_perms_count: 1,
                     memory_quota_bytes: 0,
+                    granted_permissions,
                 };
             }
         }
@@ -676,6 +732,7 @@ impl ApkPackage {
                 granted_caps_count: 0,
                 denied_perms_count: self.manifest.permissions.len(),
                 memory_quota_bytes: 0,
+                granted_permissions,
             };
         }
 
@@ -688,6 +745,7 @@ impl ApkPackage {
                 granted_caps_count: 0,
                 denied_perms_count: self.manifest.permissions.len(),
                 memory_quota_bytes: 0,
+                granted_permissions,
             };
         }
 
@@ -702,6 +760,12 @@ impl ApkPackage {
                 | "android.permission.RECORD_AUDIO"
                 | "android.permission.CALL_PHONE" => {
                     granted_caps_count += 1;
+                    // WHY the name is kept and not only the count: a count says
+                    // how many permissions the application was given and not
+                    // which ones, and a service that answers an application
+                    // has to be able to say whether the application asked for
+                    // that service at all.
+                    granted_permissions.push(perm.clone());
                 }
                 _ => {
                     denied_perms_count += 1;
@@ -717,6 +781,7 @@ impl ApkPackage {
             granted_caps_count,
             denied_perms_count,
             memory_quota_bytes: 64 * 1024 * 1024, // 64 MiB strict container ceiling
+            granted_permissions,
         }
     }
 
@@ -737,6 +802,13 @@ pub struct AcrContainerProfile {
     pub granted_caps_count: usize,
     pub denied_perms_count: usize,
     pub memory_quota_bytes: usize,
+    /// The permissions the audit granted, by name.
+    ///
+    /// WHY the names travel with the counts: a count says how many
+    /// permissions the application received and not which ones, and a service
+    /// that answers an application has to be able to say whether the
+    /// application asked for that service at all.
+    pub granted_permissions: Vec<String>,
 }
 
 /// Creates a deterministic, valid test APK containing binary `AndroidManifest.xml`
@@ -947,6 +1019,17 @@ fn sign_test_apk_with_cert(unsigned_apk: &[u8], cert: &[u8]) -> Vec<u8> {
     signed_apk
 }
 
+/// Creates a deterministically signed test APK whose `classes.dex` is the
+/// caller's payload.
+///
+/// WHY this exists beside the unsigned builder: an application is only
+/// admitted through the signed path, so a test that needs a particular DEX
+/// inside a real APK needs a signed APK around it.
+pub fn create_signed_test_apk_with_dex(package: &str, permissions: &[&str], dex_bytes: &[u8]) -> Vec<u8> {
+    let unsigned_apk = create_test_apk_with_dex(package, permissions, dex_bytes);
+    sign_test_apk_with_cert(&unsigned_apk, b"INTEROS_ACR_DETERMINISTIC_TEST_SIGNER_CERTIFICATE_V2")
+}
+
 /// Creates a deterministically signed test APK containing a valid APK Signing Block v2
 /// and matching Merkle-tree content digest.
 pub fn create_signed_test_apk(package: &str, permissions: &[&str]) -> Vec<u8> {
@@ -1028,6 +1111,34 @@ mod tests {
         // Unsigned APK still fails closed.
         let unsigned = create_test_apk("org.interos.sig", &[]);
         assert_eq!(verify_apk_signature(&unsigned), Err(ApkError::InvalidSignature));
+    }
+
+    #[test]
+    fn test_apk_audit_names_the_permissions_it_granted() {
+        // WHY the names matter and not only the counts: a service that answers
+        // an application has to be able to say whether the application asked
+        // for it, and a count cannot say that.
+        let apk_bytes = create_signed_test_apk(
+            "org.interos.permissions",
+            &[
+                "android.permission.INTERNET",
+                "android.permission.ACCESS_FINE_LOCATION",
+                "android.permission.READ_CONTACTS",
+            ],
+        );
+        let pkg = ApkPackage::parse(&apk_bytes).expect("parse APK");
+        let profile = pkg.audit_and_create_container(900);
+        assert_eq!(profile.status, AcrAuditStatus::Approved);
+        assert_eq!(profile.granted_caps_count, 2);
+        assert_eq!(profile.denied_perms_count, 1);
+        assert_eq!(
+            profile.granted_permissions,
+            alloc::vec![
+                String::from("android.permission.INTERNET"),
+                String::from("android.permission.ACCESS_FINE_LOCATION"),
+            ],
+            "the granted permissions are named, and the refused one is not among them"
+        );
     }
 
     #[test]

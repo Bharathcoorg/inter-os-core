@@ -433,6 +433,14 @@ impl DexPackage {
             while cur < raw.len() && raw[cur] != 0 {
                 cur += 1;
             }
+            // WHY the terminator is required: a string pool entry that runs to
+            // the end of the file without its NUL terminator is a truncated
+            // file, not a string. Accepting it made the last string of a
+            // damaged DEX name something the file never declared -- and a
+            // type or method name is an identity the runtime resolves by.
+            if cur >= raw.len() {
+                return Err(DexError::UnexpectedEof);
+            }
             let s = core::str::from_utf8(&raw[str_start..cur]).unwrap_or("<invalid utf8>");
             charge_string_bytes(&mut string_budget, s.len())?;
             strings.push(String::from(s));
@@ -498,12 +506,27 @@ impl DexPackage {
             let proto_idx = u16::from_le_bytes(raw[offset_pos + 2..offset_pos + 4].try_into().unwrap()) as usize;
             let name_idx = u32::from_le_bytes(raw[offset_pos + 4..offset_pos + 8].try_into().unwrap()) as usize;
 
-            let class_name = if class_idx < types.len() { types[class_idx].clone() } else { String::from("<unknown>") };
-            let method_name = if name_idx < strings.len() { strings[name_idx].clone() } else { String::from("<unknown>") };
-            let proto_str = match proto_shorty_indices.get(proto_idx) {
-                Some(&shorty_idx) if shorty_idx < strings.len() => strings[shorty_idx].clone(),
-                _ => String::from("V"),
-            };
+            // WHY an index outside its table refuses the file: a method id
+            // that names a class, a name or a prototype the file does not
+            // have is a damaged file. It used to be read as the placeholder
+            // "<unknown>", which put a method with a fabricated class and
+            // name into the runtime's method table.
+            let class_name = types
+                .get(class_idx)
+                .ok_or(DexError::TypeIndexOutOfBounds)?
+                .clone();
+            let method_name = strings
+                .get(name_idx)
+                .ok_or(DexError::StringIndexOutOfBounds)?
+                .clone();
+            let shorty_idx = proto_shorty_indices
+                .get(proto_idx)
+                .copied()
+                .ok_or(DexError::MethodIndexOutOfBounds)?;
+            let proto_str = strings
+                .get(shorty_idx)
+                .ok_or(DexError::StringIndexOutOfBounds)?
+                .clone();
 
             charge_string_bytes(&mut string_budget, class_name.len() + method_name.len() + proto_str.len())?;
             method_entries.push((class_name, method_name, proto_str));
@@ -561,11 +584,15 @@ impl DexPackage {
                 let code_off = read_uleb128(raw, &mut cur)? as usize;
                 last_method_idx = last_method_idx.checked_add(diff).ok_or(DexError::MethodIndexOutOfBounds)?;
 
-                let (c_name, m_name, p_name) = if (last_method_idx as usize) < method_entries.len() {
-                    method_entries[last_method_idx as usize].clone()
-                } else {
-                    (String::from("Unknown"), String::from("unknown"), String::from("V"))
-                };
+                // WHY an index outside the method table refuses the file: a
+                // class that names a method the file does not have is a
+                // damaged file. It used to be read as the class "Unknown"
+                // and the method "unknown", which put a fabricated method
+                // into the runtime's table under a name no class owns.
+                let (c_name, m_name, p_name) = method_entries
+                    .get(last_method_idx as usize)
+                    .cloned()
+                    .ok_or(DexError::MethodIndexOutOfBounds)?;
 
                 let mut reg_size = 0;
                 let mut ins_size = 0;
@@ -605,11 +632,14 @@ impl DexPackage {
                 let code_off = read_uleb128(raw, &mut cur)? as usize;
                 last_vmethod_idx = last_vmethod_idx.checked_add(diff).ok_or(DexError::MethodIndexOutOfBounds)?;
 
-                let (c_name, m_name, p_name) = if (last_vmethod_idx as usize) < method_entries.len() {
-                    method_entries[last_vmethod_idx as usize].clone()
-                } else {
-                    (String::from("Unknown"), String::from("unknown"), String::from("V"))
-                };
+                // WHY an index outside the method table refuses the file: a
+                // class that names a method the file does not have is a
+                // damaged file, and the method it named is the one the
+                // runtime would have to call.
+                let (c_name, m_name, p_name) = method_entries
+                    .get(last_vmethod_idx as usize)
+                    .cloned()
+                    .ok_or(DexError::MethodIndexOutOfBounds)?;
 
                 let mut reg_size = 0;
                 let mut ins_size = 0;
@@ -1085,6 +1115,152 @@ fn push_uleb128(out: &mut Vec<u8>, mut value: u32) {
     out.push((value & 0x7F) as u8);
 }
 
+/// Builds a DEX whose class defines the three activity lifecycle methods.
+///
+/// WHY this exists: the activity lifecycle is the application's own code, so
+/// a test has to be able to say that one of those methods really runs. The
+/// method named by `stubbed` is given no code item -- the shape an abstract
+/// method has -- so a runtime that runs that method cannot run it to
+/// completion, while a runtime that skips it never notices anything.
+///
+/// The DEX is otherwise well formed: it parses, its bytecode audits clean,
+/// and its class defines `onCreate`, `onStart` and `onResume` in that order.
+pub fn create_lifecycle_test_dex(class_name: &str, stubbed: Option<&str>) -> Vec<u8> {
+    let mut dex = Vec::new();
+
+    let strings: [&str; 7] = [
+        "V",                  // 0
+        "Ljava/lang/Object;", // 1
+        class_name,           // 2
+        "onCreate",           // 3
+        "onStart",            // 4
+        "onResume",           // 5
+        "lifecycle",          // 6
+    ];
+    let method_names = ["onCreate", "onStart", "onResume"];
+
+    let string_ids_off = DEX_HEADER_SIZE;
+    let string_ids_size = strings.len();
+    let type_ids_off = string_ids_off + string_ids_size * 4;
+    let type_ids_size = 3;
+    let proto_ids_off = type_ids_off + type_ids_size * 4;
+    let proto_ids_size = 1;
+    let method_ids_off = proto_ids_off + proto_ids_size * 12;
+    let method_ids_size = method_names.len();
+    let class_defs_off = method_ids_off + method_ids_size * 8;
+    let class_defs_size = 1;
+    let data_off = class_defs_off + class_defs_size * 32;
+
+    dex.resize(data_off, 0);
+
+    // String data
+    let mut string_offsets = Vec::new();
+    for s in &strings {
+        let off = dex.len();
+        string_offsets.push(off as u32);
+        let s_bytes = s.as_bytes();
+        dex.push(s_bytes.len() as u8);
+        dex.extend_from_slice(s_bytes);
+        dex.push(0);
+    }
+    while dex.len() % 4 != 0 {
+        dex.push(0);
+    }
+
+    // One code item per method, except the stubbed one, which has none.
+    let mut code_offsets = [0u32; 3];
+    for (i, name) in method_names.iter().enumerate() {
+        if stubbed == Some(*name) {
+            continue;
+        }
+        let code_off = dex.len() as u32;
+        code_offsets[i] = code_off;
+        dex.extend_from_slice(&2u16.to_le_bytes()); // registers_size
+        dex.extend_from_slice(&1u16.to_le_bytes()); // ins_size
+        dex.extend_from_slice(&2u16.to_le_bytes()); // outs_size
+        dex.extend_from_slice(&0u16.to_le_bytes()); // tries_size
+        dex.extend_from_slice(&0u32.to_le_bytes()); // debug_info_off
+        dex.extend_from_slice(&4u32.to_le_bytes()); // insns_size = 4
+        dex.extend_from_slice(&[OP_CONST_STRING, 0x00, 0x06, 0x00]);
+        dex.extend_from_slice(&[OP_RETURN_VOID, 0x00, 0x00, 0x00]);
+    }
+    while dex.len() % 4 != 0 {
+        dex.push(0);
+    }
+
+    // Class data: three direct methods, one per lifecycle step.
+    let class_data_off = dex.len() as u32;
+    dex.push(0); // static_fields_size
+    dex.push(0); // instance_fields_size
+    dex.push(method_names.len() as u8); // direct_methods_size
+    dex.push(0); // virtual_methods_size
+    for (i, _) in method_names.iter().enumerate() {
+        // The index of a method is stored as a difference from the index of
+        // the method before it, so the three methods carry differences
+        // 0, 1 and 1 to name indices 0, 1 and 2.
+        dex.push(if i == 0 { 0 } else { 1 }); // method_idx_diff
+        dex.push(1); // access_flags
+        push_uleb128(&mut dex, code_offsets[i]);
+    }
+
+    let file_size = dex.len() as u32;
+    let hdr = DexHeader {
+        magic: *DEX_MAGIC,
+        checksum: 0,
+        signature: [0u8; 20],
+        file_size,
+        header_size: (DEX_HEADER_SIZE as u32).to_le(),
+        endian_tag: ENDIAN_CONSTANT.to_le(),
+        link_size: 0,
+        link_off: 0,
+        map_off: 0,
+        string_ids_size: (string_ids_size as u32).to_le(),
+        string_ids_off: (string_ids_off as u32).to_le(),
+        type_ids_size: (type_ids_size as u32).to_le(),
+        type_ids_off: (type_ids_off as u32).to_le(),
+        proto_ids_size: (proto_ids_size as u32).to_le(),
+        proto_ids_off: (proto_ids_off as u32).to_le(),
+        field_ids_size: 0,
+        field_ids_off: 0,
+        method_ids_size: (method_ids_size as u32).to_le(),
+        method_ids_off: (method_ids_off as u32).to_le(),
+        class_defs_size: (class_defs_size as u32).to_le(),
+        class_defs_off: (class_defs_off as u32).to_le(),
+        data_size: file_size - data_off as u32,
+        data_off: (data_off as u32).to_le(),
+    };
+    let hdr_bytes = unsafe {
+        core::slice::from_raw_parts(&hdr as *const DexHeader as *const u8, DEX_HEADER_SIZE)
+    };
+    dex[..DEX_HEADER_SIZE].copy_from_slice(hdr_bytes);
+
+    for (i, off) in string_offsets.iter().enumerate() {
+        let pos = string_ids_off + i * 4;
+        dex[pos..pos + 4].copy_from_slice(&off.to_le_bytes());
+    }
+    for (i, &s_idx) in [0u32, 1, 2].iter().enumerate() {
+        let pos = type_ids_off + i * 4;
+        dex[pos..pos + 4].copy_from_slice(&s_idx.to_le_bytes());
+    }
+    dex[proto_ids_off..proto_ids_off + 12].copy_from_slice(&[0u8; 12]);
+    for (i, name_idx) in [3u32, 4, 5].iter().enumerate() {
+        let pos = method_ids_off + i * 8;
+        dex[pos..pos + 2].copy_from_slice(&2u16.to_le_bytes()); // class_idx
+        dex[pos + 2..pos + 4].copy_from_slice(&0u16.to_le_bytes()); // proto_idx
+        dex[pos + 4..pos + 8].copy_from_slice(&name_idx.to_le_bytes());
+    }
+    let pos = class_defs_off;
+    dex[pos..pos + 4].copy_from_slice(&2u32.to_le_bytes()); // class_idx
+    dex[pos + 4..pos + 8].copy_from_slice(&1u32.to_le_bytes()); // access_flags
+    dex[pos + 8..pos + 12].copy_from_slice(&1u32.to_le_bytes()); // superclass_idx
+    dex[pos + 24..pos + 28].copy_from_slice(&class_data_off.to_le_bytes());
+
+    let checksum = compute_adler32(&dex[12..]);
+    dex[8..12].copy_from_slice(&checksum.to_le_bytes());
+
+    dex
+}
+
 /// Synthesizes a valid Dalvik Executable (`classes.dex`) whose `onCreate` bytecode
 /// allocates a `android.widget.TextView`, calls `setText(text)`, and calls
 /// `Activity.setContentView(view)`.
@@ -1335,24 +1511,64 @@ mod tests {
     /// Builds a DEX where `class_defs` class_def entries all point at ONE
     /// shared class_data blob declaring `methods_per_class` direct methods
     /// (each encoded_method is exactly 3 bytes: diff, flags, code_off=0).
+    ///
+    /// WHY the fixture carries a real string, type, proto and method table:
+    /// the class data names its methods by index, and the parser refuses a
+    /// file whose class data names a method outside the table. A fixture
+    /// without those tables would be testing a damaged file instead of the
+    /// amplification this fixture exists to measure.
     fn build_shared_class_dex(class_defs: usize, methods_per_class: usize, method_diff: u32) -> Vec<u8> {
-        let class_defs_off = DEX_HEADER_SIZE;
-        let blob_off = class_defs_off + class_defs * 32;
-        let mut dex = alloc::vec![0u8; blob_off];
-        dex.push(0); // static_fields_size
-        dex.push(0); // instance_fields_size
-        push_uleb(&mut dex, methods_per_class as u32);
-        dex.push(0); // virtual_methods_size
+        // The last method the blob names has the accumulated index
+        // `method_diff * methods_per_class`, and the table starts at 0. The
+        // table is capped: a fixture that asks for a method index the table
+        // cannot hold is testing that the index is refused, and it must not
+        // allocate its way there.
+        const MAX_FIXTURE_METHODS: usize = 4096;
+        let method_count = (method_diff as usize)
+            .saturating_mul(methods_per_class)
+            .saturating_add(1)
+            .min(MAX_FIXTURE_METHODS);
+        let string_ids_off = DEX_HEADER_SIZE;
+        let type_ids_off = string_ids_off + 4;
+        let proto_ids_off = type_ids_off + 4;
+        let method_ids_off = proto_ids_off + 12;
+        let class_defs_off = method_ids_off + method_count * 8;
+
+        let mut blob = alloc::vec![];
+        blob.push(0); // static_fields_size
+        blob.push(0); // instance_fields_size
+        push_uleb(&mut blob, methods_per_class as u32);
+        blob.push(0); // virtual_methods_size
         for _ in 0..methods_per_class {
-            push_uleb(&mut dex, method_diff);
-            dex.push(1); // access_flags
-            dex.push(0); // code_off = 0
+            push_uleb(&mut blob, method_diff);
+            blob.push(1); // access_flags
+            blob.push(0); // code_off = 0
         }
-        let file_size = dex.len();
+
+        let blob_off = class_defs_off + class_defs * 32;
+        let string_data_off = blob_off + blob.len();
+        // One string: its utf16 length byte, the bytes, and the terminator.
+        let file_size = string_data_off + 1 + 8 + 1;
+        let mut dex = alloc::vec![0u8; file_size];
+
+        dex[string_ids_off..string_ids_off + 4].copy_from_slice(&(string_data_off as u32).to_le_bytes());
+        dex[type_ids_off..type_ids_off + 4].copy_from_slice(&0u32.to_le_bytes());
+        dex[proto_ids_off..proto_ids_off + 12].copy_from_slice(&[0u8; 12]);
+        for i in 0..method_count {
+            let p = method_ids_off + i * 8;
+            dex[p..p + 2].copy_from_slice(&0u16.to_le_bytes()); // class_idx
+            dex[p + 2..p + 4].copy_from_slice(&0u16.to_le_bytes()); // proto_idx
+            dex[p + 4..p + 8].copy_from_slice(&0u32.to_le_bytes()); // name_idx
+        }
         for i in 0..class_defs {
             let p = class_defs_off + i * 32;
             dex[p + 24..p + 28].copy_from_slice(&(blob_off as u32).to_le_bytes());
         }
+        dex[blob_off..blob_off + blob.len()].copy_from_slice(&blob);
+        dex[string_data_off] = 8; // utf16 length
+        dex[string_data_off + 1..string_data_off + 9].copy_from_slice(b"LShared;");
+        dex[string_data_off + 9] = 0;
+
         let hdr = DexHeader {
             magic: *DEX_MAGIC,
             checksum: 0,
@@ -1363,16 +1579,16 @@ mod tests {
             link_size: 0,
             link_off: 0,
             map_off: 0,
-            string_ids_size: 0,
-            string_ids_off: 0,
-            type_ids_size: 0,
-            type_ids_off: 0,
-            proto_ids_size: 0,
-            proto_ids_off: 0,
+            string_ids_size: 1,
+            string_ids_off: (string_ids_off as u32).to_le(),
+            type_ids_size: 1,
+            type_ids_off: (type_ids_off as u32).to_le(),
+            proto_ids_size: 1,
+            proto_ids_off: (proto_ids_off as u32).to_le(),
             field_ids_size: 0,
             field_ids_off: 0,
-            method_ids_size: 0,
-            method_ids_off: 0,
+            method_ids_size: (method_count as u32).to_le(),
+            method_ids_off: (method_ids_off as u32).to_le(),
             class_defs_size: (class_defs as u32).to_le(),
             class_defs_off: (class_defs_off as u32).to_le(),
             data_size: ((file_size - blob_off) as u32).to_le(),
@@ -1470,6 +1686,75 @@ mod tests {
         let raw = build_shared_class_dex(1, 2, u32::MAX);
         let err = DexPackage::parse(&raw).err().unwrap();
         assert_eq!(err, DexError::MethodIndexOutOfBounds);
+    }
+
+    /// A string pool entry that runs to the end of the file without its
+    /// terminator is a truncated file, not a string.
+    ///
+    /// WHY this matters: the string pool names types and methods. A string
+    /// that was accepted without its terminator was read to the end of the
+    /// file, so the last type or method of a damaged DEX carried a name the
+    /// file never declared.
+    #[test]
+    fn a_string_without_its_terminator_is_refused() {
+        let mut raw = create_test_dex("Lorg/interos/TestActivity;", "onCreate", "Truncated");
+        // Point the last string id at the final byte of the file: the string
+        // data there has no NUL terminator after it.
+        let last_string_id = DEX_HEADER_SIZE + 7 * 4;
+        let tail = (raw.len() - 1) as u32;
+        raw[last_string_id..last_string_id + 4].copy_from_slice(&tail.to_le_bytes());
+        let checksum = compute_adler32(&raw[12..]);
+        raw[8..12].copy_from_slice(&checksum.to_le_bytes());
+
+        assert_eq!(
+            DexPackage::parse(&raw).err(),
+            Some(DexError::UnexpectedEof),
+            "a string pool entry without its terminator must refuse the file"
+        );
+    }
+
+    /// A class that names a method the file does not have is a damaged file.
+    ///
+    /// WHY this matters: the parser used to read such a method as the class
+    /// "Unknown" with the method "unknown", so a damaged DEX put a fabricated
+    /// method into the runtime's table under a name no class owns.
+    #[test]
+    fn a_class_naming_a_method_outside_the_table_is_refused() {
+        // The fixture's method table is capped, so the index the class data
+        // names here is outside it.
+        let raw = build_shared_class_dex(1, 1, 5000);
+        assert_eq!(
+            DexPackage::parse(&raw).err(),
+            Some(DexError::MethodIndexOutOfBounds),
+            "a method index outside the method table must refuse the file"
+        );
+    }
+
+    /// A method id that names a class the file does not have is a damaged
+    /// file.
+    ///
+    /// WHY this matters: the class of a method id is how the runtime knows
+    /// which class a call belongs to. An out-of-range class index used to be
+    /// read as the placeholder "<unknown>", and a call to that method would
+    /// have been resolved against a class the file never declared.
+    #[test]
+    fn a_method_id_naming_a_class_outside_the_table_is_refused() {
+        let mut raw = create_test_dex("Lorg/interos/TestActivity;", "onCreate", "OutOfRange");
+        // The method id table sits after the proto table; its first entry
+        // names class index 0. The fixture has three types.
+        let string_ids_off = DEX_HEADER_SIZE;
+        let type_ids_off = string_ids_off + 8 * 4;
+        let proto_ids_off = type_ids_off + 3 * 4;
+        let method_ids_off = proto_ids_off + 12;
+        raw[method_ids_off..method_ids_off + 2].copy_from_slice(&99u16.to_le_bytes());
+        let checksum = compute_adler32(&raw[12..]);
+        raw[8..12].copy_from_slice(&checksum.to_le_bytes());
+
+        assert_eq!(
+            DexPackage::parse(&raw).err(),
+            Some(DexError::TypeIndexOutOfBounds),
+            "a method id naming a class outside the type table must refuse the file"
+        );
     }
 
     #[test]
@@ -1632,6 +1917,29 @@ mod tests {
         let dex = DexPackage::parse(&build_proto_shorty_dex()).expect("proto DEX must parse");
         let m = dex.methods.iter().find(|m| m.method_name == "m").expect("method m");
         assert_eq!(m.proto_shorty, "VL", "proto_idx must resolve via proto_ids -> shorty_idx");
+    }
+
+    /// The lifecycle fixture is a DEX the runtime can actually read.
+    ///
+    /// WHY this matters: the fixture exists so a test can say that a
+    /// lifecycle step really ran. A fixture the parser refuses would make
+    /// every such claim meaningless.
+    #[test]
+    fn the_lifecycle_fixture_is_a_readable_dex() {
+        let raw = create_lifecycle_test_dex("Lorg/interos/LifecycleActivity;", None);
+        let dex = DexPackage::parse(&raw).expect("lifecycle DEX must parse");
+        for name in ["onCreate", "onStart", "onResume"] {
+            assert!(
+                dex.methods.iter().any(|m| m.method_name == name),
+                "the fixture must define {name}"
+            );
+        }
+
+        // The stubbed variant parses too, and its stubbed method has no code.
+        let raw = create_lifecycle_test_dex("Lorg/interos/LifecycleActivity;", Some("onResume"));
+        let dex = DexPackage::parse(&raw).expect("stubbed lifecycle DEX must parse");
+        let resumed = dex.methods.iter().find(|m| m.method_name == "onResume").expect("onResume");
+        assert_eq!(resumed.code_offset, 0, "the stubbed method must carry no code");
     }
 }
 

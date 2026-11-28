@@ -549,8 +549,23 @@ impl InterWebView {
         }
     }
 
-    pub fn reload(&mut self) {
-        // Trigger page re-fetch
+    /// Asks for the page this webview is showing to be fetched again.
+    ///
+    /// WHY the embedded view does not fetch it itself: it owns no transport and
+    /// no ambient filesystem access, so the only way to have the page again is
+    /// for the host to fetch the current URL and hand the answer back through
+    /// `load_url_content`. A `reload` that quietly did nothing would leave the
+    /// caller believing the page had been refreshed when it had not, so this
+    /// reports what is missing and leaves the document as it stands.
+    pub fn reload(&mut self) -> Result<(), &'static str> {
+        if self.current_url_len == 0 {
+            return Err("ERR_NO_URL: there is no page to reload");
+        }
+        self.push_received_error(
+            -1,
+            "ERR_RELOAD_UNAVAILABLE: the host must fetch the page again and feed it through load_url_content",
+        );
+        Err("ERR_RELOAD_UNAVAILABLE: the host must fetch the page again and feed it through load_url_content")
     }
 
     pub fn stop(&mut self) {
@@ -873,6 +888,54 @@ mod tests {
             }
         }
         assert!(got_error);
+    }
+
+    #[test]
+    fn webview_reload_reports_that_the_host_must_fetch_again() {
+        let config = WebViewConfig::default_portrait();
+        let mut webview = InterWebView::create_webview(config).expect("create webview");
+
+        // WHY a page with no URL is refused before the fetch advice: there is
+        // nothing for the host to fetch, so telling it how to fetch would be
+        // advice about a page that does not exist.
+        assert_eq!(
+            webview.reload(),
+            Err("ERR_NO_URL: there is no page to reload")
+        );
+
+        webview
+            .load_html("<h1>Held</h1>", Some("interos://demo/index.html"))
+            .expect("load the page the webview will show");
+        // WHY the title is copied out instead of borrowed: the reload needs the
+        // webview itself, and a borrow held across it would keep the webview
+        // from being asked to do anything.
+        let mut before = [0u8; MAX_TITLE_BYTES];
+        let before_len = webview.title().len().min(before.len());
+        before[..before_len].copy_from_slice(&webview.title().as_bytes()[..before_len]);
+        let lines_before = webview.line_count;
+
+        assert_eq!(
+            webview.reload(),
+            Err("ERR_RELOAD_UNAVAILABLE: the host must fetch the page again and feed it through load_url_content")
+        );
+        // WHY the document must be left alone: a reload that cannot fetch
+        // cannot change the page, and a page that changed anyway would be a
+        // document the host never sent.
+        let after = webview.title();
+        assert_eq!(after.len(), before_len);
+        assert_eq!(after.as_bytes(), &before[..before_len]);
+        assert_eq!(webview.line_count, lines_before);
+
+        let mut reported = false;
+        while let Some(evt) = webview.poll_event() {
+            if let WebViewEvent::ReceivedError(code, desc, len) = evt {
+                assert_eq!(code, -1);
+                let desc_str = core::str::from_utf8(&desc[..len]).unwrap();
+                assert!(desc_str.starts_with("ERR_RELOAD_UNAVAILABLE"));
+                reported = true;
+            }
+        }
+        assert!(reported, "the caller is told the reload did not happen");
     }
 
     #[test]

@@ -1203,6 +1203,13 @@ pub enum PageStatus {
     UnrecognisedAddress,
     /// The address named a scheme the browser cannot fetch.
     UnsupportedScheme,
+    /// The address was longer than the browser's own address records hold.
+    ///
+    /// WHY this is its own state: the browser used to cut such an address at
+    /// the end of its buffer and fetch the cut address, so the page on the
+    /// screen was a different resource from the one that was asked for. The
+    /// address is now refused whole and this state says so.
+    AddressTooLong,
     /// The gateway received the request but its own fetch failed (real proxy error envelope).
     GatewayError,
     /// The response was a file, and its bytes were saved to storage.
@@ -1228,6 +1235,7 @@ impl PageStatus {
                 | PageStatus::InvalidAddress
                 | PageStatus::UnrecognisedAddress
                 | PageStatus::UnsupportedScheme
+                | PageStatus::AddressTooLong
                 | PageStatus::GatewayError
                 | PageStatus::LocalRefused
         )
@@ -2284,7 +2292,18 @@ pub fn scheme_mark(url: &[u8]) -> &'static [u8] {
 }
 
 pub const MAX_TABS: usize = 4;
-pub const MAX_URL_LEN: usize = 128;
+
+/// The longest address the browser keeps in any of its own records.
+///
+/// WHY this is one number and not several: the address bar, the tab's active
+/// address, the tab's visit list, the visit log and the bookmark record all
+/// hold an address. When those records had different capacities, the browser
+/// fetched one address and showed another -- a 300-byte address was fetched
+/// whole and then displayed, stored and bookmarked as its first 128 bytes,
+/// which is a different page. Every record that holds an address holds this
+/// many bytes, and an address that does not fit is refused rather than
+/// shortened.
+pub const MAX_URL_LEN: usize = 256;
 pub const MAX_TITLE_LEN: usize = 64;
 pub const TAB_HISTORY_CAP: usize = 8;
 pub const MAX_BOOKMARKS: usize = 16;
@@ -2564,10 +2583,19 @@ impl Tab {
         tab
     }
 
-    pub fn set_url(&mut self, url: &[u8]) {
-        let n = url.len().min(MAX_URL_LEN);
-        self.active_url[..n].copy_from_slice(&url[..n]);
-        self.active_url_len = n;
+    /// Records the address the tab is on.
+    ///
+    /// WHY an address that does not fit is refused rather than shortened: the
+    /// tab's address is what the person sees and what the back button returns
+    /// to. A shortened address is a different page, so the tab keeps the
+    /// address it had and reports that the new one did not fit.
+    pub fn set_url(&mut self, url: &[u8]) -> bool {
+        if url.len() > MAX_URL_LEN {
+            return false;
+        }
+        self.active_url[..url.len()].copy_from_slice(url);
+        self.active_url_len = url.len();
+        true
     }
 
     pub fn set_title(&mut self, title: &[u8]) {
@@ -2588,6 +2616,13 @@ impl Tab {
         if url.is_empty() {
             return;
         }
+        // WHY an address that does not fit is left out rather than shortened:
+        // the visit list is what the back button walks, and a shortened entry
+        // would send the person back to a different page than the one they
+        // left.
+        if url.len() > MAX_URL_LEN {
+            return;
+        }
         // Truncate forward history if we navigated from earlier in the stack
         if self.history_len > 0 && self.history_index + 1 < self.history_len {
             self.history_len = self.history_index + 1;
@@ -2601,7 +2636,7 @@ impl Tab {
             self.history_index = self.history_index.saturating_sub(1);
         }
         let idx = self.history_len;
-        let u = url.len().min(MAX_URL_LEN);
+        let u = url.len();
         self.history[idx][..u].copy_from_slice(&url[..u]);
         self.history_lens[idx] = u;
         self.history_len += 1;
@@ -2820,15 +2855,24 @@ impl BookmarkItem {
         url_len: 0,
     };
 
-    pub fn new(title_bytes: &[u8], url_bytes: &[u8]) -> Self {
+    /// Builds a bookmark item.
+    ///
+    /// WHY the title may be shortened but the address may not: a title is
+    /// display text, and a cut title is still the title of the page that was
+    /// saved. An address is the page itself -- a cut address opens a
+    /// different page -- so a caller that hands over an address that does not
+    /// fit gets no item at all.
+    pub fn new(title_bytes: &[u8], url_bytes: &[u8]) -> Option<Self> {
+        if url_bytes.len() > MAX_URL_LEN {
+            return None;
+        }
         let mut item = Self::EMPTY;
         let t = title_bytes.len().min(MAX_TITLE_LEN);
         item.title[..t].copy_from_slice(&title_bytes[..t]);
         item.title_len = t;
-        let u = url_bytes.len().min(MAX_URL_LEN);
-        item.url[..u].copy_from_slice(&url_bytes[..u]);
-        item.url_len = u;
-        item
+        item.url[..url_bytes.len()].copy_from_slice(url_bytes);
+        item.url_len = url_bytes.len();
+        Some(item)
     }
 
     pub fn title(&self) -> &[u8] {
@@ -2862,7 +2906,13 @@ impl BookmarkStore {
         if self.is_bookmarked(url) {
             return false;
         }
-        self.items[self.count] = BookmarkItem::new(title, url);
+        // WHY the store refuses an address it cannot hold whole: a bookmark
+        // that opens a different page than the one that was saved is worse
+        // than no bookmark at all.
+        let Some(item) = BookmarkItem::new(title, url) else {
+            return false;
+        };
+        self.items[self.count] = item;
         self.count += 1;
         true
     }
@@ -2931,16 +2981,23 @@ impl HistoryRecord {
         visited_at_epoch_secs: 0,
     };
 
-    pub fn new(url_bytes: &[u8], title_bytes: &[u8], timestamp: u64) -> Self {
+    /// Builds a visit record.
+    ///
+    /// WHY the address may not be shortened: a visit record that holds a
+    /// prefix of the address names a different page than the one that was
+    /// visited, so a record is only made for an address that fits whole.
+    pub fn new(url_bytes: &[u8], title_bytes: &[u8], timestamp: u64) -> Option<Self> {
+        if url_bytes.len() > MAX_URL_LEN {
+            return None;
+        }
         let mut rec = Self::EMPTY;
-        let u = url_bytes.len().min(MAX_URL_LEN);
-        rec.url[..u].copy_from_slice(&url_bytes[..u]);
-        rec.url_len = u;
+        rec.url[..url_bytes.len()].copy_from_slice(url_bytes);
+        rec.url_len = url_bytes.len();
         let t = title_bytes.len().min(MAX_TITLE_LEN);
         rec.title[..t].copy_from_slice(&title_bytes[..t]);
         rec.title_len = t;
         rec.visited_at_epoch_secs = timestamp;
-        rec
+        Some(rec)
     }
 }
 
@@ -2963,16 +3020,23 @@ impl BookmarkRecord {
         is_pinned: false,
     };
 
-    pub fn new(url_bytes: &[u8], title_bytes: &[u8], is_pinned: bool) -> Self {
+    /// Builds a bookmark record.
+    ///
+    /// WHY the address may not be shortened: a bookmark that opens a different
+    /// page than the one that was saved is a bookmark that lies about where
+    /// it goes, so a record is only made for an address that fits whole.
+    pub fn new(url_bytes: &[u8], title_bytes: &[u8], is_pinned: bool) -> Option<Self> {
+        if url_bytes.len() > MAX_URL_LEN {
+            return None;
+        }
         let mut rec = Self::EMPTY;
-        let u = url_bytes.len().min(MAX_URL_LEN);
-        rec.url[..u].copy_from_slice(&url_bytes[..u]);
-        rec.url_len = u;
+        rec.url[..url_bytes.len()].copy_from_slice(url_bytes);
+        rec.url_len = url_bytes.len();
         let t = title_bytes.len().min(MAX_TITLE_LEN);
         rec.title[..t].copy_from_slice(&title_bytes[..t]);
         rec.title_len = t;
         rec.is_pinned = is_pinned;
-        rec
+        Some(rec)
     }
 }
 
@@ -3105,20 +3169,30 @@ pub fn classify_address(raw: &[u8]) -> AddressOutcome {
 /// the browser reported the address as unrecognised. Only input that reads
 /// as a hostname is given a scheme; a bare word (`hello`) still names
 /// nothing the browser can fetch.
-pub fn normalize_address(raw: &[u8], out: &mut [u8]) -> usize {
+///
+/// WHY the result is refused rather than shortened: a truncated address names
+/// a different resource, and the browser would fetch that one while showing
+/// the other. An address that does not fit in `out` is refused whole, so the
+/// person is told the address is too long instead of being sent somewhere
+/// else.
+pub fn normalize_address(raw: &[u8], out: &mut [u8]) -> Option<usize> {
     let trimmed = trim_ascii(raw);
     if !matches!(parse_uri(trimmed).scheme, UriScheme::Unknown) || !looks_like_hostname(trimmed) {
-        let n = trimmed.len().min(out.len());
-        out[..n].copy_from_slice(&trimmed[..n]);
-        return n;
+        if trimmed.len() > out.len() {
+            return None;
+        }
+        out[..trimmed.len()].copy_from_slice(trimmed);
+        return Some(trimmed.len());
     }
 
     const PREFIX: &[u8] = b"https://";
-    let n = PREFIX.len().min(out.len());
-    out[..n].copy_from_slice(&PREFIX[..n]);
-    let take = trimmed.len().min(out.len().saturating_sub(n));
-    out[n..n + take].copy_from_slice(&trimmed[..take]);
-    n + take
+    let total = PREFIX.len().checked_add(trimmed.len())?;
+    if total > out.len() {
+        return None;
+    }
+    out[..PREFIX.len()].copy_from_slice(PREFIX);
+    out[PREFIX.len()..total].copy_from_slice(trimmed);
+    Some(total)
 }
 
 fn trim_ascii(raw: &[u8]) -> &[u8] {
@@ -3863,6 +3937,324 @@ pub fn gateway_reason_line(reason: &[u8], out: &mut [u8]) -> usize {
     std::design::font::ellipsize(&composed[..n], 1, GATEWAY_REASON_WIDTH, out)
 }
 
+// -----------------------------------------------------------------------------
+// Origin-scoped web storage
+// -----------------------------------------------------------------------------
+
+/// The longest origin one storage entry carries.
+pub const MAX_STORAGE_ORIGIN_LEN: usize = 64;
+
+/// The longest key one storage entry carries.
+pub const MAX_STORAGE_KEY_LEN: usize = 32;
+
+/// The longest value one storage entry carries.
+pub const MAX_STORAGE_VALUE_LEN: usize = 128;
+
+/// The most storage entries the browser keeps for every origin at once.
+pub const MAX_STORAGE_ENTRIES: usize = 32;
+
+/// What happened to a storage write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageOutcome {
+    /// The key was written for the first time.
+    Stored,
+    /// The key already held a value for this origin and was replaced.
+    Updated,
+    /// The write was refused: the store is full, or the key or value does not
+    /// fit the entry.
+    Refused,
+}
+
+/// One stored key and value, with the origin that wrote it.
+///
+/// WHY the origin travels with the entry: a page's storage is visible only
+/// to the origin that wrote it. An entry written by one origin is not
+/// reachable through another origin's `localStorage`, which is what the
+/// same-origin rule means for storage.
+#[derive(Debug, Clone, Copy)]
+pub struct StorageEntry {
+    pub origin: [u8; MAX_STORAGE_ORIGIN_LEN],
+    pub origin_len: u8,
+    pub key: [u8; MAX_STORAGE_KEY_LEN],
+    pub key_len: u8,
+    pub value: [u8; MAX_STORAGE_VALUE_LEN],
+    pub value_len: u8,
+    /// Whether the entry belongs to the tab's session storage rather than to
+    /// the origin's lasting storage.
+    pub session: bool,
+}
+
+impl StorageEntry {
+    const EMPTY: Self = Self {
+        origin: [0; MAX_STORAGE_ORIGIN_LEN],
+        origin_len: 0,
+        key: [0; MAX_STORAGE_KEY_LEN],
+        key_len: 0,
+        value: [0; MAX_STORAGE_VALUE_LEN],
+        value_len: 0,
+        session: false,
+    };
+}
+
+/// The bounded storage the browser keeps for the origins it has visited.
+///
+/// WHY the entries are bounded and fixed size: the browser is `#![no_std]`
+/// and never allocates in an event loop, so the store is a fixed array of
+/// fixed-size entries. A write that does not fit is refused rather than
+/// truncated, because a cut value is a different value from the one the page
+/// wrote.
+pub struct WebStorage {
+    entries: [StorageEntry; MAX_STORAGE_ENTRIES],
+    count: usize,
+}
+
+impl WebStorage {
+    pub const fn new() -> Self {
+        Self {
+            entries: [StorageEntry::EMPTY; MAX_STORAGE_ENTRIES],
+            count: 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Forgets every entry. Used when the browser's storage is cleared.
+    pub fn clear(&mut self) {
+        self.entries = [StorageEntry::EMPTY; MAX_STORAGE_ENTRIES];
+        self.count = 0;
+    }
+
+    /// Forgets every session entry, leaving the origins' lasting storage.
+    ///
+    /// WHY the session store dies with the tab: a session store belongs to
+    /// the browsing session, not to the origin, so closing a tab drops it
+    /// and the origin's own storage stays.
+    pub fn clear_sessions(&mut self) {
+        let mut index = 0usize;
+        while index < self.count {
+            if self.entries[index].session {
+                for position in index..self.count - 1 {
+                    self.entries[position] = self.entries[position + 1];
+                }
+                self.count -= 1;
+                self.entries[self.count] = StorageEntry::EMPTY;
+                continue;
+            }
+            index += 1;
+        }
+    }
+
+    /// Writes `value` under `key` for `origin`.
+    ///
+    /// WHY the origin is part of the write and not of the lookup only: two
+    /// origins may use the same key, and each must see its own value.
+    pub fn set(
+        &mut self,
+        origin: &[u8],
+        key: &[u8],
+        value: &[u8],
+        session: bool,
+    ) -> StorageOutcome {
+        if origin.is_empty() || origin.len() > MAX_STORAGE_ORIGIN_LEN {
+            return StorageOutcome::Refused;
+        }
+        if key.is_empty() || key.len() > MAX_STORAGE_KEY_LEN {
+            return StorageOutcome::Refused;
+        }
+        if value.len() > MAX_STORAGE_VALUE_LEN {
+            return StorageOutcome::Refused;
+        }
+        for index in 0..self.count {
+            let entry = &self.entries[index];
+            if entry.session == session
+                && entry.origin_len as usize == origin.len()
+                && &entry.origin[..entry.origin_len as usize] == origin
+                && entry.key_len as usize == key.len()
+                && &entry.key[..entry.key_len as usize] == key
+            {
+                let mut slot = self.entries[index];
+                slot.value[..value.len()].copy_from_slice(value);
+                slot.value_len = value.len() as u8;
+                self.entries[index] = slot;
+                return StorageOutcome::Updated;
+            }
+        }
+        if self.count >= MAX_STORAGE_ENTRIES {
+            return StorageOutcome::Refused;
+        }
+        let mut entry = StorageEntry::EMPTY;
+        entry.origin[..origin.len()].copy_from_slice(origin);
+        entry.origin_len = origin.len() as u8;
+        entry.key[..key.len()].copy_from_slice(key);
+        entry.key_len = key.len() as u8;
+        entry.value[..value.len()].copy_from_slice(value);
+        entry.value_len = value.len() as u8;
+        entry.session = session;
+        self.entries[self.count] = entry;
+        self.count += 1;
+        StorageOutcome::Stored
+    }
+
+    /// Reads the value `origin` stored under `key`.
+    ///
+    /// WHY the origin is checked here: this is where the same-origin rule
+    /// is enforced. A page that asks for another origin's key gets nothing,
+    /// because the entry it names is not one of this origin's entries.
+    pub fn get(&self, origin: &[u8], key: &[u8], session: bool) -> Option<&[u8]> {
+        for index in 0..self.count {
+            let entry = &self.entries[index];
+            if entry.session == session
+                && entry.origin_len as usize == origin.len()
+                && &entry.origin[..entry.origin_len as usize] == origin
+                && entry.key_len as usize == key.len()
+                && &entry.key[..entry.key_len as usize] == key
+            {
+                return Some(&entry.value[..entry.value_len as usize]);
+            }
+        }
+        None
+    }
+
+    /// Removes the value `origin` stored under `key`, reporting whether an
+    /// entry was removed.
+    pub fn remove(&mut self, origin: &[u8], key: &[u8], session: bool) -> bool {
+        for index in 0..self.count {
+            let entry = &self.entries[index];
+            if entry.session == session
+                && entry.origin_len as usize == origin.len()
+                && &entry.origin[..entry.origin_len as usize] == origin
+                && entry.key_len as usize == key.len()
+                && &entry.key[..entry.key_len as usize] == key
+            {
+                for position in index..self.count - 1 {
+                    self.entries[position] = self.entries[position + 1];
+                }
+                self.count -= 1;
+                self.entries[self.count] = StorageEntry::EMPTY;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Removes every entry `origin` owns in the named store, reporting how
+    /// many were removed.
+    pub fn clear_origin(&mut self, origin: &[u8], session: bool) -> usize {
+        let mut removed = 0usize;
+        let mut index = 0usize;
+        while index < self.count {
+            let entry = &self.entries[index];
+            let mine = entry.session == session
+                && entry.origin_len as usize == origin.len()
+                && &entry.origin[..entry.origin_len as usize] == origin;
+            if mine {
+                for position in index..self.count - 1 {
+                    self.entries[position] = self.entries[position + 1];
+                }
+                self.count -= 1;
+                self.entries[self.count] = StorageEntry::EMPTY;
+                removed += 1;
+                continue;
+            }
+            index += 1;
+        }
+        removed
+    }
+
+    /// How many keys `origin` holds in the named store.
+    pub fn count_for(&self, origin: &[u8], session: bool) -> usize {
+        let mut count = 0usize;
+        for index in 0..self.count {
+            let entry = &self.entries[index];
+            if entry.session == session
+                && entry.origin_len as usize == origin.len()
+                && &entry.origin[..entry.origin_len as usize] == origin
+            {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// The key `origin` holds at `index` in the named store.
+    pub fn key_at(&self, origin: &[u8], session: bool, index: usize) -> Option<&[u8]> {
+        let mut seen = 0usize;
+        for entry in self.entries.iter().take(self.count) {
+            if entry.session == session
+                && entry.origin_len as usize == origin.len()
+                && &entry.origin[..entry.origin_len as usize] == origin
+            {
+                if seen == index {
+                    return Some(&entry.key[..entry.key_len as usize]);
+                }
+                seen += 1;
+            }
+        }
+        None
+    }
+}
+
+/// Writes the origin of `url` into `out` and returns its length.
+///
+/// WHY the origin is scheme, host and port: two pages on the same host but
+/// on different schemes are different origins, and a page on one of them
+/// must not see the other's storage. The port is part of the origin for the
+/// same reason.
+///
+/// WHY a local address has an origin of its own: a document read from the
+/// device's own files is not a page on the web, and its storage must not be
+/// the storage of some site.
+pub fn origin_of(url: &[u8], out: &mut [u8]) -> usize {
+    let parsed = parse_uri(url);
+    let scheme = parsed.scheme.as_str().as_bytes();
+    let mut n = 0usize;
+    let take = scheme.len().min(out.len());
+    out[..take].copy_from_slice(&scheme[..take]);
+    n += take;
+    if n + 3 <= out.len() {
+        out[n] = b':';
+        out[n + 1] = b'/';
+        out[n + 2] = b'/';
+        n += 3;
+    }
+    let take = parsed.host.len().min(out.len().saturating_sub(n));
+    out[n..n + take].copy_from_slice(&parsed.host[..take]);
+    n += take;
+    let default_port = parsed.scheme.default_port();
+    if parsed.port != 0 && parsed.port != default_port {
+        let mut digits = [0u8; 5];
+        let mut len = 0usize;
+        let mut value = parsed.port;
+        if value == 0 {
+            digits[0] = b'0';
+            len = 1;
+        }
+        while value > 0 && len < digits.len() {
+            digits[len] = b'0' + (value % 10) as u8;
+            value /= 10;
+            len += 1;
+        }
+        if n < out.len() {
+            out[n] = b':';
+            n += 1;
+        }
+        for index in (0..len).rev() {
+            if n >= out.len() {
+                break;
+            }
+            out[n] = digits[index];
+            n += 1;
+        }
+    }
+    n
+}
+
 #[cfg(test)]
 mod tests {
     // WHY this is declared here: the crate is `#![no_std]` and aliases the
@@ -3871,6 +4263,73 @@ mod tests {
     extern crate std;
 
     use super::*;
+
+    #[test]
+    fn the_origin_of_an_address_is_its_scheme_host_and_port() {
+        let mut out = [0u8; 64];
+        let len = origin_of(b"https://example.test/page?x=1", &mut out);
+        assert_eq!(&out[..len], b"https://example.test");
+
+        // A different scheme on the same host is a different origin.
+        let len = origin_of(b"http://example.test/page", &mut out);
+        assert_eq!(&out[..len], b"http://example.test");
+
+        // A port that is not the scheme's default is part of the origin.
+        let len = origin_of(b"https://example.test:8443/page", &mut out);
+        assert_eq!(&out[..len], b"https://example.test:8443");
+
+        // A port that is the scheme's default is not.
+        let len = origin_of(b"https://example.test:443/page", &mut out);
+        assert_eq!(&out[..len], b"https://example.test");
+    }
+
+    #[test]
+    fn a_storage_entry_is_only_reachable_by_the_origin_that_wrote_it() {
+        let mut storage = WebStorage::new();
+        assert_eq!(
+            storage.set(b"https://one.test", b"k", b"v", false),
+            StorageOutcome::Stored
+        );
+        assert_eq!(
+            storage.set(b"https://one.test", b"k", b"w", false),
+            StorageOutcome::Updated
+        );
+        assert_eq!(storage.get(b"https://one.test", b"k", false), Some(&b"w"[..]));
+        assert_eq!(
+            storage.get(b"https://two.test", b"k", false),
+            None,
+            "another origin must not read this origin's entry"
+        );
+        assert_eq!(storage.count_for(b"https://one.test", false), 1);
+        assert_eq!(storage.count_for(b"https://two.test", false), 0);
+    }
+
+    #[test]
+    fn the_session_store_is_dropped_and_the_origins_store_is_kept() {
+        let mut storage = WebStorage::new();
+        storage.set(b"https://one.test", b"lasting", b"1", false);
+        storage.set(b"https://one.test", b"tab", b"2", true);
+        assert_eq!(storage.len(), 2);
+        storage.clear_sessions();
+        assert_eq!(storage.len(), 1);
+        assert_eq!(storage.get(b"https://one.test", b"lasting", false), Some(&b"1"[..]));
+        assert_eq!(storage.get(b"https://one.test", b"tab", true), None);
+    }
+
+    #[test]
+    fn a_value_that_does_not_fit_is_refused_rather_than_cut() {
+        let mut storage = WebStorage::new();
+        let long = [b'x'; MAX_STORAGE_VALUE_LEN + 1];
+        assert_eq!(
+            storage.set(b"https://one.test", b"k", &long, false),
+            StorageOutcome::Refused
+        );
+        assert_eq!(
+            storage.get(b"https://one.test", b"k", false),
+            None,
+            "a refused write leaves no half-written value behind"
+        );
+    }
 
     #[test]
     fn test_uri_parser_schemes() {
@@ -4276,18 +4735,24 @@ mod tests {
         assert_eq!(store.history_count, 0);
         assert_eq!(store.bookmark_count, 0);
 
-        store.push_history(HistoryRecord::new(b"https://interos.tech", b"InterOS Home", 100));
+        store.push_history(
+            HistoryRecord::new(b"https://interos.tech", b"InterOS Home", 100).expect("visit record"),
+        );
         assert_eq!(store.history_count, 1);
         assert_eq!(&store.history[0].url[..store.history[0].url_len], b"https://interos.tech");
 
         for i in 2..=10 {
-            store.push_history(HistoryRecord::new(b"https://site.org", b"Site", i as u64));
+            store.push_history(
+                HistoryRecord::new(b"https://site.org", b"Site", i as u64).expect("visit record"),
+            );
         }
         assert_eq!(store.history_count, MAX_HISTORY_ENTRIES);
         assert_eq!(store.history[MAX_HISTORY_ENTRIES - 1].visited_at_epoch_secs, 10);
         assert_eq!(store.history[0].visited_at_epoch_secs, 3);
 
-        assert!(store.add_bookmark(BookmarkRecord::new(b"gemini://docs", b"Documentation", true)));
+        assert!(store.add_bookmark(
+            BookmarkRecord::new(b"gemini://docs", b"Documentation", true).expect("bookmark record")
+        ));
         assert_eq!(store.bookmark_count, 1);
         assert!(store.bookmarks[0].is_pinned);
     }
@@ -4986,20 +5451,82 @@ mod tests {
     fn test_a_bare_hostname_is_given_the_https_scheme() {
         let mut out = [0u8; 128];
 
-        let n = normalize_address(b"example.com", &mut out);
+        let n = normalize_address(b"example.com", &mut out).expect("address fits");
         assert_eq!(&out[..n], b"https://example.com");
         assert_eq!(classify_address(&out[..n]), AddressOutcome::Fetchable);
 
-        let n = normalize_address(b"  example.com/path?q=1  ", &mut out);
+        let n = normalize_address(b"  example.com/path?q=1  ", &mut out).expect("address fits");
         assert_eq!(&out[..n], b"https://example.com/path?q=1");
         assert_eq!(parse_uri(&out[..n]).path, b"/path");
 
-        let n = normalize_address(b"http://example.com", &mut out);
+        let n = normalize_address(b"http://example.com", &mut out).expect("address fits");
         assert_eq!(&out[..n], b"http://example.com");
 
-        let n = normalize_address(b"hello", &mut out);
+        let n = normalize_address(b"hello", &mut out).expect("address fits");
         assert_eq!(&out[..n], b"hello");
         assert_eq!(classify_address(&out[..n]), AddressOutcome::NoScheme);
+    }
+
+    /// An address that does not fit is refused, never shortened.
+    ///
+    /// WHY: the browser used to cut an address at the end of its buffer and
+    /// fetch the cut address, so the page on the screen was a different
+    /// resource than the one that was asked for. A refusal leaves the
+    /// address alone and tells the caller the address is too long.
+    #[test]
+    fn an_address_that_does_not_fit_is_refused_rather_than_shortened() {
+        let mut out = [0u8; 64];
+
+        // A long path under a scheme: the whole address is 300 bytes.
+        let mut raw = [b'a'; 300];
+        raw[..8].copy_from_slice(b"https://");
+        assert!(normalize_address(&raw, &mut out).is_none());
+
+        // A bare hostname that only fits once the scheme is added.
+        let mut host = [b'b'; 60];
+        host[1] = b'.';
+        assert!(normalize_address(&host, &mut out).is_none());
+        // The same hostname fits in a buffer that can hold the scheme too.
+        let mut bigger = [0u8; 128];
+        let n = normalize_address(&host, &mut bigger).expect("address fits");
+        assert_eq!(&bigger[..8], b"https://");
+        assert_eq!(&bigger[8..n], &host[..]);
+
+        // The browser's own address capacity holds the longest address the
+        // browser will fetch, so a navigation never has to be cut.
+        let mut full = [0u8; MAX_URL_LEN];
+        let mut exact = [b'c'; MAX_URL_LEN];
+        exact[..8].copy_from_slice(b"https://");
+        let n = normalize_address(&exact, &mut full).expect("address fits exactly");
+        assert_eq!(n, MAX_URL_LEN);
+        assert_eq!(&full[..n], &exact[..]);
+    }
+
+    /// A record that holds an address refuses one it cannot hold whole.
+    ///
+    /// WHY: the tab, the visit list, the visit log and the bookmark record
+    /// all answer "where does this go" to a person reading the screen. A
+    /// record that kept only the first bytes of an address would answer with
+    /// a different page than the one that was fetched.
+    #[test]
+    fn a_record_refuses_an_address_it_cannot_hold_whole() {
+        let long = [b'x'; MAX_URL_LEN + 1];
+
+        let mut tab = Tab::new(1, b"https://example.com", b"Example");
+        assert!(!tab.set_url(&long));
+        assert_eq!(tab.url(), b"https://example.com");
+
+        let before = tab.history_len;
+        tab.push_history(&long);
+        assert_eq!(tab.history_len, before, "an address that does not fit is left out");
+
+        assert!(HistoryRecord::new(&long, b"Title", 1).is_none());
+        assert!(BookmarkRecord::new(&long, b"Title", false).is_none());
+        assert!(BookmarkItem::new(b"Title", &long).is_none());
+
+        let mut store = BookmarkStore::new();
+        assert!(!store.add_bookmark(b"Title", &long));
+        assert_eq!(store.len(), 0, "no bookmark was written for an address that did not fit");
     }
 
     /// The reader's scroll extent has to cover the whole document.

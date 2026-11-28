@@ -34,6 +34,70 @@ pub const DEFAULT_STEP_BUDGET: usize = 2000;
 /// first `MAX_LISTENERS` and the rest are refused with `CapacityExceeded`.
 pub const MAX_LISTENERS: usize = 16;
 
+/// Maximum event objects alive at once in one run.
+///
+/// WHY bounded: an event object is handed to a handler, and a handler may
+/// dispatch another event. The runtime keeps the live events in a fixed
+/// stack, and a page that nests deeper than this is refused with
+/// `CapacityExceeded` rather than losing track of an event.
+pub const MAX_EVENTS: usize = 4;
+
+/// Maximum event names one event object carries.
+pub const MAX_EVENT_NAME_LEN: usize = 16;
+
+/// Maximum timers one script run may schedule.
+///
+/// WHY bounded: the timer table is a fixed arena with no heap, so a page
+/// that schedules more than this is refused with `CapacityExceeded` rather
+/// than losing a timer it was told was accepted.
+pub const MAX_TIMERS: usize = 16;
+
+/// The longest delay a timer may ask for.
+///
+/// WHY a bound: a page that asks for a timer years away would keep the
+/// entry for years. The delay is cut to this bound, and the cut is reported
+/// as the delay the timer was given.
+pub const MAX_TIMER_DELAY_MS: u64 = 60_000;
+
+/// One timer a page scheduled and the browser has not run yet.
+///
+/// WHY the function is named rather than numbered: the runtime's function
+/// arena belongs to the run that scheduled the timer. A timer that outlives
+/// its run is entered later through the page's own program, and the name is
+/// how the page's program is asked for that function again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScheduledTimer {
+    pub id: u16,
+    pub function: [u8; 32],
+    pub function_len: u8,
+    pub delay_ms: u64,
+}
+
+/// One timer inside a run.
+#[derive(Debug, Clone, Copy)]
+struct JsTimer {
+    id: u16,
+    fn_id: u8,
+    delay_ms: u64,
+    name: [u8; 32],
+    name_len: u8,
+    cancelled: bool,
+}
+
+/// What one script run left behind.
+///
+/// WHY the timers are reported: a timer with a delay outlives the run that
+/// scheduled it, so the caller has to learn which callbacks are waiting and
+/// how long they asked to wait.
+#[derive(Debug, Clone, Copy)]
+pub struct ScriptRun {
+    pub value: JsValue,
+    pub mutated: bool,
+    pub default_prevented: bool,
+    pub timers: [ScheduledTimer; MAX_TIMERS],
+    pub timer_count: usize,
+}
+
 /// Bounded JavaScript value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsValue {
@@ -45,6 +109,14 @@ pub enum JsValue {
     Element(NodeId),
     Array(u8),
     Function(u8),
+    /// The event object handed to a listener.
+    ///
+    /// WHY an index and not a pointer: the runtime is a fixed arena, so an
+    /// event is a slot in the event stack and the value names the slot.
+    Event(u8),
+    /// The page's own storage: zero for the origin's lasting storage, one
+    /// for the tab's session storage.
+    Storage(u8),
 }
 
 impl JsValue {
@@ -67,6 +139,7 @@ impl JsValue {
             JsValue::Undefined => "undefined",
             JsValue::Array(_) => "[array]",
             JsValue::Function(_) => "[function]",
+            JsValue::Event(_) => "[event]",
             _ => "",
         }
     }
@@ -77,7 +150,7 @@ impl JsValue {
             JsValue::Boolean(b) => *b,
             JsValue::Number(n) => *n != 0,
             JsValue::String(_, len) => *len > 0,
-            JsValue::Element(_) | JsValue::Array(_) | JsValue::Function(_) => true,
+            JsValue::Element(_) | JsValue::Array(_) | JsValue::Function(_) | JsValue::Event(_) | JsValue::Storage(_) => true,
         }
     }
 
@@ -96,7 +169,7 @@ impl JsValue {
                 let s = core::str::from_utf8(&buf[..*len as usize]).unwrap_or("");
                 parse_i64(s.trim()).unwrap_or(0)
             }
-            JsValue::Element(_) | JsValue::Array(_) | JsValue::Function(_) => 0,
+            JsValue::Element(_) | JsValue::Array(_) | JsValue::Function(_) | JsValue::Event(_) | JsValue::Storage(_) => 0,
         }
     }
 }
@@ -1173,6 +1246,37 @@ struct JsListener {
     event: [u8; 16],
     event_len: u8,
     fn_id: u8,
+    /// Whether this listener takes part in the capture phase.
+    ///
+    /// WHY it is stored and not derived: `addEventListener` names the phase
+    /// when the listener is registered, and the phase decides whether the
+    /// listener runs while the event travels down to the target or while it
+    /// travels back up.
+    capture: bool,
+}
+
+/// The state one live event carries while it is being dispatched.
+///
+/// WHY this is a table and not a field: a handler may dispatch another
+/// event, so the events in flight are a stack. Each slot says whether the
+/// event has been stopped and whether its default action was prevented.
+#[derive(Debug, Clone, Copy)]
+struct JsEventState {
+    name: [u8; MAX_EVENT_NAME_LEN],
+    name_len: u8,
+    propagation_stopped: bool,
+    immediate_stopped: bool,
+    default_prevented: bool,
+}
+
+impl JsEventState {
+    const EMPTY: Self = Self {
+        name: [0; MAX_EVENT_NAME_LEN],
+        name_len: 0,
+        propagation_stopped: false,
+        immediate_stopped: false,
+        default_prevented: false,
+    };
 }
 
 /// Runtime Execution Environment.
@@ -1186,6 +1290,23 @@ pub struct JsRuntime<'a> {
     function_count: usize,
     listeners: [JsListener; MAX_LISTENERS],
     listener_count: usize,
+    events: [JsEventState; MAX_EVENTS],
+    event_depth: usize,
+    /// The timers this run scheduled.
+    timers: [JsTimer; MAX_TIMERS],
+    timer_count: usize,
+    next_timer_id: u16,
+    /// The storage the page's scripts may reach, when the browser attached
+    /// one.
+    ///
+    /// WHY it is optional: a runtime with no storage attached has no
+    /// `localStorage` at all, and a page that uses one is told the store is
+    /// unavailable rather than being handed an empty store that looks like a
+    /// store that lost its contents.
+    storage: Option<&'a mut crate::WebStorage>,
+    /// The origin the page's storage belongs to.
+    origin: [u8; crate::MAX_STORAGE_ORIGIN_LEN],
+    origin_len: u8,
     call_depth: usize,
     dom: &'a mut Dom,
     remaining_steps: usize,
@@ -1217,8 +1338,24 @@ impl<'a> JsRuntime<'a> {
                 event: [0; 16],
                 event_len: 0,
                 fn_id: 0,
+                capture: false,
             }; MAX_LISTENERS],
             listener_count: 0,
+            events: [JsEventState::EMPTY; MAX_EVENTS],
+            event_depth: 0,
+            timers: [JsTimer {
+                id: 0,
+                fn_id: 0,
+                delay_ms: 0,
+                name: [0; 32],
+                name_len: 0,
+                cancelled: false,
+            }; MAX_TIMERS],
+            timer_count: 0,
+            next_timer_id: 1,
+            storage: None,
+            origin: [0; crate::MAX_STORAGE_ORIGIN_LEN],
+            origin_len: 0,
             call_depth: 0,
             dom,
             remaining_steps: step_budget,
@@ -1228,6 +1365,176 @@ impl<'a> JsRuntime<'a> {
 
     pub fn dom_mutated(&self) -> bool {
         self.mutated
+    }
+
+    /// Builds a runtime whose page may reach `storage` under `origin`.
+    ///
+    /// WHY the origin travels with the storage: the page's scripts are only
+    /// given the entries their own origin wrote. The runtime never learns
+    /// another origin's name, so a page cannot ask for one.
+    pub fn with_storage(
+        dom: &'a mut Dom,
+        step_budget: usize,
+        storage: &'a mut crate::WebStorage,
+        origin: &[u8],
+    ) -> Self {
+        let mut runtime = Self::new(dom, step_budget);
+        let nlen = origin.len().min(crate::MAX_STORAGE_ORIGIN_LEN);
+        runtime.origin[..nlen].copy_from_slice(&origin[..nlen]);
+        runtime.origin_len = nlen as u8;
+        runtime.storage = Some(storage);
+        runtime
+    }
+
+    /// The origin the page's storage belongs to.
+    fn storage_origin(&self) -> &[u8] {
+        &self.origin[..self.origin_len as usize]
+    }
+
+    /// Records a timer the page asked for and returns its id.
+    ///
+    /// WHY a callback without a name is refused: the timer outlives this
+    /// run, and the page's program is the only way back to the function. A
+    /// callback the program cannot name could never be entered, so accepting
+    /// it would be accepting a timer that cannot fire.
+    fn schedule_timer(&mut self, handler: u8, delay_ms: u64) -> Result<JsValue, JsError> {
+        let handler = handler as usize;
+        if handler >= self.function_count {
+            return Err(JsError::ReferenceError);
+        }
+        let definition = self.functions[handler];
+        if definition.name_len == 0 {
+            return Err(JsError::UnsupportedSyntax(
+                "a timer callback must be a named function",
+            ));
+        }
+        if self.timer_count >= MAX_TIMERS {
+            return Err(JsError::CapacityExceeded);
+        }
+        let id = self.next_timer_id;
+        self.next_timer_id = self.next_timer_id.wrapping_add(1);
+        let mut name = [0u8; 32];
+        name[..definition.name_len as usize]
+            .copy_from_slice(&definition.name[..definition.name_len as usize]);
+        self.timers[self.timer_count] = JsTimer {
+            id,
+            fn_id: handler as u8,
+            delay_ms,
+            name,
+            name_len: definition.name_len,
+            cancelled: false,
+        };
+        self.timer_count += 1;
+        Ok(JsValue::Number(id as i64))
+    }
+
+    /// Removes the timer with this id.
+    fn cancel_timer(&mut self, id: u16) {
+        let mut index = 0usize;
+        while index < self.timer_count {
+            if self.timers[index].id == id {
+                for position in index..self.timer_count - 1 {
+                    self.timers[position] = self.timers[position + 1];
+                }
+                self.timer_count -= 1;
+                return;
+            }
+            index += 1;
+        }
+    }
+
+    /// Runs the timers whose delay has passed, in the order they were
+    /// scheduled, and returns how many ran.
+    ///
+    /// WHY only the timers whose delay has passed: a timer that asked to wait
+    /// is still waiting, and running it early would be a lie about when the
+    /// page's own code was entered.
+    fn fire_ready_timers(&mut self, parser: &Parser) -> Result<usize, JsError> {
+        let mut fired = 0usize;
+        while fired < MAX_TIMERS {
+            let mut found = None;
+            for index in 0..self.timer_count {
+                let timer = self.timers[index];
+                if !timer.cancelled && timer.delay_ms == 0 {
+                    found = Some(index);
+                    break;
+                }
+            }
+            let Some(index) = found else {
+                break;
+            };
+            let timer = self.timers[index];
+            for position in index..self.timer_count - 1 {
+                self.timers[position] = self.timers[position + 1];
+            }
+            self.timer_count -= 1;
+            self.invoke_function(parser, timer.fn_id, &[])?;
+            fired += 1;
+        }
+        Ok(fired)
+    }
+
+    /// The timers this run left waiting, with the delay each asked for.
+    fn pending_timers(&self) -> ([ScheduledTimer; MAX_TIMERS], usize) {
+        let mut out = [ScheduledTimer::default(); MAX_TIMERS];
+        let mut count = 0usize;
+        for index in 0..self.timer_count {
+            let timer = self.timers[index];
+            if timer.cancelled {
+                continue;
+            }
+            let mut entry = ScheduledTimer::default();
+            entry.id = timer.id;
+            entry.function[..timer.name_len as usize]
+                .copy_from_slice(&timer.name[..timer.name_len as usize]);
+            entry.function_len = timer.name_len;
+            entry.delay_ms = timer.delay_ms;
+            out[count] = entry;
+            count += 1;
+        }
+        (out, count)
+    }
+
+    /// Defines the program's functions without running its other statements.
+    ///
+    /// WHY this exists: a timer callback has to outlive the run that
+    /// scheduled it, and the runtime's function arena does not. The page's
+    /// program is parsed again and only its function declarations are
+    /// evaluated, so the callback can be entered later without repeating the
+    /// page's top-level work.
+    fn eval_declarations(&mut self, parser: &Parser, root: usize) -> Result<(), JsError> {
+        let Some(node) = parser.nodes.get(root) else {
+            return Err(JsError::UnexpectedToken);
+        };
+        let Some(StmtKind::Block {
+            stmts_start,
+            stmts_count,
+        }) = node.stmt.as_ref()
+        else {
+            return Err(JsError::UnexpectedToken);
+        };
+        for index in 0..*stmts_count {
+            let stmt_id = parser.stmts_pool[stmts_start + index];
+            let Some(stmt_node) = parser.nodes.get(stmt_id) else {
+                continue;
+            };
+            if matches!(stmt_node.stmt, Some(StmtKind::FunctionDecl { .. })) {
+                self.eval_stmt(parser, stmt_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The id of the function this run defined under this name.
+    fn function_by_name(&self, name: &[u8]) -> Option<u8> {
+        for index in 0..self.function_count {
+            let definition = &self.functions[index];
+            let len = definition.name_len as usize;
+            if len == name.len() && &definition.name[..len] == name {
+                return Some(index as u8);
+            }
+        }
+        None
     }
 
     fn tick_step(&mut self) -> Result<(), JsError> {
@@ -1413,6 +1720,18 @@ impl<'a> JsRuntime<'a> {
                     // Document root sentinel
                     return Ok(JsValue::Element(self.dom.root()));
                 }
+                // WHY the storage globals are only there when a store is
+                // attached: a page that asks for storage the browser did not
+                // give it is told the store is missing, rather than being
+                // handed an empty one that reads like a store that lost
+                // everything.
+                if slice == b"localStorage" || slice == b"sessionStorage" {
+                    return if self.storage.is_some() {
+                        Ok(JsValue::Storage(u8::from(slice == b"sessionStorage")))
+                    } else {
+                        Ok(JsValue::Undefined)
+                    };
+                }
                 self.get_var(slice).ok_or(JsError::ReferenceError)
             }
             ExprKind::Unary { op, expr } => {
@@ -1493,6 +1812,31 @@ impl<'a> JsRuntime<'a> {
                 let prop_slice = &prop[..*prop_len as usize];
                 match obj {
                     JsValue::Element(node_id) => self.get_element_prop(node_id, prop_slice),
+                    JsValue::Event(index) => {
+                        let Some(state) = self.events.get(index as usize) else {
+                            return Err(JsError::ReferenceError);
+                        };
+                        match prop_slice {
+                            b"type" => Ok(JsValue::string_from_slice(
+                                &state.name[..state.name_len as usize],
+                            )),
+                            b"defaultPrevented" => Ok(JsValue::Boolean(state.default_prevented)),
+                            b"cancelBubble" => Ok(JsValue::Boolean(state.propagation_stopped)),
+                            _ => Err(JsError::UnsupportedSyntax("unsupported event property")),
+                        }
+                    }
+                    JsValue::Storage(store) => {
+                        let session = store == 1;
+                        let Some(storage) = self.storage.as_ref() else {
+                            return Err(JsError::UnsupportedSyntax("storage is not available"));
+                        };
+                        match prop_slice {
+                            b"length" => Ok(JsValue::Number(
+                                storage.count_for(self.storage_origin(), session) as i64,
+                            )),
+                            _ => Err(JsError::UnsupportedSyntax("unsupported storage property")),
+                        }
+                    }
                     JsValue::Array(aid) => {
                         if prop_slice == b"length" {
                             let aid_usize = aid as usize;
@@ -1522,6 +1866,60 @@ impl<'a> JsRuntime<'a> {
             } => {
                 let callee_node = parser.nodes.get(*callee).ok_or(JsError::UnexpectedToken)?;
                 match callee_node.expr.as_ref() {
+                    Some(ExprKind::Ident(name, nlen)) => {
+                        let global = &name[..*nlen as usize];
+                        // Method: setTimeout(handler, delay)
+                        //
+                        // WHY the callback is named: the runtime's function
+                        // arena belongs to this run, and a timer that outlives
+                        // the run is entered later through the page's own
+                        // program, where the name is how that program is
+                        // asked for the function again.
+                        if global == b"setTimeout" {
+                            if *args_count < 1 {
+                                return Err(JsError::TypeError);
+                            }
+                            let handler_id = parser.args_pool[*args_start];
+                            let handler_val = self.eval_expr(parser, handler_id)?;
+                            let JsValue::Function(handler) = handler_val else {
+                                return Err(JsError::TypeError);
+                            };
+                            let delay = if *args_count >= 2 {
+                                let delay_id = parser.args_pool[*args_start + 1];
+                                let delay_val = self.eval_expr(parser, delay_id)?;
+                                delay_val.to_number()
+                            } else {
+                                0
+                            };
+                            let delay = if delay < 0 {
+                                0
+                            } else {
+                                delay.min(MAX_TIMER_DELAY_MS as i64) as u64
+                            };
+                            return self.schedule_timer(handler, delay);
+                        }
+                        // Method: clearTimeout(id)
+                        //
+                        // WHY a cancelled timer is removed rather than left
+                        // behind: a cancelled timer that later ran would be a
+                        // callback the page was told would not run.
+                        if global == b"clearTimeout" {
+                            if *args_count < 1 {
+                                return Err(JsError::TypeError);
+                            }
+                            let id_id = parser.args_pool[*args_start];
+                            let id_val = self.eval_expr(parser, id_id)?;
+                            let id = id_val.to_number();
+                            if id < 0 {
+                                return Ok(JsValue::Undefined);
+                            }
+                            self.cancel_timer(id as u16);
+                            return Ok(JsValue::Undefined);
+                        }
+                    }
+                    _ => {}
+                }
+                match callee_node.expr.as_ref() {
                     Some(ExprKind::Member {
                         object,
                         prop,
@@ -1529,6 +1927,139 @@ impl<'a> JsRuntime<'a> {
                     }) => {
                         let obj = self.eval_expr(parser, *object)?;
                         let method = &prop[..*prop_len as usize];
+
+                        // Method: event.stopPropagation()
+                        // Method: event.preventDefault()
+                        // Method: event.stopImmediatePropagation()
+                        //
+                        // WHY these are handled first: the event object is not
+                        // an element, and a handler that calls
+                        // `stopPropagation()` is asking the dispatch to stop
+                        // travelling -- a request the runtime has to answer
+                        // rather than pass on.
+                        if let JsValue::Event(index) = obj {
+                            match method {
+                                b"stopPropagation" => {
+                                    if let Some(state) = self.events.get_mut(index as usize) {
+                                        state.propagation_stopped = true;
+                                    }
+                                    return Ok(JsValue::Undefined);
+                                }
+                                b"stopImmediatePropagation" => {
+                                    if let Some(state) = self.events.get_mut(index as usize) {
+                                        state.propagation_stopped = true;
+                                        state.immediate_stopped = true;
+                                    }
+                                    return Ok(JsValue::Undefined);
+                                }
+                                b"preventDefault" => {
+                                    if let Some(state) = self.events.get_mut(index as usize) {
+                                        state.default_prevented = true;
+                                    }
+                                    return Ok(JsValue::Undefined);
+                                }
+                                _ => return Err(JsError::UnsupportedSyntax("unsupported event method")),
+                            }
+                        }
+
+                        // Method: localStorage.setItem(key, value)
+                        // Method: localStorage.getItem(key)
+                        // Method: localStorage.removeItem(key)
+                        // Method: localStorage.clear()
+                        // Method: localStorage.key(index)
+                        //
+                        // WHY the store is the page's own: the runtime holds
+                        // the origin the page was served from and asks the
+                        // store for that origin's entries, so a page cannot
+                        // read or write another origin's storage even by
+                        // naming it.
+                        if let JsValue::Storage(store) = obj {
+                            let session = store == 1;
+                            // WHY the origin is copied out first: the store is
+                            // borrowed from the runtime, and the runtime is
+                            // what evaluates the arguments.
+                            let mut origin = [0u8; crate::MAX_STORAGE_ORIGIN_LEN];
+                            let origin_len = self.origin_len as usize;
+                            origin[..origin_len].copy_from_slice(&self.origin[..origin_len]);
+                            let origin = &origin[..origin_len];
+                            // WHY the arguments are evaluated before the store
+                            // is borrowed: evaluating them needs the runtime,
+                            // and the store is part of the runtime.
+                            let first = if *args_count >= 1 {
+                                let arg_id = parser.args_pool[*args_start];
+                                Some(self.eval_expr(parser, arg_id)?)
+                            } else {
+                                None
+                            };
+                            let second = if *args_count >= 2 {
+                                let arg_id = parser.args_pool[*args_start + 1];
+                                Some(self.eval_expr(parser, arg_id)?)
+                            } else {
+                                None
+                            };
+                            let Some(storage) = self.storage.as_mut() else {
+                                return Err(JsError::UnsupportedSyntax("storage is not available"));
+                            };
+                            match method {
+                                b"setItem" => {
+                                    let (Some(key), Some(value)) = (first, second) else {
+                                        return Err(JsError::TypeError);
+                                    };
+                                    let outcome = storage.set(
+                                        origin,
+                                        key.as_str().as_bytes(),
+                                        value.as_str().as_bytes(),
+                                        session,
+                                    );
+                                    if outcome == crate::StorageOutcome::Refused {
+                                        return Err(JsError::CapacityExceeded);
+                                    }
+                                    return Ok(JsValue::Undefined);
+                                }
+                                b"getItem" => {
+                                    let Some(key) = first else {
+                                        return Err(JsError::TypeError);
+                                    };
+                                    return Ok(match storage.get(
+                                        origin,
+                                        key.as_str().as_bytes(),
+                                        session,
+                                    ) {
+                                        Some(value) => JsValue::string_from_slice(value),
+                                        None => JsValue::Null,
+                                    });
+                                }
+                                b"removeItem" => {
+                                    let Some(key) = first else {
+                                        return Err(JsError::TypeError);
+                                    };
+                                    storage.remove(origin, key.as_str().as_bytes(), session);
+                                    return Ok(JsValue::Undefined);
+                                }
+                                b"clear" => {
+                                    storage.clear_origin(origin, session);
+                                    return Ok(JsValue::Undefined);
+                                }
+                                b"key" => {
+                                    let Some(index) = first else {
+                                        return Err(JsError::TypeError);
+                                    };
+                                    let index = index.to_number();
+                                    if index < 0 {
+                                        return Ok(JsValue::Null);
+                                    }
+                                    return Ok(match storage.key_at(origin, session, index as usize) {
+                                        Some(key) => JsValue::string_from_slice(key),
+                                        None => JsValue::Null,
+                                    });
+                                }
+                                _ => {
+                                    return Err(JsError::UnsupportedSyntax(
+                                        "unsupported storage method",
+                                    ))
+                                }
+                            }
+                        }
 
                         // Method: document.getElementById(id_str)
                         if method == b"getElementById" && *args_count >= 1 {
@@ -1635,10 +2166,14 @@ impl<'a> JsRuntime<'a> {
                             }
                         }
 
-                        // Method: element.addEventListener(event, handler)
+                        // Method: element.addEventListener(event, handler, capture)
                         // Registers a function-valued handler for a named event
                         // on this element. The handler runs when the runtime
-                        // dispatches that event (see `dispatch_event`).
+                        // dispatches that event (see `dispatch_event`). The third
+                        // argument names the phase: a true value puts the
+                        // listener in the capture phase, which runs while the
+                        // event travels down to the target instead of back up
+                        // from it.
                         if method == b"addEventListener" && *args_count >= 2 {
                             let node = match obj {
                                 JsValue::Element(n) => n,
@@ -1653,6 +2188,13 @@ impl<'a> JsRuntime<'a> {
                                 JsValue::Function(f) => f,
                                 _ => return Err(JsError::TypeError),
                             };
+                            let capture = if *args_count >= 3 {
+                                let cap_id = parser.args_pool[*args_start + 2];
+                                let cap_val = self.eval_expr(parser, cap_id)?;
+                                cap_val.to_bool()
+                            } else {
+                                false
+                            };
                             if self.listener_count >= MAX_LISTENERS {
                                 return Err(JsError::CapacityExceeded);
                             }
@@ -1664,15 +2206,17 @@ impl<'a> JsRuntime<'a> {
                                 event,
                                 event_len: elen as u8,
                                 fn_id: handler,
+                                capture,
                             };
                             self.listener_count += 1;
                             return Ok(JsValue::Undefined);
                         }
 
-                        // Method: element.removeEventListener(event, handler)
+                        // Method: element.removeEventListener(event, handler, capture)
                         // Removes the first listener matching this node, event
-                        // name, and function id (the identity addEventListener
-                        // keys on). A no-op when none is registered.
+                        // name, function id and phase (the identity
+                        // addEventListener keys on). A no-op when none is
+                        // registered.
                         if method == b"removeEventListener" && *args_count >= 2 {
                             let node = match obj {
                                 JsValue::Element(n) => n,
@@ -1687,6 +2231,13 @@ impl<'a> JsRuntime<'a> {
                                 JsValue::Function(f) => f,
                                 _ => return Err(JsError::TypeError),
                             };
+                            let capture = if *args_count >= 3 {
+                                let cap_id = parser.args_pool[*args_start + 2];
+                                let cap_val = self.eval_expr(parser, cap_id)?;
+                                cap_val.to_bool()
+                            } else {
+                                false
+                            };
                             let mut event = [0u8; 16];
                             let elen = ev_bytes.len().min(event.len());
                             event[..elen].copy_from_slice(&ev_bytes[..elen]);
@@ -1698,6 +2249,7 @@ impl<'a> JsRuntime<'a> {
                                     && l.event_len == elen
                                     && &l.event[..elen as usize] == &event[..elen as usize]
                                     && l.fn_id == handler
+                                    && l.capture == capture
                                 {
                                     let mut j = i;
                                     while j + 1 < self.listener_count {
@@ -1710,6 +2262,7 @@ impl<'a> JsRuntime<'a> {
                                         event: [0; 16],
                                         event_len: 0,
                                         fn_id: 0,
+                                        capture: false,
                                     };
                                     break;
                                 }
@@ -1721,6 +2274,14 @@ impl<'a> JsRuntime<'a> {
                         // Method: console.log(...)
                         if method == b"log" {
                             return Ok(JsValue::Undefined);
+                        }
+
+                        // WHY a method on nothing is a type error: a page that
+                        // asks for a store the browser did not give it holds
+                        // `undefined`, and calling a method on it is a type
+                        // error rather than an unknown method.
+                        if matches!(obj, JsValue::Undefined | JsValue::Null) {
+                            return Err(JsError::TypeError);
                         }
 
                         Err(JsError::UnsupportedSyntax("unsupported object method"))
@@ -1834,12 +2395,21 @@ impl<'a> JsRuntime<'a> {
     }
 
     /// Dispatches `event` to every listener registered on `document` for that name.
-    fn dispatch_event(&mut self, parser: &Parser, event: &[u8]) -> Result<(), JsError> {
+    ///
+    /// Returns whether the event's default action was prevented.
+    fn dispatch_event(&mut self, parser: &Parser, event: &[u8]) -> Result<bool, JsError> {
         let root = self.dom.root();
         self.dispatch_event_on(parser, root, event)
     }
 
     /// Dispatches `event` to every listener registered on `target` for that name.
+    ///
+    /// The dispatch follows the DOM event path (DOM Standard §2.9): the
+    /// capture phase runs from the root down to the target's parent, the
+    /// target itself runs its listeners in registration order, and the bubble
+    /// phase runs from the target's parent back up to the root. A listener
+    /// registered with a true third argument belongs to the capture phase;
+    /// every other listener belongs to the bubble phase.
     ///
     /// The matching function ids are gathered first so the mutable borrow
     /// taken by [`JsRuntime::invoke_function`] does not overlap the listener
@@ -1850,12 +2420,9 @@ impl<'a> JsRuntime<'a> {
         parser: &Parser,
         target: NodeId,
         event: &[u8],
-    ) -> Result<(), JsError> {
-        // Bubble phase (DOM Standard §2.9): the event runs on the target and then
-        // on each ancestor up to the document root, so a listener on an ancestor
-        // fires for an event dispatched on a descendant (event delegation). The
-        // path is collected first so a handler that mutates the tree cannot change
-        // it mid-dispatch.
+    ) -> Result<bool, JsError> {
+        // The path is collected first so a handler that mutates the tree cannot
+        // change it mid-dispatch.
         let mut path = [NO_NODE; 64];
         let mut depth = 0usize;
         let root = self.dom.root();
@@ -1877,25 +2444,120 @@ impl<'a> JsRuntime<'a> {
             }
             cur = self.dom.parent(nid);
         }
-        for i in 0..depth {
-            let node = path[i];
+        if depth == 0 {
+            return Ok(false);
+        }
+
+        // The event object handed to every handler. It lives in the runtime's
+        // event stack while the dispatch runs, so a handler that dispatches
+        // another event gets its own object.
+        let event_value = self.begin_event(event)?;
+
+        // The nodes the event visits, in the order the DOM visits them: the
+        // root first for the capture phase, then the target, then the target's
+        // parent upwards for the bubble phase.
+        let mut nodes = [NO_NODE; 64];
+        let mut node_count = 0usize;
+        // Capture phase: the root down to the target's parent.
+        for i in (1..depth).rev() {
+            if node_count < nodes.len() {
+                nodes[node_count] = path[i];
+                node_count += 1;
+            }
+        }
+        // The target.
+        if node_count < nodes.len() {
+            nodes[node_count] = path[0];
+            node_count += 1;
+        }
+        // Bubble phase: the target's parent up to the root.
+        for i in 1..depth {
+            if node_count < nodes.len() {
+                nodes[node_count] = path[i];
+                node_count += 1;
+            }
+        }
+
+        for (position, node) in nodes[..node_count].iter().enumerate() {
+            let is_target = position + 1 == depth && *node == path[0];
+            let in_capture_phase = position + 1 < depth;
             let mut ids = [0u8; MAX_LISTENERS];
             let mut count = 0usize;
             for j in 0..self.listener_count {
                 let listener = self.listeners[j];
                 let len = listener.event_len as usize;
-                if listener.node == node && len == event.len() && &listener.event[..len] == event {
-                    if count < ids.len() {
+                if listener.node == *node && len == event.len() && &listener.event[..len] == event {
+                    // A listener belongs to the capture phase only if it asked
+                    // for it; the target runs both kinds, in the order they
+                    // were registered.
+                    let takes_part = listener.capture == in_capture_phase || is_target;
+                    if takes_part && count < ids.len() {
                         ids[count] = listener.fn_id;
                         count += 1;
                     }
                 }
             }
             for k in 0..count {
-                self.invoke_function(parser, ids[k], &[])?;
+                self.invoke_function(parser, ids[k], &[event_value])?;
+                if self.event_immediate_stopped(event_value) {
+                    break;
+                }
+            }
+            if self.event_propagation_stopped(event_value) {
+                break;
             }
         }
-        Ok(())
+
+        let prevented = self.event_default_prevented(event_value);
+        self.end_event();
+        Ok(prevented)
+    }
+
+    /// Opens an event object for a dispatch and returns the value a handler
+    /// receives as its event argument.
+    fn begin_event(&mut self, name: &[u8]) -> Result<JsValue, JsError> {
+        if self.event_depth >= MAX_EVENTS {
+            return Err(JsError::CapacityExceeded);
+        }
+        let mut state = JsEventState::EMPTY;
+        let nlen = name.len().min(MAX_EVENT_NAME_LEN);
+        state.name[..nlen].copy_from_slice(&name[..nlen]);
+        state.name_len = nlen as u8;
+        self.events[self.event_depth] = state;
+        self.event_depth += 1;
+        Ok(JsValue::Event((self.event_depth - 1) as u8))
+    }
+
+    /// Closes the innermost event object.
+    fn end_event(&mut self) {
+        if self.event_depth > 0 {
+            self.event_depth -= 1;
+        }
+    }
+
+    fn event_state(&self, value: JsValue) -> Option<&JsEventState> {
+        match value {
+            JsValue::Event(index) => self.events.get(index as usize),
+            _ => None,
+        }
+    }
+
+    fn event_propagation_stopped(&self, value: JsValue) -> bool {
+        self.event_state(value)
+            .map(|state| state.propagation_stopped)
+            .unwrap_or(false)
+    }
+
+    fn event_immediate_stopped(&self, value: JsValue) -> bool {
+        self.event_state(value)
+            .map(|state| state.immediate_stopped)
+            .unwrap_or(false)
+    }
+
+    fn event_default_prevented(&self, value: JsValue) -> bool {
+        self.event_state(value)
+            .map(|state| state.default_prevented)
+            .unwrap_or(false)
     }
 
     fn eval_expr_bin_eq(&self, l: JsValue, r: JsValue) -> bool {
@@ -2127,6 +2789,27 @@ pub fn execute_script_with_mutations(
     Ok((val, runtime.dom_mutated()))
 }
 
+/// Executes a script with the page's storage attached and returns whether the
+/// DOM was mutated.
+///
+/// WHY the origin travels with the store: the script may only reach the
+/// entries its own origin wrote, so the runtime is told which origin the
+/// page was served from and asks the store for that origin alone.
+pub fn execute_script_with_mutations_and_storage(
+    script: &[u8],
+    dom: &mut Dom,
+    step_budget: usize,
+    storage: &mut crate::WebStorage,
+    origin: &[u8],
+) -> Result<(JsValue, bool), JsError> {
+    let lexer = Lexer::new(script);
+    let mut parser = Parser::new(lexer)?;
+    let root = parser.parse_program()?;
+    let mut runtime = JsRuntime::with_storage(dom, step_budget, storage, origin);
+    let val = runtime.eval_program(&parser, root)?;
+    Ok((val, runtime.dom_mutated()))
+}
+
 /// Executes an inline JavaScript snippet against the browser's DOM.
 pub fn execute_script(
     script: &[u8],
@@ -2150,13 +2833,134 @@ pub fn execute_script_with_events(
     step_budget: usize,
     event: &[u8],
 ) -> Result<(JsValue, bool), JsError> {
+    execute_script_with_events_detailed(script, dom, step_budget, event).map(|(v, mutated, _)| (v, mutated))
+}
+
+/// Runs a script, dispatches `event`, and reports what the dispatch decided.
+///
+/// The third value says whether a handler called `preventDefault()`: the
+/// event's default action was called off, and the page that asked for that
+/// has to be told the request was handled rather than defaulted.
+pub fn execute_script_with_events_detailed(
+    script: &[u8],
+    dom: &mut Dom,
+    step_budget: usize,
+    event: &[u8],
+) -> Result<(JsValue, bool, bool), JsError> {
     let lexer = Lexer::new(script);
     let mut parser = Parser::new(lexer)?;
     let root = parser.parse_program()?;
     let mut runtime = JsRuntime::new(dom, step_budget);
     let val = runtime.eval_program(&parser, root)?;
-    runtime.dispatch_event(&parser, event)?;
-    Ok((val, runtime.dom_mutated()))
+    let default_prevented = runtime.dispatch_event(&parser, event)?;
+    runtime.fire_ready_timers(&parser)?;
+    Ok((val, runtime.dom_mutated(), default_prevented))
+}
+
+/// Runs a script, dispatches `event`, and reports what the run left behind.
+///
+/// The timers the run did not fire are reported so the caller can run them
+/// when their delay has passed.
+pub fn execute_script_reporting(
+    script: &[u8],
+    dom: &mut Dom,
+    step_budget: usize,
+    event: &[u8],
+) -> Result<ScriptRun, JsError> {
+    let lexer = Lexer::new(script);
+    let mut parser = Parser::new(lexer)?;
+    let root = parser.parse_program()?;
+    let mut runtime = JsRuntime::new(dom, step_budget);
+    let value = runtime.eval_program(&parser, root)?;
+    let default_prevented = runtime.dispatch_event(&parser, event)?;
+    runtime.fire_ready_timers(&parser)?;
+    let (timers, timer_count) = runtime.pending_timers();
+    Ok(ScriptRun {
+        value,
+        mutated: runtime.dom_mutated(),
+        default_prevented,
+        timers,
+        timer_count,
+    })
+}
+
+/// Runs a script with the page's storage attached and reports what the run
+/// left behind.
+///
+/// WHY the origin travels with the store: the page may only reach the
+/// entries its own origin wrote, so the runtime is told which origin the
+/// page was served from and asks the store for that origin alone.
+pub fn execute_script_reporting_with_storage(
+    script: &[u8],
+    dom: &mut Dom,
+    step_budget: usize,
+    event: &[u8],
+    storage: &mut crate::WebStorage,
+    origin: &[u8],
+) -> Result<ScriptRun, JsError> {
+    let lexer = Lexer::new(script);
+    let mut parser = Parser::new(lexer)?;
+    let root = parser.parse_program()?;
+    let mut runtime = JsRuntime::with_storage(dom, step_budget, storage, origin);
+    let value = runtime.eval_program(&parser, root)?;
+    let default_prevented = runtime.dispatch_event(&parser, event)?;
+    runtime.fire_ready_timers(&parser)?;
+    let (timers, timer_count) = runtime.pending_timers();
+    Ok(ScriptRun {
+        value,
+        mutated: runtime.dom_mutated(),
+        default_prevented,
+        timers,
+        timer_count,
+    })
+}
+
+/// Runs a page's program far enough to define its functions, then calls the
+/// named one.
+///
+/// WHY the definitions are made without running the page's other statements:
+/// a timer callback is entered later, and running the page's top-level work
+/// again would repeat work the page already did. The callback therefore
+/// starts from the page's functions and not from the page's variables, and
+/// a callback that needs a variable the page set up sees it as undefined.
+pub fn execute_named_callback(
+    script: &[u8],
+    dom: &mut Dom,
+    step_budget: usize,
+    name: &[u8],
+) -> Result<bool, JsError> {
+    let lexer = Lexer::new(script);
+    let mut parser = Parser::new(lexer)?;
+    let root = parser.parse_program()?;
+    let mut runtime = JsRuntime::new(dom, step_budget);
+    runtime.eval_declarations(&parser, root)?;
+    let Some(handler) = runtime.function_by_name(name) else {
+        return Err(JsError::ReferenceError);
+    };
+    runtime.invoke_function(&parser, handler, &[])?;
+    Ok(runtime.dom_mutated())
+}
+
+/// Runs a script with the page's storage attached, then dispatches `event`.
+///
+/// WHY the origin travels with the store: the page may only reach the
+/// entries its own origin wrote, so the runtime is told which origin the
+/// page was served from and asks the store for that origin alone.
+pub fn execute_script_with_events_and_storage(
+    script: &[u8],
+    dom: &mut Dom,
+    step_budget: usize,
+    event: &[u8],
+    storage: &mut crate::WebStorage,
+    origin: &[u8],
+) -> Result<(JsValue, bool, bool), JsError> {
+    let lexer = Lexer::new(script);
+    let mut parser = Parser::new(lexer)?;
+    let root = parser.parse_program()?;
+    let mut runtime = JsRuntime::with_storage(dom, step_budget, storage, origin);
+    let val = runtime.eval_program(&parser, root)?;
+    let default_prevented = runtime.dispatch_event(&parser, event)?;
+    Ok((val, runtime.dom_mutated(), default_prevented))
 }
 
 #[cfg(test)]
@@ -2535,5 +3339,297 @@ mod tests {
                 .expect("removeEventListener dispatch succeeds");
         assert!(!mutated, "a removed listener must not run on dispatch");
         assert_eq!(dom.node_count(), before, "a removed listener must not mutate the DOM");
+    }
+
+    /// Runs a script and dispatches `event` on the element with that id.
+    ///
+    /// WHY a helper: the phase rules only show themselves when the event is
+    /// dispatched on a node below the root, so the tests need the element the
+    /// page names rather than the document.
+    fn dispatch_on_element(
+        src: &[u8],
+        dom: &mut Dom,
+        element_id: &[u8],
+        event: &[u8],
+    ) -> Result<(JsValue, bool), JsError> {
+        let lexer = Lexer::new(src);
+        let mut parser = Parser::new(lexer)?;
+        let root = parser.parse_program()?;
+        let mut runtime = JsRuntime::new(dom, 2000);
+        runtime.eval_program(&parser, root)?;
+        let target = runtime
+            .find_element_by_id(element_id)
+            .ok_or(JsError::ReferenceError)?;
+        let prevented = runtime.dispatch_event_on(&parser, target, event)?;
+        let order = runtime.get_var(b"order").unwrap_or(JsValue::Undefined);
+        Ok((order, prevented))
+    }
+
+    #[test]
+    fn a_capture_listener_runs_before_the_target_and_the_bubble_listener() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body><div id=\"outer\"><div id=\"inner\"></div></div></body></html>");
+        let src = b"var order = '-'; \
+                    function outerCapture() { order = order + 'C'; } \
+                    function outerBubble() { order = order + 'B'; } \
+                    function innerHandler() { order = order + 'I'; } \
+                    var outer = document.getElementById('outer'); \
+                    var inner = document.getElementById('inner'); \
+                    outer.addEventListener('click', outerCapture, true); \
+                    outer.addEventListener('click', outerBubble); \
+                    inner.addEventListener('click', innerHandler);";
+        let (order, prevented) =
+            dispatch_on_element(src, &mut dom, b"inner", b"click").expect("dispatch succeeds");
+        assert_eq!(
+            order.as_str(), "-CIB",
+            "the capture phase runs while the event travels down, the target runs next, and the bubble phase runs last"
+        );
+        assert!(!prevented, "a handler that says nothing must not prevent the default");
+    }
+
+    #[test]
+    fn a_capture_listener_that_stops_the_event_keeps_the_target_from_running() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body><div id=\"outer\"><div id=\"inner\"></div></div></body></html>");
+        let src = b"var order = '-'; \
+                    function stopper(e) { order = order + 'S'; e.stopPropagation(); } \
+                    function outerBubble() { order = order + 'B'; } \
+                    function innerHandler() { order = order + 'I'; } \
+                    var outer = document.getElementById('outer'); \
+                    var inner = document.getElementById('inner'); \
+                    outer.addEventListener('click', stopper, true); \
+                    outer.addEventListener('click', outerBubble); \
+                    inner.addEventListener('click', innerHandler);";
+        let (order, prevented) =
+            dispatch_on_element(src, &mut dom, b"inner", b"click").expect("dispatch succeeds");
+        assert_eq!(
+            order.as_str(), "-S",
+            "a stopped event must not reach the target or the bubble phase"
+        );
+        assert!(!prevented);
+    }
+
+    #[test]
+    fn a_handler_that_prevents_the_default_is_reported() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body><button id=\"go\">Go</button></body></html>");
+        let src = b"var order = '-'; \
+                    function onGo(e) { order = order + 'P'; e.preventDefault(); } \
+                    var go = document.getElementById('go'); \
+                    go.addEventListener('click', onGo);";
+        let (order, prevented) =
+            dispatch_on_element(src, &mut dom, b"go", b"click").expect("dispatch succeeds");
+        assert_eq!(order.as_str(), "-P");
+        assert!(
+            prevented,
+            "a handler that called preventDefault must be reported to the caller"
+        );
+    }
+
+    #[test]
+    fn a_handler_receives_the_event_it_was_called_for() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body><button id=\"go\">Go</button></body></html>");
+        let src = b"var order = '-'; \
+                    function onGo(e) { order = order + e.type; } \
+                    var go = document.getElementById('go'); \
+                    go.addEventListener('submit', onGo);";
+        let (order, prevented) =
+            dispatch_on_element(src, &mut dom, b"go", b"submit").expect("dispatch succeeds");
+        assert_eq!(order.as_str(), "-submit", "the handler must receive the event it was called for");
+        assert!(!prevented);
+    }
+
+    #[test]
+    fn a_removed_capture_listener_does_not_run() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body><div id=\"outer\"><div id=\"inner\"></div></div></body></html>");
+        let src = b"var order = '-'; \
+                    function outerCapture() { order = order + 'C'; } \
+                    function innerHandler() { order = order + 'I'; } \
+                    var outer = document.getElementById('outer'); \
+                    var inner = document.getElementById('inner'); \
+                    outer.addEventListener('click', outerCapture, true); \
+                    outer.removeEventListener('click', outerCapture, true); \
+                    inner.addEventListener('click', innerHandler);";
+        let (order, prevented) =
+            dispatch_on_element(src, &mut dom, b"inner", b"click").expect("dispatch succeeds");
+        assert_eq!(
+            order.as_str(), "-I",
+            "a removed capture listener must not run while the event travels down"
+        );
+        assert!(!prevented);
+    }
+
+    /// Runs a script with a storage attached and returns the program's value.
+    fn run_with_storage(
+        src: &[u8],
+        dom: &mut Dom,
+        storage: &mut crate::WebStorage,
+        origin: &[u8],
+    ) -> Result<JsValue, JsError> {
+        let lexer = Lexer::new(src);
+        let mut parser = Parser::new(lexer)?;
+        let root = parser.parse_program()?;
+        let mut runtime = JsRuntime::with_storage(dom, 2000, storage, origin);
+        runtime.eval_program(&parser, root)
+    }
+
+    #[test]
+    fn a_page_reads_back_the_storage_its_own_origin_wrote() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let mut storage = crate::WebStorage::new();
+        let src = b"var missing = localStorage.getItem('absent'); \
+                    localStorage.setItem('name', 'interos'); \
+                    var read = localStorage.getItem('name');";
+        let res = run_with_storage(src, &mut dom, &mut storage, b"https://example.test")
+            .expect("storage script succeeds");
+        assert_eq!(res.as_str(), "interos");
+        assert_eq!(
+            storage.get(b"https://example.test", b"name", false),
+            Some(&b"interos"[..]),
+            "the entry belongs to the origin that wrote it"
+        );
+        assert_eq!(
+            storage.get(b"https://example.test", b"absent", false),
+            None,
+            "a key that was never written has no value"
+        );
+    }
+
+    #[test]
+    fn another_origin_cannot_see_the_entries_of_this_one() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let mut storage = crate::WebStorage::new();
+        let src = b"localStorage.setItem('name', 'interos'); \
+                    localStorage.setItem('shared', 'first');";
+        run_with_storage(src, &mut dom, &mut storage, b"https://one.test").expect("first page writes");
+
+        // A page served from another origin sees an empty store.
+        let mut other_dom = Dom::new();
+        other_dom.parse(b"<html><body></body></html>");
+        let src = b"var seen = localStorage.getItem('shared'); \
+                    var count = localStorage.length; \
+                    (seen == null) && (count == 0);";
+        let res = run_with_storage(
+            src,
+            &mut other_dom,
+            &mut storage,
+            b"https://two.test",
+        )
+        .expect("second page reads");
+        assert_eq!(
+            res.as_str(),
+            "true",
+            "another origin must not see this origin's entries"
+        );
+
+        // The first origin's entry is still there for the first origin.
+        assert_eq!(
+            storage.get(b"https://one.test", b"shared", false),
+            Some(&b"first"[..])
+        );
+    }
+
+    #[test]
+    fn the_session_store_is_not_the_origins_own_store() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let mut storage = crate::WebStorage::new();
+        let src = b"localStorage.setItem('k', 'lasting'); \
+                    sessionStorage.setItem('k', 'tab'); \
+                    var lasting = localStorage.getItem('k'); \
+                    var tab = sessionStorage.getItem('k'); \
+                    lasting + '/' + tab;";
+        let res = run_with_storage(src, &mut dom, &mut storage, b"https://example.test")
+            .expect("storage script succeeds");
+        assert_eq!(
+            res.as_str(),
+            "lasting/tab",
+            "the tab's session store and the origin's store are separate"
+        );
+        assert_eq!(storage.get(b"https://example.test", b"k", true), Some(&b"tab"[..]));
+        assert_eq!(
+            storage.get(b"https://example.test", b"k", false),
+            Some(&b"lasting"[..])
+        );
+    }
+
+    #[test]
+    fn a_page_with_no_storage_attached_is_told_the_store_is_missing() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let src = b"localStorage.setItem('k', 'v');";
+        let err = execute_script(src, &mut dom, 1000).expect_err("storage must not be invented");
+        assert_eq!(
+            err,
+            JsError::TypeError,
+            "a page with no store must fail rather than write into one that does not exist"
+        );
+    }
+
+    #[test]
+    fn a_timer_that_asked_to_wait_is_reported_rather_than_run_early() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let src = b"function later() { var s = document.createElement('p'); s.textContent = 'LATE'; document.body.appendChild(s); } \
+                    setTimeout(later, 250);";
+        let run = execute_script_reporting(src, &mut dom, 2000, b"DOMContentLoaded")
+            .expect("the page runs");
+        assert_eq!(
+            run.timer_count, 1,
+            "the timer that is waiting has to be reported to the caller"
+        );
+        assert_eq!(&run.timers[0].function[..5], b"later");
+        assert_eq!(run.timers[0].delay_ms, 250);
+        assert!(
+            !run.mutated,
+            "a timer that has not come due must not have run the page's code"
+        );
+    }
+
+    #[test]
+    fn a_timer_with_no_delay_runs_after_the_page_has_loaded() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let before = dom.node_count();
+        let src = b"function soon() { var s = document.createElement('p'); s.textContent = 'SOON'; document.body.appendChild(s); } \
+                    setTimeout(soon, 0);";
+        let run = execute_script_reporting(src, &mut dom, 2000, b"DOMContentLoaded")
+            .expect("the page runs");
+        assert_eq!(run.timer_count, 0, "a timer that ran is not one still waiting");
+        assert!(run.mutated, "a timer with no delay runs at the end of the run");
+        assert!(dom.node_count() > before, "the callback built its node");
+    }
+
+    #[test]
+    fn a_cancelled_timer_does_not_run_and_is_not_reported() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let before = dom.node_count();
+        let src = b"function soon() { var s = document.createElement('p'); s.textContent = 'SOON'; document.body.appendChild(s); } \
+                    var id = setTimeout(soon, 0); \
+                    clearTimeout(id);";
+        let run = execute_script_reporting(src, &mut dom, 2000, b"DOMContentLoaded")
+            .expect("the page runs");
+        assert_eq!(run.timer_count, 0);
+        assert!(!run.mutated, "a cancelled timer must not run the page's code");
+        assert_eq!(dom.node_count(), before, "a cancelled timer must not touch the page");
+    }
+
+    #[test]
+    fn a_named_callback_runs_the_pages_function_without_repeating_the_page() {
+        let mut dom = Dom::new();
+        dom.parse(b"<html><body></body></html>");
+        let src = b"var side = 0; \
+                    function later() { var s = document.createElement('p'); s.textContent = 'LATE'; document.body.appendChild(s); } \
+                    side = 1;";
+        let before = dom.node_count();
+        let mutated = execute_named_callback(src, &mut dom, 2000, b"later")
+            .expect("the named callback runs");
+        assert!(mutated, "the callback built its node");
+        assert_eq!(dom.node_count(), before + 2, "the callback added its element and text");
     }
 }

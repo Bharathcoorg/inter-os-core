@@ -29,6 +29,13 @@ pub struct ScriptRunReport {
     pub skipped_external: usize,
     pub truncated: bool,
     pub last_error: Option<crate::js::JsError>,
+    /// The timers the page scheduled that have not run yet.
+    ///
+    /// WHY they are reported: a timer with a delay outlives the run that
+    /// scheduled it, so the caller has to learn which callbacks are waiting
+    /// and how long they asked to wait.
+    pub timers: [crate::js::ScheduledTimer; crate::js::MAX_TIMERS],
+    pub timer_count: usize,
 }
 
 /// Runs a page's inline classic scripts, then dispatches `DOMContentLoaded` to
@@ -42,6 +49,119 @@ pub struct ScriptRunReport {
 /// classic scripts, and inline scripts that exceed [`SCRIPT_BUF_BYTES`] are
 /// refused whole rather than truncated mid-statement.
 pub fn run_page_scripts(dom: &mut Dom) -> ScriptRunReport {
+    run_page_scripts_inner(dom, None, &[])
+}
+
+/// Runs a page's inline scripts with the page's storage attached.
+///
+/// WHY the origin travels with the store: the page may only reach the
+/// entries its own origin wrote, so the runtime is told which origin the
+/// document was served from.
+pub fn run_page_scripts_with_storage(
+    dom: &mut Dom,
+    storage: &mut crate::WebStorage,
+    origin: &[u8],
+) -> ScriptRunReport {
+    run_page_scripts_inner(dom, Some(storage), origin)
+}
+
+/// Runs one script buffer with the store attached, or without one.
+fn run_script_buffer(
+    script: &[u8],
+    dom: &mut Dom,
+    storage: &mut Option<&mut crate::WebStorage>,
+    origin: &[u8],
+) -> Result<crate::js::ScriptRun, crate::js::JsError> {
+    match storage.as_mut() {
+        Some(store) => crate::js::execute_script_reporting_with_storage(
+            script,
+            dom,
+            crate::js::DEFAULT_STEP_BUDGET,
+            b"DOMContentLoaded",
+            &mut *store,
+            origin,
+        ),
+        None => crate::js::execute_script_reporting(
+            script,
+            dom,
+            crate::js::DEFAULT_STEP_BUDGET,
+            b"DOMContentLoaded",
+        ),
+    }
+}
+
+/// Collects the page's inline script text into `buf` and returns its length.
+///
+/// WHY the text is gathered into one buffer: a browser runs all of a page's
+/// classic scripts in one global scope, so a function declared in one script
+/// is visible to the next.
+fn collect_page_scripts(dom: &mut Dom, buf: &mut [u8; SCRIPT_BUF_BYTES]) -> usize {
+    let node_count = dom.node_count();
+    let mut len = 0usize;
+    for id in 0..node_count as NodeId {
+        let nid = id as NodeId;
+        if !(dom.node(nid).is_element() && dom.tag(nid).eq_ignore_ascii_case(b"script")) {
+            continue;
+        }
+        if let Some(kind) = dom.attr(nid, b"type") {
+            if kind.eq_ignore_ascii_case(b"module") {
+                continue;
+            }
+            let is_js = kind.is_empty()
+                || kind.eq_ignore_ascii_case(b"text/javascript")
+                || kind.eq_ignore_ascii_case(b"application/javascript")
+                || kind.eq_ignore_ascii_case(b"text/ecmascript")
+                || kind.eq_ignore_ascii_case(b"application/ecmascript");
+            if !is_js {
+                continue;
+            }
+        }
+        if dom.has_attr(nid, b"src") {
+            continue;
+        }
+        let body = dom.script_body(nid);
+        if body.is_empty() {
+            continue;
+        }
+        let sep = usize::from(len > 0);
+        if sep + body.len() > buf.len().saturating_sub(len) {
+            continue;
+        }
+        if sep > 0 {
+            buf[len] = b'\n';
+            len += 1;
+        }
+        buf[len..len + body.len()].copy_from_slice(body);
+        len += body.len();
+    }
+    len
+}
+
+/// Runs the page's named function, for a timer that came due.
+///
+/// WHY the page's program is parsed again: the timer outlived the run that
+/// scheduled it, and that run's function arena is gone. The page's program
+/// is the only place the function still exists, so it is parsed again and
+/// its functions are defined without running the page's other statements.
+pub fn run_named_callback(dom: &mut Dom, name: &[u8]) -> Result<bool, crate::js::JsError> {
+    let mut buf = [0u8; SCRIPT_BUF_BYTES];
+    let len = collect_page_scripts(dom, &mut buf);
+    if len == 0 {
+        return Err(crate::js::JsError::ReferenceError);
+    }
+    crate::js::execute_named_callback(
+        &buf[..len],
+        dom,
+        crate::js::DEFAULT_STEP_BUDGET,
+        name,
+    )
+}
+
+fn run_page_scripts_inner(
+    dom: &mut Dom,
+    mut storage: Option<&mut crate::WebStorage>,
+    origin: &[u8],
+) -> ScriptRunReport {
     let mut report = ScriptRunReport::default();
     let node_count = dom.node_count();
     let mut scripts: [NodeId; MAX_PAGE_SCRIPTS] = [NO_NODE; MAX_PAGE_SCRIPTS];
@@ -105,15 +225,12 @@ pub fn run_page_scripts(dom: &mut Dom) -> ScriptRunReport {
     if len == 0 {
         return report;
     }
-    match crate::js::execute_script_with_events(
-        &buf[..len],
-        dom,
-        crate::js::DEFAULT_STEP_BUDGET,
-        b"DOMContentLoaded",
-    ) {
-        Ok((_, mutated)) => {
+    match run_script_buffer(&buf[..len], dom, &mut storage, origin) {
+        Ok(run) => {
             report.executed_count = included_count;
-            report.mutated = mutated;
+            report.mutated = run.mutated;
+            report.timers = run.timers;
+            report.timer_count = run.timer_count;
         }
         Err(err) => {
             report.last_error = Some(err);
@@ -135,15 +252,12 @@ pub fn run_page_scripts(dom: &mut Dom) -> ScriptRunReport {
                         continue;
                     }
                     buf[..n].copy_from_slice(body);
-                    match crate::js::execute_script_with_events(
-                        &buf[..n],
-                        dom,
-                        crate::js::DEFAULT_STEP_BUDGET,
-                        b"DOMContentLoaded",
-                    ) {
-                        Ok((_, mutated)) => {
+                    match run_script_buffer(&buf[..n], dom, &mut storage, origin) {
+                        Ok(run) => {
                             report.executed_count += 1;
-                            report.mutated |= mutated;
+                            report.mutated |= run.mutated;
+                            report.timers = run.timers;
+                            report.timer_count = run.timer_count;
                         }
                         Err(e) => {
                             report.last_error = Some(e);
@@ -165,6 +279,12 @@ pub struct NativeFlowEngine {
     scroll_y: i32,
     current_url: [u8; 256],
     current_url_len: usize,
+    /// The storage the documents this engine loads may reach.
+    ///
+    /// WHY the engine keeps its own: a document's storage belongs to the
+    /// origin it was served from, so the store has to outlive a single
+    /// document and sit with the engine that loads them.
+    storage: crate::WebStorage,
     title: [u8; 64],
     title_len: usize,
     status: EngineStatus,
@@ -181,6 +301,7 @@ impl NativeFlowEngine {
             scroll_y: 0,
             current_url: [0u8; 256],
             current_url_len: 0,
+            storage: crate::WebStorage::new(),
             title: [0u8; 64],
             title_len: 0,
             status: EngineStatus::Ready,
@@ -309,9 +430,15 @@ impl BrowserEngine for NativeFlowEngine {
     /// real network pipeline.
     fn load_url(&mut self, url: &str) -> Result<(), &'static str> {
         let bytes = url.as_bytes();
-        let len = bytes.len().min(self.current_url.len());
-        self.current_url[..len].copy_from_slice(&bytes[..len]);
-        self.current_url_len = len;
+        // WHY the address is refused rather than cut: the engine used to keep
+        // the first 256 bytes of a longer address, so the document it showed
+        // was attributed to an address that named a different page. The
+        // address is refused whole, and the caller keeps the page it had.
+        if bytes.len() > self.current_url.len() {
+            return Err("address too long");
+        }
+        self.current_url[..bytes.len()].copy_from_slice(bytes);
+        self.current_url_len = bytes.len();
         // Fail closed: starting a navigation abandons the on-screen document now.
         // If the fetch that follows fails, the viewport must show an empty/Loading
         // state -- never the previous page's DOM/title laid out under the new URL,
@@ -328,9 +455,15 @@ impl BrowserEngine for NativeFlowEngine {
     fn load_html(&mut self, html: &str, base_url: Option<&str>) -> Result<(), &'static str> {
         if let Some(base) = base_url {
             let bytes = base.as_bytes();
-            let len = bytes.len().min(self.current_url.len());
-            self.current_url[..len].copy_from_slice(&bytes[..len]);
-            self.current_url_len = len;
+            // WHY the base address is refused rather than cut: a cut base
+            // address names a different page than the one the document came
+            // from, and every relative link on the page would then resolve
+            // against an address that was never asked for.
+            if bytes.len() > self.current_url.len() {
+                return Err("base address too long");
+            }
+            self.current_url[..bytes.len()].copy_from_slice(bytes);
+            self.current_url_len = bytes.len();
         }
 
         // Extract title from HTML before skipping it in DOM
@@ -348,7 +481,20 @@ impl BrowserEngine for NativeFlowEngine {
         self.dom.parse(html.as_bytes());
         // Scripts run before layout so a page that builds its own content is
         // laid out as it will be seen, not as the bare markup arrived.
-        self.script_report = run_page_scripts(&mut self.dom);
+        //
+        // WHY the origin is taken from the address the document was served
+        // from: the page's storage belongs to that origin, and a document
+        // with no address has no origin and so no storage.
+        let mut origin = [0u8; crate::MAX_STORAGE_ORIGIN_LEN];
+        let origin_len = crate::origin_of(
+            &self.current_url[..self.current_url_len],
+            &mut origin,
+        );
+        self.script_report = run_page_scripts_with_storage(
+            &mut self.dom,
+            &mut self.storage,
+            &origin[..origin_len],
+        );
 
         self.scroll_y = 0;
         self.relayout();

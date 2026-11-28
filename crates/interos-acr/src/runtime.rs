@@ -470,6 +470,20 @@ pub struct DalvikVmState {
     static_fields: Vec<(u16, u32)>,
     /// Classes whose `<clinit>` has already executed in this VM (JVM "initialized").
     initialized_classes: BTreeSet<String>,
+    /// The permissions the APK audit granted this application, by name.
+    ///
+    /// WHY the VM holds them: a capability-bearing service answers only to an
+    /// application that asked for it in its manifest. The names come from the
+    /// audit, never from the application itself, so an application cannot
+    /// declare a permission to itself.
+    pub granted_permissions: BTreeSet<String>,
+    /// The private directory this application owns, e.g. `/data/data/org.example`.
+    ///
+    /// WHY the VM holds it: `Context.getFilesDir()` has to answer with the
+    /// application's OWN directory. A path shared by every application would
+    /// put one application's files where another application could reach
+    /// them.
+    pub private_data_dir: String,
     pub heap_max_bytes: usize,
     pub heap_used_bytes: usize,
     pub gc_trigger_threshold_bytes: usize,
@@ -528,6 +542,27 @@ pub struct MonitorRecord {
     pub recursion_count: u32,
     pub wait_queue: Vec<u64>,
     pub cond_waiters: Vec<u64>,
+}
+
+/// The permission a framework service needs before it answers an application.
+///
+/// WHY the table is here and not inside each service: every service answers
+/// for every application that reaches it, and the question "did this
+/// application ask for this?" is the same question for each of them. Naming
+/// it once keeps a service that is added later from answering an application
+/// that never declared it.
+///
+/// WHY these three: they are the services that stand for a device capability
+/// -- a position, a camera, a microphone. The other surfaces answer nothing
+/// at all (no mixer, no notification service), so there is nothing to
+/// authorize there yet.
+fn required_permission_for(class: &str) -> Option<&'static str> {
+    match class {
+        "android/location/LocationManager" => Some("android.permission.ACCESS_FINE_LOCATION"),
+        "android/camera/CameraManager" => Some("android.permission.CAMERA"),
+        "android/media/AudioRecord" => Some("android.permission.RECORD_AUDIO"),
+        _ => None,
+    }
 }
 
 /// Returns true if a source class descriptor is assignable to target class descriptor.
@@ -798,6 +833,8 @@ impl DalvikVmState {
             content_view_id: None,
             static_fields: Vec::new(),
             initialized_classes: BTreeSet::new(),
+            granted_permissions: BTreeSet::new(),
+            private_data_dir: String::new(),
             heap_max_bytes: DEFAULT_HEAP_MAX_BYTES,
             heap_used_bytes: 0,
             gc_trigger_threshold_bytes: DEFAULT_HEAP_MAX_BYTES * 3 / 4,
@@ -805,6 +842,24 @@ impl DalvikVmState {
             gc_reclaimed_objects: 0,
             gc_total_pause_ticks: 0,
         }
+    }
+
+    /// Records the permissions the APK audit granted this application.
+    ///
+    /// WHY the manager is the only caller that may set this: the set is the
+    /// application's authority, and authority comes from the platform's audit
+    /// of the manifest. An application cannot widen it from inside its own VM.
+    pub fn set_granted_permissions<I: IntoIterator<Item = String>>(&mut self, permissions: I) {
+        self.granted_permissions = permissions.into_iter().collect();
+    }
+
+    /// Records the private directory this application owns.
+    ///
+    /// WHY the manager is the only caller that may set this: the directory is
+    /// the application's identity in the filesystem, and it is derived from
+    /// the package name the manifest declared.
+    pub fn set_private_data_dir(&mut self, dir: String) {
+        self.private_data_dir = dir;
     }
 
     /// Saves the active VM execution context into the current thread state.
@@ -1709,6 +1764,17 @@ impl DalvikVmState {
         // distinct from the fail-closed pure `framework::dispatch` surface.
         if let Some(result) = self.try_dispatch_view_method(dex, class, method_name, arg_registers, arg_values)? {
             return Ok(result);
+        }
+        // WHY the permission is asked before the service answers: the service
+        // is a capability, and the application holds it only if its manifest
+        // asked for it and the audit granted it. An application that never
+        // asked is refused here, so a service that attaches to this platform
+        // later cannot hand its answer to an application that did not ask for
+        // it.
+        if let Some(required) = required_permission_for(class) {
+            if !self.granted_permissions.contains(required) {
+                return Err(self.throw_exception("Ljava/lang/SecurityException;", Some(required)));
+            }
         }
         match class {
             "java/lang/Object" => {
@@ -3778,18 +3844,37 @@ impl DalvikVmState {
                         Ok(sp_id)
                     }
                     "getFilesDir" => {
+                        // WHY the path is made before the object is borrowed:
+                        // the object's payload is filled through a mutable
+                        // borrow of the VM, and the directory it names is read
+                        // from the VM as well.
+                        let path = if self.private_data_dir.is_empty() {
+                            String::from("/data/data/files")
+                        } else {
+                            self.private_data_dir.clone()
+                        };
                         let f_id = self.allocate_object("Ljava/io/File;")?;
                         if let Ok(obj) = self.get_object_mut(f_id) {
-                            obj.payload = ObjectPayload::File { path: String::from("/data/data/files") };
+                            // WHY the application's own directory: the files
+                            // this path names belong to this application alone.
+                            // The generic path is the fallback for a VM that
+                            // was never given an identity, and it says the
+                            // same thing the context-free surface says.
+                            obj.payload = ObjectPayload::File { path };
                         }
                         self.last_return_value = f_id;
                         self.last_return_string = None;
                         Ok(f_id)
                     }
                     "getCacheDir" => {
+                        let path = if self.private_data_dir.is_empty() {
+                            String::from("/data/data/cache")
+                        } else {
+                            alloc::format!("{}/cache", self.private_data_dir)
+                        };
                         let f_id = self.allocate_object("Ljava/io/File;")?;
                         if let Ok(obj) = self.get_object_mut(f_id) {
-                            obj.payload = ObjectPayload::File { path: String::from("/data/data/cache") };
+                            obj.payload = ObjectPayload::File { path };
                         }
                         self.last_return_value = f_id;
                         self.last_return_string = None;

@@ -134,6 +134,170 @@ const STYLESHEET_WINDOW_BYTES: usize = css::MAX_CSS_BYTES + 16 * 1024;
 /// is exactly what the static's lifetime expresses.
 static mut COOKIE_JAR: browser::http::CookieJar = browser::http::CookieJar::new();
 
+/// The storage the pages this browser visits may reach.
+///
+/// WHY a static and not a field of `BrowserApp`: the store outlives a single
+/// navigation -- a site that wrote a value expects to read it back when the
+/// person comes to it again -- and it is larger than the task stack should
+/// carry. Every entry names the origin that wrote it, so a page only ever
+/// sees its own.
+static mut WEB_STORAGE: browser::WebStorage = browser::WebStorage::new();
+
+/// The origin of the page on screen.
+///
+/// WHY a static: the page's scripts run from several places -- the load
+/// path and the inline handler path -- and each of them has to agree on
+/// which origin the page belongs to, or a page could reach another origin's
+/// storage. The origin is published when the address changes and read where
+/// a script runs.
+static mut PAGE_ORIGIN: [u8; browser::MAX_STORAGE_ORIGIN_LEN] =
+    [0; browser::MAX_STORAGE_ORIGIN_LEN];
+
+/// How many bytes of [`PAGE_ORIGIN`] are the origin.
+static mut PAGE_ORIGIN_LEN: usize = 0;
+
+/// Publishes the origin of the address the browser is now on.
+///
+/// WHY the origin rather than the address: the origin is what the same-origin
+/// rule is about. Two pages on the same host but on different schemes are
+/// different origins, and a page on one of them must not see the other's
+/// storage.
+fn publish_page_origin(url: &[u8]) {
+    let mut origin = [0u8; browser::MAX_STORAGE_ORIGIN_LEN];
+    let len = browser::origin_of(url, &mut origin);
+    let slot = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_ORIGIN) };
+    slot[..len].copy_from_slice(&origin[..len]);
+    unsafe {
+        *core::ptr::addr_of_mut!(PAGE_ORIGIN_LEN) = len;
+    }
+}
+
+/// The origin of the page on screen, as the scripts on that page may see it.
+fn page_origin() -> &'static [u8] {
+    unsafe {
+        let len = *core::ptr::addr_of!(PAGE_ORIGIN_LEN);
+        let slot = &*core::ptr::addr_of!(PAGE_ORIGIN);
+        &slot[..len]
+    }
+}
+
+/// One timer the page scheduled that has not run yet.
+#[derive(Clone, Copy)]
+struct PendingTimer {
+    id: u16,
+    function: [u8; 32],
+    function_len: u8,
+    due_ticks: u64,
+}
+
+impl PendingTimer {
+    const EMPTY: Self = Self {
+        id: 0,
+        function: [0; 32],
+        function_len: 0,
+        due_ticks: 0,
+    };
+}
+
+/// The timers the page on screen scheduled and the browser has not run yet.
+///
+/// WHY a static: a timer outlives the run that scheduled it -- that is the
+/// whole point of a delayed callback -- so the queue has to sit outside the
+/// script run that filled it.
+static mut TIMER_QUEUE: [PendingTimer; browser::js::MAX_TIMERS] =
+    [PendingTimer::EMPTY; browser::js::MAX_TIMERS];
+
+/// How many entries of [`TIMER_QUEUE`] are in use.
+static mut TIMER_COUNT: usize = 0;
+
+/// Records the timers a page scheduled, with the time each comes due.
+///
+/// WHY the delay is added to the clock the device keeps: a timer that asked
+/// to wait has to wait that long in the time the person is living in, not in
+/// a clock the browser made up.
+fn schedule_timers(timers: &[browser::js::ScheduledTimer], count: usize, now_ticks: u64) -> usize {
+    let mut scheduled = 0usize;
+    let mut index = 0usize;
+    while index < count && scheduled < browser::js::MAX_TIMERS {
+        let timer = &timers[index];
+        let slot = unsafe { &mut *core::ptr::addr_of_mut!(TIMER_QUEUE) };
+        let used = unsafe { *core::ptr::addr_of!(TIMER_COUNT) };
+        if used >= browser::js::MAX_TIMERS {
+            break;
+        }
+        let mut entry = PendingTimer::EMPTY;
+        entry.id = timer.id;
+        entry.function[..timer.function_len as usize]
+            .copy_from_slice(&timer.function[..timer.function_len as usize]);
+        entry.function_len = timer.function_len;
+        entry.due_ticks = now_ticks.saturating_add(timer.delay_ms);
+        slot[used] = entry;
+        unsafe {
+            *core::ptr::addr_of_mut!(TIMER_COUNT) = used + 1;
+        }
+        scheduled += 1;
+        index += 1;
+    }
+    scheduled
+}
+
+/// Runs the timers whose time has come and reports how many ran.
+///
+/// WHY the callback is entered through the page's own program: the run that
+/// scheduled the timer is over, and that run's function arena is gone with
+/// it. The page's program is where the function still exists.
+fn fire_due_timers(now_ticks: u64) -> usize {
+    let mut fired = 0usize;
+    loop {
+        let mut due = None;
+        unsafe {
+            let used = *core::ptr::addr_of!(TIMER_COUNT);
+            let queue = &*core::ptr::addr_of!(TIMER_QUEUE);
+            for index in 0..used {
+                if queue[index].due_ticks <= now_ticks {
+                    due = Some(index);
+                    break;
+                }
+            }
+        }
+        let Some(index) = due else {
+            break;
+        };
+        let entry = unsafe { (*core::ptr::addr_of!(TIMER_QUEUE))[index] };
+        // The timer leaves the queue before it runs, so a callback that fails
+        // does not leave a timer that runs again on the next tick.
+        unsafe {
+            let used = *core::ptr::addr_of!(TIMER_COUNT);
+            let queue = &mut *core::ptr::addr_of_mut!(TIMER_QUEUE);
+            for position in index..used - 1 {
+                queue[position] = queue[position + 1];
+            }
+            *core::ptr::addr_of_mut!(TIMER_COUNT) = used - 1;
+            queue[used - 1] = PendingTimer::EMPTY;
+        }
+        let dom = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
+        match browser::engine::run_named_callback(dom, &entry.function[..entry.function_len as usize]) {
+            Ok(_) => fired += 1,
+            Err(err) => {
+                BrowserApp::log_js_error(err);
+            }
+        }
+    }
+    fired
+}
+
+/// Forgets the timers the page scheduled.
+///
+/// WHY they are forgotten: the page they belonged to is gone, and a callback
+/// that ran against a different page would be a callback nobody asked for.
+fn clear_timers() {
+    unsafe {
+        let queue = &mut *core::ptr::addr_of_mut!(TIMER_QUEUE);
+        *queue = [PendingTimer::EMPTY; browser::js::MAX_TIMERS];
+        *core::ptr::addr_of_mut!(TIMER_COUNT) = 0;
+    }
+}
+
 /// The two-entry revalidating cache, also across navigations.
 static mut HTTP_CACHE: browser::http::HttpCache = browser::http::HttpCache::new();
 
@@ -2323,6 +2487,8 @@ const BODY_UNRECOGNISED: &[u8] = b"The address did not name a host this browser 
 so nothing was requested and no page was loaded.";
 const BODY_UNSUPPORTED_SCHEME: &[u8] = b"This browser reads pages over HTTP. The address \
 names a scheme it cannot fetch, so nothing was requested.";
+const BODY_ADDRESS_TOO_LONG: &[u8] = b"The address is longer than this browser keeps in its own \
+records. It was refused whole rather than cut, so nothing was requested.";
 const BODY_GATEWAY_ERROR: &[u8] = b"The Device Studio gateway received the request but could \
 not fetch the page. The failure is the origin's or this host's network, not a page the browser \
 can show.";
@@ -2425,13 +2591,21 @@ pub fn net_recv(sock_or_conn: u32, buf: &mut [u8]) -> Result<usize, i64> {
 // -----------------------------------------------------------------------------
 // Bookmark Data Models & Settings Persistence
 // -----------------------------------------------------------------------------
-const BM_TITLE_MAX: usize = 24;
-const BM_URL_MAX: usize = 48;
+// WHY these capacities are the browser's own: a bookmark opens an address, so
+// the address field holds exactly what the browser's other address records
+// hold. The old 48-byte address field cut a longer address, and the bookmark
+// then opened a different page than the one that was saved while the screen
+// said the bookmark had been written.
+const BM_TITLE_MAX: usize = browser::MAX_TITLE_LEN;
+const BM_URL_MAX: usize = browser::MAX_URL_LEN;
 const MAX_BOOKMARKS: usize = 6;
 const BM_RECORD_BYTES: usize = 1 + BM_TITLE_MAX + BM_URL_MAX;
 const STORE_BLOB_BYTES: usize = 2 + MAX_BOOKMARKS * BM_RECORD_BYTES;
-const STORE_VERSION: u8 = 1;
-const STORE_KEY: &str = "browser.bookmarks.v1";
+// WHY the version moved: the record layout changed, so a blob written by the
+// old layout is not read as a current one. The key carries the same version
+// so the old blob is not mistaken for this one's.
+const STORE_VERSION: u8 = 2;
+const STORE_KEY: &str = "browser.bookmarks.v2";
 
 #[derive(Clone, Copy)]
 pub struct Bookmark {
@@ -2467,14 +2641,22 @@ impl BookmarkRecord {
         url: [0; BM_URL_MAX],
     };
 
-    fn from_parts(id: u8, title: &[u8], url: &[u8]) -> Self {
+    /// Builds a bookmark record.
+    ///
+    /// WHY the address may not be shortened: a bookmark that opens a
+    /// different page than the one that was saved is a bookmark that lies
+    /// about where it goes. An address that does not fit is refused whole.
+    /// The title is display text, so it may be cut to fit.
+    fn from_parts(id: u8, title: &[u8], url: &[u8]) -> Option<Self> {
+        if url.len() > BM_URL_MAX {
+            return None;
+        }
         let mut rec = BookmarkRecord::EMPTY;
         rec.id = id;
         let n = title.len().min(BM_TITLE_MAX);
         rec.title[..n].copy_from_slice(&title[..n]);
-        let m = url.len().min(BM_URL_MAX);
-        rec.url[..m].copy_from_slice(&url[..m]);
-        rec
+        rec.url[..url.len()].copy_from_slice(url);
+        Some(rec)
     }
 
     fn valid(&self) -> bool {
@@ -2622,7 +2804,13 @@ impl BookmarkStore {
             return Err(-22);
         }
         let id = self.next_id;
-        let rec = BookmarkRecord::from_parts(id, title, url);
+        // WHY an address that does not fit is refused here: the record holds
+        // the address the bookmark opens, and a cut address opens a different
+        // page. The refusal is reported as EINVAL, the same answer the store
+        // gives for a bookmark it cannot make.
+        let Some(rec) = BookmarkRecord::from_parts(id, title, url) else {
+            return Err(-22);
+        };
         if !rec.valid() {
             return Err(-22);
         }
@@ -3169,7 +3357,7 @@ pub struct BrowserApp {
     /// WHY this is longer than 64 bytes: real addresses are, and a truncated
     /// address made Reload, Back and Forward fetch a different resource than
     /// the one on screen.
-    pub current_url: [u8; 256],
+    pub current_url: [u8; browser::MAX_URL_LEN],
     pub current_url_len: usize,
     /// How far the reader has been scrolled, and how far it can be.
     ///
@@ -4840,7 +5028,17 @@ impl BrowserApp {
             return false;
         }
         let _ = context;
-        match browser::js::execute_script_with_mutations(code, dom, browser::js::DEFAULT_STEP_BUDGET) {
+        // WHY the store and the origin travel with the script: the handler
+        // runs on the page on screen, so it may reach that page's origin's
+        // storage and no other origin's.
+        let storage = unsafe { &mut *core::ptr::addr_of_mut!(WEB_STORAGE) };
+        match browser::js::execute_script_with_mutations_and_storage(
+            code,
+            dom,
+            browser::js::DEFAULT_STEP_BUDGET,
+            storage,
+            page_origin(),
+        ) {
             Ok((_, mutated)) => {
                 std::log("[BROWSER APP] JS script executed successfully.").ok();
                 mutated
@@ -4921,7 +5119,30 @@ impl BrowserApp {
     /// Runs captured inline classic scripts in order and dispatches `DOMContentLoaded`.
     pub fn execute_page_scripts(&mut self) {
         let dom = unsafe { &mut *core::ptr::addr_of_mut!(PAGE_DOM) };
-        let report = browser::engine::run_page_scripts(dom);
+        let storage = unsafe { &mut *core::ptr::addr_of_mut!(WEB_STORAGE) };
+        let report = browser::engine::run_page_scripts_with_storage(dom, storage, page_origin());
+        // WHY the timers are recorded here: a timer with a delay outlives the
+        // run that scheduled it, so the browser has to keep the callback and
+        // the time it comes due, and run it when that time arrives.
+        if report.timer_count > 0 {
+            // WHY the clock is read rather than assumed: a timer that asked
+            // to wait has to be given a real time to come due. A device with
+            // no clock cannot give one, and the browser says so instead of
+            // scheduling a timer that would come due at once.
+            match std::get_ticks() {
+                Ok(now) => {
+                    let scheduled = schedule_timers(&report.timers, report.timer_count, now);
+                    if scheduled > 0 {
+                        std::log("[BROWSER APP] Page scheduled a timer; the browser will run it when its delay has passed.")
+                            .ok();
+                    }
+                }
+                Err(_) => {
+                    std::log("[BROWSER APP] The device clock is unavailable, so the page's delayed timer has no time to come due and was not scheduled.")
+                        .ok();
+                }
+            }
+        }
         if report.unsupported_module {
             std::log("[BROWSER APP] Unsupported script type='module' skipped.").ok();
         }
@@ -6193,6 +6414,22 @@ impl BrowserApp {
     }
 
     pub fn navigate(&mut self, target: &[u8]) -> bool {
+        // WHY the address is checked before anything is recorded: the browser
+        // used to cut a long address at the end of its buffer and fetch the
+        // cut address, so the visit log, the tab and the address bar all
+        // named a different page than the one that was asked for. An address
+        // that does not fit is refused here, before a visit is written or a
+        // request is made.
+        if target.len() > browser::MAX_URL_LEN {
+            std::log("[BROWSER APP] The address is longer than this browser keeps in its own records; it was refused whole and nothing was requested.")
+                .ok();
+            self.status = PageStatus::AddressTooLong;
+            self.loading_progress = 0;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            self.tabs.active_tab_mut().error_code = -22; // EINVAL
+            let _ = std::audio_haptic_click();
+            return false;
+        }
         self.history.push(target);
         let _ = self.history.persist();
         self.tabs.navigate_to(target);
@@ -6226,15 +6463,36 @@ impl BrowserApp {
     pub fn navigate_again(&mut self, target: &[u8]) -> bool {
         // A hostname typed without a scheme is fetched over HTTPS, so the
         // address bar records the address the request actually names.
-        let mut normalized = [0u8; 256];
-        let target = {
-            let n = browser::normalize_address(target, &mut normalized);
-            &normalized[..n]
+        let mut normalized = [0u8; browser::MAX_URL_LEN];
+        let Some(n) = browser::normalize_address(target, &mut normalized) else {
+            // WHY the address is refused rather than cut: a cut address names
+            // a different resource, and the browser would fetch that one
+            // while showing the other. Nothing is requested, so the page on
+            // the screen stays the page that was there.
+            std::log("[BROWSER APP] The address is longer than this browser keeps in its own records; it was refused whole and nothing was requested.")
+                .ok();
+            self.status = PageStatus::AddressTooLong;
+            self.loading_progress = 0;
+            self.tabs.active_tab_mut().loading_state = LoadingState::Failed;
+            self.tabs.active_tab_mut().error_code = -22; // EINVAL
+            let _ = std::audio_haptic_click();
+            return false;
         };
+        let target = &normalized[..n];
 
-        let n = target.len().min(self.current_url.len());
-        self.current_url[..n].copy_from_slice(&target[..n]);
-        self.current_url_len = n;
+        // WHY the address is copied whole: `normalize_address` refuses an
+        // address that does not fit, so there is never a shorter address to
+        // cut down to this buffer's size.
+        self.current_url[..target.len()].copy_from_slice(target);
+        self.current_url_len = target.len();
+        // WHY the origin is published here: the page that is about to be
+        // fetched belongs to this origin, and its scripts may reach this
+        // origin's storage and no other origin's.
+        publish_page_origin(&self.current_url[..self.current_url_len]);
+        // WHY the old timers are forgotten: they belonged to the page that
+        // was on screen, and a callback that ran against the page that
+        // replaced it would be a callback nobody asked for.
+        clear_timers();
         self.scroll = ScrollState::new(0, READER_VIEWPORT_H, 0);
         // The gateway's reason belongs to the fetch that failed. A new
         // navigation has not failed yet, so the last reason is forgotten
@@ -7046,6 +7304,10 @@ impl BrowserApp {
         let start = b"about:blank";
         self.current_url[..start.len()].copy_from_slice(start);
         self.current_url_len = start.len();
+        // WHY the origin is published here: the start page is not a page on
+        // the web, so it has no origin, and a script on it must not reach
+        // any origin's storage.
+        publish_page_origin(&self.current_url[..self.current_url_len]);
         self.address_len = 0;
         self.address_focused = false;
         self.select_all = false;
@@ -7134,9 +7396,10 @@ impl BrowserApp {
                     std::log("[BROWSER APP] Bookmark not added: a bookmark needs an address.").ok();
                     return Err(-22);
                 }
-                if self.address_len > BM_URL_MAX {
-                    self.address_len = BM_URL_MAX;
-                }
+                // WHY the address is refused rather than cut: a cut address
+                // opens a different page than the one that was typed, and the
+                // store would then say the bookmark was written. The whole
+                // address is refused here, so the store decides.
                 let title_len = self.bm_title_len.min(BM_TITLE_MAX);
                 let outcome = self.bookmarks.add(&self.bm_title[..title_len], &self.address[..self.address_len]);
                 self.bm_step = BookmarkStep::Idle;
@@ -7147,6 +7410,9 @@ impl BrowserApp {
                 match outcome {
                     Ok(()) => {
                         std::log("[BROWSER APP] Bookmark written to the settings store and acknowledged.").ok();
+                    }
+                    Err(-22) => {
+                        std::log("[BROWSER APP] Bookmark was NOT saved: the address is longer than this browser keeps in its own records, so it was refused whole rather than cut.").ok();
                     }
                     Err(_) => {
                         std::log("[BROWSER APP] Bookmark was NOT saved: the kernel refused the settings write. It is held in the unsaved group for this session only.").ok();
@@ -7381,6 +7647,7 @@ impl Frame {
             PageStatus::InvalidAddress => (b"Address cannot be opened", BODY_INVALID),
             PageStatus::UnrecognisedAddress => (b"Address not recognised", BODY_UNRECOGNISED),
             PageStatus::UnsupportedScheme => (b"Scheme not supported", BODY_UNSUPPORTED_SCHEME),
+            PageStatus::AddressTooLong => (b"Address too long", BODY_ADDRESS_TOO_LONG),
             PageStatus::GatewayError => (b"Gateway could not fetch", BODY_GATEWAY_ERROR),
             PageStatus::Downloaded => {
                 if app.last_download_truncated {
@@ -9391,6 +9658,7 @@ fn web_page_pixel(x: usize, y: usize, app: &BrowserApp, f: &Frame) -> u32 {
                 PageStatus::InvalidAddress => b"INVALID ADDRESS",
                 PageStatus::UnrecognisedAddress => b"ADDRESS NOT RECOGNISED",
                 PageStatus::UnsupportedScheme => b"SCHEME NOT SUPPORTED",
+                PageStatus::AddressTooLong => b"ADDRESS TOO LONG",
                 PageStatus::GatewayError => b"GATEWAY COULD NOT FETCH",
                 PageStatus::Downloaded => {
                     if app.last_download_truncated {
@@ -12112,10 +12380,18 @@ fn handle_tap(app: &mut BrowserApp, px: u32, py: u32) -> Tap<'static> {
                     // Close target tapped?
                     if tab_close_rect(card_y).contains(x, y) {
                         app.tabs.close_tab(i);
+                        // WHY the session store goes with the tab: a session
+                        // store belongs to the browsing session, not to the
+                        // origin, so closing a tab drops it and the origins'
+                        // own storage stays.
+                        unsafe {
+                            (*core::ptr::addr_of_mut!(WEB_STORAGE)).clear_sessions();
+                        }
                         let cur = app.tabs.active_tab().url();
                         let n = cur.len().min(app.current_url.len());
                         app.current_url[..n].copy_from_slice(&cur[..n]);
                         app.current_url_len = n;
+                        publish_page_origin(&app.current_url[..app.current_url_len]);
                     } else if app.tabs.tab(i).is_some() {
                         app.tabs.switch_tab(i);
                         let cur = app.tabs.active_tab().url();
@@ -13066,6 +13342,20 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if events & std::EVENT_TIMER_TICK != 0 {
+                    // WHY the timers run here: a timer that asked to wait has
+                    // to run when its time comes, and the device's tick is
+                    // the clock the page's delay was measured against. A
+                    // device with no clock cannot say a timer is due, so no
+                    // timer is run on a guess.
+                    if let Ok(now) = std::get_ticks() {
+                        if fire_due_timers(now) > 0 {
+                            browser.relayout_page();
+                            if surface > 0 {
+                                render_browser_ui(surface, &browser);
+                                let _ = std::surface_flip();
+                            }
+                        }
+                    }
                     if browser.scroll.is_flinging() && browser.status == PageStatus::Loaded {
                         if browser.scroll.step_fling() && surface > 0 {
                             render_browser_ui(surface, &browser);
