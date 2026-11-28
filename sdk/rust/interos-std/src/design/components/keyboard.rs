@@ -22,6 +22,7 @@
 use crate::design::draw_target::Surface;
 use crate::design::font;
 use crate::design::primitives::Rect;
+use crate::design::radius;
 use crate::design::theme::Theme;
 
 /// Standard default reference width for the portrait keyboard dock (720px).
@@ -377,30 +378,28 @@ impl SoftKeyboard {
     /// Performs touch hit-testing against the keyboard dock.
     ///
     /// Returns `Some(KeyAction)` if the point `(px, py)` lands on a key pill,
-    /// or `None` if the touch falls outside keyboard bounds or in the gutters between keys.
+    /// or `None` if the touch falls outside keyboard bounds, in the gutters
+    /// between keys, or in the transparent corner of a pill.
+    ///
+    /// WHY the hit test asks the same question the painter answers: the keys
+    /// are drawn as stadium pills, so the corners of a key's rectangle are
+    /// transparent, and the old rectangle test claimed those corners. A press
+    /// in a corner activated a key that was not painted there -- the picture
+    /// and the hit test disagreed about where the key was. The test is
+    /// therefore the painter's own shape, in the painter's own coordinates:
+    /// the key's actual rectangle and the platform pill radius, which the
+    /// helper clamps to half the smaller side exactly as the painter does.
     pub fn hit_test(&self, px: usize, py: usize) -> Option<KeyAction> {
         if !self.bounds.contains(px, py) {
             return None;
         }
 
-        let rx = if self.bounds.w == DEFAULT_KB_WIDTH {
-            px - self.bounds.x
-        } else if self.bounds.w == 0 {
-            return None;
-        } else {
-            ((px - self.bounds.x) * DEFAULT_KB_WIDTH) / self.bounds.w
-        };
-
-        let ry = if self.bounds.h == DEFAULT_KB_HEIGHT {
-            py - self.bounds.y
-        } else if self.bounds.h == 0 {
-            return None;
-        } else {
-            ((py - self.bounds.y) * DEFAULT_KB_HEIGHT) / self.bounds.h
-        };
-
         for key in KEYS {
-            if rx >= key.x && rx < key.x + key.w && ry >= key.y && ry < key.y + key.h {
+            // WHY the painted rectangle and not the reference one: the
+            // painter draws `self.key_rect(key)`, so a scaled keyboard answers
+            // on the scaled pill and not on the 720x430 reference box.
+            let rect = self.key_rect(key);
+            if in_rounded_rect(px, py, rect.x, rect.y, rect.w, rect.h, radius::PILL) {
                 return Some(key.action(self.shift));
             }
         }
@@ -624,13 +623,22 @@ mod tests {
         assert_eq!(kb.hit_test(610 + 10, 178 + 10), Some(KeyAction::Char(b'l')));
 
         // Row 3: Shift, z, m, Backspace
-        assert_eq!(kb.hit_test(15 + 10, 260 + 10), Some(KeyAction::Shift));
+        // WHY the Shift and Backspace samples are the key centres and not
+        // `key.x + 10`: a key 80 or 110 columns wide is a 36-pixel stadium
+        // (the pill radius is half the shorter side), and the old sample sat
+        // 26 pixels from both corner centres -- 26*26 + 26*26 is outside
+        // 36*36, so it was in the corner the painter leaves transparent. The
+        // old point was asserting the bug: it answered a key that was not
+        // painted there.
+        assert_eq!(kb.hit_test(15 + 40, 260 + 36), Some(KeyAction::Shift));
         assert_eq!(kb.hit_test(105 + 10, 260 + 10), Some(KeyAction::Char(b'z')));
         assert_eq!(kb.hit_test(525 + 10, 260 + 10), Some(KeyAction::Char(b'm')));
-        assert_eq!(kb.hit_test(595 + 10, 260 + 10), Some(KeyAction::Backspace));
+        assert_eq!(kb.hit_test(595 + 55, 260 + 36), Some(KeyAction::Backspace));
 
         // Row 4: Hide, Comma, Space, Period, Enter
-        assert_eq!(kb.hit_test(15 + 10, 342 + 10), Some(KeyAction::Hide));
+        // WHY the Hide sample is the key centre: the same 36-pixel stadium,
+        // the same transparent corner (see the Shift sample above).
+        assert_eq!(kb.hit_test(15 + 40, 342 + 36), Some(KeyAction::Hide));
         assert_eq!(kb.hit_test(105 + 10, 342 + 10), Some(KeyAction::Char(b',')));
         assert_eq!(kb.hit_test(200, 342 + 10), Some(KeyAction::Char(b' ')));
         assert_eq!(kb.hit_test(515 + 10, 342 + 10), Some(KeyAction::Char(b'.')));
@@ -660,15 +668,68 @@ mod tests {
         assert_eq!(kb.hit_test(610 + 10, 178 + 10), Some(KeyAction::Char(b'L')));
 
         // Row 3 shifted: Shift, Z, Backspace
-        assert_eq!(kb.hit_test(15 + 10, 260 + 10), Some(KeyAction::Shift));
+        // WHY the Shift and Backspace samples are the key centres: the old
+        // `key.x + 10` samples sat in the transparent corner of the 36-pixel
+        // stadium these two keys are drawn as (see the unshifted test above).
+        assert_eq!(kb.hit_test(15 + 40, 260 + 36), Some(KeyAction::Shift));
         assert_eq!(kb.hit_test(105 + 10, 260 + 10), Some(KeyAction::Char(b'Z')));
-        assert_eq!(kb.hit_test(595 + 10, 260 + 10), Some(KeyAction::Backspace));
+        assert_eq!(kb.hit_test(595 + 55, 260 + 36), Some(KeyAction::Backspace));
 
         // Row 4 shifted: ?, Space, !, Enter
         assert_eq!(kb.hit_test(105 + 10, 342 + 10), Some(KeyAction::Char(b'?')));
         assert_eq!(kb.hit_test(200, 342 + 10), Some(KeyAction::Char(b' ')));
         assert_eq!(kb.hit_test(515 + 10, 342 + 10), Some(KeyAction::Char(b'!')));
         assert_eq!(kb.hit_test(600, 342 + 10), Some(KeyAction::Enter));
+    }
+
+    #[test]
+    fn a_press_in_the_transparent_corner_answers_nothing() {
+        // WHY this test exists: the keys are drawn as stadium pills, so the
+        // corners of a key's rectangle are transparent. The hit test used to
+        // claim the whole rectangle, and a press in a corner activated a key
+        // that was not painted there -- the picture and the hit test
+        // disagreed about where the key was.
+        let kb = SoftKeyboard::new(Rect::new(0, 0, 720, 430));
+        let key = &KEYS[0];
+        let rect = kb.key_rect(key);
+        let radius = radius::PILL.min(rect.w / 2).min(rect.h / 2);
+
+        // The corner of the '1' key is outside the shape the painter draws.
+        assert!(
+            !in_rounded_rect(rect.x, rect.y, rect.x, rect.y, rect.w, rect.h, radius),
+            "the corner of the pill must be outside the shape the painter draws"
+        );
+        assert_eq!(
+            kb.hit_test(rect.x, rect.y),
+            None,
+            "a press in the transparent corner of a key must not answer that key"
+        );
+
+        // The middle of the key is painted, so it is the key.
+        let centre_x = rect.x + rect.w / 2;
+        let centre_y = rect.y + rect.h / 2;
+        assert_eq!(
+            kb.hit_test(centre_x, centre_y),
+            Some(KeyAction::Char(b'1')),
+            "the painted middle of the key is the key"
+        );
+
+        // WHY the picture is checked too: the point of the fix is that the
+        // two agree, so the painted corner has to be the dock and the painted
+        // middle has to be the key.
+        let theme = Theme::LIGHT;
+        assert_eq!(
+            kb.render_pixel(rect.x, rect.y, &theme),
+            Some(theme.surface_container),
+            "the corner is painted as the dock, not as the key"
+        );
+        let painted_middle = kb
+            .render_pixel(centre_x, centre_y, &theme)
+            .expect("the key is painted");
+        assert_ne!(
+            painted_middle, theme.surface_container,
+            "the middle of the key is painted as the key"
+        );
     }
 
     #[test]
