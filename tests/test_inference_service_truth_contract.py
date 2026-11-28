@@ -822,6 +822,21 @@ def test_the_copy_is_bounded_and_takes_no_heap():
         assert heap not in body, f"the install allocates with {heap!r}"
 
 
+def install_arm(source: str, name: str) -> str:
+    """The match arm of `install_notice` that answers one outcome.
+
+    The arms are read one at a time so a status code can be pinned to the
+    outcome it belongs to, instead of to the function as a whole: a file with
+    two successful arms has to say which of them is which.
+    """
+    notice = function_body(source, "fn install_notice")
+    marker = f"InstallOutcome::{name}"
+    start = notice.index(marker)
+    rest = notice[start + len(marker) :]
+    end = rest.index("InstallOutcome::") if "InstallOutcome::" in rest else len(rest)
+    return rest[:end]
+
+
 def test_the_install_is_answered_from_a_measurement():
     """The service says what the model namespace reports, because nothing else
     can tell it.
@@ -830,16 +845,37 @@ def test_the_install_is_answered_from_a_measurement():
     answer; a reason given here would be invented. The listing's byte count is
     the one statement available, and only a namespace holding exactly the bytes
     the source stated is called installed.
+
+    A model the device was already given is the second honest success: the
+    request moved no bytes, so it cannot be called installed, but the bytes
+    the filesystem reports for the file it already holds are a measurement
+    just the same, and that is what the adoption reports.
     """
     lib = lib_source()
     body = function_body(lib, "fn install_model_file")
     assert "gguf::local_model_size()" in body
     assert "std::ipc::receive" not in body, "the install answer relays a reply that cannot arrive"
     notice = function_body(lib, "fn install_notice")
-    assert notice.count("STATUS_SUCCESS") == 1, "more than one outcome claims an install"
+    assert notice.count("STATUS_SUCCESS") == 2, (
+        "the copy and the adoption are the two honest successes; "
+        "any other arm that claims one is claiming work that did not happen"
+    )
     assert "InstallOutcome::Installed(size)" in notice
     for refused in ("STATUS_UNAVAILABLE", "STATUS_ERROR"):
         assert refused in notice, f"the install answer never reports {refused}"
+    for name in ("Installed", "Adopted"):
+        arm = install_arm(lib, name)
+        assert "STATUS_SUCCESS" in arm, f"the {name} outcome is not answered as a success"
+        assert "byte_count" in arm, f"the {name} outcome reports no measurement"
+    for name in ("NothingToInstall", "RequestRefused", "Short", "Absent", "AdoptionRefused"):
+        arm = install_arm(lib, name)
+        assert "STATUS_SUCCESS" not in arm, f"the {name} outcome claims a success"
+    assert "already on the device" in install_arm(lib, "Adopted"), (
+        "the adoption is reported as an install, which claims a copy that never happened"
+    )
+    assert "installed" in install_arm(lib, "Installed"), (
+        "the copy is not reported as the install it was"
+    )
 
 
 def test_an_install_refreshes_the_probe():
