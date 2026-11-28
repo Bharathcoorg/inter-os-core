@@ -116,6 +116,20 @@ pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
     Some(id)
 }
 
+/// The attempts a process-table read spends before it reports that the table
+/// could not be read.
+///
+/// WHY a budget and not a blocking lock: the filesystem enforcement path reads
+/// the table while other subsystems' locks may be held, so a blocking wait
+/// here is a deadlock risk. The budget is what turns "the table stayed busy"
+/// into an answer the caller can fail closed on, and it is what keeps a
+/// momentarily busy table from being read as "no answer at all".
+///
+/// WHY the budget is not shrunk to make a host case cheap: a single attempt
+/// turns every momentary contention into a refusal, which is the opposite of
+/// what the spin is for.
+pub const TABLE_READ_SPINS: usize = 500_000;
+
 /// Looks up the process owning `task`, distinguishing "no such thread" from
 /// "the table could not be read".
 ///
@@ -123,7 +137,18 @@ pub fn register_leader(task: TaskId, parent_task: TaskId) -> Option<ProcessId> {
 /// `Err(())` is not an answer, and a caller that turns it into `Ok(None)` is
 /// deciding that an unreadable table means an unowned task.
 fn try_process_for_task(task: TaskId) -> Result<Option<ProcessId>, ()> {
-    for _ in 0..500_000 {
+    try_process_for_task_within(task, TABLE_READ_SPINS)
+}
+
+/// The same read, with the attempt budget chosen by the caller.
+///
+/// WHY the budget is a parameter: a host case that has to observe an unreadable
+/// table would otherwise have to hold a process-global table for the length of
+/// the production budget, and every other host case that consults the table in
+/// that window is told the table cannot be read. The question is the same; only
+/// the patience is different.
+fn try_process_for_task_within(task: TaskId, spins: usize) -> Result<Option<ProcessId>, ()> {
+    for _ in 0..spins {
         if let Some(threads) = THREAD_TABLE.try_lock() {
             return Ok(threads.iter().flatten().find(|r| r.task == task).map(|r| r.process));
         }
@@ -184,12 +209,23 @@ pub fn mark_application_for_task(task: TaskId) -> Result<(), &'static str> {
 /// enforcement path without risking a blocking lock under another subsystem's
 /// lock.
 pub fn task_is_application(task: TaskId) -> Option<bool> {
-    let process = match try_process_for_task(task) {
+    task_is_application_within(task, TABLE_READ_SPINS)
+}
+
+/// The same predicate, with the attempt budget chosen by the caller.
+///
+/// WHY the budget is a parameter: the answer has to be pinnable for a table
+/// that cannot be read, and a host case that holds a process-global table for
+/// the length of the production budget is a case every other host case that
+/// consults the table can collide with. The answer is the same question asked
+/// with less patience.
+fn task_is_application_within(task: TaskId, spins: usize) -> Option<bool> {
+    let process = match try_process_for_task_within(task, spins) {
         Ok(Some(process)) => process,
         Ok(None) => return Some(false),
         Err(()) => return None,
     };
-    for _ in 0..500_000 {
+    for _ in 0..spins {
         if let Some(table) = PROCESS_TABLE.try_lock() {
             return table.iter().flatten().find(|r| r.id == process).map(|r| r.is_application);
         }
@@ -199,6 +235,18 @@ pub fn task_is_application(task: TaskId) -> Option<bool> {
         core::hint::spin_loop();
     }
     None
+}
+
+/// Test-only: the same predicate with a caller-chosen attempt budget.
+///
+/// WHY this exists: pinning the unreadable-table rule needs a table that cannot
+/// be read, and holding the real table for the length of the production budget
+/// refuses every other host case that consults the table in that window. The
+/// answer this returns is the answer the production predicate returns for a
+/// table it could not read.
+#[cfg(test)]
+pub(crate) fn task_is_application_with_budget(task: TaskId, spins: usize) -> Option<bool> {
+    task_is_application_within(task, spins)
 }
 
 pub fn record_for_process(process: ProcessId) -> Option<ProcessRecord> {

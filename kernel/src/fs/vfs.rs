@@ -1782,7 +1782,18 @@ impl Vfs {
     /// busy for its whole bounded spin; treating that as "not an application" would
     /// give an application ambient VFS authority for the duration of the contention.
     fn task_is_sandbox_subject(task_id: TaskId) -> bool {
-        match crate::task::process::task_is_application(task_id) {
+        Self::sandbox_subject_for(crate::task::process::task_is_application(task_id), task_id)
+    }
+
+    /// The sandbox decision, separated from the table read that feeds it.
+    ///
+    /// WHY the answer is a parameter and not a lookup inside this function: the
+    /// decision has to be pinnable for an answer that could not be established
+    /// (`None`) without holding a process-global table for the length of the
+    /// read that establishes it, and a host case that holds a process-global is
+    /// a case every other host case can collide with.
+    fn sandbox_subject_for(is_application: Option<bool>, task_id: TaskId) -> bool {
+        match is_application {
             Some(false) => Self::app_package_for_task(task_id).is_some(),
             _ => true,
         }
@@ -5452,6 +5463,14 @@ mod tests {
     /// open path while the thread table is held: that path takes SCHEDULER, and
     /// holding THREAD_TABLE across it would invert the table lock order against
     /// the scheduler's own contention cases.
+    ///
+    /// WHY the read here is one attempt and not the production budget: the
+    /// production budget is 500,000 attempts, and holding a process-global table
+    /// across it is a hold of about half a second -- long enough that every other
+    /// host case that consults the table in that window is told the table cannot
+    /// be read and is refused for it. The question is the same one the
+    /// production read asks ("can this table be read?"), so the case asks it
+    /// once.
     #[test]
     fn vfs_c1_an_unreadable_process_table_does_not_exempt_an_application() {
         let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -5468,22 +5487,92 @@ mod tests {
         assert_eq!(crate::task::process::task_is_application(task), Some(true));
         assert!(Vfs::task_is_sandbox_subject(task));
 
+        // The production budget must not be the thing that was shortened to make
+        // this case cheap: one attempt would turn every momentary contention into
+        // a refusal, which is the opposite of what the spin is for.
+        assert_eq!(
+            crate::task::process::TABLE_READ_SPINS, 500_000,
+            "the production table read must keep its patience: a shorter budget \
+             refuses a caller over a momentarily busy table"
+        );
+
         {
             let _held = crate::task::process::THREAD_TABLE.lock();
-            assert_eq!(
-                crate::task::process::task_is_application(task), None,
-                "a table that could not be read is not an answer"
-            );
-            assert!(
-                Vfs::task_is_sandbox_subject(task),
-                "an unknown subject must be sandboxed, not exempted: the exemption \
-                 is the grant of the whole VFS"
-            );
+            assert_unreadable_table_is_not_an_exemption(task);
         }
 
         // Readable again, and the answer is the established one rather than a
         // sticky refusal: the fix must not turn every task into a subject.
         assert_eq!(crate::task::process::task_is_application(task), Some(true));
+    }
+
+    /// The unreadable-table answer, asserted for a table the caller holds.
+    ///
+    /// WHY the table is held by the caller: it has to be unreadable for the
+    /// answer to be `None`, and holding a process-global table here for the
+    /// length of a production read refuses every other host case that consults
+    /// the table in that window -- the flake this case used to carry.
+    fn assert_unreadable_table_is_not_an_exemption(task: TaskId) {
+        assert_eq!(
+            crate::task::process::task_is_application_with_budget(task, 1),
+            None,
+            "a table that could not be read is not an answer"
+        );
+        assert!(
+            Vfs::sandbox_subject_for(None, task),
+            "an unknown subject must be sandboxed, not exempted: the exemption \
+             is the grant of the whole VFS"
+        );
+    }
+
+    /// The host suite runs its cases in parallel, so the case that proves an
+    /// unreadable process table is a sandbox subject is the case every other
+    /// case can collide with. This pins that collision.
+    ///
+    /// WHAT IT EXERCISES: a reader that consults the process table while that
+    /// case holds it. The reader must still get an answer, not a refusal.
+    ///
+    /// WHY the refusal under a table that stays unreadable is not what is pinned
+    /// here: that refusal is the production rule (fail closed) and it is
+    /// correct. The defect was the *duration* of the hold -- long enough that
+    /// the refusal reached cases that had nothing to do with it.
+    #[test]
+    fn the_unreadable_table_case_does_not_refuse_a_concurrent_reader() {
+        let _lock = crate::task::process::PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let task = {
+            let mut sched = crate::task::SCHEDULER.lock();
+            sched.spawn("evilapp", dummy_test_entry, CapabilityTable::new_for_task(TaskId::new(), 4), 6)
+        };
+        let _leader = crate::task::process::OwnedLeader::adopted(task);
+        crate::task::process::mark_application_for_task(task).unwrap();
+        crate::task::process::bind_user_for_task(task, 1).unwrap();
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let reader = std::thread::spawn(move || {
+            ready_tx.send(()).expect("the reader is ready");
+            go_rx.recv().expect("the reader may read");
+            // A reader of the kind the flake hit: a task id with no process
+            // record of its own, which reads as a kernel task unless the table
+            // cannot be read at all.
+            crate::task::process::task_is_application(TaskId::new())
+        });
+        ready_rx.recv().expect("the reader is ready");
+
+        // The table is held before the reader is let go, so the reader's read is
+        // made against a table that cannot be read.
+        {
+            let _held = crate::task::process::THREAD_TABLE.lock();
+            go_tx.send(()).expect("the reader may read");
+            assert_unreadable_table_is_not_an_exemption(task);
+        }
+
+        let answer = reader.join().expect("the reader thread");
+        assert_eq!(
+            answer,
+            Some(false),
+            "a reader must not be refused because another case held the process table"
+        );
     }
 
     #[test]
