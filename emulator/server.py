@@ -780,9 +780,131 @@ def check_launcher_ready():
                 pass
     return False
 
+
+def request_guest_reboot(timeout=15.0):
+    """Asks the guest to reboot itself over the COM1 control plane.
+
+    WHY the guest and not the host: QEMU's monitor `system_reset` resets the
+    machine's devices even when the accelerator does not restart the guest.
+    Under WHPX the CPU keeps running while the COM1 UART is reset, so the
+    Studio's console dies without anything rebooting. The guest's own REBOOT
+    command is a reset request from the kernel itself, so it behaves the same
+    way under every accelerator.
+
+    Returns (accepted, detail). `accepted` means the guest acknowledged the
+    request, not that the boot has finished; the caller still has to watch for
+    the new launcher.
+    """
+    marker = '[SYSTEM] System reboot requested via COM1 serial.'
+    with telemetry_lock:
+        start = len(serial_lines)
+    sent, detail = send_guest_serial_command('REBOOT', timeout=timeout)
+    if not sent:
+        return False, detail
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with telemetry_lock:
+            recent = serial_lines[start:]
+        if any(marker in line for line in recent):
+            return True, 'the guest accepted the reboot request'
+        time.sleep(0.25)
+    return False, 'the guest did not acknowledge the reboot request'
+
+
+def perform_warm_reboot():
+    """Reboots the running guest and reports only what was observed.
+
+    The order is deliberate. The guest's own REBOOT command is tried first
+    because it is a real reset request from the kernel and works under every
+    accelerator. The host-level monitor reset is the fallback for a guest whose
+    console no longer answers, and the cold relaunch is the last resort for a
+    guest this Studio owns, because a guest it does not own must never be
+    terminated from here.
+
+    Returns (ok, message, restart_method).
+    """
+    accepted, detail = request_guest_reboot()
+    if accepted:
+        restart_method = 'guest_reboot'
+    else:
+        # The console did not answer, so the guest cannot be asked. The
+        # host-level reset is still worth trying: it restarts the machine under
+        # TCG, and where the accelerator refuses to restart the guest the
+        # verification below reports that instead of claiming a reboot.
+        ok, monitor_detail = send_qemu_monitor_cmd('system_reset')
+        restart_method = 'monitor_system_reset'
+        detail = f"{detail}; the host reset answered: {monitor_detail}" if ok else \
+                 f"{detail}; the host reset failed: {monitor_detail}"
+        if not ok:
+            return False, detail, 'failed'
+    # WHY the client release and the wait: resetting the machine resets QEMU's
+    # 16550, and that reset abandons the Studio's COM1 client instead of
+    # closing it. The guest really does reboot -- the BIOS, the bootloader
+    # stages and the kernel all run again -- but its new boot log would go
+    # into a socket nobody serves, so the Studio would report silence and the
+    # UI would claim that nothing happened. The client is dropped here, the
+    # worker reclaims the re-listening port, and the route waits for the new
+    # launcher before it calls the reboot a success.
+    release_stale_serial_client(restart_method)
+    reset_monitor_connection()
+    vnc_client.force_reconnect()
+    rebooted, boot_detail = await_guest_reboot()
+    if not rebooted:
+        return False, f"{detail} -- {boot_detail}", restart_method
+    return True, f"{detail} -- {boot_detail}", restart_method
+
+
+def await_guest_reboot(timeout=90.0, rotate_after=25.0):
+    """Waits for the guest to present a new launcher after a machine reset.
+
+    WHY the wait: the reset is only finished when the guest is back. SeaBIOS,
+    the bootloader stages and the kernel all run again, and under TCG that
+    takes tens of seconds; until the launcher presents itself the device is
+    still booting. A route that answered "rebooted" the moment the monitor
+    command was sent would be claiming a device state it had not observed, and
+    a route that waited without reconnecting would be waiting on the socket the
+    reset abandoned.
+
+    Returns (rebooted, detail). `detail` states what was actually seen so the
+    caller can report the truth.
+    """
+    global last_reboot_cursor
+    with telemetry_lock:
+        cursor = min(last_reboot_cursor, len(serial_lines))
+    deadline = time.time() + timeout
+    saw_kernel = False
+    last_progress = time.time()
+    seen_count = cursor
+    while time.time() < deadline:
+        with telemetry_lock:
+            recent = serial_lines[cursor:] if cursor < len(serial_lines) else []
+        for line in recent:
+            if '[BOOT] Serial COM1 online' in line:
+                saw_kernel = True
+            if '[LAUNCHER] Step 5' in line:
+                return True, 'the guest presented its launcher again'
+        if len(recent) > seen_count:
+            seen_count = len(recent)
+            last_progress = time.time()
+        elif time.time() - last_progress > rotate_after:
+            # WHY the rotation: the first client to claim QEMU's re-listening
+            # serial port can be accepted and then ignored, so a silent console
+            # after a reset is not proof that the guest stayed down. Releasing
+            # the client again lets the worker retry the port.
+            release_stale_serial_client('reboot wait saw no new boot output')
+            last_progress = time.time()
+        time.sleep(0.5)
+    with telemetry_lock:
+        recent = serial_lines[cursor:] if cursor < len(serial_lines) else []
+    if saw_kernel:
+        return False, 'the guest kernel restarted but never presented its launcher'
+    if recent:
+        return False, 'the guest produced no new boot output after the reset'
+    return False, 'the guest produced no new boot output after the reset'
+
+
 # Guest package and filesystem state are authoritative. Device Studio does not
 # maintain a host-side filesystem shadow of guest state.
-
 THEMES_DIR = os.path.join(DIRECTORY, "data", "themes")
 os.makedirs(THEMES_DIR, exist_ok=True)
 ACTIVE_THEME_FILE = os.path.join(THEMES_DIR, "_active_theme.json")
@@ -1216,11 +1338,27 @@ current_serial_log_path = os.path.join(os.path.dirname(DIRECTORY), "target", "x8
 # launcher readiness for a guest that never presented its launcher.
 serial_log_is_session = False
 
+# A guest console that says nothing for this long is no longer alive.
+#
+# WHY: the kernel prints a tick heartbeat roughly once a second, so ten
+# seconds of silence is not a quiet guest -- it is an orphaned socket. Resetting
+# the machine resets QEMU's 16550, and that device reset abandons the chardev
+# client instead of closing it, so the reader would otherwise wait forever on a
+# connection that no longer carries a byte while the guest writes its whole new
+# boot log into the void.
+SERIAL_CONSOLE_SILENCE_LIMIT = 10.0
+# The first line after a (re)connect only arrives once the BIOS and the
+# bootloader stages have handed over to the kernel, which takes tens of seconds
+# under TCG, so the watchdog stays quiet until the guest has spoken once.
+SERIAL_CONSOLE_BOOT_GRACE = 45.0
+
+
 def serial_stream_worker():
     """Background worker continuously pulling UART lines from QEMU COM1 TCP port (4201).
 
-    Reconnects with short backoff whenever the connection dies, errors, or a
-    QEMU relaunch bumps `serial_epoch`; never exits.
+    Reconnects with short backoff whenever the connection dies, errors, goes
+    silent while the guest is demonstrably alive, or a QEMU relaunch or machine
+    reset bumps `serial_epoch`; never exits.
     """
     global serial_lines, serial_socket_conn, current_serial_log_path
     buf = ""
@@ -1244,13 +1382,17 @@ def serial_stream_worker():
                 backoff = 0.25
                 seen_epoch = serial_epoch
                 s.settimeout(0.8)
+                last_rx = time.time()
+                guest_spoke = False
                 while True:
                     if serial_epoch != seen_epoch:
-                        break  # QEMU relaunched: drop this stale single-client
+                        break  # QEMU relaunched or the machine was reset: drop this stale single-client
                     try:
                         chunk = s.recv(1024)
                         if not chunk:
                             break
+                        last_rx = time.time()
+                        guest_spoke = True
                         decoded = chunk.decode('utf-8', errors='replace')
                         buf += decoded
                         while '\n' in buf:
@@ -1268,6 +1410,15 @@ def serial_stream_worker():
                                     except Exception:
                                         pass
                     except socket.timeout:
+                        # WHY the silence watchdog: a reset abandons the chardev
+                        # client instead of closing it, so EOF never arrives and
+                        # the worker would wait on a console that is gone. The
+                        # guest heartbeats about once a second, so a console
+                        # that has been silent for the limit is orphaned and the
+                        # client has to be reclaimed.
+                        limit = SERIAL_CONSOLE_SILENCE_LIMIT if guest_spoke else SERIAL_CONSOLE_BOOT_GRACE
+                        if time.time() - last_rx > limit:
+                            break
                         continue  # quiet guest is fine; epoch/keepalive checked
         except Exception as e:
             print(f"[serial] reconnect in {backoff:.2f}s: {e}")
@@ -1277,6 +1428,34 @@ def serial_stream_worker():
             with serial_socket_lock:
                 if serial_socket_conn is conn:
                     serial_socket_conn = None  # never leave a closed fd published
+
+
+def release_stale_serial_client(reason='machine reset'):
+    """Drops the COM1 client QEMU abandoned when the machine was reset.
+
+    WHY: resetting the machine resets the 16550 device, and the device reset
+    takes the chardev frontend down with it. QEMU does not close the TCP client
+    it was serving -- it abandons it and starts listening on the port again --
+    so the Studio's reader would sit on a socket that no longer carries a byte
+    while the guest writes its whole new boot log into the void. Dropping the
+    client here lets the serial worker claim the re-listening port and pick the
+    new boot up.
+    """
+    global serial_epoch, serial_socket_conn
+    with serial_socket_lock:
+        serial_epoch += 1
+        old = serial_socket_conn
+        serial_socket_conn = None
+    if old is not None:
+        try:
+            old.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            old.close()
+        except OSError:
+            pass
+        print(f"[serial] released the stale COM1 client ({reason})")
 
 
 def send_guest_serial_command(command, wait_for=None, timeout=12):
@@ -5564,21 +5743,29 @@ class StudioAPIHandler(http.server.SimpleHTTPRequestHandler):
                     ok, resp, info = launch_qemu_profile(active_profile_key)
                     restart_method = 'backend_relaunch'
                 else:
-                    ok, resp = send_qemu_monitor_cmd('system_reset')
-                    restart_method = 'monitor_system_reset'
-                    if ok:
-                        vnc_client.force_reconnect()
-                    else:
-                        stop_tracked_qemu()
-                        ok, resp, info = launch_qemu_profile(active_profile_key)
-                        restart_method = 'backend_relaunch'
+                    # WHY the guest-level reboot first: QEMU's monitor
+                    # `system_reset` resets the machine's devices even when the
+                    # accelerator does not restart the guest. Under WHPX the
+                    # CPU keeps running while the COM1 UART is reset, so the
+                    # Studio's console dies without anything rebooting -- the
+                    # route would report a reboot that never happened and the
+                    # guest would be left unreachable. The guest's own REBOOT
+                    # command is a reset request from the kernel, so it behaves
+                    # the same way under every accelerator, and the Studio can
+                    # watch the new boot arrive.
+                    ok, resp, restart_method = perform_warm_reboot()
                 self.send_response(200 if ok else 500)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     'success': ok,
                     'action': 'reboot',
-                    'qemu_reset': ok and restart_method == 'monitor_system_reset',
+                    # WHY these two names: the reboot is reported from what the
+                    # guest's own serial log showed, and the mechanism that
+                    # produced it is named separately. A flag that was true
+                    # only for the monitor path would read as "the guest did
+                    # not reboot" for a guest-level reboot that really did.
+                    'guest_rebooted': bool(ok),
                     'restart_method': restart_method if ok else 'failed',
                     'message': str(resp),
                     **({'vnc_display': (info or {}).get('vnc_display'),

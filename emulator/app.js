@@ -2911,8 +2911,14 @@ document.addEventListener('DOMContentLoaded', () => {
           if (!warmResp.ok || warmData.success === false) {
             throw new Error(warmData.error || warmData.message || ('warm reset failed (HTTP ' + warmResp.status + ')'));
           }
-          logConsole('ok', '[POWER] Guest was launched by an earlier Studio process; warm reset via ' + (warmData.restart_method || 'QEMU monitor') + '.');
-          showToast('Guest reset via QEMU monitor (not a cold restart)');
+          const warmMethod = warmData.restart_method || 'unknown';
+          logConsole('ok', '[POWER] Guest was launched by an earlier Studio process; warm reset via ' + warmMethod + '.');
+          // WHY the message names the mechanism: the reset is reported from what
+          // the guest's serial log showed, and the guest kernel's own reboot
+          // request is a different path from a host-driven machine reset.
+          showToast(warmMethod === 'guest_reboot'
+            ? 'Guest rebooted by the guest kernel (not a cold restart)'
+            : 'Guest reset via the QEMU monitor (not a cold restart)');
           bootFacts.sessionStart = Date.now();
           bootFacts.stageEvidence = {};
           renderPhoneFrameSurface();
