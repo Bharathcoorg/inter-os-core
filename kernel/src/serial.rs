@@ -1728,6 +1728,19 @@ fn handle_serial_command(cmd: &[u8]) {
         // `[KMS PERF]` line. Reporting it here is what lets a latency run tell
         // an expensive frame apart from a host that simply stopped scheduling.
         let (comp_cyc, pres_cyc, last_flip) = crate::performance::last_frame();
+        // The present cost the display controller measured for its own
+        // dirty-band copies, and the dispatch-to-answer stage of the last
+        // touch.
+        //
+        // WHY both are read from the published copies instead of from their
+        // owners: the display lock is held for the whole of a frame, and the
+        // touch state is process-global. A reader that found the display lock
+        // held would have to publish a zero for a present that really
+        // happened, and the answer stage is already free of locks.
+        let (present_samples, present_total_cycles, present_worst_cycles) =
+            crate::performance::present_cost_snapshot();
+        let (input_answered_last_ms, input_answered_max_ms, input_answered_samples) =
+            crate::performance::input_latency_stats();
         let (mailboxes, endpoints, shm_pipes) = {
             let (mb, ep) = if let Some(r) = crate::ipc::IPC_ROUTER.try_lock() {
                 (r.mailbox_count(), r.endpoint_count())
@@ -1753,9 +1766,11 @@ fn handle_serial_command(cmd: &[u8]) {
             }
         };
         crate::serial_println!(
-            "[DIAG_STATE] tasks_total={} tasks_active={} surfaces={} mailboxes={} endpoints={} shm_pipes={} heap_used={} heap_free={} last_flip={} last_flip_compose_cycles={} last_flip_present_cycles={} input_queue_wait_last_ms={} input_queue_wait_max_ms={} input_lines={}",
+            "[DIAG_STATE] tasks_total={} tasks_active={} surfaces={} mailboxes={} endpoints={} shm_pipes={} heap_used={} heap_free={} last_flip={} last_flip_compose_cycles={} last_flip_present_cycles={} input_queue_wait_last_ms={} input_queue_wait_max_ms={} input_lines={} present_samples={} present_total_cycles={} present_worst_cycles={} input_answered_last_ms={} input_answered_max_ms={} input_answered_samples={}",
             tasks_tot, tasks_act, surfaces, mailboxes, endpoints, shm_pipes, heap_used, heap_free,
-            last_flip, comp_cyc, pres_cyc, q_wait_last, q_wait_max, q_lines
+            last_flip, comp_cyc, pres_cyc, q_wait_last, q_wait_max, q_lines,
+            present_samples, present_total_cycles, present_worst_cycles,
+            input_answered_last_ms, input_answered_max_ms, input_answered_samples
         );
         return;
     }

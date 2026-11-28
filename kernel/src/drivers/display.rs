@@ -155,12 +155,19 @@ impl DisplayDriver for KmsDisplayDriver<'_> {
         // `take_tap_to_flip` snapshots the earlier stages as it consumes the
         // touch, so the split cannot be read out of order and collapse into the
         // total.
+        // The dispatch-to-answer stage is taken BEFORE the flip consumes the
+        // touch: `take_tap_to_flip` releases the pending answer together with
+        // the touch it belonged to, so a reader that asked afterwards would
+        // find nothing and the stage would never be reported.
+        let answered = crate::performance::take_input_answered();
+
         if let Some(latency) =
             crate::performance::take_tap_to_flip(crate::interrupts::get_system_ticks())
         {
             crate::serial_println!(
-                "[TAP FLIP] tap_to_scanout_ms={} wake_to_paint_ms={} paint_to_fliprequest_ms={} app_writes={} flip={} compose_cycles={} present_cycles={}",
+                "[TAP FLIP] tap_to_scanout_ms={} dispatch_to_answer_ms={} wake_to_paint_ms={} paint_to_fliprequest_ms={} app_writes={} flip={} compose_cycles={} present_cycles={}",
                 latency.total_ms,
+                answered.map(|answer| answer.answered_ms).unwrap_or(latency.total_ms),
                 latency.paint_ms.unwrap_or(latency.total_ms),
                 latency.flip_request_ms.unwrap_or(latency.total_ms),
                 latency.writes,

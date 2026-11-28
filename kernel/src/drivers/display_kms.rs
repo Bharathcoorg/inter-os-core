@@ -834,9 +834,35 @@ pub struct DrmKmsController {
     pub back_buffer: Vec<u32>,
     pub surfaces: Vec<DrmSurface>,
     pub next_surface_id: u32,
-    pub vsync_counter: u64,
+    /// How many page flips have reached the scanout.
+    ///
+    /// WHY this is the only flip counter: `vsync_counter` stood beside it and
+    /// was incremented in the same statement, so it was the same number under
+    /// a second name. Two names for one measurement is how a reader ends up
+    /// believing there were two events, and a counter nobody reads is a
+    /// counter that has to be maintained for nothing.
     pub page_flips_completed: u64,
-    pub scanout_y_offset: u16,
+    /// The summed cost of the presents this controller has pushed.
+    ///
+    /// WHY the unit is a tick and not a CPU cycle: the clock this file
+    /// already uses is `crate::interrupts::get_system_ticks()`, which counts
+    /// milliseconds of real time since boot. The counter therefore measures
+    /// what that clock can resolve -- a present that finishes inside one
+    /// millisecond measures zero, and the worst case is the number that
+    /// carries the information. The compositor publishes the cycle-accurate
+    /// cost of the physical flush that follows this controller's copy (and of
+    /// the GPU band submit) beside it as `last_flip_present_cycles` in the
+    /// diagnostics line, so the two together say both how long the present
+    /// took and how much of that the guest clock was able to see.
+    pub present_cycles_total: u64,
+    /// The worst single present this controller has pushed, in the same ticks.
+    pub present_worst_cycles: u64,
+    /// How many presents have been measured.
+    ///
+    /// WHY only the flips that copied rows count: a flip with an empty dirty
+    /// band presents nothing -- there is no image to push -- and counting it
+    /// would drag the average down with zeroes no person ever saw.
+    pub present_cycles_samples: u64,
     pub focused_surface: Option<u32>,
     pub orientation: DisplayOrientation,
     pub refresh_hz: u16,
@@ -904,9 +930,10 @@ impl DrmKmsController {
             back_buffer: vec![0xFF000000; size],
             surfaces: Vec::new(),
             next_surface_id: 1,
-            vsync_counter: 0,
             page_flips_completed: 0,
-            scanout_y_offset: 0,
+            present_cycles_total: 0,
+            present_worst_cycles: 0,
+            present_cycles_samples: 0,
             focused_surface: None,
             orientation: DisplayOrientation::Portrait,
             refresh_hz: 60,
@@ -2519,9 +2546,18 @@ impl DrmKmsController {
     }
 
     /// Performs an atomic page flip: swaps back buffer to front scanout buffer.
+    ///
+    /// WHY the present cost is measured here: this is the one place in the
+    /// KMS controller where the dirty band is actually copied, and it runs on
+    /// every flip the compositor makes. The clock is the one this file
+    /// already uses for frame pacing (`get_system_ticks`), so the number
+    /// published next to the compositor's cycle count is a measurement rather
+    /// than an estimate.
     pub fn page_flip(&mut self) -> u64 {
         self.ensure_buffers();
+        let present_start = crate::interrupts::get_system_ticks();
         core::mem::swap(&mut self.front_buffer, &mut self.back_buffer);
+        let mut copied_pixels = 0usize;
         if self.present_dirty_rows.1 > self.present_dirty_rows.0 {
             let y0 = self.present_dirty_rows.0.min(self.scanout_height as usize);
             let y1 = self.present_dirty_rows.1.min(self.scanout_height as usize);
@@ -2530,16 +2566,52 @@ impl DrmKmsController {
             let end = y1 * w;
             if end <= self.front_buffer.len() && end <= self.back_buffer.len() {
                 self.back_buffer[start..end].copy_from_slice(&self.front_buffer[start..end]);
+                copied_pixels = end - start;
             }
         }
-        self.vsync_counter += 1;
+        let present_end = crate::interrupts::get_system_ticks();
+        // WHY the sample is only taken when rows were copied: this is the
+        // cost of a present, and a flip with an empty band had nothing to
+        // present. Counting it would publish an average diluted by zeroes
+        // that no person ever saw on the screen.
+        if copied_pixels > 0 {
+            let cost = present_end.saturating_sub(present_start);
+            self.present_cycles_samples = self.present_cycles_samples.saturating_add(1);
+            self.present_cycles_total = self.present_cycles_total.saturating_add(cost);
+            self.present_worst_cycles = self.present_worst_cycles.max(cost);
+        }
+        // WHY the counters are published as well as kept here: a reader that
+        // has to take the display lock to see them finds it held for the
+        // whole of a frame, and would have to publish a zero for a present
+        // that really happened. The copy is written by the same statement
+        // that updates the counters above, in the same units, so the two
+        // cannot disagree.
+        crate::performance::record_present_cost(
+            self.present_cycles_samples,
+            self.present_cycles_total,
+            self.present_worst_cycles,
+        );
         self.page_flips_completed += 1;
-        self.scanout_y_offset = 0;
         let now = crate::interrupts::get_system_ticks();
         self.scheduler.record_frame(now, self.frame_deadline_ticks);
         let ticks_per_frame = ((1000u64 + self.refresh_hz.max(1) as u64 - 1) / self.refresh_hz.max(1) as u64).max(1);
         self.frame_deadline_ticks = now.saturating_add(ticks_per_frame);
         self.page_flips_completed
+    }
+
+    /// Returns `(samples, total_cycles, worst_cycles)` for the presents this
+    /// controller has pushed.
+    ///
+    /// WHY the order: the sample count comes first because it is what says
+    /// whether the other two numbers mean anything. A total with no samples
+    /// is a zero that was never measured, and a reader that skips the count
+    /// reads it as a free present.
+    pub fn present_cost_stats(&self) -> (u64, u64, u64) {
+        (
+            self.present_cycles_samples,
+            self.present_cycles_total,
+            self.present_worst_cycles,
+        )
     }
 }
 
@@ -2558,9 +2630,10 @@ pub static DRM_KMS: Mutex<DrmKmsController> = Mutex::new(DrmKmsController {
     back_buffer: Vec::new(),
     surfaces: Vec::new(),
     next_surface_id: 1,
-    vsync_counter: 0,
     page_flips_completed: 0,
-    scanout_y_offset: 0,
+    present_cycles_total: 0,
+    present_worst_cycles: 0,
+    present_cycles_samples: 0,
     focused_surface: None,
     orientation: DisplayOrientation::Portrait,
     refresh_hz: 60,
@@ -3039,6 +3112,57 @@ mod tests {
         assert!(r0 >= 140 && r0 <= 155, "r0 should map to ~150, got {r0}");
         assert!(r1 >= 295 && r1 <= 305, "r1 should map to ~300, got {r1}");
         assert!(r1 - r0 < 200, "present band should be narrow, got {r0}..{r1}");
+        assert!(kms.destroy_surface(id));
+    }
+
+    #[test]
+    fn the_present_cost_accounting_counts_the_flips_that_copied_rows() {
+        // WHY this test exists: the present cost is the only number that says
+        // whether the screen kept up with the finger, and a counter that
+        // never moves is indistinguishable from a counter that is not wired
+        // to the present path at all.
+        let mut kms = DrmKmsController::new(64, 64);
+        assert_eq!(
+            kms.present_cost_stats(),
+            (0, 0, 0),
+            "a controller that has not flipped has no present cost to publish"
+        );
+
+        // A flip with nothing in the dirty band presents no image at all, so
+        // it is not a present and must not become a sample.
+        kms.take_present_dirty_rows();
+        kms.page_flip();
+        assert_eq!(
+            kms.present_cost_stats().0,
+            0,
+            "a flip that copied no rows is not a present and must not be counted as one"
+        );
+
+        let id = kms.create_surface(64, 64, 0, 1);
+        kms.surfaces[0].mark_frame_drawn();
+        kms.composite();
+        kms.page_flip();
+        let (samples, total, worst) = kms.present_cost_stats();
+        assert_eq!(samples, 1, "the flip that copied the composed rows is one present");
+        assert_eq!(worst, total, "with one sample the worst case is the total");
+        assert!(worst <= total, "the worst present cannot cost more than all of them");
+        assert!(kms.destroy_surface(id));
+    }
+
+    #[test]
+    fn the_present_cost_keeps_the_worst_case_as_a_bound() {
+        let mut kms = DrmKmsController::new(64, 64);
+        let id = kms.create_surface(64, 64, 0, 1);
+        kms.surfaces[0].mark_frame_drawn();
+        kms.composite();
+        kms.page_flip();
+        kms.surfaces[0].dirty = true;
+        kms.surfaces[0].dirty_rows = (10, 20);
+        kms.composite();
+        kms.page_flip();
+        let (samples, total, worst) = kms.present_cost_stats();
+        assert_eq!(samples, 2, "both flips had rows to push");
+        assert!(worst <= total, "the bound is one of the samples, so it cannot exceed the total");
         assert!(kms.destroy_surface(id));
     }
 
@@ -4334,7 +4458,7 @@ pub fn test_drm_kms() {
     kms.composite();
     let flips = kms.page_flip();
     assert_eq!(flips, 1);
-    assert_eq!(kms.vsync_counter, 1);
+    assert_eq!(kms.page_flips_completed, 1);
     crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(s1), None);
     crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(s2), None);
     crate::gui::WINDOW_MANAGER.lock().destroy_if(crate::gui::WindowId(3), None);

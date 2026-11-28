@@ -5705,6 +5705,13 @@ pub fn sys_input_event_poll(out_buf: &mut [u8]) -> Result<usize, SyscallResult> 
     } else {
         crate::drivers::input::INPUT_PIPELINE.lock().pop_for_task(task_id).ok_or(SyscallResult::NotReady)?
     };
+    // WHY the answer is stamped here: this is the moment the owning task
+    // actually takes the dispatched touch out of its own queue. Everything
+    // before it is the platform's routing and wake; everything after it is the
+    // app's paint, which is already a stage of its own. The owner check inside
+    // the recorder rejects a read by any task that does not own the touch, so
+    // the input daemon's service events are ignored.
+    crate::performance::record_input_answered(crate::interrupts::get_system_ticks(), task_id.0);
     crate::serial_println!("[INPUT POLL SUCCESS] Task {} ({}) got {:?}", task_id.0, task_name, event.kind);
     if out_buf.len() < 24 { return Err(SyscallResult::InvalidArguments); }
 
@@ -5738,7 +5745,14 @@ pub fn sys_touch_poll() -> Result<u32, SyscallResult> {
         crate::drivers::input::INPUT_PIPELINE.lock().pop_for_task(task_id)
     };
     match event {
-        Some(event) => Ok(event.kind as u32),
+        Some(event) => {
+            // WHY this is stamped here and not above: the compatibility touch
+            // poll is a second read path, and the stage it reports has to be
+            // the moment this task really took the event. A read that found
+            // nothing is not an answer.
+            crate::performance::record_input_answered(crate::interrupts::get_system_ticks(), task_id.0);
+            Ok(event.kind as u32)
+        }
         None => Ok(0),
     }
 }
