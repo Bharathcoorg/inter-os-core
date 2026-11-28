@@ -1,0 +1,20 @@
+[package]
+license = "AGPL-3.0-only"
+name = "interos-ota"
+version = "0.1.0"
+edition = "2021"
+authors = ["Inter OS Contributors"]
+description = "Architecture-neutral crash-consistent A/B OTA state machine with a durable block-device slot store"
+
+# WHY there are no dependencies at all: this crate is the host-testable half of
+# the OTA subsystem, so it has to build and run under `cargo test` on an x86_64
+# host with no cross toolchain and no target-specific code. Its SHA-256 is the
+# repository's own implementation, copied in-tree from
+# `kernel-aarch64/kernel-core/src/crypto/sha256.rs`, because the kernel-core
+# crate lives under the excluded `kernel-aarch64/` tree, is not a workspace
+# member, and pulls in `spin` and `alloc` — none of which a pure state machine
+# should need. No `serde`, no `sha2`, no third-party crate of any kind.
+[dependencies]
+
+[features]
+default = []

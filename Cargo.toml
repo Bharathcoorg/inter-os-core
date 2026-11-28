@@ -22,6 +22,7 @@ members = [
     "apps/webview_demo",
     "crates/interos-android-format",
     "crates/interos-acr",
+    "crates/interos-ota",
 ]
 exclude = [
     "boot",

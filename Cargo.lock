@@ -164,6 +164,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "interos-ota"
+version = "0.1.0"
+
+[[package]]
 name = "interos-std"
 version = "0.1.0"
 dependencies = [

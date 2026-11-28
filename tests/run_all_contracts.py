@@ -127,6 +127,7 @@ PINNED_FRAMEWORK_COLLECTED_CASES = {
     "tests/test_native_ui_truth_contract.py": 34,
     "tests/test_notes_truth_contract.py": 17,
     "tests/test_notification_contract.py": 6,
+    "tests/test_ota_durable_ab.py": 7,
     "tests/test_package_kind_registry.py": 4,
     "tests/test_package_update_continuity.py": 6,
     "tests/test_permission_policy_contract.py": 6,
